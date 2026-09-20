@@ -1,0 +1,10 @@
+/target/
+/.codex-tmp/
+/.codex-*/
+/presentation-output/
+.DS_Store
+**/output/
+**/ovito-output*.mp4
+*.key
+*.pptx
+*.inspect.ndjson

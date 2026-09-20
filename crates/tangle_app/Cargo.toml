@@ -1,0 +1,15 @@
+[package]
+name = "tangle_app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GRASS workflow orchestration for TANGLE fiber assemblies"
+keywords = ["fiber", "workflow", "simulation", "materials"]
+categories = ["science"]
+
+[dependencies]
+grass_app.workspace = true
+grass_derive.workspace = true
+grass_scheduler.workspace = true
+tangle_core.workspace = true

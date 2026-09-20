@@ -1,0 +1,21 @@
+//! Device-resident contact and centerline relaxation for TANGLE.
+//!
+//! Relaxation is implemented with CubeCL kernels and persistent device buffers.
+//! The public API is organized around mechanics concepts rather than a
+//! particular GPU backend.
+
+#![warn(missing_docs)]
+
+mod compaction;
+mod device;
+
+pub use compaction::{CompactionEnergyModel, CompactionKinematics, CompactionMetrics};
+
+pub use device::{
+    AdaptiveSegmentationConfig, BatchStatus, ContactAggregation, ContactCapture, DeviceFiberWorld,
+    DeviceState, DeviceWorld, DeviceWorldCheckpoint, FiberMotion, FormationTargetError,
+    LayerTargetCheckpoint, PackedAssembly, PackingError, RelaxationBackend, RelaxationConfig,
+    RelaxationOverrides, RelaxationPlugin, RelaxationSnapshot, RelaxationState,
+    SegmentContactCandidate, VertexTargetCheckpoint, WorkflowControl,
+};
+pub use tangle_contact::CellListConfig;

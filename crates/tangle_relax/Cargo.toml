@@ -1,0 +1,22 @@
+[package]
+name = "tangle_relax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Device-resident fiber relaxation mechanics and GRASS plugins for TANGLE"
+
+[features]
+default = ["wgpu"]
+wgpu = ["cubecl/wgpu", "tangle_contact/wgpu"]
+cuda = ["cubecl/cuda", "tangle_contact/cuda"]
+hip = ["cubecl/hip", "tangle_contact/hip"]
+
+[dependencies]
+cubecl.workspace = true
+serde.workspace = true
+grass_app.workspace = true
+grass_scheduler.workspace = true
+tangle_app.workspace = true
+tangle_contact = { workspace = true, default-features = false }
+tangle_core.workspace = true

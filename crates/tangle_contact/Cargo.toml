@@ -1,0 +1,16 @@
+[package]
+name = "tangle_contact"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Device-resident broad phase and capsule contact kernels for TANGLE"
+
+[features]
+default = ["wgpu"]
+wgpu = ["cubecl/wgpu"]
+cuda = ["cubecl/cuda"]
+hip = ["cubecl/hip"]
+
+[dependencies]
+cubecl.workspace = true

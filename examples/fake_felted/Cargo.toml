@@ -1,0 +1,17 @@
+[package]
+name = "fake_felted"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+grass_app.workspace = true
+grass_scheduler.workspace = true
+tangle_app.workspace = true
+tangle_checkpoint.workspace = true
+tangle_core.workspace = true
+tangle_export.workspace = true
+tangle_generate.workspace = true
+tangle_relax.workspace = true
+tangle_example_support = { path = "../tangle_example_support" }

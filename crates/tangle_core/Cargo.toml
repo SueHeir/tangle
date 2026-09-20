@@ -1,0 +1,12 @@
+[package]
+name = "tangle_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Solver-neutral fiber assembly geometry and persistent junction topology"
+keywords = ["fiber", "materials", "geometry", "simulation"]
+categories = ["science", "data-structures"]
+
+[dependencies]
+serde.workspace = true
