@@ -46,6 +46,12 @@ is referenced to the initial internal, non-gripped gauge length.
 
 ![Interim DIRT through-thickness stress-strain comparison of unneedled and needled fake felt](docs/media/dirt-through-thickness-tension-interim.png)
 
+[![Needled fake felt undergoing through-thickness tension in DIRT](docs/media/dirt-needled-tension.png)](docs/media/dirt-needled-tension.mp4)
+
+The movie shows the needled specimen during the same DIRT through-thickness
+tension calculation. The two colors distinguish the 7 and 19 micrometer fiber
+populations; click the preview to play it.
+
 At approximately 16.6% strain, the needled specimen retains a larger,
 intermittent load path while the unneedled control has fallen close to zero
 stress. No bonds have broken at this point. This is a developing numerical

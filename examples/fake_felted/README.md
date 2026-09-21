@@ -9,6 +9,11 @@ material-generation study rather than a calibrated material model.
 | Unneedled control | [![Twenty-ply control formation](../../docs/media/felted-control.png)](../../docs/media/felted-control.mp4) |
 | Needled continuation | [![Twenty-ply needled formation](../../docs/media/felted-needled.png)](../../docs/media/felted-needled.mp4) |
 
+The exported needled specimen can then be loaded in DIRT for through-thickness
+tension. [Click the preview below to play the DIRT simulation.](../../docs/media/dirt-needled-tension.mp4)
+
+[![Needled fake felt undergoing through-thickness tension in DIRT](../../docs/media/dirt-needled-tension.png)](../../docs/media/dirt-needled-tension.mp4)
+
 The control is constructed one physically separated ply at a time, with each
 ply approached and relaxed against the existing stack. The needled path uses
 the same population and deposition sequence, then applies layer-scoped needle
