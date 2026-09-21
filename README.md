@@ -35,6 +35,23 @@ formation. Click any preview to play the short OVITO rendering.
 | 7. Twenty-ply control | [![The unneedled fake felt construction](docs/media/felted-control.png)](docs/media/felted-control.mp4) |
 | 8. Twenty-ply needled material | [![The needled fake felt construction](docs/media/felted-needled.png)](docs/media/felted-needled.mp4) |
 
+## Downstream mechanics in DIRT
+
+TANGLE generates and relaxes the fiber geometry, then exports multi-material
+spherocylinders and intra-fiber bonds for dynamic loading in
+[DIRT](https://github.com/SueHeir/dirt). The interim result below compares
+otherwise matched twenty-ply control and needled specimens in through-thickness
+tension. DIRT grips the upper and lower 15% of each specimen; engineering strain
+is referenced to the initial internal, non-gripped gauge length.
+
+![Interim DIRT through-thickness stress-strain comparison of unneedled and needled fake felt](docs/media/dirt-through-thickness-tension-interim.png)
+
+At approximately 16.6% strain, the needled specimen retains a larger,
+intermittent load path while the unneedled control has fallen close to zero
+stress. No bonds have broken at this point. This is a developing numerical
+demonstration of the TANGLE-to-DIRT workflow, not a calibrated material
+prediction; both simulations continue toward 50% strain.
+
 ## Current scope
 
 The first implementation contains `tangle_core`, which establishes:
