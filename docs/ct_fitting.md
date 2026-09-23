@@ -37,6 +37,7 @@ relaxed, run = fit.relax()               # optional: clean up remaining overlaps
 | `min_length` | Shorter fragments are dropped. Default 3 diameters. |
 | `max_length` | Optional. Fits longer than this are split where the scan gives them the least support. |
 | `length` | Optional typical fiber length. Turns on the fiber-length prior (below). A rough value is enough. |
+| `profile` | Brightness across the fiber, a `CrossSection`. Solid at brightness 1 by default (see Several fiber types). |
 
 `FitSettings` holds the numerical settings (rounds, rates, merge gap and so
 on). The defaults are meant to work without changes.
@@ -135,6 +136,45 @@ felts, so this is a soft cost rather than a hard count.
 tests it on a scan cropped from a larger cell, so fibers run through the
 scan boundary as in a real scan. It fits with and without the prior and
 scores both.
+
+## Several fiber types
+
+A scan can hold fiber types that differ in size and in brightness, and the
+brightest fibers are not necessarily the ones of interest. Describe each
+type's cross-section with a `CrossSection` and pass a list of specs:
+
+```python
+small = ct.FiberSpec(diameter=7 * um, name="fine_7um")  # solid, brightest (1)
+large = ct.FiberSpec(
+    diameter=19 * um,
+    profile=ct.CrossSection(brightness=0.75, rim=2 * um, core=1 / 3),  # rim 0.75, core 0.25
+    name="coarse_19um",
+)
+fit = ct.fit_fibers(volume, voxel_size=1.25 * um, spec=[small, large])
+```
+
+Brightness uses a scale where void is 0 and the brightest type is 1. How
+it works:
+
+- Void and the reference fiber level come from a three-class threshold
+  (void, dim, bright), because a two-class one would split a dim type from
+  the bright one.
+- Types are fitted one after another, largest first. Each type sees the scan
+  through its own detection image. A rimmed type's image is smoothed at half
+  its radius, which fills the dim core, and rescaled so the type reads about
+  1 on its axis.
+- Fibers already found claim their voxels. A smaller type therefore isn't
+  traced along a larger fiber's bright rim, and it can't pull on voxels a
+  larger fiber owns.
+- Radii are sized from the scan itself by inverting the type's profile. For
+  a rimmed type, the owned brightness isn't just π r².
+- `fit.json` stores every spec and each fiber's type. `score()` reports
+  recovery for each type. `suggested_population()` returns one population
+  per type.
+
+[`ct_fit_two_types.py`](../crates/tangle_python/python/examples/ct_fit_two_types.py)
+renders and fits such a scan: 7 µm solid fibers and 19 µm fibers with a
+rim at 0.75 and a core at 0.25.
 
 ## Checking a fit against known answers
 

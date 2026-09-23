@@ -126,6 +126,32 @@ class CtFitTests(unittest.TestCase):
             self.assertTrue(np.all(line[:, 0] < 36))
         self.assertEqual(int(crop.labels.max()), len(crop.centerlines))
 
+    def test_cross_section_area_round_trip(self):
+        rimmed = ct.CrossSection(brightness=0.75, rim=2 * um, core=1 / 3)
+        radius = 7.0
+        area = rimmed.area(radius, VOXEL)
+        self.assertLess(area, 0.75 * np.pi * radius * radius)
+        recovered = rimmed.radius_from_area(np.array([area]), VOXEL, 2.0, 14.0)[0]
+        self.assertAlmostEqual(recovered, radius, places=2)
+        solid = ct.CrossSection(brightness=0.5)
+        self.assertAlmostEqual(solid.radius_from_area(np.array([solid.area(3.0, VOXEL)]), VOXEL, 1.0, 6.0)[0], 3.0)
+        self.assertAlmostEqual(solid.center_response(3.0, VOXEL, 0.0), 0.5)
+        self.assertLess(rimmed.center_response(radius, VOXEL, 0.5 * radius), 0.75)
+
+    def test_fit_json_keeps_fiber_types(self):
+        small = ct.FiberSpec(diameter=DIAMETER, name="small")
+        large = ct.FiberSpec(diameter=2 * DIAMETER, profile=ct.CrossSection(brightness=0.75, rim=2 * um, core=0.3), name="large")
+        typed = ct.FitResult(
+            shape=self.fit.shape, voxel_size=VOXEL, spec=large, centerlines=self.fit.centerlines,
+            radii=self.fit.radii, support=self.fit.support, levels=self.fit.levels,
+            specs=[small, large], types=np.arange(self.fit.fiber_count) % 2,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            reloaded = ct.load_fit(typed.write(tmp)["config"])
+        self.assertEqual(reloaded.specs[1].profile.core, 0.3)
+        self.assertEqual(list(reloaded.types), list(typed.types))
+        self.assertEqual(len(typed.suggested_population()), 2)
+
     def test_thin_fibers_are_rejected(self):
         with self.assertRaises(ValueError):
             ct.fit_fibers(self.scan.volume, VOXEL, ct.FiberSpec(diameter=1 * um))

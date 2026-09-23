@@ -106,14 +106,21 @@ def local_residual(
     high: np.ndarray,
     lines: list[np.ndarray],
     radii: np.ndarray,
+    base: np.ndarray | None = None,
 ) -> float:
-    """Squared residual of rendering ``lines`` against ``image`` over box ``[low, high)``."""
+    """Squared residual of rendering ``lines`` against ``image`` over box ``[low, high)``.
+
+    ``base`` is an already-rendered occupancy of the box (for example the
+    unchanged neighbors) that ``lines`` are added to.
+    """
     from ._moves import render_occupancy
 
     if np.any(high <= low):
         return 0.0
     observed = image[low[2] : high[2], low[1] : high[1], low[0] : high[0]]
     rendered = render_occupancy(low, high, lines, np.asarray(radii, dtype=np.float64))
+    if base is not None:
+        np.maximum(rendered, base, out=rendered)
     return float(((observed - rendered) ** 2).sum())
 
 

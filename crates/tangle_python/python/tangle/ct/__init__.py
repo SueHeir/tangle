@@ -20,10 +20,12 @@ matplotlib``.
 from ._evaluate import score
 from ._fit import FiberSpec, FitResult, FitSettings, fit_fibers, load_fit
 from ._image import Levels
+from ._profile import CrossSection
 from ._overlay import fiber_palette, overlay_slice, overlay_volume, save_overlay_figure
 from ._synthetic import SyntheticScan, read_vti, synthetic_ct
 
 __all__ = [
+    "CrossSection",
     "FiberSpec",
     "FitResult",
     "FitSettings",

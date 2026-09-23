@@ -117,6 +117,22 @@ def score(fit, truth, *, coverage_threshold: float = 0.8, min_length: float | No
     label_accuracy = float((mapped_labels[truth_solid] == truth_labels[truth_solid]).mean()) if truth_solid.any() else 0.0
 
     h = fit.voxel_size
+    per_type = None
+    truth_types = getattr(truth, "types", None)
+    if truth_types is not None and getattr(fit, "types", None) is not None:
+        per_type = {}
+        states = {entry["id"]: entry["state"] for entry in per_truth}
+        for kind in np.unique(truth_types):
+            ids = [g for g in range(1, count + 1) if truth_types[g - 1] == kind and g in states]
+            mine = [f for f in range(len(owner)) if owner[f] > 0 and truth_types[owner[f] - 1] == kind]
+            per_type[int(kind)] = {
+                "true_fibers": sum(states[g] != "stub" for g in ids),
+                "recovered": sum(states[g] == "recovered" for g in ids),
+                "split": sum(states[g] == "split" for g in ids),
+                "missed": sum(states[g] == "missed" for g in ids),
+                "fitted": len(mine),
+                "fitted_as_this_type": sum(int(fit.types[f]) == int(kind) for f in mine),
+            }
     fit_ends = end_statistics(fit.centerlines, fit.radii, shape)
     truth_ends = end_statistics(truth.centerlines, np.asarray(truth.radii), shape)
     precision = (len(owner) - false_positive) / max(len(owner), 1)
@@ -143,5 +159,6 @@ def score(fit, truth, *, coverage_threshold: float = 0.8, min_length: float | No
         "interior_ends_truth": truth_ends["interior_ends"],
         "implied_mean_length_fit_m": fit_ends["implied_length"] * h if fit_ends["implied_length"] else None,
         "implied_mean_length_truth_m": truth_ends["implied_length"] * h if truth_ends["implied_length"] else None,
+        "per_type": per_type,
         "per_true_fiber": per_truth,
     }

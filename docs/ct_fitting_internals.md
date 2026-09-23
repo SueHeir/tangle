@@ -275,6 +275,29 @@ is given:
 They appear per round in `history`, in `population_summary()` and in the
 score.
 
+## 7b. Several fiber types
+
+`_fit.fit_fibers`, `_fit._fit_type`, `_profile.CrossSection`
+
+When `spec` is a list, or its profile isn't solid at brightness 1:
+
+- **Levels:** `_fit._three_class_levels` finds two thresholds by exhaustive
+  three-class Otsu on a 128-bin histogram. Void is the darkest class median
+  and brightness 1 the brightest class median. The re-level step (5) is
+  skipped.
+- **Order:** types are fitted largest diameter first, each through sections
+  3–7 in full, on its own detection image (`_fit._detection_image`). For a
+  rimmed type that image is the normalized scan blurred with σ = r/2, divided
+  by the blurred profile's value on the axis (`CrossSection.center_response`).
+  For a solid type it is the scan divided by the type's brightness.
+- **Earlier types are frozen:**
+  - they block tracing (their voxels within 1.2 r are pre-claimed);
+  - they own voxels in the data force (6a.1) and in end growth (6a.4);
+  - they push in the non-overlap step (6a.5) without moving.
+- **Radii:** the owned mass is summed over the normalized scan, not the
+  detection image, and converted to a radius by inverting the type's
+  integrated profile (`CrossSection.radius_from_area`).
+
 ## 8. Where Tangle's own code comes in
 
 - **Ownership rule:** the fitter uses the same nearest-capsule-surface rule

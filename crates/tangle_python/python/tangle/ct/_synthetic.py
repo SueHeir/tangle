@@ -34,6 +34,9 @@ class SyntheticScan:
     voxel_size: float
     # Cell period in voxels along each (x, y, z) axis; 0 where not periodic.
     period: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    # Fiber type of each true fiber (index into the ``profiles`` it was
+    # rendered with), or None for a single-type scan.
+    types: np.ndarray | None = None
 
     def crop(self, low: tuple[int, int, int], high: tuple[int, int, int]) -> "SyntheticScan":
         """The sub-volume ``[low, high)`` (voxel indices, ``(x, y, z)``).
@@ -52,7 +55,7 @@ class SyntheticScan:
         volume = self.volume[window].copy()
         old_labels = self.labels[window]
         extent = (high_a - low_a).astype(np.float64)
-        lines, radii, origin = [], [], []
+        lines, radii, origin, types = [], [], [], []
         shifts = [
             np.array(combo) * self.period
             for combo in itertools.product(*[(-1, 0, 1) if p > 0 else (0,) for p in self.period])
@@ -70,6 +73,8 @@ class SyntheticScan:
                         lines.append(dense[start:k])
                         radii.append(self.radii[index])
                         origin.append(index + 1)
+                        if self.types is not None:
+                            types.append(self.types[index])
                     start = None
         # Voxels keep the id of the nearest surviving piece of their fiber.
         labels = np.zeros_like(old_labels)
@@ -89,7 +94,10 @@ class SyntheticScan:
             owner = np.concatenate([np.full(len(lines[p]), p) for p in pieces])
             _, nearest = cKDTree(nodes).query(points)
             labels[z, y, x] = owner[nearest] + 1
-        return SyntheticScan(volume, labels, lines, np.asarray(radii, dtype=np.float64), self.voxel_size)
+        return SyntheticScan(
+            volume, labels, lines, np.asarray(radii, dtype=np.float64), self.voxel_size, np.zeros(3),
+            np.asarray(types, dtype=int) if self.types is not None else None,
+        )
 
 
 def synthetic_ct(
@@ -101,6 +109,7 @@ def synthetic_ct(
     void_level: float = 0.05,
     drift: float = 0.05,
     seed: int = 0,
+    profiles=None,
 ) -> SyntheticScan:
     """Render ``source`` (an ``Assembly`` or ``RunResult``) as a CT-like volume.
 
@@ -109,6 +118,13 @@ def synthetic_ct(
     Gaussian noise (``noise`` relative to the contrast) and a weak
     low-frequency drift are applied; the result is scaled to ``uint16``.
     Ground-truth labels come from the exporter's per-voxel fiber ids.
+
+    ``profiles`` renders several fiber types with their own brightness:
+    a sequence of ``(diameter, CrossSection)`` pairs. Each fiber gets the
+    profile whose diameter is nearest its own, and every voxel's occupancy is
+    scaled by that profile's brightness at the voxel's distance from the
+    axis (a solid fiber of brightness 1 is the default). The result's
+    ``types`` holds each fiber's profile index.
     """
     from scipy.ndimage import gaussian_filter
 
@@ -117,6 +133,12 @@ def synthetic_ct(
         labels = read_vti(report.fiber_ids_path).astype(np.int32)
         interface = read_vti(report.interface_path)
     occupancy = np.clip(interface.astype(np.float32) / 255.0, 0.0, 1.0)
+    centerlines = [np.asarray(line) / voxel_size for line in source.centerlines()]
+    # Export ids are one-based in source order for these single-material scans.
+    radii = _radii(source, labels, centerlines, voxel_size)
+    types = None
+    if profiles:
+        occupancy, types = _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles)
     rng = np.random.default_rng(seed)
     attenuation = void_level + (1.0 - void_level) * gaussian_filter(occupancy, psf_sigma_voxels)
     attenuation += rng.normal(0.0, noise, size=attenuation.shape).astype(np.float32)
@@ -127,14 +149,32 @@ def synthetic_ct(
     low, high = np.percentile(attenuation, [0.5, 99.5])
     volume = np.clip((attenuation - low) / (high - low) * 65535, 0, 65535).astype(np.uint16)
 
-    centerlines = [np.asarray(line) / voxel_size for line in source.centerlines()]
-    # Export ids are one-based in source order for these single-material scans.
-    radii = _radii(source, labels, centerlines, voxel_size)
     period = np.zeros(3)
     cell = getattr(source, "cell", None)
     if cell is not None:
         period = np.array([n / voxel_size if p else 0.0 for n, p in zip(cell.lengths, cell.periodic)])
-    return SyntheticScan(volume, labels, centerlines, radii, voxel_size, period)
+    return SyntheticScan(volume, labels, centerlines, radii, voxel_size, period, types)
+
+
+def _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles):
+    """Scale occupancy by each fiber type's brightness profile."""
+    from ._geometry import rasterize
+
+    diameters = np.array([d for d, _ in profiles]) / voxel_size
+    shapes = [profile for _, profile in profiles]
+    types = np.array([int(np.argmin(np.abs(diameters - 2.0 * r))) for r in radii], dtype=int)
+    owner, best, _ = rasterize(occupancy.shape, centerlines, radii, reach=radii + 2.0, signed=True)
+    level = np.ones(occupancy.shape, dtype=np.float32)  # periodic images without a centerline stay solid
+    owned = owner > 0
+    fiber = owner[owned] - 1
+    rho = best[owned] + radii[fiber]
+    brightness = np.array([p.brightness for p in shapes])[types[fiber]]
+    core = np.array([1.0 if p.solid else p.core for p in shapes])[types[fiber]]
+    rim = np.array([np.inf if p.solid else p.rim / voxel_size for p in shapes])[types[fiber]]
+    inner = np.maximum(radii[fiber] - rim, 0.0)
+    values = (brightness * np.where(rho < inner, core, 1.0)).astype(np.float32)
+    level[owned] = values
+    return occupancy * level, types
 
 
 def _radii(source, labels, centerlines, voxel_size) -> np.ndarray:

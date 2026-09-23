@@ -29,8 +29,14 @@ def data_step(
     *,
     reach_factor: float,
     rate: float,
+    mass_image: np.ndarray | None = None,
 ) -> tuple[list[np.ndarray], np.ndarray]:
-    """Apply the lateral data force; also return each fiber's owned intensity."""
+    """Apply the lateral data force; also return each fiber's owned intensity.
+
+    The owned intensity (for the radius) is summed over ``mass_image`` when
+    given, so a type tracked on a smoothed detection image is still sized
+    from the scan itself.
+    """
     labels, _, segments = rasterize(
         image.shape, centerlines, radii, reach=reach_factor * radii, signed=True
     )
@@ -47,7 +53,7 @@ def data_step(
     ) / np.maximum(total, 1e-9)[:, None]
 
     # Unclipped intensities for the mass, so zero-mean noise in the void cancels.
-    signed_weights = np.clip(image[owned], -1.5, 1.5).astype(np.float64)
+    signed_weights = np.clip((image if mass_image is None else mass_image)[owned], -1.5, 1.5).astype(np.float64)
     fiber_mass = np.bincount(labels[owned] - 1, weights=signed_weights, minlength=len(centerlines))
 
     moved = []
@@ -94,12 +100,20 @@ def radius_step(
     prior_radius: float,
     tolerance: float,
     prior_weight: float,
+    profile=None,
+    voxel_size: float | None = None,
 ) -> np.ndarray:
     lengths = np.array([np.linalg.norm(np.diff(c, axis=0), axis=1).sum() for c in centerlines])
     # Owned intensity is (partial-volume) area times length; the two
     # hemispherical caps add 4/3 of a radius of length.
     effective = np.maximum(lengths + 4.0 / 3.0 * radii, 1e-9)
-    measured = np.sqrt(np.maximum(fiber_mass, 0.0) / (np.pi * effective))
+    if profile is None:
+        measured = np.sqrt(np.maximum(fiber_mass, 0.0) / (np.pi * effective))
+    else:
+        # The cross-section integrates the type's brightness profile, not 1.
+        measured = profile.radius_from_area(
+            fiber_mass / effective, voxel_size, 0.25 * prior_radius, 2.0 * prior_radius
+        )
     blended = (measured + prior_weight * prior_radius) / (1.0 + prior_weight)
     return np.clip(blended, prior_radius * (1 - tolerance), prior_radius * (1 + tolerance))
 

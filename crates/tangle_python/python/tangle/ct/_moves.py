@@ -226,7 +226,8 @@ def _merge_with_prior(
         return lines, radii, 0
     cos_limit = np.cos(np.radians(max_angle_degrees))
     tips = np.array([tip for _, _, tip, _ in ends])
-    candidates = []
+    # Geometric candidates first (cheap), keeping each end's nearest few.
+    geometric: list[tuple[float, int, int]] = []
     for a, b in cKDTree(tips).query_pairs(max_gap):
         i, ei, pi, ti = ends[a]
         j, ej, pj, tj = ends[b]
@@ -244,6 +245,28 @@ def _merge_with_prior(
                 continue
             if along > 0.0 and (along / distance < cos_limit or float(-gap @ tj) / distance < cos_limit):
                 continue
+            # Quick bound from the straight bridge: filling a gap of length g
+            # with mean intensity m changes the residual by about
+            # π r² g (1 - 2m); skip joins that can't come close to paying.
+            bridge = pi[None] + np.linspace(0.0, 1.0, max(int(distance), 2))[:, None] * gap[None]
+            mean = float(sample_image(image, bridge).mean())
+            if np.pi * r * r * max(along, 0.0) * (2.0 * mean - 1.0) / scale + 4.0 * end_cost < 0.0:
+                continue
+        geometric.append((distance, a, b))
+    per_end: dict[int, int] = {}
+    shortlist = []
+    for distance, a, b in sorted(geometric):
+        if per_end.get(a, 0) >= 4 or per_end.get(b, 0) >= 4:
+            continue
+        per_end[a] = per_end.get(a, 0) + 1
+        per_end[b] = per_end.get(b, 0) + 1
+        shortlist.append((a, b))
+
+    candidates = []
+    for a, b in shortlist:
+        i, ei, _, _ = ends[a]
+        j, ej, _, _ = ends[b]
+        r = 0.5 * (radii[i] + radii[j])
         joined = _join(_oriented(lines[i], ei, at_start=False), _oriented(lines[j], ej, at_start=True))
         if min_bend_radius is not None:
             junction = len(_oriented(lines[i], ei, at_start=False))
@@ -251,15 +274,14 @@ def _merge_with_prior(
             window = excess[max(junction - 6, 0) : junction + 3]
             if len(window) and window.max() > 1.0:
                 continue
-        region = np.vstack([lines[i][-4:] if ei == 1 else lines[i][:4], lines[j][-4:] if ej == 1 else lines[j][:4]])
-        low, high = local_box(region, 2.5 * r, image.shape)
+        region = np.vstack([lines[i][-2:] if ei == 1 else lines[i][:2], lines[j][-2:] if ej == 1 else lines[j][:2]])
+        low, high = local_box(region, 2.0 * r, image.shape)
         others = near_box(lines, radii, low, high, skip=(i, j))
-        context = [lines[k] for k in others]
-        context_r = list(radii[others])
+        base = render_occupancy(low, high, [lines[k] for k in others], radii[others]) if others else None
         length_i, length_j = polyline_length(lines[i]), polyline_length(lines[j])
         radius = (radii[i] * length_i + radii[j] * length_j) / max(length_i + length_j, 1e-9)
-        apart = local_residual(image, low, high, context + [lines[i], lines[j]], np.array(context_r + [radii[i], radii[j]]))
-        together = local_residual(image, low, high, context + [joined], np.array(context_r + [radius]))
+        apart = local_residual(image, low, high, [lines[i], lines[j]], np.array([radii[i], radii[j]]), base)
+        together = local_residual(image, low, high, [joined], np.array([radius]), base)
         odds = (apart - together) / scale + 2.0 * end_cost
         if odds > 0.0:
             candidates.append((odds, i, ei, j, ej))
@@ -354,10 +376,9 @@ def split_kinks(
                 window = np.vstack([line[max(cut - 6, 0) : cut + 7], smoothed[max(cut - 6, 0) : cut + 7]])
                 low, high = local_box(window, 2.5 * radius, image.shape)
                 others = near_box(context_lines, context_radii, low, high, skip=(source,))
-                context = [context_lines[k] for k in others]
-                context_r = [context_radii[k] for k in others]
-                kinked = local_residual(image, low, high, context + [line], np.array(context_r + [radius]))
-                smooth = local_residual(image, low, high, context + [smoothed], np.array(context_r + [radius]))
+                base = render_occupancy(low, high, [context_lines[k] for k in others], context_radii[others]) if others else None
+                kinked = local_residual(image, low, high, [line], np.array([radius]), base)
+                smooth = local_residual(image, low, high, [smoothed], np.array([radius]), base)
                 if (kinked - smooth) / scale + 2.0 * end_cost > 0.0:
                     kept += 1
                     queue.append((smoothed, radius, source))

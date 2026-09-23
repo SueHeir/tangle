@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -13,6 +13,7 @@ from . import _moves, _refine
 from ._ends import end_cost, end_statistics, evidence_scale
 from ._geometry import polyline_length, rasterize, tangents
 from ._image import HessianField, Levels, normalize
+from ._profile import CrossSection
 from ._trace import trace_fibers
 
 
@@ -38,8 +39,13 @@ class FiberSpec:
         ``ln(length / diameter)`` nats. Splits, joins and the one-or-two-fiber
         decision then weigh the scan against that cost, and joins across
         longer gaps become possible. A rough value is enough.
+    ``profile``
+        Brightness across the fiber (:class:`CrossSection`): solid by default;
+        set ``brightness`` for a type dimmer than the brightest one, and
+        ``rim``/``core`` for fibers with a bright rim and a dimmer core.
     ``name``
-        Material name used in the exported Tangle configuration.
+        Material name used in the exported Tangle configuration; also names
+        the type when several are fitted together.
     """
 
     diameter: float
@@ -48,6 +54,7 @@ class FiberSpec:
     min_length: float | None = None
     max_length: float | None = None
     length: float | None = None
+    profile: CrossSection = CrossSection()
     name: str = "ct fiber"
 
     def replace(self, **changes: Any) -> "FiberSpec":
@@ -97,6 +104,15 @@ class FitResult:
     support: np.ndarray
     levels: Levels
     history: list[dict[str, Any]] = field(default_factory=list)
+    # With several fiber types: the specs, and each fiber's index into them.
+    specs: list[FiberSpec] | None = None
+    types: np.ndarray | None = None
+
+    def spec_of(self, index: int) -> FiberSpec:
+        """The spec (fiber type) of fiber ``index``."""
+        if self.specs is None or self.types is None:
+            return self.spec
+        return self.specs[int(self.types[index])]
 
     # -- geometry in meters -------------------------------------------------
     @property
@@ -123,15 +139,16 @@ class FitResult:
         """One Tangle material per distinct fitted diameter (rounded to 10 nm)."""
         import tangle
 
-        bend = self.spec.min_bend_radius or 5.0 * self.spec.diameter
-        cache: dict[int, Any] = {}
+        cache: dict[tuple[str, int], Any] = {}
         result = []
-        for diameter in self.diameters_m():
-            key = int(round(diameter / 1e-8))
+        for index, diameter in enumerate(self.diameters_m()):
+            spec = self.spec_of(index)
+            bend = spec.min_bend_radius or 5.0 * spec.diameter
+            key = (spec.name, int(round(diameter / 1e-8)))
             if key not in cache:
                 cache[key] = tangle.Material(
-                    f"{self.spec.name} {key * 1e-2:.2f}um",
-                    diameter=key * 1e-8,
+                    f"{spec.name} {key[1] * 1e-2:.2f}um",
+                    diameter=key[1] * 1e-8,
                     min_bend_radius=bend,
                 )
             result.append(cache[key])
@@ -225,16 +242,46 @@ class FitResult:
             "implied_mean_length": ends["implied_length"] * h if ends["implied_length"] else None,
             "expected_interior_ends": ends.get("expected_interior_ends"),
             "expected_interior_ends_sd": ends.get("expected_interior_ends_sd"),
+            "types": (
+                {
+                    item.name: {
+                        "fiber_count": int((self.types == kind).sum()),
+                        "diameter_mean": float(diameters[self.types == kind].mean()) if (self.types == kind).any() else None,
+                    }
+                    for kind, item in enumerate(self.specs)
+                }
+                if self.specs is not None and self.types is not None
+                else None
+            ),
             "_tilt": tilt,
         }
+
+    def of_type(self, kind: int) -> "FitResult":
+        """Only the fibers of type ``kind`` (an index into ``specs``)."""
+        if self.specs is None or self.types is None:
+            return self
+        keep = np.flatnonzero(self.types == kind)
+        return replace(
+            self,
+            spec=self.specs[kind],
+            centerlines=[self.centerlines[i] for i in keep],
+            radii=self.radii[keep],
+            support=self.support[keep],
+            specs=None,
+            types=None,
+        )
 
     def suggested_population(self, count: int | None = None, seed: int = 1) -> Any:
         """A ``tangle.FiberPopulation`` with the fitted statistics.
 
         Boundary-cut fibers make the fitted lengths a lower bound; the length
-        range uses uncensored fibers when there are any.
+        range uses uncensored fibers when there are any. With several fiber
+        types this returns one population per type.
         """
         import tangle
+
+        if self.specs is not None and self.types is not None:
+            return [self.of_type(kind).suggested_population(seed=seed + kind) for kind in range(len(self.specs))]
 
         summary = self.population_summary()
         values = np.array(summary["orientation_eigenvalues"])
@@ -279,11 +326,13 @@ class FitResult:
             "cell_lengths": self.cell_lengths_m(),
             "spec": asdict(self.spec),
             "levels": asdict(self.levels),
+            "specs": [asdict(item) for item in self.specs] if self.specs else None,
             "fibers": [
                 {
                     "id": i + 1,
                     "diameter": float(d),
                     "support": float(s),
+                    "type": int(self.types[i]) if self.types is not None else 0,
                     "centerline": line.tolist(),
                 }
                 for i, (line, d, s) in enumerate(zip(self.centerlines_m(), self.diameters_m(), self.support))
@@ -343,10 +392,19 @@ def load_fit(path: str | Path) -> FitResult:
     data = json.loads(Path(path).read_text())
     h = data["voxel_size"]
     fibers = data["fibers"]
+
+    def spec_from(values: dict[str, Any]) -> FiberSpec:
+        values = dict(values)
+        values["profile"] = CrossSection(**values.get("profile") or {})
+        return FiberSpec(**values)
+
+    specs = [spec_from(item) for item in data["specs"]] if data.get("specs") else None
     return FitResult(
         shape=tuple(data["shape_zyx"]),
         voxel_size=h,
-        spec=FiberSpec(**data["spec"]),
+        spec=spec_from(data["spec"]),
+        specs=specs,
+        types=np.array([f.get("type", 0) for f in fibers], dtype=int) if specs else None,
         centerlines=[np.asarray(f["centerline"]) / h for f in fibers],
         radii=np.array([0.5 * f["diameter"] / h for f in fibers]),
         support=np.array([f["support"] for f in fibers]),
@@ -358,7 +416,7 @@ def load_fit(path: str | Path) -> FitResult:
 def fit_fibers(
     volume: np.ndarray,
     voxel_size: float,
-    spec: FiberSpec,
+    spec: FiberSpec | Sequence[FiberSpec],
     settings: FitSettings | None = None,
     *,
     verbose: bool = False,
@@ -370,26 +428,32 @@ def fit_fibers(
     ``settings.rounds`` rounds of (continuous fit → remove duplicates and
     unsupported fibers → merge fragments → trace new fibers in what is still
     unexplained).
+
+    ``spec`` may be a list of fiber types. Types are fitted one after another,
+    largest diameter first, each on a detection image matched to its own
+    brightness profile (``FiberSpec.profile``); the fibers already found claim
+    their voxels, so a smaller type is not traced along a larger fiber's rim.
     """
     settings = settings or FitSettings()
     volume = np.asarray(volume)
     if volume.ndim != 3:
         raise ValueError("volume must be a 3D (z, y, x) array")
-    radius = 0.5 * spec.diameter / voxel_size
-    if radius < 1.0:
-        raise ValueError(
-            f"fibers are only {2 * radius:.1f} voxels across; at least 2 are needed"
-        )
-    bend = (spec.min_bend_radius or 5.0 * spec.diameter) / voxel_size
-    min_length = (spec.min_length or 3.0 * spec.diameter) / voxel_size
-    max_length = spec.max_length / voxel_size if spec.max_length else None
-    length = spec.length / voxel_size if spec.length else None
-    spacing = settings.node_spacing_radii * radius
-    cost = end_cost(spec.length, spec.diameter)
+    specs = [spec] if isinstance(spec, FiberSpec) else list(spec)
+    if not specs:
+        raise ValueError("give at least one FiberSpec")
+    for item in specs:
+        if 0.5 * item.diameter / voxel_size < 1.0:
+            raise ValueError(
+                f"fibers are only {item.diameter / voxel_size:.1f} voxels across; at least 2 are needed"
+            )
+    single = len(specs) == 1 and specs[0].profile.solid and specs[0].profile.brightness == 1.0
 
-    image, levels = normalize(volume, denoise_sigma=settings.denoise_sigma_voxels, levels=settings.levels)
-    hessian = HessianField(image, sigma=max(0.6 * radius, 1.0))
-    foreground = image > 0.5
+    if single or settings.levels is not None:
+        image, levels = normalize(volume, denoise_sigma=settings.denoise_sigma_voxels, levels=settings.levels)
+    else:
+        image, levels = normalize(volume, denoise_sigma=settings.denoise_sigma_voxels, levels=_three_class_levels(volume, settings))
+
+    history: list[dict[str, Any]] = []
 
     def log(stage: str, lines: list[np.ndarray], **extra: Any) -> None:
         entry = {"stage": stage, "fibers": len(lines), **extra}
@@ -397,14 +461,138 @@ def fit_fibers(
         if verbose:
             print(entry)
 
-    history: list[dict[str, Any]] = []
+    order = sorted(range(len(specs)), key=lambda k: -specs[k].diameter)
+    lines: list[np.ndarray] = []
+    radii = np.zeros(0)
+    types = np.zeros(0, dtype=int)
+    for kind in order:
+        item = specs[kind]
+        if single:
+            detect = image
+        else:
+            detect = _detection_image(image, item, voxel_size)
+            log(f"type {item.name}", lines, diameter=item.diameter)
+        found, found_radii, detect, levels = _fit_type(
+            detect, None if single else image, item, settings, voxel_size, levels,
+            frozen=lines, frozen_radii=radii, relevel=single, log=log,
+        )
+        if single:
+            image = detect
+        lines = lines + found
+        radii = np.concatenate([radii, found_radii])
+        types = np.concatenate([types, np.full(len(found), kind, dtype=int)])
+
+    return FitResult(
+        shape=tuple(int(n) for n in volume.shape),
+        voxel_size=voxel_size,
+        spec=specs[0],
+        centerlines=lines,
+        radii=np.asarray(radii, dtype=np.float64),
+        support=_refine.support(image, lines),
+        levels=levels,
+        history=history,
+        specs=None if len(specs) == 1 else specs,
+        types=None if len(specs) == 1 else types,
+    )
+
+
+def _three_class_levels(volume: np.ndarray, settings: FitSettings) -> Levels:
+    """Void and reference-fiber levels for a scan with several fiber types.
+
+    A two-class threshold would split a dim fiber type from the bright one.
+    Three classes (void, dim, bright) are found by exhaustive search over a
+    histogram; void is the darkest class median and the reference fiber level
+    (brightness 1) the brightest.
+    """
+    from scipy.ndimage import gaussian_filter
+
+    image = np.asarray(volume, dtype=np.float32)
+    if settings.denoise_sigma_voxels > 0:
+        image = gaussian_filter(image, settings.denoise_sigma_voxels)
+    sample = image[:: max(1, image.shape[0] // 64)].ravel()
+    low, high = np.percentile(sample, [0.1, 99.9])
+    histogram, edges = np.histogram(np.clip(sample, low, high), bins=128, range=(low, high))
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    weight = np.concatenate([[0.0], np.cumsum(histogram)])
+    moment = np.concatenate([[0.0], np.cumsum(histogram * centers)])
+    total_w, total_m = weight[-1], moment[-1]
+    best, split = -1.0, (1, 2)
+    for a in range(1, len(centers) - 1):
+        for b in range(a + 1, len(centers)):
+            w0, w1, w2 = weight[a], weight[b] - weight[a], total_w - weight[b]
+            if min(w0, w1, w2) <= 0:
+                continue
+            m0, m1, m2 = moment[a], moment[b] - moment[a], total_m - moment[b]
+            between = m0 * m0 / w0 + m1 * m1 / w1 + m2 * m2 / w2
+            if between > best:
+                best, split = between, (a, b)
+    t1, t2 = edges[split[0]], edges[split[1]]
+    void = float(np.median(sample[sample < t1]))
+    fiber = float(np.median(sample[sample >= t2]))
+    return Levels(void=void, fiber=fiber, threshold=float(t1))
+
+
+def _detection_image(image: np.ndarray, spec: FiberSpec, voxel_size: float) -> np.ndarray:
+    """The scan as this fiber type sees it: about 1 on its axis, 0 in void.
+
+    A rimmed type is smoothed at half its radius, which fills its dim core;
+    the result is divided by the level such a fiber reaches on its axis.
+    """
+    from scipy.ndimage import gaussian_filter
+
+    radius = 0.5 * spec.diameter / voxel_size
+    sigma = 0.0 if spec.profile.solid else 0.5 * radius
+    smoothed = gaussian_filter(image, sigma) if sigma > 0 else image
+    return (smoothed / max(spec.profile.center_response(radius, voxel_size, sigma), 1e-3)).astype(np.float32)
+
+
+def _fit_type(
+    image: np.ndarray,
+    mass_image: np.ndarray | None,
+    spec: FiberSpec,
+    settings: FitSettings,
+    voxel_size: float,
+    levels: Levels,
+    *,
+    frozen: list[np.ndarray],
+    frozen_radii: np.ndarray,
+    relevel: bool,
+    log,
+) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, Levels]:
+    """Fit one fiber type; ``frozen`` fibers (earlier types) stay fixed but
+    own their voxels and block tracing."""
+    radius = 0.5 * spec.diameter / voxel_size
+    bend = (spec.min_bend_radius or 5.0 * spec.diameter) / voxel_size
+    min_length = (spec.min_length or 3.0 * spec.diameter) / voxel_size
+    max_length = spec.max_length / voxel_size if spec.max_length else None
+    length = spec.length / voxel_size if spec.length else None
+    spacing = settings.node_spacing_radii * radius
+    cost = end_cost(spec.length, spec.diameter)
+    profile = None if spec.profile.solid and spec.profile.brightness == 1.0 else spec.profile
+    frozen_count = len(frozen)
+
+    hessian = HessianField(image, sigma=max(0.6 * radius, 1.0))
+    foreground = image > 0.5
+    frozen_claim = None
+    if frozen_count:
+        frozen_claim, _, _ = rasterize(image.shape, frozen, frozen_radii, reach=1.2 * frozen_radii)
+        frozen_claim = np.where(frozen_claim > 0, -1, 0).astype(np.int32)
+
+    def claim(lines: list[np.ndarray], radii: np.ndarray) -> np.ndarray | None:
+        if not lines:
+            return frozen_claim.copy() if frozen_claim is not None else None
+        claimed, _, _ = rasterize(image.shape, lines, radii, reach=1.2 * radii)
+        if frozen_claim is not None:
+            claimed = np.where(claimed > 0, claimed, frozen_claim)
+        return claimed
+
     lines = trace_fibers(
         image, hessian, radius=radius, min_bend_radius=bend, min_length=min_length, node_spacing=spacing,
-        foreground=foreground,
+        foreground=foreground, claimed=frozen_claim,
     )
     radii = np.full(len(lines), radius)
     log("trace", lines)
-    if settings.levels is None and lines:
+    if relevel and settings.levels is None and lines:
         # Otsu class medians put the fiber level below the fiber core (blurred
         # edge voxels are in the fiber class); re-level on the traced cores.
         image, levels = _relevel(image, levels, lines, radius)
@@ -415,18 +603,30 @@ def fit_fibers(
         for _ in range(settings.iterations_per_round):
             if not lines:
                 break
-            lines, mass = _refine.data_step(
-                image, lines, radii, reach_factor=settings.ownership_reach_radii, rate=settings.data_rate
-            )
+            if frozen_count:
+                # Earlier types own their voxels; only this type's fibers move.
+                moved, mass = _refine.data_step(
+                    image, frozen + lines, np.concatenate([frozen_radii, radii]),
+                    reach_factor=settings.ownership_reach_radii, rate=settings.data_rate, mass_image=mass_image,
+                )
+                lines, mass = moved[frozen_count:], mass[frozen_count:]
+            else:
+                lines, mass = _refine.data_step(
+                    image, lines, radii, reach_factor=settings.ownership_reach_radii, rate=settings.data_rate,
+                    mass_image=mass_image,
+                )
             lines = _refine.bend_step(lines, settings.bend_rate)
             radii = _refine.radius_step(
                 lines, radii, mass, prior_radius=radius, tolerance=spec.diameter_tolerance,
-                prior_weight=settings.radius_prior_weight,
+                prior_weight=settings.radius_prior_weight, profile=profile, voxel_size=voxel_size,
             )
-            occupied, _, _ = rasterize(image.shape, lines, radii, signed=True)
+            occupied, _, _ = rasterize(image.shape, frozen + lines, np.concatenate([frozen_radii, radii]), signed=True)
+            if frozen_count:
+                occupied = np.where(occupied > frozen_count, occupied - frozen_count, np.where(occupied > 0, -1, 0))
             lines = _refine.end_step(image, lines, radii, step=spacing, occupied=occupied)
             if settings.separate_fibers:
-                lines = _refine.separate_step(lines, radii)
+                separated = _refine.separate_step(frozen + lines, np.concatenate([frozen_radii, radii]))
+                lines = separated[frozen_count:]
             lines = _refine.respace(lines, spacing)
         scale = evidence_scale(image, lines, radii, radius) if cost > 0 else 1.0
         lines, radii, splits = _moves.split_kinks(
@@ -457,25 +657,14 @@ def fit_fibers(
             explained=explained, **extra,
         )
         if round_index + 1 < settings.rounds:
-            claimed, _, _ = rasterize(image.shape, lines, radii, reach=1.2 * radii)
             born = trace_fibers(
                 image, hessian, radius=radius, min_bend_radius=bend, min_length=min_length,
-                node_spacing=spacing, claimed=claimed, foreground=foreground, label_offset=len(lines),
+                node_spacing=spacing, claimed=claim(lines, radii), foreground=foreground, label_offset=len(lines),
             )
             lines = lines + born
             radii = np.concatenate([radii, np.full(len(born), radius)])
             log(f"births {round_index + 1}", lines, born=len(born))
-
-    return FitResult(
-        shape=tuple(int(n) for n in volume.shape),
-        voxel_size=voxel_size,
-        spec=spec,
-        centerlines=lines,
-        radii=np.asarray(radii, dtype=np.float64),
-        support=_refine.support(image, lines),
-        levels=levels,
-        history=history,
-    )
+    return lines, np.asarray(radii, dtype=np.float64), image, levels
 
 
 def _relevel(image: np.ndarray, levels: Levels, lines: list[np.ndarray], radius: float) -> tuple[np.ndarray, Levels]:
