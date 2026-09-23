@@ -160,6 +160,7 @@ def main() -> None:
         if ONLY and name not in ONLY:
             continue
         scan = scan_of(centerlines)
+        (OUTPUT / name).mkdir(parents=True, exist_ok=True)
         ct.save_overlay_figure(OUTPUT / name / "truth_overlay.png", scan.volume, scan.labels, title=f"{name}: truth")
         for label, (spec, settings) in fits().items():
             started = time.perf_counter()
