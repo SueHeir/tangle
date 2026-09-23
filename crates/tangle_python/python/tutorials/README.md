@@ -20,7 +20,7 @@ They complement the workflow-oriented examples in `../examples/`.
 | `11_compaction.ipynb` | Every target, path, kinematic choice, increment, energy, and guard setting |
 | `12_junction_capture.ipynb` | Every junction filter and explicit capture schedule |
 | `13_checkpoints_and_resume.ipynb` | Every checkpoint, continuation, and branching option |
-| `14_results_and_exports.ipynb` | Results, `result.assembly`, native analysis, OVITO, BPM, and PuMA export controls |
+| `14_results_and_exports.ipynb` | Results, `result.assembly`, native analysis, contact and neighbor metrics, OVITO, BPM, and PuMA export controls |
 
 After installing the Python, Rust/Cargo, and native compiler prerequisites
 described step-by-step in notebook 00, install the development extension,

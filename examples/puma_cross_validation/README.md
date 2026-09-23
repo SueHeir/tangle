@@ -4,6 +4,9 @@ Start with the [Python notebook](../../crates/tangle_python/python/examples/puma
 or run `python crates/tangle_python/python/examples/puma_cross_validation.py`
 from the repository root after [installing TANGLE](../../crates/tangle_python/README.md).
 PuMA is optional; without it the script writes the bundle and skips comparison.
+To compare, create a PuMA environment with `conda create -n puma conda-forge::puma`,
+activate it, and build TANGLE into it with `maturin develop` as in the
+installation guide. PuMA ships `pumapy` through conda-forge, not PyPI: `pip install pumapy` installs an unrelated package with the same name.
 The Rust command below is the equivalent native fixture.
 
 This example creates two equal, orthogonal fibers with a small physical gap,
@@ -42,8 +45,9 @@ cargo run -p puma_cross_validation --bin needled_section
 python examples/puma_cross_validation/analyze_needled_section.py
 ```
 
-The Python environment needs `pumapy`, NumPy, matplotlib, and Markdown. It uses
-PuMA directly, with no TANGLE adapter. Results are under
+The Python environment needs `pumapy` (from the conda-forge `puma` package
+above), NumPy, matplotlib, and Markdown. It uses PuMA directly, with no TANGLE
+adapter. Results are under
 `output/needled_section/`: `report.html` (embedded figures), `report.md`, raw
 `comparison.json`, and interoperable voxel bundles at 3, 2, and 1 µm resolution.
 The HTML report can be viewed on its own; retain the adjacent JSON for its raw-data link.
