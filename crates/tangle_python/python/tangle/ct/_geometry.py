@@ -49,6 +49,16 @@ def sample_image(image: np.ndarray, points: np.ndarray, *, fill: float = 0.0) ->
     return map_coordinates(image, coordinates, order=1, mode="constant", cval=fill)
 
 
+def sample_labels(labels: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """Nearest-voxel lookup of an integer ``(z, y, x)`` array; outside reads 0."""
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    index = np.floor(points[:, ::-1]).astype(int)
+    inside = np.all((index >= 0) & (index < np.array(labels.shape)), axis=1)
+    values = np.zeros(len(points), dtype=labels.dtype)
+    values[inside] = labels[index[inside, 0], index[inside, 1], index[inside, 2]]
+    return values
+
+
 def _segment_distances(voxels: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
     ab = b - a
     denominator = float(ab @ ab)
@@ -56,6 +66,42 @@ def _segment_distances(voxels: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.n
         return np.linalg.norm(voxels - a, axis=1)
     t = np.clip((voxels - a) @ ab / denominator, 0.0, 1.0)
     return np.linalg.norm(voxels - (a + t[:, None] * ab), axis=1)
+
+
+def _box_segment_distances(low: np.ndarray, high: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Distances from the voxel centers of box ``[low, high)`` to segment ``ab``, as ``(z, y, x)``."""
+    x = (np.arange(low[0], high[0]) + 0.5 - a[0])[None, None, :]
+    y = (np.arange(low[1], high[1]) + 0.5 - a[1])[None, :, None]
+    z = (np.arange(low[2], high[2]) + 0.5 - a[2])[:, None, None]
+    ab = b - a
+    denominator = float(ab @ ab)
+    if denominator <= 1e-12:
+        return np.sqrt(x * x + y * y + z * z)
+    t = np.clip((x * ab[0] + y * ab[1] + z * ab[2]) / denominator, 0.0, 1.0)
+    dx, dy, dz = x - t * ab[0], y - t * ab[1], z - t * ab[2]
+    return np.sqrt(dx * dx + dy * dy + dz * dz)
+
+
+def paint(target: np.ndarray, line: np.ndarray, reach: float, value: int, *, only_empty: bool = False) -> None:
+    """Set voxels of ``target`` within ``reach`` of polyline ``line`` to ``value`` in place.
+
+    Works on per-segment windows, so it costs nothing proportional to the
+    whole volume (unlike :func:`rasterize`).
+    """
+    line = np.asarray(line, dtype=np.float64).reshape(-1, 3)
+    if len(line) == 1:
+        line = np.vstack([line, line])
+    upper = np.array(target.shape[::-1])
+    for a, b in zip(line[:-1], line[1:]):
+        low = np.maximum(np.floor(np.minimum(a, b) - reach - 0.5).astype(int), 0)
+        high = np.minimum(np.ceil(np.maximum(a, b) + reach + 0.5).astype(int), upper)
+        if np.any(high <= low):
+            continue
+        inside = _box_segment_distances(low, high, a, b) <= reach
+        window = target[low[2] : high[2], low[1] : high[1], low[0] : high[0]]
+        if only_empty:
+            inside &= window == 0
+        window[inside] = value
 
 
 def rasterize(
@@ -90,11 +136,7 @@ def rasterize(
             high = np.minimum(np.ceil(np.maximum(a, b) + fiber_reach + 0.5).astype(int), upper)
             if np.any(high <= low):
                 continue
-            xs, ys, zs = (np.arange(low[i], high[i]) + 0.5 for i in range(3))
-            grid = np.stack(np.meshgrid(xs, ys, zs, indexing="xy"), axis=-1)
-            # meshgrid "xy" gives (y, x, z); reorder to (z, y, x)
-            grid = np.transpose(grid, (2, 0, 1, 3))
-            distance = _segment_distances(grid.reshape(-1, 3), a, b).reshape(grid.shape[:3])
+            distance = _box_segment_distances(low, high, a, b)
             inside = distance <= fiber_reach
             if signed:
                 distance = distance - radius

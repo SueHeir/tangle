@@ -42,6 +42,6 @@ jobs:
         run: |
           python -m venv .venv-ci
           source .venv-ci/bin/activate
-          python -m pip install "maturin>=1.8,<2" numpy
+          python -m pip install "maturin>=1.8,<2" numpy scipy tifffile
           maturin develop --manifest-path crates/tangle_python/Cargo.toml
           python -m unittest discover -s crates/tangle_python/python/tests -v

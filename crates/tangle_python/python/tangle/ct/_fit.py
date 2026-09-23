@@ -290,9 +290,9 @@ class FitResult:
         paths = {"config": directory / "fit.json"}
         paths["config"].write_text(json.dumps(self.to_dict(), indent=1) + "\n")
         labels = self.label_volume()
-        paths["labels"] = _write_stack(directory / "labels", labels.astype(np.uint16))
+        paths["labels"] = _write_stack(directory / "labels", labels.astype(np.uint16), self.voxel_size)
         if volume is not None:
-            paths["overlay_stack"] = _write_stack(directory / "overlay", overlay_volume(volume, labels), rgb=True)
+            paths["overlay_stack"] = _write_stack(directory / "overlay", overlay_volume(volume, labels), self.voxel_size, rgb=True)
             try:
                 paths["overlay_png"] = save_overlay_figure(directory / "overlay.png", volume, labels, title=f"{self.fiber_count} fitted fibers")
             except ImportError:
@@ -300,7 +300,8 @@ class FitResult:
         return paths
 
 
-def _write_stack(stem: Path, array: np.ndarray, rgb: bool = False) -> Path:
+def _write_stack(stem: Path, array: np.ndarray, voxel_size: float, rgb: bool = False) -> Path:
+    """ImageJ-format stack with the voxel spacing, so Fiji opens it as a volume."""
     try:
         import tifffile
     except ImportError:
@@ -308,7 +309,15 @@ def _write_stack(stem: Path, array: np.ndarray, rgb: bool = False) -> Path:
         np.save(path, array)
         return path
     path = stem.with_suffix(".tif")
-    tifffile.imwrite(path, array, photometric="rgb" if rgb else "minisblack", metadata={"axes": "ZYXS" if rgb else "ZYX"})
+    pixel = voxel_size * 1e6
+    tifffile.imwrite(
+        path,
+        array,
+        imagej=True,
+        photometric="rgb" if rgb else "minisblack",
+        resolution=(1.0 / pixel, 1.0 / pixel),
+        metadata={"spacing": pixel, "unit": "um", "axes": "ZYXS" if rgb else "ZYX"},
+    )
     return path
 
 

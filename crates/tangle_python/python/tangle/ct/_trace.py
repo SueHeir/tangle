@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._geometry import polyline_length, rasterize, resample, sample_image
+from ._geometry import paint, polyline_length, resample, sample_image, sample_labels
 from ._image import HessianField
 
 
@@ -64,8 +64,8 @@ class Tracer:
     def recenter(self, center: np.ndarray, direction: np.ndarray, own_label: int = 0) -> np.ndarray:
         points = self._plane(center, direction, self.window)
         weights = np.clip(sample_image(self.image, points), 0.0, None)
-        owners = sample_image(self.claimed.astype(np.float32), points)
-        foreign = (owners > 0.5) & (np.abs(owners - own_label) > 0.5)
+        owners = sample_labels(self.claimed, points)
+        foreign = (owners > 0) & (owners != own_label)
         weights = np.where(foreign, 0.15 * weights, weights)
         distance2 = ((points - center) ** 2).sum(axis=1)
         weights *= np.exp(-distance2 / (2.0 * (0.8 * self.radius) ** 2))
@@ -203,16 +203,12 @@ def trace_fibers(
         if len(line) >= 2 and polyline_length(line) >= min_length:
             line = resample(line, node_spacing)
             fibers.append(line)
-            claim, _, _ = rasterize(image.shape, [line], np.array([radius]), reach=1.1 * radius)
-            claimed[claim > 0] = label
+            paint(claimed, line, 1.1 * radius, label)
             if max_fibers is not None and len(fibers) >= max_fibers:
                 break
         else:
-            # remember the rejected seed neighborhood so it is not retried
-            low = np.maximum(np.array(index) - 1, 0)
-            claimed[low[0] : index[0] + 2, low[1] : index[1] + 2, low[2] : index[2] + 2] = np.where(
-                claimed[low[0] : index[0] + 2, low[1] : index[1] + 2, low[2] : index[2] + 2] == 0,
-                -1,
-                claimed[low[0] : index[0] + 2, low[1] : index[1] + 2, low[2] : index[2] + 2],
-            )
+            # Mark the rejected trace (or the seed) so nearby seeds on the
+            # same blob are not traced again.
+            rejected = line if len(line) else seed[None]
+            paint(claimed, rejected, 0.75 * radius, -1, only_empty=True)
     return fibers

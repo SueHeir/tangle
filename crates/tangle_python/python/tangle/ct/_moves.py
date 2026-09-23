@@ -221,19 +221,16 @@ def render_occupancy(
     box_low: np.ndarray, box_high: np.ndarray, lines: list[np.ndarray], radii: np.ndarray, edge: float = 1.2
 ) -> np.ndarray:
     """Soft union occupancy of capsules over the voxel box ``[low, high)`` (x, y, z)."""
-    from ._geometry import _segment_distances
+    from ._geometry import _box_segment_distances
 
-    xs, ys, zs = (np.arange(box_low[a], box_high[a]) + 0.5 for a in range(3))
-    grid = np.stack(np.meshgrid(xs, ys, zs, indexing="xy"), axis=-1)
-    grid = np.transpose(grid, (2, 0, 1, 3)).reshape(-1, 3)
-    occupancy = np.zeros(len(grid))
+    occupancy = np.zeros(tuple(int(n) for n in (box_high - box_low)[::-1]))
     for line, radius in zip(lines, radii):
         for a, b in zip(line[:-1], line[1:]):
             if np.any(np.minimum(a, b) - radius - 2 * edge > box_high) or np.any(np.maximum(a, b) + radius + 2 * edge < box_low):
                 continue
-            distance = _segment_distances(grid, a, b)
-            occupancy = np.maximum(occupancy, np.clip(0.5 - (distance - radius) / (2 * edge), 0.0, 1.0))
-    return occupancy.reshape(len(zs), len(ys), len(xs))
+            distance = _box_segment_distances(box_low, box_high, a, b)
+            np.maximum(occupancy, np.clip(0.5 - (distance - radius) / (2 * edge), 0.0, 1.0), out=occupancy)
+    return occupancy
 
 
 def resolve_side_by_side(
