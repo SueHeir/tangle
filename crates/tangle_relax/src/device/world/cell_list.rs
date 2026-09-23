@@ -58,6 +58,10 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         }
     }
 
+    /// Rebuilds the shared cell list. With `use_proxies` long segments are
+    /// binned as their proxy pieces (the neighbor-list grid); without it
+    /// every segment is binned whole (the contact-capture grid).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn rebuild_cell_list(
         &self,
         cell_count: usize,
@@ -66,6 +70,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         cells_z: u32,
         control: Handle,
         control_len: usize,
+        use_proxies: bool,
     ) {
         let cube_dim = CubeDim::new_1d(64);
         let cell_cubes = CubeCount::Static(cell_count.div_ceil(64) as u32, 1, 1);
@@ -90,6 +95,10 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     self.packed.segment_vertices.len(),
                 ),
                 BufferArg::from_raw_parts(
+                    self.segment_proxies.clone(),
+                    self.packed.segment_count(),
+                ),
+                BufferArg::from_raw_parts(
                     self.active_segment_indices.clone(),
                     self.packed.segment_count(),
                 ),
@@ -99,6 +108,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
                 BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
                 BufferArg::from_raw_parts(control.clone(), control_len),
+                u32::from(use_proxies),
                 cells_x,
                 cells_y,
                 cells_z,
@@ -123,6 +133,10 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     self.packed.segment_vertices.len(),
                 ),
                 BufferArg::from_raw_parts(
+                    self.segment_proxies.clone(),
+                    self.packed.segment_count(),
+                ),
+                BufferArg::from_raw_parts(
                     self.active_segment_indices.clone(),
                     self.packed.segment_count(),
                 ),
@@ -131,37 +145,36 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 BufferArg::from_raw_parts(self.cell_cursors.clone(), cell_count),
                 BufferArg::from_raw_parts(
                     self.scattered_cell_segments.clone(),
-                    self.packed.segment_count(),
+                    self.proxy_capacity,
                 ),
-                BufferArg::from_raw_parts(
-                    self.cell_slot_cells.clone(),
-                    self.packed.segment_count(),
-                ),
+                BufferArg::from_raw_parts(self.scattered_cell_proxies.clone(), self.proxy_capacity),
+                BufferArg::from_raw_parts(self.cell_slot_cells.clone(), self.proxy_capacity),
                 BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
                 BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
                 BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
                 BufferArg::from_raw_parts(control.clone(), control_len),
+                u32::from(use_proxies),
                 cells_x,
                 cells_y,
                 cells_z,
             );
+            // One thread per possible slot; the kernel stops at the filled count.
             rank_cell_segments::launch_unchecked::<R>(
                 &self.client,
-                segment_cubes,
+                CubeCount::Static(self.proxy_capacity.div_ceil(64) as u32, 1, 1),
                 cube_dim,
-                BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
                 BufferArg::from_raw_parts(self.cell_counts.clone(), cell_count),
                 BufferArg::from_raw_parts(self.cell_offsets.clone(), cell_count),
                 BufferArg::from_raw_parts(
                     self.scattered_cell_segments.clone(),
-                    self.packed.segment_count(),
+                    self.proxy_capacity,
                 ),
-                BufferArg::from_raw_parts(
-                    self.cell_slot_cells.clone(),
-                    self.packed.segment_count(),
-                ),
-                BufferArg::from_raw_parts(self.cell_segments.clone(), self.packed.segment_count()),
+                BufferArg::from_raw_parts(self.scattered_cell_proxies.clone(), self.proxy_capacity),
+                BufferArg::from_raw_parts(self.cell_slot_cells.clone(), self.proxy_capacity),
+                BufferArg::from_raw_parts(self.cell_segments.clone(), self.proxy_capacity),
+                BufferArg::from_raw_parts(self.cell_proxies.clone(), self.proxy_capacity),
                 BufferArg::from_raw_parts(control.clone(), control_len),
+                cell_count as u32,
             );
         }
     }

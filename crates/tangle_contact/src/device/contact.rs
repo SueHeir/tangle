@@ -4,6 +4,8 @@
 
 use cubecl::prelude::*;
 
+use super::cell_list::{proxy_cell, proxy_of};
+
 #[cube(launch_unchecked)]
 #[allow(unused_assignments)]
 pub fn capture_segment_contacts(
@@ -245,7 +247,9 @@ pub fn find_segment_corrections(
     control: &[u32],
     neighbor_counts: &[u32],
     neighbor_segments: &[u32],
-    neighbor_home_cells: &[u32],
+    neighbor_reference_positions: &[f32],
+    segment_proxies: &[u32],
+    cell_proxies: &[u32],
     corrections: &mut [f32],
     segment_max_penetration: &mut [f32],
     neighbor_capacity: u32,
@@ -287,30 +291,50 @@ pub fn find_segment_corrections(
     let mut correction_weight = 0.0_f32;
 
     // Candidates come from the segment's neighbor list. A segment whose list
-    // overflowed its capacity instead scans the cells around the home cell
-    // recorded when the lists were built; both sets are valid until a rebuild
-    // is requested.
+    // overflowed its capacity instead scans the cells around each of its
+    // proxy pieces, located from the positions the lists were built from, and
+    // takes a candidate only from the proxy pair holding the closest points,
+    // so a pair of long segments is not counted twice. Both sets are valid
+    // until a rebuild is requested.
     let length_x = cell_upper[0] - cell_lower[0];
     let length_y = cell_upper[1] - cell_lower[1];
     let length_z = cell_upper[2] - cell_lower[2];
     let listed_count = neighbor_counts[segment_index];
     let listed = listed_count <= neighbor_capacity;
-    let home_cell = neighbor_home_cells[segment_index];
-    let home_x = home_cell % cells_x;
-    let home_y = (home_cell / cells_x) % cells_y;
-    let home_z = home_cell / (cells_x * cells_y);
-    let mut ranges = 27_u32;
+    let proxies = segment_proxies[segment_index];
+    let mut ranges = 27 * proxies;
     if listed {
         ranges = 1;
     }
 
-    for neighbor in 0..ranges {
+    for range in 0..ranges {
+        let proxy = range / 27;
+        let neighbor = range % 27;
         let mut count = 0_u32;
         let mut start = 0_usize;
         if listed {
             count = listed_count;
             start = segment_index * neighbor_capacity as usize;
         } else {
+            let home_cell = proxy_cell(
+                neighbor_reference_positions[3 * first_vertex],
+                neighbor_reference_positions[3 * first_vertex + 1],
+                neighbor_reference_positions[3 * first_vertex + 2],
+                neighbor_reference_positions[3 * second_vertex],
+                neighbor_reference_positions[3 * second_vertex + 1],
+                neighbor_reference_positions[3 * second_vertex + 2],
+                proxy,
+                proxies,
+                cell_lower,
+                cell_upper,
+                cell_periodic,
+                cells_x,
+                cells_y,
+                cells_z,
+            );
+            let home_x = home_cell % cells_x;
+            let home_y = (home_cell / cells_x) % cells_y;
+            let home_z = home_cell / (cells_x * cells_y);
             let offset_x = (neighbor % 3) as i32 - 1;
             let offset_y = ((neighbor / 3) % 3) as i32 - 1;
             let offset_z = (neighbor / 9) as i32 - 1;
@@ -349,10 +373,12 @@ pub fn find_segment_corrections(
         }
         for slot in 0..count {
             let mut other = 0_usize;
+            let mut other_proxy = 0_u32;
             if listed {
                 other = neighbor_segments[start + slot as usize] as usize;
             } else {
                 other = cell_segments[start + slot as usize] as usize;
+                other_proxy = cell_proxies[start + slot as usize];
             }
             let third_vertex = segment_vertices[2 * other] as usize;
             let fourth_vertex = segment_vertices[2 * other + 1] as usize;
@@ -450,7 +476,10 @@ pub fn find_segment_corrections(
                     let distance =
                         (delta_x * delta_x + delta_y * delta_y + delta_z * delta_z).sqrt();
                     let penetration = radius + segment_radii[other] - distance;
-                    if penetration > 0.0 {
+                    let canonical = listed
+                        || (proxy_of(s, proxies) == proxy
+                            && proxy_of(t, segment_proxies[other]) == other_proxy);
+                    if penetration > 0.0 && canonical {
                         let deepest = penetration > maximum_penetration;
                         if deepest {
                             maximum_penetration = penetration;
