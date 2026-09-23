@@ -203,6 +203,12 @@ WGPU is the default; CPU execution is explicitly selected with
 `settings.backend = "cpu"`. Both use CubeCL kernels, with no silent CPU
 fallback. Large manufacturing recipes are intended for accelerators.
 
+The CPU backend compiles each kernel through LLVM the first time a process
+uses it, which can take minutes before the first iteration, and each
+iteration then launches a few dozen kernels whose fixed cost dominates small
+and medium runs. Expect it to be one to two orders of magnitude slower than
+a GPU; use it for testing, not for manufacturing recipes.
+
 Seeded generation is deterministic. GPU/CPU relaxation is not guaranteed
 bitwise identical across runs or devices; assess reproducibility using explicit
 geometric and residual tolerances. Save the recipe, settings, code revision,
