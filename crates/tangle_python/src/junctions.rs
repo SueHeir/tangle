@@ -106,7 +106,7 @@ impl PyJunctionPolicy {
         if !self.min_crossing_angle.is_finite()
             || !self.max_crossing_angle.is_finite()
             || self.min_crossing_angle < 0.0
-            || self.max_crossing_angle > std::f64::consts::FRAC_PI_2
+            || self.max_crossing_angle as f32 > std::f32::consts::FRAC_PI_2
             || self.min_crossing_angle > self.max_crossing_angle
         {
             return Err(PyValueError::new_err(

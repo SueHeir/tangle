@@ -50,7 +50,10 @@ const BPM_MODES: &[(&str, BpmExportMode)] = &[
     ("spheres_exact", BpmExportMode::SpheresExact),
     ("spheres_dynamic", BpmExportMode::SpheresDynamic),
     ("spherocylinders_exact", BpmExportMode::SpherocylindersExact),
-    ("spherocylinders_constant", BpmExportMode::SpherocylindersConstant),
+    (
+        "spherocylinders_constant",
+        BpmExportMode::SpherocylindersConstant,
+    ),
 ];
 
 // --- Needle footprints -------------------------------------------------------
@@ -100,10 +103,9 @@ impl PyCircularFootprint {
 
     fn __repr__(&self) -> String {
         match (self.center, self.seed) {
-            (Some(center), _) => format!(
-                "CircularFootprint({center:?}, diameter={})",
-                self.diameter
-            ),
+            (Some(center), _) => {
+                format!("CircularFootprint({center:?}, diameter={})", self.diameter)
+            }
             (None, seed) => format!(
                 "CircularFootprint.random(diameter={}, seed={})",
                 self.diameter,
@@ -133,10 +135,7 @@ impl PyRandomFiberFraction {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "RandomFiberFraction({}, seed={})",
-            self.fraction, self.seed
-        )
+        format!("RandomFiberFraction({}, seed={})", self.fraction, self.seed)
     }
 }
 
@@ -371,8 +370,7 @@ impl PyRecipe {
         {
             let model = self.model.lock().expect("assembly lock poisoned");
             let materials = &model.assembly.materials.entries;
-            if !materials.is_empty() && !materials.iter().any(|entry| entry.name == material_name)
-            {
+            if !materials.is_empty() && !materials.iter().any(|entry| entry.name == material_name) {
                 let known = materials
                     .iter()
                     .map(|entry| format!("{:?}", entry.name))
@@ -591,7 +589,9 @@ impl PyRecipe {
                 every: capture_every,
                 policy,
             },
-            format!("relax for {iterations} iterations and capture junctions every {capture_every}"),
+            format!(
+                "relax for {iterations} iterations and capture junctions every {capture_every}"
+            ),
         );
         Ok(())
     }
@@ -799,9 +799,18 @@ fn recipe_error(
     ));
     let value = error.value(py);
     for (name, item) in [
-        ("operation_index", index.into_pyobject(py).map(|v| v.into_any())),
-        ("operation", operation.into_pyobject(py).map(|v| v.into_any())),
-        ("iteration", iteration.into_pyobject(py).map(|v| v.into_any())),
+        (
+            "operation_index",
+            index.into_pyobject(py).map(|v| v.into_any()),
+        ),
+        (
+            "operation",
+            operation.into_pyobject(py).map(|v| v.into_any()),
+        ),
+        (
+            "iteration",
+            iteration.into_pyobject(py).map(|v| v.into_any()),
+        ),
         ("reason", reason.into_pyobject(py).map(|v| v.into_any())),
     ] {
         let Ok(item) = item;

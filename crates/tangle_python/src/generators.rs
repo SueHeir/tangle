@@ -12,7 +12,7 @@ use tangle_generate::{
 use crate::collection::{PyCell, PyFiberCollection, PyMaterial};
 use crate::common::{
     direction_to_py, parse_axis, parse_choice, parse_direction, parse_range, range_to_py,
-    scale_range, unit_vector, with_kwargs,
+    repr_fields, scale_range, unit_vector, with_kwargs,
 };
 
 // --- Orientation variants ----------------------------------------------------
@@ -50,20 +50,26 @@ impl PyPlanarOrientation {
     #[pyo3(signature = (*, normal=None, max_tilt=10.0_f64.to_radians()))]
     fn new(normal: Option<&Bound<'_, PyAny>>, max_tilt: f64) -> PyResult<Self> {
         Ok(Self {
-            normal: normal.map(|value| parse_direction(value, "normal")).transpose()?,
+            normal: normal
+                .map(|value| parse_direction(value, "normal"))
+                .transpose()?,
             max_tilt,
         })
     }
 
     #[getter]
     fn normal(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        self.normal.map(|normal| direction_to_py(py, normal)).transpose()
+        self.normal
+            .map(|normal| direction_to_py(py, normal))
+            .transpose()
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "PlanarOrientation(normal={:?}, max_tilt={})",
-            self.normal, self.max_tilt
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        repr_fields(
+            slf.as_any(),
+            "PlanarOrientation",
+            &["normal", "max_tilt"],
+            false,
         )
     }
 }
@@ -107,7 +113,9 @@ impl PyLayeredBiaxialOrientation {
         seed: u64,
     ) -> PyResult<Self> {
         Ok(Self {
-            normal: normal.map(|value| parse_direction(value, "normal")).transpose()?,
+            normal: normal
+                .map(|value| parse_direction(value, "normal"))
+                .transpose()?,
             primary_fraction,
             cross_fraction,
             max_in_plane_deviation,
@@ -118,18 +126,24 @@ impl PyLayeredBiaxialOrientation {
 
     #[getter]
     fn normal(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        self.normal.map(|normal| direction_to_py(py, normal)).transpose()
+        self.normal
+            .map(|normal| direction_to_py(py, normal))
+            .transpose()
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "LayeredBiaxialOrientation(normal={:?}, primary_fraction={}, cross_fraction={}, max_in_plane_deviation={}, max_tilt={}, seed={})",
-            self.normal,
-            self.primary_fraction,
-            self.cross_fraction,
-            self.max_in_plane_deviation,
-            self.max_tilt,
-            self.seed
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        repr_fields(
+            slf.as_any(),
+            "LayeredBiaxialOrientation",
+            &[
+                "normal",
+                "primary_fraction",
+                "cross_fraction",
+                "max_in_plane_deviation",
+                "max_tilt",
+                "seed",
+            ],
+            false,
         )
     }
 }
@@ -159,10 +173,12 @@ impl PyAlignedOrientation {
         direction_to_py(py, self.axis)
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "AlignedOrientation(axis={:?}, max_angle={})",
-            self.axis, self.max_angle
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        repr_fields(
+            slf.as_any(),
+            "AlignedOrientation",
+            &["axis", "max_angle"],
+            false,
         )
     }
 }
@@ -273,10 +289,12 @@ impl PyLayeredPosition {
         })
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "LayeredPosition(layer_count={}, axis={:?}, jitter_fraction={})",
-            self.layer_count, self.axis, self.jitter_fraction
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        repr_fields(
+            slf.as_any(),
+            "LayeredPosition",
+            &["layer_count", "axis", "jitter_fraction"],
+            false,
         )
     }
 }
@@ -306,10 +324,12 @@ impl PyDensityGradientPosition {
         })
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "DensityGradientPosition(axis={:?}, exponent={}, toward_high={})",
-            self.axis, self.exponent, self.toward_high
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        repr_fields(
+            slf.as_any(),
+            "DensityGradientPosition",
+            &["axis", "exponent", "toward_high"],
+            false,
         )
     }
 }
@@ -440,12 +460,16 @@ impl PyFiberPopulation {
 
     #[getter]
     fn diameter(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        self.diameter.map(|value| range_to_py(py, value)).transpose()
+        self.diameter
+            .map(|value| range_to_py(py, value))
+            .transpose()
     }
 
     #[setter]
     fn set_diameter(&mut self, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
-        self.diameter = value.map(|value| parse_range(value, "diameter")).transpose()?;
+        self.diameter = value
+            .map(|value| parse_range(value, "diameter"))
+            .transpose()?;
         Ok(())
     }
 
@@ -491,10 +515,21 @@ impl PyFiberPopulation {
         with_kwargs(py, self.clone(), changes, "replace")
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "FiberPopulation(material={:?}, count={}, segments_per_fiber={}, orientation={:?}, position={:?})",
-            self.material.name, self.count, self.segments_per_fiber, self.orientation, self.position
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        repr_fields(
+            slf.as_any(),
+            "FiberPopulation",
+            &[
+                "material",
+                "count",
+                "segments_per_fiber",
+                "seed",
+                "length",
+                "diameter",
+                "orientation",
+                "position",
+            ],
+            false,
         )
     }
 }
@@ -525,11 +560,13 @@ impl PyFiberPopulation {
 // --- Generators --------------------------------------------------------------
 
 fn material_or_default(material: Option<PyRef<'_, PyMaterial>>, diameter: f64) -> PyMaterial {
-    material.map(|material| material.clone()).unwrap_or(PyMaterial {
-        name: "fiber".to_string(),
-        diameter,
-        min_bend_radius: None,
-    })
+    material
+        .map(|material| material.clone())
+        .unwrap_or(PyMaterial {
+            name: "fiber".to_string(),
+            diameter,
+            min_bend_radius: None,
+        })
 }
 
 /// Gives every generated fiber the caller's bend limit when the native

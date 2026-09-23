@@ -12,7 +12,10 @@ use crate::common::{
 };
 
 const KINEMATICS: &[(&str, CompactionKinematics)] = &[
-    ("rigid_fiber_centers", CompactionKinematics::RigidFiberCenters),
+    (
+        "rigid_fiber_centers",
+        CompactionKinematics::RigidFiberCenters,
+    ),
     ("moving_walls", CompactionKinematics::MovingWalls),
     ("affine_vertices", CompactionKinematics::AffineVertices),
 ];
@@ -21,6 +24,9 @@ const KINEMATICS: &[(&str, CompactionKinematics)] = &[
 
 macro_rules! scalar_target {
     ($rust:ident, $python:literal, $doc:literal) => {
+        scalar_target!($rust, $python, $doc, |_value: f64| PyResult::Ok(()));
+    };
+    ($rust:ident, $python:literal, $doc:literal, $check:expr) => {
         #[doc = $doc]
         #[pyclass(name = $python, module = "tangle._tangle", frozen)]
         #[derive(Clone, Debug)]
@@ -34,6 +40,7 @@ macro_rules! scalar_target {
             #[new]
             fn new(value: f64) -> PyResult<Self> {
                 positive_finite(value, "value")?;
+                ($check)(value)?;
                 Ok(Self { value })
             }
 
@@ -47,7 +54,16 @@ macro_rules! scalar_target {
 scalar_target!(
     PyVolumeFractionTarget,
     "VolumeFractionTarget",
-    "Stop when nominal fiber volume over cell volume reaches `value` (< 1)."
+    "Stop when nominal fiber volume over cell volume reaches `value` (< 1).",
+    |value: f64| {
+        if value < 1.0 {
+            PyResult::Ok(())
+        } else {
+            Err(PyValueError::new_err(
+                "volume fraction target must be below 1",
+            ))
+        }
+    }
 );
 scalar_target!(
     PyCellVolumeTarget,
@@ -142,7 +158,9 @@ fn target_to_py(py: Python<'_>, target: CompactionTarget) -> PyResult<Py<PyAny>>
         CompactionTarget::NominalVolumeFraction(value) => {
             Py::new(py, PyVolumeFractionTarget { value })?.into_any()
         }
-        CompactionTarget::CellVolume(value) => Py::new(py, PyCellVolumeTarget { value })?.into_any(),
+        CompactionTarget::CellVolume(value) => {
+            Py::new(py, PyCellVolumeTarget { value })?.into_any()
+        }
         CompactionTarget::CellLengths(lengths) => {
             Py::new(py, PyCellLengthsTarget { lengths })?.into_any()
         }

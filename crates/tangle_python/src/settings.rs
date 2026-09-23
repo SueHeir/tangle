@@ -11,7 +11,7 @@ use tangle_relax::{
     RelaxationConfig, RelaxationOverrides,
 };
 
-use crate::common::{choice_name, parse_choice, widen, with_kwargs};
+use crate::common::{choice_name, parse_choice, repr_fields, widen, with_kwargs};
 
 const BACKENDS: &[(&str, RelaxationBackend)] = &[
     ("wgpu", RelaxationBackend::Wgpu),
@@ -23,7 +23,10 @@ const MOTION_MODELS: &[(&str, FiberMotion)] = &[
 ];
 const CONTACT_AGGREGATIONS: &[(&str, ContactAggregation)] = &[
     ("uniform_average", ContactAggregation::UniformAverage),
-    ("penetration_weighted", ContactAggregation::PenetrationWeighted),
+    (
+        "penetration_weighted",
+        ContactAggregation::PenetrationWeighted,
+    ),
     ("deepest_only", ContactAggregation::DeepestOnly),
 ];
 const BUDGET_EXHAUSTION: &[(&str, SolveExhaustion)] = &[
@@ -653,22 +656,21 @@ impl PyRelaxationOverrides {
         Ok(overrides)
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            concat!(
-                "RelaxationOverrides(motion_model={:?}, correction_fraction={:?}, ",
-                "contact_aggregation={:?}, stretch_stiffness={:?}, bend_stiffness={:?}, ",
-                "curvature_limit_stiffness={:?}, constraint_iterations={:?}, ",
-                "curvature_cleanup_sweeps={:?})"
-            ),
-            self.motion_model(),
-            self.correction_fraction,
-            self.contact_aggregation(),
-            self.stretch_stiffness,
-            self.bend_stiffness,
-            self.curvature_limit_stiffness,
-            self.constraint_iterations,
-            self.curvature_cleanup_sweeps,
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        repr_fields(
+            slf.as_any(),
+            "RelaxationOverrides",
+            &[
+                "motion_model",
+                "correction_fraction",
+                "contact_aggregation",
+                "stretch_stiffness",
+                "bend_stiffness",
+                "curvature_limit_stiffness",
+                "constraint_iterations",
+                "curvature_cleanup_sweeps",
+            ],
+            true,
         )
     }
 }

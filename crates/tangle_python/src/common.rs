@@ -163,11 +163,7 @@ where
 }
 
 /// Parses a string option against its allowed spellings.
-pub(crate) fn parse_choice<T: Copy>(
-    value: &str,
-    name: &str,
-    choices: &[(&str, T)],
-) -> PyResult<T> {
+pub(crate) fn parse_choice<T: Copy>(value: &str, name: &str, choices: &[(&str, T)]) -> PyResult<T> {
     choices
         .iter()
         .find(|(label, _)| *label == value)
@@ -184,7 +180,10 @@ pub(crate) fn parse_choice<T: Copy>(
         })
 }
 
-pub(crate) fn choice_name<T: Copy + PartialEq>(value: T, choices: &[(&'static str, T)]) -> &'static str {
+pub(crate) fn choice_name<T: Copy + PartialEq>(
+    value: T,
+    choices: &[(&'static str, T)],
+) -> &'static str {
     choices
         .iter()
         .find(|(_, parsed)| *parsed == value)
@@ -224,4 +223,23 @@ pub(crate) fn unit_fraction(value: f64, name: &str) -> PyResult<()> {
 /// `1e-4_f32` reads back as `0.0001` rather than `9.99999974e-05`.
 pub(crate) fn widen(value: f32) -> f64 {
     value.to_string().parse().unwrap_or(value as f64)
+}
+
+/// Formats `Class(field=repr(value), ...)` from Python-visible attributes, so
+/// reprs show Python values (`None`, lists) rather than Rust debug output.
+pub(crate) fn repr_fields(
+    object: &Bound<'_, PyAny>,
+    class_name: &str,
+    fields: &[&str],
+    skip_none: bool,
+) -> PyResult<String> {
+    let mut parts = Vec::with_capacity(fields.len());
+    for field in fields {
+        let value = object.getattr(*field)?;
+        if skip_none && value.is_none() {
+            continue;
+        }
+        parts.push(format!("{field}={}", value.repr()?));
+    }
+    Ok(format!("{class_name}({})", parts.join(", ")))
 }

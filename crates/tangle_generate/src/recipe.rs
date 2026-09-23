@@ -230,7 +230,12 @@ fn generate_layer_staged_population(
 /// Deterministic pseudo-random center for a circular needle footprint in
 /// `layer`, uniform over `origin + [0, extent)` in the two coordinates
 /// orthogonal to the layer axis.
-pub fn random_footprint_center(seed: u64, layer: u32, origin: [f32; 2], extent: [f32; 2]) -> [f32; 2] {
+pub fn random_footprint_center(
+    seed: u64,
+    layer: u32,
+    origin: [f32; 2],
+    extent: [f32; 2],
+) -> [f32; 2] {
     let unit = |bits: u64| (((bits >> 40) as f64) * (1.0 / ((1_u64 << 24) as f64))) as f32;
     let first = splitmix64(seed ^ (2 * layer) as u64);
     let second = splitmix64(seed ^ (2 * layer + 1) as u64);
