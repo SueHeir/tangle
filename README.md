@@ -191,6 +191,9 @@ See [solver and architecture notes](docs/architecture.md) for details.
 - **Fiber shape:** curvature and torsion distributions, tangent correlation and
   persistence length, curl index, and a Schladitz β orientation fit, from
   `characterize_shape()` on the same generated or CT-tracked centerlines.
+- **Entanglement:** per-fiber writhe and the Gauss linking of contacting
+  fibers, from `characterize_entanglement()`, to tell wrapped fibers from ones
+  that only cross.
 - **Scorecard against a scan:** `tangle.score_structure(candidate, reference,
   contact_gap)` scores every shape, contact and orientation metric by its
   distance to the reference divided by the reference's own

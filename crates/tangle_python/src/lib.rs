@@ -13,7 +13,8 @@ mod settings;
 use pyo3::prelude::*;
 
 use analysis::{
-    PyAnalysisReport, PyNeighborReport, PyPumaExportReport, PyScorecard, PyShapeReport,
+    PyAnalysisReport, PyEntanglementReport, PyNeighborReport, PyPumaExportReport, PyScorecard,
+    PyShapeReport,
 };
 use checkpoint::PyCheckpointSettings;
 use collection::{PyAssembly, PyCell, PyFiberCollection, PyFiberSelection, PyMaterial};
@@ -45,6 +46,7 @@ fn _tangle(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyPumaExportReport>()?;
     module.add_class::<PyShapeReport>()?;
     module.add_class::<PyScorecard>()?;
+    module.add_class::<PyEntanglementReport>()?;
     module.add_function(wrap_pyfunction!(analysis::score_structure_py, module)?)?;
 
     module.add_class::<PyCell>()?;

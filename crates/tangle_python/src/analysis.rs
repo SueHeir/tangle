@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use tangle_characterize::{
-    analyze_contact_graph, analyze_neighbors, analyze_shape, score_structure, write_analysis_json,
-    AssemblyMetrics, Distribution, NeighborAnalysisConfig, NeighborMetrics, Scorecard,
-    ScorecardConfig, ShapeAnalysisConfig, ShapeMetrics,
+    analyze_contact_graph, analyze_entanglement, analyze_neighbors, analyze_shape, score_structure,
+    write_analysis_json, AssemblyMetrics, Distribution, EntanglementConfig, EntanglementMetrics,
+    NeighborAnalysisConfig, NeighborMetrics, Scorecard, ScorecardConfig, ShapeAnalysisConfig,
+    ShapeMetrics,
 };
 use tangle_core::FiberAssembly;
 use tangle_export::PumaExportReport;
@@ -625,7 +626,7 @@ impl PyShapeReport {
 
 /// Scores a candidate structure against a reference, metric by metric.
 #[pyfunction]
-#[pyo3(name = "score_structure", signature = (candidate, reference, contact_gap, *, subdivisions=[2, 2, 2], candidate_region=None, reference_region=None, max_candidate_subvolumes=64, min_piece_length=None, sample_spacing=None, neighbor_sample_spacing=None, neighbor_gap=None, in_axis_angle_degrees=20.0, orientation_axis=[0.0, 0.0, 1.0], quantile_count=101))]
+#[pyo3(name = "score_structure", signature = (candidate, reference, contact_gap, *, subdivisions=[2, 2, 2], candidate_region=None, reference_region=None, max_candidate_subvolumes=64, min_piece_length=None, sample_spacing=None, neighbor_sample_spacing=None, neighbor_gap=None, in_axis_angle_degrees=20.0, orientation_axis=[0.0, 0.0, 1.0], quantile_count=101, linking_window=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn score_structure_py(
     candidate: PyRef<'_, PyAssembly>,
@@ -642,6 +643,7 @@ pub(crate) fn score_structure_py(
     in_axis_angle_degrees: f64,
     orientation_axis: [f64; 3],
     quantile_count: usize,
+    linking_window: Option<f64>,
 ) -> PyResult<PyScorecard> {
     // Copy each assembly out of its lock in turn, so passing the same
     // assembly twice cannot deadlock.
@@ -669,6 +671,8 @@ pub(crate) fn score_structure_py(
     config.neighbors.sample_spacing = neighbor_sample_spacing;
     config.neighbors.neighbor_gap = neighbor_gap;
     config.neighbors.in_axis_angle = in_axis_angle_degrees.to_radians();
+    config.entanglement.window = linking_window;
+    config.entanglement.quantile_count = quantile_count;
     score_structure(&candidate, &reference, &config)
         .map(|inner| PyScorecard { inner })
         .map_err(|error| PyValueError::new_err(error.to_string()))
@@ -818,5 +822,135 @@ impl PyScorecard {
             }
             None => format!("Scorecard(metrics_scored={scored})"),
         }
+    }
+}
+
+/// Runs the neighbor analysis and then the entanglement analysis on its
+/// contacting pairs.
+pub(crate) fn characterize_entanglement(
+    assembly: &FiberAssembly,
+    contact_gap: f64,
+    sample_spacing: Option<f64>,
+    window: Option<f64>,
+    neighbor_sample_spacing: Option<f64>,
+    quantile_count: usize,
+) -> PyResult<PyEntanglementReport> {
+    let mut neighbor_config = NeighborAnalysisConfig::new(contact_gap);
+    neighbor_config.sample_spacing = neighbor_sample_spacing;
+    let neighbors = analyze_neighbors(assembly, &neighbor_config)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let config = EntanglementConfig {
+        sample_spacing,
+        window,
+        quantile_count,
+    };
+    analyze_entanglement(assembly, &neighbors, &config)
+        .map(|inner| PyEntanglementReport { inner })
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyclass(name = "EntanglementReport", module = "tangle._tangle", frozen)]
+#[derive(Clone)]
+pub(crate) struct PyEntanglementReport {
+    pub(crate) inner: EntanglementMetrics,
+}
+
+#[pymethods]
+impl PyEntanglementReport {
+    #[getter]
+    fn schema_version(&self) -> u32 {
+        self.inner.schema_version
+    }
+
+    #[getter]
+    fn sample_spacing(&self) -> f64 {
+        self.inner.sample_spacing
+    }
+
+    #[getter]
+    fn window(&self) -> f64 {
+        self.inner.window
+    }
+
+    /// Signed writhe, one value per fiber: ``count``, ``mean``,
+    /// ``standard_deviation`` and ``quantiles``.
+    #[getter]
+    fn writhe(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(py, serde_json::to_string(&self.inner.writhe))
+    }
+
+    #[getter]
+    fn absolute_writhe_per_length(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(
+            py,
+            serde_json::to_string(&self.inner.absolute_writhe_per_length),
+        )
+    }
+
+    #[getter]
+    fn mean_absolute_writhe_per_length(&self) -> Option<f64> {
+        self.inner.mean_absolute_writhe_per_length
+    }
+
+    /// Signed Gauss linking of each contacting pair within the window.
+    #[getter]
+    fn contact_linking(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(py, serde_json::to_string(&self.inner.contact_linking))
+    }
+
+    #[getter]
+    fn absolute_contact_linking(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(
+            py,
+            serde_json::to_string(&self.inner.absolute_contact_linking),
+        )
+    }
+
+    /// Writhe of every fiber in topology order.
+    #[getter]
+    fn fiber_writhes(&self) -> Vec<f64> {
+        self.inner.fibers.iter().map(|f| f.writhe).collect()
+    }
+
+    #[pyo3(signature = (pretty=true))]
+    fn to_json(&self, pretty: bool) -> PyResult<String> {
+        if pretty {
+            serde_json::to_string_pretty(&self.inner)
+        } else {
+            serde_json::to_string(&self.inner)
+        }
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(py, serde_json::to_string(&self.inner))
+    }
+
+    fn write_json(&self, path: PathBuf) -> PyResult<()> {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        }
+        let encoded = serde_json::to_string_pretty(&self.inner)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        std::fs::write(path, encoded).map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    fn __repr__(&self) -> String {
+        let format = |value: Option<f64>| value.map_or("None".to_owned(), |v| format!("{v:.4}"));
+        format!(
+            "EntanglementReport(fibers={}, mean_absolute_writhe_per_length={}, median_absolute_contact_linking={})",
+            self.inner.fibers.len(),
+            format(self.inner.mean_absolute_writhe_per_length),
+            format(
+                self.inner
+                    .absolute_contact_linking
+                    .as_ref()
+                    .map(Distribution::median)
+            ),
+        )
     }
 }

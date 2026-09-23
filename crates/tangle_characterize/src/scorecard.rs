@@ -30,8 +30,9 @@ use tangle_core::{FiberAssembly, FiberId, PeriodicCell, Vec3};
 use crate::distribution::Distribution;
 use crate::neighbors::{add, norm, scale, sub};
 use crate::{
-    analyze_contact_graph, analyze_neighbors, analyze_shape, characterize_assembly,
-    NeighborAnalysisConfig, NeighborAnalysisError, ShapeAnalysisConfig, ShapeAnalysisError,
+    analyze_contact_graph, analyze_entanglement, analyze_neighbors, analyze_shape,
+    characterize_assembly, EntanglementConfig, EntanglementError, NeighborAnalysisConfig,
+    NeighborAnalysisError, ShapeAnalysisConfig, ShapeAnalysisError,
 };
 
 /// Schema version of [`Scorecard`] and [`StructureProfile`].
@@ -66,16 +67,19 @@ pub struct StructureProfile {
 ///
 /// Distributions: `curvature`, `absolute_torsion`, `curl_index`,
 /// `axis_cosine`, `fiber_length`, `crossing_angle` (radians), `free_length`,
-/// `excess_persistence`.
+/// `excess_persistence`, `absolute_writhe_per_length`,
+/// `absolute_contact_linking`.
 pub fn profile_structure(
     assembly: &FiberAssembly,
     shape: &ShapeAnalysisConfig,
     neighbors: &NeighborAnalysisConfig,
+    entanglement: &EntanglementConfig,
 ) -> Result<StructureProfile, ScorecardError> {
     let basic = characterize_assembly(assembly);
     let shape_metrics = analyze_shape(assembly, shape)?;
     let neighbor_metrics = analyze_neighbors(assembly, neighbors)?;
     let graph = analyze_contact_graph(&neighbor_metrics);
+    let entanglement_metrics = analyze_entanglement(assembly, &neighbor_metrics, entanglement)?;
     let quantiles = shape.quantile_count;
     let volume = basic.cell.volume;
     let has_length = neighbor_metrics.total_length > 0.0;
@@ -159,6 +163,14 @@ pub fn profile_structure(
                 quantiles,
             ),
         ),
+        (
+            "absolute_writhe_per_length",
+            entanglement_metrics.absolute_writhe_per_length,
+        ),
+        (
+            "absolute_contact_linking",
+            entanglement_metrics.absolute_contact_linking,
+        ),
     ]
     .into_iter()
     .map(|(name, value)| (name.to_owned(), value))
@@ -200,6 +212,9 @@ pub struct ScorecardConfig {
     /// Neighbor-analysis settings. Unset lengths are resolved from the whole
     /// reference region and then used for every subvolume.
     pub neighbors: NeighborAnalysisConfig,
+    /// Entanglement settings. An unset spacing uses the resolved shape
+    /// spacing, and an unset window 20 of those spacings.
+    pub entanglement: EntanglementConfig,
 }
 
 impl ScorecardConfig {
@@ -214,6 +229,7 @@ impl ScorecardConfig {
             minimum_piece_length: None,
             shape: ShapeAnalysisConfig::default(),
             neighbors: NeighborAnalysisConfig::new(contact_gap),
+            entanglement: EntanglementConfig::default(),
         }
     }
 }
@@ -258,6 +274,8 @@ pub struct Scorecard {
     pub shape: ShapeAnalysisConfig,
     /// Neighbor settings actually used, with lengths resolved.
     pub neighbors: NeighborAnalysisConfig,
+    /// Entanglement settings actually used, with lengths resolved.
+    pub entanglement: EntanglementConfig,
     /// One row per metric, scalars first, in name order.
     pub rows: Vec<ScoreRow>,
     /// Metrics of the whole candidate region.
@@ -273,6 +291,8 @@ pub enum ScorecardError {
     Shape(ShapeAnalysisError),
     /// The neighbor settings were invalid.
     Neighbors(NeighborAnalysisError),
+    /// The entanglement settings were invalid.
+    Entanglement(EntanglementError),
     /// A subdivision count was zero, or the total was below two.
     InvalidSubdivisions([usize; 3]),
     /// A region had a non-positive or non-finite extent.
@@ -303,6 +323,7 @@ impl fmt::Display for ScorecardError {
         match self {
             Self::Shape(error) => write!(formatter, "{error}"),
             Self::Neighbors(error) => write!(formatter, "{error}"),
+            Self::Entanglement(error) => write!(formatter, "{error}"),
             Self::InvalidSubdivisions(counts) => write!(
                 formatter,
                 "subdivisions must be positive and give at least two subvolumes, got {counts:?}"
@@ -336,6 +357,12 @@ impl Error for ScorecardError {}
 impl From<ShapeAnalysisError> for ScorecardError {
     fn from(error: ShapeAnalysisError) -> Self {
         Self::Shape(error)
+    }
+}
+
+impl From<EntanglementError> for ScorecardError {
+    fn from(error: EntanglementError) -> Self {
+        Self::Entanglement(error)
     }
 }
 
@@ -423,7 +450,23 @@ pub fn score_structure(
         ..config.neighbors.clone()
     };
 
-    let profile = |assembly: &FiberAssembly| profile_structure(assembly, &shape, &neighbors);
+    let entanglement_spacing = config
+        .entanglement
+        .sample_spacing
+        .unwrap_or(first_shape.sample_spacing);
+    let entanglement = EntanglementConfig {
+        sample_spacing: Some(entanglement_spacing),
+        window: Some(
+            config
+                .entanglement
+                .window
+                .unwrap_or(20.0 * entanglement_spacing),
+        ),
+        ..config.entanglement.clone()
+    };
+
+    let profile =
+        |assembly: &FiberAssembly| profile_structure(assembly, &shape, &neighbors, &entanglement);
     let reference_profile = profile(&reference_whole)?;
     let candidate_whole = crop_assembly(
         candidate,
@@ -498,6 +541,7 @@ pub fn score_structure(
         minimum_piece_length,
         shape,
         neighbors,
+        entanglement,
         rows,
         candidate: candidate_profile,
         reference: reference_profile,

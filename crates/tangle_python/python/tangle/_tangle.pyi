@@ -74,6 +74,29 @@ class AnalysisReport:
     def to_dict(self) -> dict[str, Any]: ...
     def write_json(self, path: Path) -> None: ...
 
+class EntanglementReport:
+    @property
+    def schema_version(self) -> int: ...
+    @property
+    def sample_spacing(self) -> float: ...
+    @property
+    def window(self) -> float: ...
+    @property
+    def writhe(self) -> ShapeDistribution | None: ...
+    @property
+    def absolute_writhe_per_length(self) -> ShapeDistribution | None: ...
+    @property
+    def mean_absolute_writhe_per_length(self) -> float | None: ...
+    @property
+    def contact_linking(self) -> ShapeDistribution | None: ...
+    @property
+    def absolute_contact_linking(self) -> ShapeDistribution | None: ...
+    @property
+    def fiber_writhes(self) -> list[float]: ...
+    def to_json(self, pretty: bool = ...) -> str: ...
+    def to_dict(self) -> dict[str, Any]: ...
+    def write_json(self, path: Path) -> None: ...
+
 class NeighborReport:
     @property
     def schema_version(self) -> int: ...
@@ -305,6 +328,15 @@ class Assembly:
         orientation_axis: Point = ...,
         min_torsion_curvature: float | None = ...,
     ) -> ShapeReport: ...
+    def characterize_entanglement(
+        self,
+        contact_gap: float,
+        *,
+        sample_spacing: float | None = ...,
+        window: float | None = ...,
+        neighbor_sample_spacing: float | None = ...,
+        quantile_count: int = ...,
+    ) -> EntanglementReport: ...
     def export_puma(
         self,
         output_directory: Path,
@@ -520,6 +552,7 @@ def score_structure(
     in_axis_angle_degrees: float = ...,
     orientation_axis: Point = ...,
     quantile_count: int = ...,
+    linking_window: float | None = ...,
 ) -> Scorecard: ...
 
 # --- Settings, policies, and overrides ---------------------------------------
@@ -1043,6 +1076,15 @@ class RunResult:
         orientation_axis: Point = ...,
         min_torsion_curvature: float | None = ...,
     ) -> ShapeReport: ...
+    def characterize_entanglement(
+        self,
+        contact_gap: float,
+        *,
+        sample_spacing: float | None = ...,
+        window: float | None = ...,
+        neighbor_sample_spacing: float | None = ...,
+        quantile_count: int = ...,
+    ) -> EntanglementReport: ...
     def write_ovito(
         self,
         path: Path,

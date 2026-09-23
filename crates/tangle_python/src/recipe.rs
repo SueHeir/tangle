@@ -21,8 +21,8 @@ use tangle_generate::{
 use tangle_relax::{RelaxationPlugin, RelaxationState};
 
 use crate::analysis::{
-    characterize_neighbors, characterize_shape, PyAnalysisReport, PyNeighborReport,
-    PyPumaExportReport, PyShapeReport,
+    characterize_entanglement, characterize_neighbors, characterize_shape, PyAnalysisReport,
+    PyEntanglementReport, PyNeighborReport, PyPumaExportReport, PyShapeReport,
 };
 use crate::checkpoint::PyCheckpointSettings;
 use crate::collection::{
@@ -969,6 +969,26 @@ impl PyRunResult {
             quantile_count,
             orientation_axis,
             min_torsion_curvature,
+        )
+    }
+
+    /// Measures fiber writhe and the Gauss linking of contacting fibers.
+    #[pyo3(signature = (contact_gap, *, sample_spacing=None, window=None, neighbor_sample_spacing=None, quantile_count=101))]
+    fn characterize_entanglement(
+        &self,
+        contact_gap: f64,
+        sample_spacing: Option<f64>,
+        window: Option<f64>,
+        neighbor_sample_spacing: Option<f64>,
+        quantile_count: usize,
+    ) -> PyResult<PyEntanglementReport> {
+        characterize_entanglement(
+            &self.model().assembly,
+            contact_gap,
+            sample_spacing,
+            window,
+            neighbor_sample_spacing,
+            quantile_count,
         )
     }
 

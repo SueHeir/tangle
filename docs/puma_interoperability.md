@@ -181,6 +181,30 @@ The quantile function is enough to plot a distribution and to compute its
 Wasserstein distance to another, which is how a generated structure will be
 scored against a scan.
 
+## Entanglement
+
+`characterize_entanglement(contact_gap)` separates fibers that merely cross or
+bend from fibers that coil and wrap around each other. It evaluates the Gauss
+linking integral exactly for polylines with the segment-pair solid-angle
+formula of Klenin and Langowski (2000), on fibers resampled at
+`sample_spacing` (default the smallest fiber diameter).
+
+- **Writhe:** the integral of each fiber with itself. It is zero for a fiber
+  that stays in a plane and grows as the fiber coils; its sign is the
+  handedness. `absolute_writhe_per_length` divides by fiber length so long and
+  short fibers can share a distribution.
+- **Contact linking:** the integral between two fibers that touch (the pairs
+  found by `characterize_neighbors` with the same `contact_gap`), restricted to
+  a `window` of arc length (default 20 sample spacings) centered on their first
+  contact on each fiber. Fibers are open, so it is not an integer: a single
+  straight crossing tends to one half in magnitude as the window grows
+  (a perpendicular crossing of two unit-length fibers 0.1 apart gives 0.41;
+  a 20° one gives 0.31), and each full wrap adds about one.
+  Each contacting pair is counted once.
+
+Both depend on the spacing and the window, so compare structures only at the
+same settings; the scorecard resolves them once from the reference.
+
 ## Scoring against a scan
 
 `tangle.score_structure(candidate, reference, contact_gap)` compares a
@@ -209,12 +233,13 @@ first.
 | Kind | Metrics |
 | --- | --- |
 | Scalars | `volume_fraction`, `length_density`, `mean_squared_axis_cosine`, `log_schladitz_beta`, `persistence_length`, `tangent_correlation_length`, `contacts_per_length`, `contact_ratio_to_random`, `in_axis_contact_fraction`, `mean_neighbors`, `neighbor_correlation_length`, `contact_degree_per_length`, `contact_clustering`, `repeated_contact_fraction`, `largest_component_length_fraction` |
-| Distributions | `curvature`, `absolute_torsion`, `curl_index`, `axis_cosine`, `fiber_length`, `crossing_angle`, `free_length`, `excess_persistence` |
+| Distributions | `curvature`, `absolute_torsion`, `curl_index`, `axis_cosine`, `fiber_length`, `crossing_angle`, `free_length`, `excess_persistence`, `absolute_writhe_per_length`, `absolute_contact_linking` |
 
 - **Same settings on both sides.** Sample spacings, the neighbor gap, lag
   ranges and the torsion threshold are resolved once from the whole reference
   region and reused for every subvolume; the resolved values are in the
-  report's `shape` and `neighbors` settings.
+  report's `shape`, `neighbors` and `entanglement` settings. The linking
+  window defaults to 20 shape sample spacings (`linking_window`).
 - **Cropping.** Each subvolume is analyzed as a non-periodic box. Fibers are
   clipped at its faces (periodic images included), and pieces shorter than
   `min_piece_length` (default the largest reference fiber diameter) are

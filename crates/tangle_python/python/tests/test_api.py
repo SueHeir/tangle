@@ -160,6 +160,35 @@ class CollectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             assembly.characterize_neighbors(0.1, neighbor_gap=0.01)
 
+    def test_entanglement_measures_contact_linking(self):
+        radius = 0.05
+        material = tangle.Material("fiber", diameter=2 * radius)
+        collection = tangle.FiberCollection.from_centerlines(
+            [
+                [[0.5, 1.0, 1.0], [1.5, 1.0, 1.0]],
+                [[1.0, 0.5, 1.0 + 2 * radius], [1.0, 1.5, 1.0 + 2 * radius]],
+            ],
+            material,
+        )
+        assembly = tangle.Assembly(tangle.Cell([2.0, 2.0, 2.0]))
+        assembly.insert(collection)
+
+        report = assembly.characterize_entanglement(0.01, neighbor_sample_spacing=0.002)
+        self.assertIsInstance(report, tangle.EntanglementReport)
+        self.assertAlmostEqual(report.sample_spacing, 2 * radius)
+        self.assertAlmostEqual(report.window, 20 * 2 * radius)
+        linking = report.absolute_contact_linking
+        self.assertEqual(linking["count"], 1)
+        self.assertGreater(linking["mean"], 0.2)
+        self.assertLess(linking["mean"], 0.5)
+        self.assertEqual(len(report.fiber_writhes), 2)
+        self.assertTrue(all(abs(value) < 1e-9 for value in report.fiber_writhes))
+        self.assertEqual(report.to_dict()["schema_version"], 1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nested" / "entanglement.json"
+            report.write_json(path)
+            self.assertTrue(path.is_file())
+
     def test_shape_analysis_measures_a_helix(self):
         a, c = 1.0, 0.5
         helix = [
