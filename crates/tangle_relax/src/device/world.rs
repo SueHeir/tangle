@@ -150,6 +150,10 @@ pub struct DeviceFiberWorld<R: Runtime> {
     neighbor_segments: Handle,
     neighbor_home_cells: Handle,
     neighbor_reference_positions: Handle,
+    // Cell-sorted copies of each slot's segment geometry (eight floats) and
+    // topology (vertex ids and fiber), refreshed at every list build.
+    slot_geometry: Handle,
+    slot_topology: Handle,
     neighbor_skin: f32,
     neighbor_capacity: u32,
     corrections: Handle,
@@ -405,6 +409,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             client.create_from_slice(u32::as_bytes(&vec![0_u32; packed.segment_count()]));
         let neighbor_reference_positions =
             client.create_from_slice(f32::as_bytes(&packed.positions));
+        let slot_geometry = client.empty(8 * packed.segment_count() * core::mem::size_of::<f32>());
+        let slot_topology = client.empty(3 * packed.segment_count() * core::mem::size_of::<u32>());
         let corrections =
             client.create_from_slice(f32::as_bytes(&vec![0.0_f32; 6 * packed.segment_count()]));
         let segment_max =
@@ -496,6 +502,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             neighbor_segments,
             neighbor_home_cells,
             neighbor_reference_positions,
+            slot_geometry,
+            slot_topology,
             neighbor_skin,
             neighbor_capacity,
             corrections,
