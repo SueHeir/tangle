@@ -14,7 +14,11 @@ replaces the old result):
 * ``segment.tif``: the fitted fibers, one color per fiber, over the scan (RGB);
 * ``diff.tif``: where the segmentation and the truth disagree, over the dimmed
   scan (RGB): red = true fiber the fit left empty (missed), blue = fit where
-  there is no fiber (extra), yellow = fiber given to the wrong fiber;
+  there is no fiber (extra), orange = fiber given to the wrong fiber;
+* ``confidence.tif``: the fit's own confidence in each fitted voxel, over the
+  dimmed scan (RGB): green = sure, through yellow, to red = unsure. It uses
+  no ground truth; ``score.json`` records how well it predicts the errors
+  in ``diff.tif``;
 * ``fit.json``: the fit (reload with ``ct.load_fit``);
 * ``score.json``: the score against the truth, the geometry report and the
   run time.
@@ -77,7 +81,7 @@ from tangle.units import um
 
 BACKEND = os.environ.get("TANGLE_BACKEND", "wgpu")
 MASK_LEVEL = 0.35  # of the way from void to fiber grey level: a generous threshold
-FILES = ("raw.tif", "mask.tif", "true.tif", "segment.tif", "diff.tif", "fit.json", "score.json")
+FILES = ("raw.tif", "mask.tif", "true.tif", "segment.tif", "diff.tif", "confidence.tif", "fit.json", "score.json")
 DIFF_COLORS = {"missed": (230, 50, 50), "extra": (60, 120, 255), "wrong_fiber": (255, 200, 0)}
 
 
@@ -285,8 +289,8 @@ EXAMPLES: dict[str, Callable[[Path], Example]] = {
 # -- the runner -----------------------------------------------------------------
 
 
-def label_diff(scan: ct.SyntheticScan, fit_labels: np.ndarray) -> tuple[np.ndarray, dict]:
-    """RGB stack of where the fit and the truth disagree, and voxel counts.
+def label_diff(scan: ct.SyntheticScan, fit_labels: np.ndarray) -> tuple[np.ndarray, dict, dict]:
+    """RGB stack of where the fit and the truth disagree, voxel counts, and the class masks.
 
     Each fitted fiber is matched to the true fiber it overlaps most; a voxel
     both call fiber is "wrong_fiber" when its fit is matched to another one.
@@ -305,16 +309,77 @@ def label_diff(scan: ct.SyntheticScan, fit_labels: np.ndarray) -> tuple[np.ndarr
         "extra": (truth == 0) & (fit_labels > 0),
         "wrong_fiber": both & (mapping[fit_labels] != truth),
     }
-    volume = np.asarray(scan.volume, dtype=np.float32)
-    low, high = np.percentile(volume[:: max(1, volume.shape[0] // 32)], [0.5, 99.5])
-    grey = (np.clip((volume - low) / max(high - low, 1e-6), 0.0, 1.0) * 110).astype(np.uint8)
-    rgb = np.repeat(grey[..., None], 3, axis=-1)
+    rgb = _dim_scan(scan)
     for name, where in classes.items():
         rgb[where] = DIFF_COLORS[name]
     fiber = max(int((truth > 0).sum()), 1)
     counts = {f"{name}_voxels": int(where.sum()) for name, where in classes.items()}
     counts.update({f"{name}_fraction_of_true_fiber": int(where.sum()) / fiber for name, where in classes.items()})
-    return rgb, counts
+    return rgb, counts, classes
+
+
+def _dim_scan(scan: ct.SyntheticScan) -> np.ndarray:
+    volume = np.asarray(scan.volume, dtype=np.float32)
+    low, high = np.percentile(volume[:: max(1, volume.shape[0] // 32)], [0.5, 99.5])
+    grey = (np.clip((volume - low) / max(high - low, 1e-6), 0.0, 1.0) * 110).astype(np.uint8)
+    return np.repeat(grey[..., None], 3, axis=-1)
+
+
+def confidence_image(scan: ct.SyntheticScan, confidence: np.ndarray) -> np.ndarray:
+    """RGB stack: fitted voxels from red (confidence 0) through yellow to green (1)."""
+    rgb = _dim_scan(scan)
+    fitted = ~np.isnan(confidence)
+    c = np.clip(confidence[fitted], 0.0, 1.0)
+    rgb[fitted] = np.stack(
+        [np.where(c < 0.5, 230, 230 * (1 - c) * 2), np.where(c < 0.5, 400 * c, 200), 40 * np.ones_like(c)], axis=1
+    ).astype(np.uint8)
+    return rgb
+
+
+def _auc(score: np.ndarray, positive: np.ndarray) -> float | None:
+    """Chance that a positive scores above a negative (ties count half)."""
+    from scipy.stats import rankdata
+
+    n1 = int(positive.sum())
+    n0 = len(positive) - n1
+    if n1 == 0 or n0 == 0:
+        return None
+    ranks = rankdata(score)
+    return float((ranks[positive].sum() - n1 * (n1 + 1) / 2) / (n1 * n0))
+
+
+def confidence_check(fit: ct.FitResult, report: dict, classes: dict, confidence: np.ndarray) -> dict:
+    """How well the fit's own confidence picks out its errors.
+
+    Voxels: among fitted voxels, the wrong ones (extra or wrong fiber).
+    Fibers: among fits, the merged and false ones (by mean node confidence).
+    """
+    fitted = ~np.isnan(confidence)
+    wrong = (classes["extra"] | classes["wrong_fiber"])[fitted]
+    unsure = 1.0 - confidence[fitted]
+    states = [entry["state"] for entry in report["per_fitted_fiber"]]
+    fiber_confidence = np.array([float(np.mean(c)) if len(c) else 0.0 for c in fit.confidence or []])
+    bad = np.array([state != "matched" for state in states], dtype=bool)
+    result = {
+        "voxel_auc": _auc(unsure, wrong),
+        "voxel_mean_confidence_right": float(confidence[fitted][~wrong].mean()) if (~wrong).any() else None,
+        "voxel_mean_confidence_wrong": float(confidence[fitted][wrong].mean()) if wrong.any() else None,
+        "fiber_auc": None,
+    }
+    if len(fiber_confidence) == len(bad) and len(bad):
+        result["fiber_auc"] = _auc(1.0 - fiber_confidence, bad)
+        result["fiber_mean_confidence_matched"] = float(fiber_confidence[~bad].mean()) if (~bad).any() else None
+        result["fiber_mean_confidence_merged_or_false"] = float(fiber_confidence[bad].mean()) if bad.any() else None
+    # Missed fiber: how much of it lies next to (within 2 voxels of) a low-confidence fitted voxel.
+    missed = classes["missed"]
+    if missed.any() and fitted.any():
+        from scipy.ndimage import grey_dilation
+
+        low = np.where(fitted, 1.0 - np.nan_to_num(confidence, nan=1.0), 0.0).astype(np.float32)
+        near = grey_dilation(low, size=5)
+        result["missed_next_to_unsure_fit"] = float((near[missed] > 0.5).mean())
+        result["missed_next_to_any_fit"] = float((grey_dilation(fitted.astype(np.uint8), size=5)[missed] > 0).mean())
+    return result
 
 
 def run(name: str, output: Path) -> dict:
@@ -345,13 +410,16 @@ def run(name: str, output: Path) -> dict:
     _write_stack(folder / "true", ct.overlay_volume(scan.volume, scan.labels), h, rgb=True)
     fit_labels = fit.label_volume()
     _write_stack(folder / "segment", ct.overlay_volume(scan.volume, fit_labels), h, rgb=True)
-    diff, diff_counts = label_diff(scan, fit_labels)
+    diff, diff_counts, diff_classes = label_diff(scan, fit_labels)
     _write_stack(folder / "diff", diff, h, rgb=True)
+    confidence = fit.confidence_volume()
+    _write_stack(folder / "confidence", confidence_image(scan, confidence), h, rgb=True)
+    check = confidence_check(fit, report, diff_classes, confidence)
     (folder / "fit.json").write_text(json.dumps(fit.to_dict(), indent=1) + "\n")
-    summary = {key: value for key, value in report.items() if key not in ("per_true_fiber", "per_type")}
+    summary = {key: value for key, value in report.items() if key not in ("per_true_fiber", "per_type", "per_fitted_fiber")}
     (folder / "score.json").write_text(
         json.dumps(
-            {"seconds": seconds, "score": report, "geometry": geometry, "diff": diff_counts, **extra},
+            {"seconds": seconds, "score": report, "geometry": geometry, "diff": diff_counts, "confidence": check, **extra},
             indent=1, default=str,
         ) + "\n"
     )
@@ -369,6 +437,9 @@ def run(name: str, output: Path) -> dict:
         "label accuracy": summary["voxel_label_accuracy"],
         "missed / extra / wrong (% of fiber)": "/".join(
             f"{100 * diff_counts[f'{k}_fraction_of_true_fiber']:.1f}" for k in ("missed", "extra", "wrong_fiber")
+        ),
+        "confidence AUC (voxel/fiber)": "/".join(
+            "-" if check[k] is None else f"{check[k]:.2f}" for k in ("voxel_auc", "fiber_auc")
         ),
         "end error max (vox)": extra.get("end_error_max_voxels"),
         "overlaps": geometry.get("overlapping_pairs"),
@@ -399,8 +470,10 @@ def write_summary(output: Path, rows: list[dict]) -> None:
     header = (
         "# tangle.ct examples\n\n"
         f"Fitted from binary masks thresholded at {MASK_LEVEL} of the way from void to fiber. "
-        "Each example's folder holds raw.tif, mask.tif, true.tif, segment.tif, diff.tif, fit.json and score.json. "
-        "diff.tif: red = missed, blue = extra, yellow = wrong fiber.\n\n"
+        "Each example's folder holds raw.tif, mask.tif, true.tif, segment.tif, diff.tif, confidence.tif, fit.json and score.json. "
+        "diff.tif: red = missed, blue = extra, orange = wrong fiber. confidence.tif: green = sure, red = unsure. "
+        "Confidence AUC: how well low confidence picks out the wrong voxels (extra or wrong fiber) among fitted "
+        "voxels, and the merged or false fits among all fits; 0.5 is chance, 1 is perfect.\n\n"
     )
     (output / "summary.md").write_text(header + "\n".join(lines) + "\n")
 

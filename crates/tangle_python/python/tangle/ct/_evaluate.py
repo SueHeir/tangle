@@ -161,6 +161,15 @@ def score(fit, truth, *, coverage_threshold: float = 0.8, min_length: float | No
         "implied_mean_length_truth_m": truth_ends["implied_length"] * h if truth_ends["implied_length"] else None,
         "per_type": per_type,
         "per_true_fiber": per_truth,
+        "per_fitted_fiber": [
+            {
+                "id": f + 1,
+                "true_id": int(owner[f]),
+                "purity": float(purity[f]),
+                "state": "false" if owner[f] == 0 or purity[f] < 0.5 else "merged" if purity[f] < 0.8 else "matched",
+            }
+            for f in range(len(owner))
+        ],
     }
 
 

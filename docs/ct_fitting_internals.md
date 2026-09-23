@@ -374,6 +374,7 @@ same steps size the fibers.
   - the spec and the levels;
   - each fiber's centerline in meters, its diameter and its support (the mean
     normalized intensity along it);
+  - each fiber's per-node confidence (see below);
   - `population` (`population_summary()`): diameter and length statistics,
     fibers touching the boundary, waviness, the orientation tensor, volume
     fraction and the end statistics;
@@ -387,6 +388,27 @@ same steps size the fibers.
 - `suggested_population()`: a `tangle.FiberPopulation` built from the fitted
   statistics. The orientation is aligned, planar or isotropic, from the
   orientation tensor's eigenvalues.
+
+### 9a. Confidence (`_confidence.node_confidence`)
+
+After the final solve, each fiber is resampled every `spacing` (the node
+spacing, one smallest radius) and read on a ring of 8 directions normal to
+its tangent. With `r` the fiber's radius and `m` the thickness margin:
+
+| Component | Read at | Score |
+| --- | --- | --- |
+| image | the axis and the ring at 0.5 r | mean of clip((I − 0.5)/0.4, 0, 1) |
+| ownership | the same 9 points | 1 − fraction inside another fit's capsule |
+| surround | the ring at r + m + 1 | 1 − fraction that is foreground (I > 0.5) and not within r + m + 0.5 of another fit |
+| thickness | the axis | exp(−½((depth − m)/r − 1)² / 0.3²) |
+| stability | the axis | exp(−½(d / 0.5 r)²), d = distance to the fiber before the final solve |
+
+`depth` is the same local thickness the classifier uses (§7b). The product
+of the five is median-filtered over three samples, and each stored node
+takes the lowest sample within half a segment of it. Other fits are found
+with a KD-tree over segment midpoints and exact point-to-segment
+distances. The history gets a `confidence` entry with the mean, the number
+of fibers whose lowest node is below 0.5, and the mean of each component.
 
 ## 10. Scoring against ground truth
 

@@ -168,6 +168,38 @@ class CtToolTests(unittest.TestCase):
         kept, _, changed = resolve_side_by_side(crossing, [along(20.0), across], radii, min_length=12.0)
         self.assertEqual((changed, len(kept)), (0, 2))
 
+    def test_confidence_flags_a_fit_between_two_fibers(self):
+        from scipy.ndimage import distance_transform_edt, maximum_filter
+
+        from tangle.ct._confidence import node_confidence
+        from tangle.ct._geometry import paint
+
+        x = np.linspace(8.0, 48.0, 11)
+
+        def along(y):
+            return np.stack([x, np.full_like(x, y), np.full_like(x, 20.0)], axis=1)
+
+        occupied = np.zeros((40, 40, 56), dtype=np.int32)
+        for label, y in ((1, 16.0), (2, 24.0)):  # two touching fibers of radius 4
+            paint(occupied, along(y), 4.0, label)
+        image = (occupied > 0).astype(np.float32)
+        depth = maximum_filter(distance_transform_edt(image > 0.5), size=3).astype(np.float32)
+
+        def mean(lines, **options):
+            nodes, summary = node_confidence(image, depth, lines, np.full(len(lines), 4.0), spacing=4.0, **options)
+            self.assertEqual([len(c) for c in nodes], [len(line) for line in lines])
+            self.assertTrue(all(((c >= 0) & (c <= 1)).all() for c in nodes))
+            return summary["mean"]
+
+        right = mean([along(16.0), along(24.0)])
+        self.assertGreater(right, 0.7)
+        # One fit along the contact line of both: too thin a foreground, and
+        # fiber on both sides that no fit explains.
+        self.assertLess(mean([along(20.0)]), 0.3)
+        # Fits that just moved three voxels are less sure than settled ones.
+        moved = mean([along(16.0), along(24.0)], previous=[along(13.0), along(27.0)])
+        self.assertLess(moved, 0.5 * right)
+
     def test_geometry_report_finds_overlaps_and_kinks(self):
         straight = np.stack([np.linspace(0, 40, 9), np.zeros(9), np.zeros(9)], axis=1)
         beside = straight + np.array([0.0, 3.0, 0.0])  # radii 2: 1 voxel deep, half a radius
@@ -217,6 +249,21 @@ class CtFitTests(unittest.TestCase):
         self.assertEqual(assembly.fiber_count, self.fit.fiber_count)
         population = self.fit.suggested_population(count=5)
         self.assertEqual(population.count, 5)
+
+    def test_fit_reports_confidence_per_node(self):
+        confidence = self.fit.confidence
+        self.assertEqual([len(c) for c in confidence], [len(line) for line in self.fit.centerlines])
+        values = np.concatenate(confidence)
+        self.assertTrue(((values >= 0) & (values <= 1)).all())
+        # Three well separated, correctly fitted fibers: mostly sure.
+        self.assertGreater(float(values.mean()), 0.6)
+        volume = self.fit.confidence_volume()
+        fitted = self.fit.label_volume() > 0
+        self.assertTrue(np.isnan(volume[~fitted]).all())
+        self.assertFalse(np.isnan(volume[fitted]).any())
+        with tempfile.TemporaryDirectory() as tmp:
+            reloaded = ct.load_fit(self.fit.write(tmp)["config"])
+        np.testing.assert_allclose(np.concatenate(reloaded.confidence), values, atol=1e-3)
 
     def test_overlay_colors_each_fiber(self):
         labels = self.fit.label_volume()

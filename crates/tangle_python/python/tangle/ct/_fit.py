@@ -9,7 +9,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from . import _moves, _refine
+from . import _confidence, _moves, _refine
 from ._ends import end_cost, end_statistics, evidence_scale
 from ._geometry import polyline_length, rasterize, tangents
 from ._image import HessianField, Levels, normalize
@@ -110,6 +110,8 @@ class FitResult:
     # With several fiber types: the specs, and each fiber's index into them.
     specs: list[FiberSpec] | None = None
     types: np.ndarray | None = None
+    # How sure the fit is of each node, in [0, 1] (see ``_confidence``).
+    confidence: list[np.ndarray] | None = None
 
     def spec_of(self, index: int) -> FiberSpec:
         """The spec (fiber type) of fiber ``index``."""
@@ -136,6 +138,18 @@ class FitResult:
         """One-based fiber id for every voxel inside a fitted capsule (0 = void)."""
         labels, _, _ = rasterize(self.shape, self.centerlines, self.radii, signed=True)
         return labels
+
+    def confidence_volume(self) -> np.ndarray:
+        """The confidence of the nearest fitted node for every fitted voxel (NaN = void)."""
+        values = np.full(self.shape, np.nan, dtype=np.float32)
+        if not self.confidence or not self.centerlines:
+            return values
+        _, _, segments = rasterize(self.shape, self.centerlines, self.radii, signed=True)
+        per_segment = [0.5 * (c[:-1] + c[1:]) for c in self.confidence]
+        table = np.concatenate(per_segment).astype(np.float32)
+        owned = segments >= 0
+        values[owned] = table[segments[owned]]
+        return values
 
     # -- Tangle outputs -----------------------------------------------------
     def materials(self) -> list[Any]:
@@ -192,7 +206,7 @@ class FitResult:
             )
         run = recipe.run(settings)
         relaxed = [np.asarray(line) / self.voxel_size for line in run.centerlines()]
-        return replace(self, centerlines=relaxed, history=self.history + [{"stage": "tangle relax", "max_penetration_m": run.max_penetration}]), run
+        return replace(self, centerlines=relaxed, confidence=None, history=self.history + [{"stage": "tangle relax", "max_penetration_m": run.max_penetration}]), run
 
     # -- statistics for a generator config ------------------------------------
     def population_summary(self) -> dict[str, Any]:
@@ -273,6 +287,7 @@ class FitResult:
             support=self.support[keep],
             specs=None,
             types=None,
+            confidence=[self.confidence[i] for i in keep] if self.confidence is not None else None,
         )
 
     def suggested_population(self, count: int | None = None, seed: int = 1) -> Any:
@@ -338,6 +353,11 @@ class FitResult:
                     "support": float(s),
                     "type": int(self.types[i]) if self.types is not None else 0,
                     "centerline": line.tolist(),
+                    **(
+                        {"confidence": np.round(self.confidence[i], 3).tolist()}
+                        if self.confidence is not None
+                        else {}
+                    ),
                 }
                 for i, (line, d, s) in enumerate(zip(self.centerlines_m(), self.diameters_m(), self.support))
             ],
@@ -414,6 +434,7 @@ def load_fit(path: str | Path) -> FitResult:
         support=np.array([f["support"] for f in fibers]),
         levels=Levels(**data["levels"]),
         history=data.get("history", []),
+        confidence=[np.asarray(f["confidence"]) for f in fibers] if fibers and "confidence" in fibers[0] else None,
     )
 
 
@@ -514,12 +535,16 @@ def fit_fibers(
             radii = np.concatenate([radii, born_radii])
             types = np.concatenate([types, born_types])
             log(f"births {round_index + 1}", lines, born=len(born), types=fitter.counts(types))
+    confidence = None
     if lines:
         # The last round's splits and joins are not yet admissible fibers. The
         # fit is returned exactly as the solver leaves it, with the radii and
         # types (so bend limits) it was solved with.
+        before = lines
         lines = fitter.solve(lines, radii, types)
         log("final solve", lines, types=fitter.counts(types))
+        confidence, summary = fitter.confidence(lines, radii, previous=before)
+        log("confidence", lines, **summary)
 
     return FitResult(
         shape=tuple(int(n) for n in volume.shape),
@@ -532,6 +557,7 @@ def fit_fibers(
         history=history,
         specs=None if len(specs) == 1 else specs,
         types=None if len(specs) == 1 else np.asarray(types, dtype=int),
+        confidence=confidence,
     )
 
 
@@ -706,6 +732,19 @@ class _Fitter:
             iterations=s.solver_iterations, settle=s.solver_settle_iterations, backend=s.backend,
             reach=np.asarray(radii, dtype=np.float64) + self.margin, log=self.log,
         )
+
+    def confidence(
+        self, lines: list[np.ndarray], radii: np.ndarray, *, previous: list[np.ndarray] | None = None
+    ) -> tuple[list[np.ndarray], dict[str, Any]]:
+        """Per-node confidence, and a summary for the history."""
+        if previous is not None and len(previous) != len(lines):
+            previous = None
+        per_node, summary = _confidence.node_confidence(
+            self.image, self.depth, lines, radii, spacing=self.spacing, margin=self.margin, previous=previous
+        )
+        summary = {key: value for key, value in summary.items() if key not in ("fiber_mean", "fiber_min", "fibers")}
+        summary["mean"] = round(float(summary.get("mean", 0.0)), 3)
+        return per_node, summary
 
     def topology(
         self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray

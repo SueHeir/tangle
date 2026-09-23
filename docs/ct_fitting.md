@@ -204,6 +204,25 @@ The unit tests use a small three-fiber case.
 fibers are from valid Tangle fibers: the curvature ratio against the bend
 limit, the deepest overlap between two fibers and the shortest segment.
 
+## How sure the fit is
+
+Every fitted node gets a confidence in [0, 1], computed without any ground
+truth, in `FitResult.confidence` (one array per fiber) and in `fit.json`.
+`FitResult.confidence_volume()` spreads it over the fitted voxels. A node
+is trusted when, where it sits:
+
+- the scan is fiber across the core of its capsule (**image**);
+- just outside its capsule the scan is void, or belongs to another fit
+  (**surround**: unexplained fiber there means a fiber is missing, or this
+  fit is off-center);
+- its core is not also inside another fit (**ownership**);
+- the foreground's thickness there matches its radius (**thickness**: a fit
+  along the contact of two touching fibers reads the wrong thickness);
+- it barely moved in the final solve (**stability**).
+
+The confidence is the product of the five. The plan is to use it to keep
+confident fibers fixed and re-solve only the unsure regions.
+
 ## Examples
 
 [`ct_examples.py`](../crates/tangle_python/python/examples/ct_examples.py)
@@ -219,7 +238,8 @@ is only ever one result per example:
 | `mask.tif` | the fiber mask the fit starts from |
 | `true.tif` | the true fibers, one color per fiber, over the scan (RGB) |
 | `segment.tif` | the fitted fibers, one color per fiber, over the scan (RGB) |
-| `diff.tif` | where fit and truth disagree, over the dimmed scan (RGB): red = true fiber left empty (missed), blue = fit over void (extra), yellow = fiber voxel given to the wrong fiber |
+| `diff.tif` | where fit and truth disagree, over the dimmed scan (RGB): red = true fiber left empty (missed), blue = fit over void (extra), orange = fiber voxel given to the wrong fiber |
+| `confidence.tif` | the fit's own confidence in each fitted voxel (no ground truth used), over the dimmed scan (RGB): green = sure, yellow, red = unsure. `score.json` records how well it picks out the errors in `diff.tif` |
 | `fit.json` | the fit (`ct.load_fit`) |
 | `score.json` | score against the truth, geometry report, run time |
 
