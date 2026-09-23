@@ -118,9 +118,10 @@ mod tests {
 
     #[test]
     fn wasserstein_distance_of_a_shift_is_the_shift() {
-        let first = Distribution::from_values((0..1000).map(|i| (i as f64).sqrt()), 101).unwrap();
+        // Evenly spaced values, so a coarser quantile grid interpolates exactly.
+        let first = Distribution::from_values((0..1000).map(|i| i as f64 / 999.0), 101).unwrap();
         let shifted =
-            Distribution::from_values((0..1000).map(|i| (i as f64).sqrt() + 0.75), 51).unwrap();
+            Distribution::from_values((0..1000).map(|i| i as f64 / 999.0 + 0.75), 51).unwrap();
         assert!((first.wasserstein_distance(&shifted) - 0.75).abs() < 1e-9);
         assert!((shifted.wasserstein_distance(&first) - 0.75).abs() < 1e-9);
         assert!(first.wasserstein_distance(&first).abs() < 1e-12);

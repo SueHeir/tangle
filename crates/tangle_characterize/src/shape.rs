@@ -798,7 +798,10 @@ mod tests {
                     vec![[0.0; 3], direction]
                 })
                 .collect();
-            let metrics = analyze_shape(&assembly_with(0.01, &fibers), &with_spacing(0.5)).unwrap();
+            // Unit-length fibers at spacing 0.3 always give three chords; a
+            // spacing that divides the length exactly would let rounding
+            // drop the last chord of some fibers and not others.
+            let metrics = analyze_shape(&assembly_with(0.01, &fibers), &with_spacing(0.3)).unwrap();
             let fitted = metrics.schladitz_beta.unwrap();
             assert!(
                 relative_error(fitted, beta) < 0.06,
