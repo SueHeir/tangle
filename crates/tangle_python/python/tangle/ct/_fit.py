@@ -205,7 +205,8 @@ class FitResult:
             [
                 bool(np.any(line[[0, -1]] < margin[i]) or np.any(line[[0, -1]] > upper - margin[i]))
                 for i, line in enumerate(self.centerlines)
-            ]
+            ],
+            dtype=bool,
         )
         tensor = np.zeros((3, 3))
         tilt = []
