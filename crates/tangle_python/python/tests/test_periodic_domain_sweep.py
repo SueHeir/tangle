@@ -38,6 +38,25 @@ class PeriodicDomainSweepTests(unittest.TestCase):
             ) ** 0.5
             self.assertAlmostEqual(chord, config.fiber_length, places=6)
 
+    def test_only_cells_smaller_than_a_flat_fiber_ramp(self):
+        for side in sweep.DOMAIN_SIDES:
+            config = sweep.SweepConfig(side=side)
+            flat_fits = config.fiber_length * config.diameter <= side**2
+            with self.subTest(side=side):
+                self.assertEqual(config.ramp_slope == 0.0, flat_fits)
+        config = sweep.SweepConfig(side=1.0)
+        (centerline,) = sweep.straight_layer_fibers(
+            config, layer=0, count=1, rng=sweep.random.Random(2)
+        ).centerlines()
+        # Strands one wrap apart along the fiber clear each other in z.
+        wrap = round((config.side - config.diameter) / config.segment_length)
+        rise = centerline[wrap][2] - centerline[0][2]
+        self.assertGreater(rise, config.diameter)
+        self.assertGreater(
+            config.staging_thickness,
+            config.layer_count * config.ramp_slope * config.fiber_length,
+        )
+
     def test_cells_too_small_for_the_diameter_are_rejected(self):
         with self.assertRaises(ValueError):
             sweep.build(0.5)

@@ -15,8 +15,14 @@ Fibers use 25 segments (length 0.4) wherever the cell allows it. A segment
 plus one diameter must stay below half the cell side, or a segment could touch
 two periodic images of the same neighbor and the minimum-image contact (and a
 DIRT bond or contact) becomes ambiguous; the smallest cell therefore refines
-to 50 segments per fiber. Lengths are unitless; scale every length setting
-together to change units.
+to 50 segments per fiber.
+
+A flat fiber whose footprint (length times diameter) exceeds the cell area
+overlaps itself along its whole length and cannot relax apart. On such cells
+(only side 1 by default) each fiber is deposited as a gentle ramp that rises
+a little more than one diameter per wrap of the cell, so its strands start
+separated through the thickness. Lengths are unitless; scale every length
+setting together to change units.
 
 Each configuration writes ``side_XX/`` with the relaxed geometry (OVITO dump),
 multi-material spherocylinder and bond data for DIRT
@@ -54,6 +60,8 @@ LAYER_GAP = 0.5
 FORMATION_TOLERANCE = 0.02
 CONTACT_TOLERANCE = 0.01
 DEM_CONTACT_TOLERANCE = 0.002
+# Rise per wrap of a ramped fiber, in diameters.
+RAMP_MARGIN = 1.2
 DENSITY = 1_000.0
 
 
@@ -102,8 +110,25 @@ class SweepConfig:
         return fiber_volume / (self.volume_fraction * self.side**2)
 
     @property
+    def ramp_slope(self) -> float:
+        """Rise per unit fiber length, or 0 when a flat fiber fits the cell.
+
+        Strands of one straight fiber that overlap in plane are at least
+        ``side - diameter`` apart along it, so this slope lifts them past one
+        another by a margin over one diameter.
+        """
+        if self.fiber_length * self.diameter <= self.side**2:
+            return 0.0
+        return RAMP_MARGIN * self.diameter / (self.side - self.diameter)
+
+    @property
     def staging_thickness(self) -> float:
-        return (self.layer_count + 1) * STAGING_SPACING * self.diameter + self.target_thickness
+        ramps = self.layer_count * self.ramp_slope * self.fiber_length
+        return (
+            (self.layer_count + 1) * STAGING_SPACING * self.diameter
+            + self.target_thickness
+            + ramps
+        )
 
     @property
     def name(self) -> str:
@@ -133,10 +158,11 @@ def layer_assignment(config: SweepConfig, rng: random.Random) -> list[int]:
 def straight_layer_fibers(
     config: SweepConfig, layer: int, count: int, rng: random.Random
 ) -> tangle.FiberCollection:
-    """Straight in-plane fibers at random angle and position in one layer.
+    """Straight fibers at random in-plane angle and position in one layer.
 
     Fibers keep their full length even when it exceeds the cell; the
-    centerlines cross the periodic faces as many times as they need.
+    centerlines cross the periodic faces as many times as they need. They lie
+    flat unless the cell is too small for that (see ``ramp_slope``).
     """
     fiber = material(config)
     collection = tangle.FiberCollection(f"layer {layer}")
@@ -154,7 +180,9 @@ def straight_layer_fibers(
             [
                 center[0] + (start + index * step) * direction[0],
                 center[1] + (start + index * step) * direction[1],
-                z + (start + index * step) * tilt,
+                z
+                + (start + index * step) * tilt
+                + index * step * config.ramp_slope,
             ]
             for index in range(config.segments_per_fiber + 1)
         ]
