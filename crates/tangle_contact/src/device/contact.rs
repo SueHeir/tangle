@@ -243,8 +243,12 @@ pub fn find_segment_corrections(
     cell_upper: &[f32],
     cell_periodic: &[u32],
     control: &[u32],
+    neighbor_counts: &[u32],
+    neighbor_segments: &[u32],
+    neighbor_home_cells: &[u32],
     corrections: &mut [f32],
     segment_max_penetration: &mut [f32],
+    neighbor_capacity: u32,
     correction_fraction: f32,
     contact_aggregation: u32,
     cells_x: u32,
@@ -282,275 +286,260 @@ pub fn find_segment_corrections(
     let mut maximum_penetration = 0.0_f32;
     let mut correction_weight = 0.0_f32;
 
-    let midpoint_x = 0.5 * (p1x + q1x);
-    let midpoint_y = 0.5 * (p1y + q1y);
-    let midpoint_z = 0.5 * (p1z + q1z);
-    let width_x = (cell_upper[0] - cell_lower[0]) / cells_x as f32;
-    let width_y = (cell_upper[1] - cell_lower[1]) / cells_y as f32;
-    let width_z = (cell_upper[2] - cell_lower[2]) / cells_z as f32;
-    let raw_home_x = ((midpoint_x - cell_lower[0]) / width_x).floor() as i32;
-    let raw_home_y = ((midpoint_y - cell_lower[1]) / width_y).floor() as i32;
-    let raw_home_z = ((midpoint_z - cell_lower[2]) / width_z).floor() as i32;
-    let mut home_x = raw_home_x.clamp(0, cells_x as i32 - 1) as u32;
-    let mut home_y = raw_home_y.clamp(0, cells_y as i32 - 1) as u32;
-    let mut home_z = raw_home_z.clamp(0, cells_z as i32 - 1) as u32;
-    if cell_periodic[0] != 0 {
-        home_x = ((raw_home_x % cells_x as i32 + cells_x as i32) % cells_x as i32) as u32;
-    }
-    if cell_periodic[1] != 0 {
-        home_y = ((raw_home_y % cells_y as i32 + cells_y as i32) % cells_y as i32) as u32;
-    }
-    if cell_periodic[2] != 0 {
-        home_z = ((raw_home_z % cells_z as i32 + cells_z as i32) % cells_z as i32) as u32;
+    // Candidates come from the segment's neighbor list. A segment whose list
+    // overflowed its capacity instead scans the cells around the home cell
+    // recorded when the lists were built; both sets are valid until a rebuild
+    // is requested.
+    let length_x = cell_upper[0] - cell_lower[0];
+    let length_y = cell_upper[1] - cell_lower[1];
+    let length_z = cell_upper[2] - cell_lower[2];
+    let listed_count = neighbor_counts[segment_index];
+    let listed = listed_count <= neighbor_capacity;
+    let home_cell = neighbor_home_cells[segment_index];
+    let home_x = home_cell % cells_x;
+    let home_y = (home_cell / cells_x) % cells_y;
+    let home_z = home_cell / (cells_x * cells_y);
+    let mut ranges = 27_u32;
+    if listed {
+        ranges = 1;
     }
 
-    for neighbor in 0..27_u32 {
-        let offset_x = (neighbor % 3) as i32 - 1;
-        let offset_y = ((neighbor / 3) % 3) as i32 - 1;
-        let offset_z = (neighbor / 9) as i32 - 1;
-        let raw_neighbor_x = home_x as i32 + offset_x;
-        let raw_neighbor_y = home_y as i32 + offset_y;
-        let raw_neighbor_z = home_z as i32 + offset_z;
-        let valid_x =
-            cell_periodic[0] != 0 || (raw_neighbor_x >= 0 && raw_neighbor_x < cells_x as i32);
-        let valid_y =
-            cell_periodic[1] != 0 || (raw_neighbor_y >= 0 && raw_neighbor_y < cells_y as i32);
-        let valid_z =
-            cell_periodic[2] != 0 || (raw_neighbor_z >= 0 && raw_neighbor_z < cells_z as i32);
-        let unique_x = cell_periodic[0] == 0
-            || !((cells_x == 1 && offset_x != 0)
-                || (cells_x == 2
-                    && ((home_x == 0 && offset_x > 0) || (home_x == 1 && offset_x < 0))));
-        let unique_y = cell_periodic[1] == 0
-            || !((cells_y == 1 && offset_y != 0)
-                || (cells_y == 2
-                    && ((home_y == 0 && offset_y > 0) || (home_y == 1 && offset_y < 0))));
-        let unique_z = cell_periodic[2] == 0
-            || !((cells_z == 1 && offset_z != 0)
-                || (cells_z == 2
-                    && ((home_z == 0 && offset_z > 0) || (home_z == 1 && offset_z < 0))));
-        if valid_x && valid_y && valid_z && unique_x && unique_y && unique_z {
-            let neighbor_x =
-                ((raw_neighbor_x % cells_x as i32 + cells_x as i32) % cells_x as i32) as u32;
-            let neighbor_y =
-                ((raw_neighbor_y % cells_y as i32 + cells_y as i32) % cells_y as i32) as u32;
-            let neighbor_z =
-                ((raw_neighbor_z % cells_z as i32 + cells_z as i32) % cells_z as i32) as u32;
-            let mut shift_x = 0.0_f32;
-            let mut shift_y = 0.0_f32;
-            let mut shift_z = 0.0_f32;
-            if raw_neighbor_x < 0 {
-                shift_x = -(cell_upper[0] - cell_lower[0]);
-            } else if raw_neighbor_x >= cells_x as i32 {
-                shift_x = cell_upper[0] - cell_lower[0];
+    for neighbor in 0..ranges {
+        let mut count = 0_u32;
+        let mut start = 0_usize;
+        if listed {
+            count = listed_count;
+            start = segment_index * neighbor_capacity as usize;
+        } else {
+            let offset_x = (neighbor % 3) as i32 - 1;
+            let offset_y = ((neighbor / 3) % 3) as i32 - 1;
+            let offset_z = (neighbor / 9) as i32 - 1;
+            let raw_neighbor_x = home_x as i32 + offset_x;
+            let raw_neighbor_y = home_y as i32 + offset_y;
+            let raw_neighbor_z = home_z as i32 + offset_z;
+            let valid_x =
+                cell_periodic[0] != 0 || (raw_neighbor_x >= 0 && raw_neighbor_x < cells_x as i32);
+            let valid_y =
+                cell_periodic[1] != 0 || (raw_neighbor_y >= 0 && raw_neighbor_y < cells_y as i32);
+            let valid_z =
+                cell_periodic[2] != 0 || (raw_neighbor_z >= 0 && raw_neighbor_z < cells_z as i32);
+            let unique_x = cell_periodic[0] == 0
+                || !((cells_x == 1 && offset_x != 0)
+                    || (cells_x == 2
+                        && ((home_x == 0 && offset_x > 0) || (home_x == 1 && offset_x < 0))));
+            let unique_y = cell_periodic[1] == 0
+                || !((cells_y == 1 && offset_y != 0)
+                    || (cells_y == 2
+                        && ((home_y == 0 && offset_y > 0) || (home_y == 1 && offset_y < 0))));
+            let unique_z = cell_periodic[2] == 0
+                || !((cells_z == 1 && offset_z != 0)
+                    || (cells_z == 2
+                        && ((home_z == 0 && offset_z > 0) || (home_z == 1 && offset_z < 0))));
+            if valid_x && valid_y && valid_z && unique_x && unique_y && unique_z {
+                let neighbor_x =
+                    ((raw_neighbor_x % cells_x as i32 + cells_x as i32) % cells_x as i32) as u32;
+                let neighbor_y =
+                    ((raw_neighbor_y % cells_y as i32 + cells_y as i32) % cells_y as i32) as u32;
+                let neighbor_z =
+                    ((raw_neighbor_z % cells_z as i32 + cells_z as i32) % cells_z as i32) as u32;
+                let cell = ((neighbor_z * cells_y + neighbor_y) * cells_x + neighbor_x) as usize;
+                count = cell_counts[cell];
+                start = cell_offsets[cell] as usize;
             }
-            if raw_neighbor_y < 0 {
-                shift_y = -(cell_upper[1] - cell_lower[1]);
-            } else if raw_neighbor_y >= cells_y as i32 {
-                shift_y = cell_upper[1] - cell_lower[1];
+        }
+        for slot in 0..count {
+            let mut other = 0_usize;
+            if listed {
+                other = neighbor_segments[start + slot as usize] as usize;
+            } else {
+                other = cell_segments[start + slot as usize] as usize;
             }
-            if raw_neighbor_z < 0 {
-                shift_z = -(cell_upper[2] - cell_lower[2]);
-            } else if raw_neighbor_z >= cells_z as i32 {
-                shift_z = cell_upper[2] - cell_lower[2];
-            }
-            let cell = ((neighbor_z * cells_y + neighbor_y) * cells_x + neighbor_x) as usize;
-            let count = cell_counts[cell];
-            let start = cell_offsets[cell];
-            for slot in 0..count {
-                let other = cell_segments[(start + slot) as usize] as usize;
-                let third_vertex = segment_vertices[2 * other] as usize;
-                let fourth_vertex = segment_vertices[2 * other + 1] as usize;
-                let adjacent_same_fiber = segment_fibers[other] == owner
-                    && (first_vertex == third_vertex
-                        || first_vertex == fourth_vertex
-                        || second_vertex == third_vertex
-                        || second_vertex == fourth_vertex);
-                if other != segment_index && !adjacent_same_fiber {
-                    let mut p2x = positions[3 * third_vertex] + shift_x;
-                    let mut p2y = positions[3 * third_vertex + 1] + shift_y;
-                    let mut p2z = positions[3 * third_vertex + 2] + shift_z;
-                    let mut q2x = positions[3 * fourth_vertex] + shift_x;
-                    let mut q2y = positions[3 * fourth_vertex + 1] + shift_y;
-                    let mut q2z = positions[3 * fourth_vertex + 2] + shift_z;
-                    let length_x = cell_upper[0] - cell_lower[0];
-                    let length_y = cell_upper[1] - cell_lower[1];
-                    let length_z = cell_upper[2] - cell_lower[2];
-                    let image_dx = 0.5 * (p2x + q2x - p1x - q1x);
-                    let image_dy = 0.5 * (p2y + q2y - p1y - q1y);
-                    let image_dz = 0.5 * (p2z + q2z - p1z - q1z);
-                    if cell_periodic[0] != 0 {
-                        let image_shift = (image_dx / length_x).round() * length_x;
-                        p2x -= image_shift;
-                        q2x -= image_shift;
-                    }
-                    if cell_periodic[1] != 0 {
-                        let image_shift = (image_dy / length_y).round() * length_y;
-                        p2y -= image_shift;
-                        q2y -= image_shift;
-                    }
-                    if cell_periodic[2] != 0 {
-                        let image_shift = (image_dz / length_z).round() * length_z;
-                        p2z -= image_shift;
-                        q2z -= image_shift;
-                    }
-                    let d2x = q2x - p2x;
-                    let d2y = q2y - p2y;
-                    let d2z = q2z - p2z;
-                    // Every point of a segment lies within half its length of
-                    // its midpoint, so capsules whose midpoints are farther
-                    // apart than both half-lengths plus both radii cannot
-                    // touch. Rejecting them here skips the exact solve for the
-                    // vast majority of broad-phase candidates.
-                    let midpoint_dx = 0.5 * (p2x + q2x - p1x - q1x);
-                    let midpoint_dy = 0.5 * (p2y + q2y - p1y - q1y);
-                    let midpoint_dz = 0.5 * (p2z + q2z - p1z - q1z);
-                    let reach = (half_length
-                        + 0.5 * (d2x * d2x + d2y * d2y + d2z * d2z).sqrt()
-                        + radius
-                        + segment_radii[other])
-                        * (1.0 + 1.0e-4_f32);
-                    if midpoint_dx * midpoint_dx
-                        + midpoint_dy * midpoint_dy
-                        + midpoint_dz * midpoint_dz
-                        <= reach * reach
-                    {
-                        let rx = p1x - p2x;
-                        let ry = p1y - p2y;
-                        let rz = p1z - p2z;
-                        let a = d1x * d1x + d1y * d1y + d1z * d1z;
-                        let e = d2x * d2x + d2y * d2y + d2z * d2z;
-                        let f = d2x * rx + d2y * ry + d2z * rz;
-                        let mut s = 0.0_f32;
-                        let mut t = 0.0_f32;
+            let third_vertex = segment_vertices[2 * other] as usize;
+            let fourth_vertex = segment_vertices[2 * other + 1] as usize;
+            let adjacent_same_fiber = segment_fibers[other] == owner
+                && (first_vertex == third_vertex
+                    || first_vertex == fourth_vertex
+                    || second_vertex == third_vertex
+                    || second_vertex == fourth_vertex);
+            if other != segment_index && !adjacent_same_fiber {
+                let mut p2x = positions[3 * third_vertex];
+                let mut p2y = positions[3 * third_vertex + 1];
+                let mut p2z = positions[3 * third_vertex + 2];
+                let mut q2x = positions[3 * fourth_vertex];
+                let mut q2y = positions[3 * fourth_vertex + 1];
+                let mut q2z = positions[3 * fourth_vertex + 2];
+                let image_dx = 0.5 * (p2x + q2x - p1x - q1x);
+                let image_dy = 0.5 * (p2y + q2y - p1y - q1y);
+                let image_dz = 0.5 * (p2z + q2z - p1z - q1z);
+                if cell_periodic[0] != 0 {
+                    let image_shift = (image_dx / length_x).round() * length_x;
+                    p2x -= image_shift;
+                    q2x -= image_shift;
+                }
+                if cell_periodic[1] != 0 {
+                    let image_shift = (image_dy / length_y).round() * length_y;
+                    p2y -= image_shift;
+                    q2y -= image_shift;
+                }
+                if cell_periodic[2] != 0 {
+                    let image_shift = (image_dz / length_z).round() * length_z;
+                    p2z -= image_shift;
+                    q2z -= image_shift;
+                }
+                let d2x = q2x - p2x;
+                let d2y = q2y - p2y;
+                let d2z = q2z - p2z;
+                // Every point of a segment lies within half its length of
+                // its midpoint, so capsules whose midpoints are farther
+                // apart than both half-lengths plus both radii cannot
+                // touch. Rejecting them here skips the exact solve for the
+                // vast majority of broad-phase candidates.
+                let midpoint_dx = 0.5 * (p2x + q2x - p1x - q1x);
+                let midpoint_dy = 0.5 * (p2y + q2y - p1y - q1y);
+                let midpoint_dz = 0.5 * (p2z + q2z - p1z - q1z);
+                let reach = (half_length
+                    + 0.5 * (d2x * d2x + d2y * d2y + d2z * d2z).sqrt()
+                    + radius
+                    + segment_radii[other])
+                    * (1.0 + 1.0e-4_f32);
+                if midpoint_dx * midpoint_dx + midpoint_dy * midpoint_dy + midpoint_dz * midpoint_dz
+                    <= reach * reach
+                {
+                    let rx = p1x - p2x;
+                    let ry = p1y - p2y;
+                    let rz = p1z - p2z;
+                    let a = d1x * d1x + d1y * d1y + d1z * d1z;
+                    let e = d2x * d2x + d2y * d2y + d2z * d2z;
+                    let f = d2x * rx + d2y * ry + d2z * rz;
+                    let mut s = 0.0_f32;
+                    let mut t = 0.0_f32;
 
-                        if a <= length_epsilon && e > length_epsilon {
-                            t = (f / e).clamp(0.0, 1.0);
-                        } else if a > length_epsilon {
-                            let c = d1x * rx + d1y * ry + d1z * rz;
-                            if e <= length_epsilon {
+                    if a <= length_epsilon && e > length_epsilon {
+                        t = (f / e).clamp(0.0, 1.0);
+                    } else if a > length_epsilon {
+                        let c = d1x * rx + d1y * ry + d1z * rz;
+                        if e <= length_epsilon {
+                            s = (-c / a).clamp(0.0, 1.0);
+                        } else {
+                            let b = d1x * d2x + d1y * d2y + d1z * d2z;
+                            let denominator = a * e - b * b;
+                            if denominator.abs() > parallel_relative_epsilon * a * e {
+                                s = ((b * f - c * e) / denominator).clamp(0.0, 1.0);
+                            }
+                            let projected = (b * s + f) / e;
+                            if projected < 0.0 {
                                 s = (-c / a).clamp(0.0, 1.0);
+                            } else if projected > 1.0 {
+                                t = 1.0;
+                                s = ((b - c) / a).clamp(0.0, 1.0);
                             } else {
-                                let b = d1x * d2x + d1y * d2y + d1z * d2z;
-                                let denominator = a * e - b * b;
-                                if denominator.abs() > parallel_relative_epsilon * a * e {
-                                    s = ((b * f - c * e) / denominator).clamp(0.0, 1.0);
-                                }
-                                let projected = (b * s + f) / e;
-                                if projected < 0.0 {
-                                    s = (-c / a).clamp(0.0, 1.0);
-                                } else if projected > 1.0 {
-                                    t = 1.0;
-                                    s = ((b - c) / a).clamp(0.0, 1.0);
-                                } else {
-                                    t = projected;
-                                }
+                                t = projected;
                             }
                         }
+                    }
 
-                        let point1x = p1x + d1x * s;
-                        let point1y = p1y + d1y * s;
-                        let point1z = p1z + d1z * s;
-                        let point2x = p2x + d2x * t;
-                        let point2y = p2y + d2y * t;
-                        let point2z = p2z + d2z * t;
-                        let delta_x = point2x - point1x;
-                        let delta_y = point2y - point1y;
-                        let delta_z = point2z - point1z;
-                        let distance =
-                            (delta_x * delta_x + delta_y * delta_y + delta_z * delta_z).sqrt();
-                        let penetration = radius + segment_radii[other] - distance;
-                        if penetration > 0.0 {
-                            let deepest = penetration > maximum_penetration;
+                    let point1x = p1x + d1x * s;
+                    let point1y = p1y + d1y * s;
+                    let point1z = p1z + d1z * s;
+                    let point2x = p2x + d2x * t;
+                    let point2y = p2y + d2y * t;
+                    let point2z = p2z + d2z * t;
+                    let delta_x = point2x - point1x;
+                    let delta_y = point2y - point1y;
+                    let delta_z = point2z - point1z;
+                    let distance =
+                        (delta_x * delta_x + delta_y * delta_y + delta_z * delta_z).sqrt();
+                    let penetration = radius + segment_radii[other] - distance;
+                    if penetration > 0.0 {
+                        let deepest = penetration > maximum_penetration;
+                        if deepest {
+                            maximum_penetration = penetration;
+                        }
+
+                        let mut nx = 0.0_f32;
+                        let mut ny = 0.0_f32;
+                        let mut nz = 0.0_f32;
+                        if distance > 1.0e-7_f32 {
+                            let inverse_distance = 1.0 / distance;
+                            nx = delta_x * inverse_distance;
+                            ny = delta_y * inverse_distance;
+                            nz = delta_z * inverse_distance;
+                        } else {
+                            nx = d1y * d2z - d1z * d2y;
+                            ny = d1z * d2x - d1x * d2z;
+                            nz = d1x * d2y - d1y * d2x;
+                            let mut normal_length = (nx * nx + ny * ny + nz * nz).sqrt();
+                            if normal_length <= 1.0e-7_f32 {
+                                if d1x.abs() <= d1y.abs() && d1x.abs() <= d1z.abs() {
+                                    nx = 0.0;
+                                    ny = d1z;
+                                    nz = -d1y;
+                                } else if d1y.abs() <= d1z.abs() {
+                                    nx = -d1z;
+                                    ny = 0.0;
+                                    nz = d1x;
+                                } else {
+                                    nx = d1y;
+                                    ny = -d1x;
+                                    nz = 0.0;
+                                }
+                                normal_length = (nx * nx + ny * ny + nz * nz).sqrt();
+                            }
+                            if normal_length > 1.0e-7_f32 {
+                                nx /= normal_length;
+                                ny /= normal_length;
+                                nz /= normal_length;
+                            } else {
+                                nx = 1.0;
+                            }
+                            let dominant = if nx.abs() >= ny.abs() && nx.abs() >= nz.abs() {
+                                nx
+                            } else if ny.abs() >= nz.abs() {
+                                ny
+                            } else {
+                                nz
+                            };
+                            if dominant < 0.0 {
+                                nx = -nx;
+                                ny = -ny;
+                                nz = -nz;
+                            }
+                            if segment_index > other {
+                                nx = -nx;
+                                ny = -ny;
+                                nz = -nz;
+                            }
+                        }
+                        let weight_0 = 1.0 - s;
+                        let weight_1 = s;
+                        let other_weight_0 = 1.0 - t;
+                        let denominator = weight_0 * weight_0
+                            + weight_1 * weight_1
+                            + other_weight_0 * other_weight_0
+                            + t * t;
+                        let magnitude = -correction_fraction * penetration / denominator;
+                        let mut aggregate_weight = 1.0_f32;
+                        if contact_aggregation == 1 {
+                            aggregate_weight = penetration;
+                        }
+                        if contact_aggregation == 2 {
                             if deepest {
-                                maximum_penetration = penetration;
+                                correction_0x = nx * magnitude * weight_0;
+                                correction_0y = ny * magnitude * weight_0;
+                                correction_0z = nz * magnitude * weight_0;
+                                correction_1x = nx * magnitude * weight_1;
+                                correction_1y = ny * magnitude * weight_1;
+                                correction_1z = nz * magnitude * weight_1;
+                                correction_weight = 1.0;
                             }
-
-                            let mut nx = 0.0_f32;
-                            let mut ny = 0.0_f32;
-                            let mut nz = 0.0_f32;
-                            if distance > 1.0e-7_f32 {
-                                let inverse_distance = 1.0 / distance;
-                                nx = delta_x * inverse_distance;
-                                ny = delta_y * inverse_distance;
-                                nz = delta_z * inverse_distance;
-                            } else {
-                                nx = d1y * d2z - d1z * d2y;
-                                ny = d1z * d2x - d1x * d2z;
-                                nz = d1x * d2y - d1y * d2x;
-                                let mut normal_length = (nx * nx + ny * ny + nz * nz).sqrt();
-                                if normal_length <= 1.0e-7_f32 {
-                                    if d1x.abs() <= d1y.abs() && d1x.abs() <= d1z.abs() {
-                                        nx = 0.0;
-                                        ny = d1z;
-                                        nz = -d1y;
-                                    } else if d1y.abs() <= d1z.abs() {
-                                        nx = -d1z;
-                                        ny = 0.0;
-                                        nz = d1x;
-                                    } else {
-                                        nx = d1y;
-                                        ny = -d1x;
-                                        nz = 0.0;
-                                    }
-                                    normal_length = (nx * nx + ny * ny + nz * nz).sqrt();
-                                }
-                                if normal_length > 1.0e-7_f32 {
-                                    nx /= normal_length;
-                                    ny /= normal_length;
-                                    nz /= normal_length;
-                                } else {
-                                    nx = 1.0;
-                                }
-                                let dominant = if nx.abs() >= ny.abs() && nx.abs() >= nz.abs() {
-                                    nx
-                                } else if ny.abs() >= nz.abs() {
-                                    ny
-                                } else {
-                                    nz
-                                };
-                                if dominant < 0.0 {
-                                    nx = -nx;
-                                    ny = -ny;
-                                    nz = -nz;
-                                }
-                                if segment_index > other {
-                                    nx = -nx;
-                                    ny = -ny;
-                                    nz = -nz;
-                                }
-                            }
-                            let weight_0 = 1.0 - s;
-                            let weight_1 = s;
-                            let other_weight_0 = 1.0 - t;
-                            let denominator = weight_0 * weight_0
-                                + weight_1 * weight_1
-                                + other_weight_0 * other_weight_0
-                                + t * t;
-                            let magnitude = -correction_fraction * penetration / denominator;
-                            let mut aggregate_weight = 1.0_f32;
-                            if contact_aggregation == 1 {
-                                aggregate_weight = penetration;
-                            }
-                            if contact_aggregation == 2 {
-                                if deepest {
-                                    correction_0x = nx * magnitude * weight_0;
-                                    correction_0y = ny * magnitude * weight_0;
-                                    correction_0z = nz * magnitude * weight_0;
-                                    correction_1x = nx * magnitude * weight_1;
-                                    correction_1y = ny * magnitude * weight_1;
-                                    correction_1z = nz * magnitude * weight_1;
-                                    correction_weight = 1.0;
-                                }
-                            } else {
-                                correction_0x += nx * magnitude * weight_0 * aggregate_weight;
-                                correction_0y += ny * magnitude * weight_0 * aggregate_weight;
-                                correction_0z += nz * magnitude * weight_0 * aggregate_weight;
-                                correction_1x += nx * magnitude * weight_1 * aggregate_weight;
-                                correction_1y += ny * magnitude * weight_1 * aggregate_weight;
-                                correction_1z += nz * magnitude * weight_1 * aggregate_weight;
-                                correction_weight += aggregate_weight;
-                            }
+                        } else {
+                            correction_0x += nx * magnitude * weight_0 * aggregate_weight;
+                            correction_0y += ny * magnitude * weight_0 * aggregate_weight;
+                            correction_0z += nz * magnitude * weight_0 * aggregate_weight;
+                            correction_1x += nx * magnitude * weight_1 * aggregate_weight;
+                            correction_1y += ny * magnitude * weight_1 * aggregate_weight;
+                            correction_1z += nz * magnitude * weight_1 * aggregate_weight;
+                            correction_weight += aggregate_weight;
                         }
                     }
                 }

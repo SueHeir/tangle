@@ -16,13 +16,24 @@ use tangle_relax::{
 pub(crate) struct PyCellListSettings {
     #[pyo3(get, set)]
     pub cell_size_scale: f32,
+    #[pyo3(get, set)]
+    pub neighbor_skin_scale: f32,
+    #[pyo3(get, set)]
+    pub neighbor_capacity: u32,
 }
 
 impl Default for PyCellListSettings {
     fn default() -> Self {
-        let config = CellListConfig::default();
+        CellListConfig::default().into()
+    }
+}
+
+impl From<CellListConfig> for PyCellListSettings {
+    fn from(config: CellListConfig) -> Self {
         Self {
             cell_size_scale: config.cell_size_scale,
+            neighbor_skin_scale: config.neighbor_skin_scale,
+            neighbor_capacity: config.neighbor_capacity,
         }
     }
 }
@@ -30,17 +41,30 @@ impl Default for PyCellListSettings {
 #[pymethods]
 impl PyCellListSettings {
     #[new]
-    #[pyo3(signature = (cell_size_scale=None))]
-    fn new(cell_size_scale: Option<f32>) -> Self {
+    #[pyo3(signature = (cell_size_scale=None, neighbor_skin_scale=None, neighbor_capacity=None))]
+    fn new(
+        cell_size_scale: Option<f32>,
+        neighbor_skin_scale: Option<f32>,
+        neighbor_capacity: Option<u32>,
+    ) -> Self {
         let mut settings = Self::default();
         if let Some(value) = cell_size_scale {
             settings.cell_size_scale = value;
+        }
+        if let Some(value) = neighbor_skin_scale {
+            settings.neighbor_skin_scale = value;
+        }
+        if let Some(value) = neighbor_capacity {
+            settings.neighbor_capacity = value;
         }
         settings
     }
 
     fn __repr__(&self) -> String {
-        format!("CellListSettings(cell_size_scale={})", self.cell_size_scale)
+        format!(
+            "CellListSettings(cell_size_scale={}, neighbor_skin_scale={}, neighbor_capacity={})",
+            self.cell_size_scale, self.neighbor_skin_scale, self.neighbor_capacity
+        )
     }
 
     fn copy(&self) -> Self {
@@ -50,6 +74,8 @@ impl PyCellListSettings {
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         let output = PyDict::new(py);
         output.set_item("cell_size_scale", self.cell_size_scale)?;
+        output.set_item("neighbor_skin_scale", self.neighbor_skin_scale)?;
+        output.set_item("neighbor_capacity", self.neighbor_capacity)?;
         Ok(output.unbind())
     }
 }
@@ -61,8 +87,20 @@ impl PyCellListSettings {
                 "cell_size_scale must be finite and at least 1",
             ));
         }
+        if !self.neighbor_skin_scale.is_finite() || self.neighbor_skin_scale < 0.0 {
+            return Err(PyValueError::new_err(
+                "neighbor_skin_scale must be finite and non-negative",
+            ));
+        }
+        if self.neighbor_capacity == 0 {
+            return Err(PyValueError::new_err(
+                "neighbor_capacity must be at least 1",
+            ));
+        }
         Ok(CellListConfig {
             cell_size_scale: self.cell_size_scale,
+            neighbor_skin_scale: self.neighbor_skin_scale,
+            neighbor_capacity: self.neighbor_capacity,
         })
     }
 }
@@ -310,9 +348,7 @@ impl Default for PyRelaxationSettings {
             iterations_per_batch: config.iterations_per_batch,
             debug_snapshot_interval: config.debug_snapshot_interval,
             save_assembled_reference: config.save_assembled_reference,
-            cell_list: PyCellListSettings {
-                cell_size_scale: config.cell_list.cell_size_scale,
-            },
+            cell_list: config.cell_list.into(),
             adaptive_segmentation: config.adaptive_segmentation.map(|adaptive| {
                 PyAdaptiveSegmentationSettings {
                     contact_length_over_diameter: adaptive.contact_length_over_diameter,

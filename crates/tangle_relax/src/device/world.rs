@@ -1,4 +1,5 @@
 mod cell_list;
+mod neighbor_list;
 
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -24,6 +25,8 @@ use crate::{CompactionEnergyModel, CompactionKinematics, CompactionMetrics};
 use tangle_contact::device::{capture_segment_contacts, find_segment_corrections};
 
 const CELL_SCAN_BLOCK_SIZE: usize = 256;
+/// Largest neighbor-list buffer, below WGPU's default 128 MiB binding limit.
+const MAXIMUM_NEIGHBOR_LIST_BYTES: usize = 120 << 20;
 
 /// One unique inter-fiber capsule contact captured from the resident GPU world.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -142,6 +145,14 @@ pub struct DeviceFiberWorld<R: Runtime> {
     cell_scan_block_size: usize,
     cell_scan_block_sums: Vec<Handle>,
     cell_scan_block_offsets: Vec<Handle>,
+    // Pending-rebuild flag and completed-rebuild count.
+    neighbor_state: Handle,
+    neighbor_counts: Handle,
+    neighbor_segments: Handle,
+    neighbor_home_cells: Handle,
+    neighbor_reference_positions: Handle,
+    neighbor_skin: f32,
+    neighbor_capacity: u32,
     corrections: Handle,
     segment_max: Handle,
     curvature_ratio: Handle,
@@ -257,6 +268,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         assert!(packed.segment_count() > 0);
         assert!(packed.fiber_count() > 0);
         assert!(cell_list.cell_size_scale >= 1.0);
+        assert!(cell_list.neighbor_skin_scale.is_finite() && cell_list.neighbor_skin_scale >= 0.0);
+        assert!(cell_list.neighbor_capacity > 0);
         assert!(max_step > 0.0);
 
         let mut fiber_has_active_segment = vec![false; packed.fiber_count()];
@@ -295,9 +308,12 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             })
             .fold(0.0_f32, f32::max);
         let maximum_radius = packed.segment_radii.iter().copied().fold(0.0_f32, f32::max);
+        let neighbor_skin = cell_list.neighbor_skin_scale * maximum_radius;
+        // Neighbor lists are built from this grid, so a cell must also span
+        // the skin around the widest capsule pair.
         let cell_size = (maximum_rest_length.max(maximum_initial_length)
             + 2.0 * maximum_radius
-            + 2.0 * max_step)
+            + (2.0 * max_step).max(neighbor_skin))
             * cell_list.cell_size_scale;
         let cell_extent = [
             packed.cell_upper[0] - packed.cell_lower[0],
@@ -374,6 +390,23 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             }
             scan_length = blocks;
         }
+        // Keep the list buffer within a single binding on every backend; an
+        // overflowing segment only falls back to scanning its cells.
+        let neighbor_capacity = cell_list.neighbor_capacity.min(
+            (MAXIMUM_NEIGHBOR_LIST_BYTES / (core::mem::size_of::<u32>() * packed.segment_count()))
+                .max(1) as u32,
+        );
+        // Lists start stale so the first contact pass builds them.
+        let neighbor_state = client.create_from_slice(u32::as_bytes(&[1_u32, 0]));
+        let neighbor_counts =
+            client.create_from_slice(u32::as_bytes(&vec![0_u32; packed.segment_count()]));
+        let neighbor_segments = client.empty(
+            packed.segment_count() * neighbor_capacity as usize * core::mem::size_of::<u32>(),
+        );
+        let neighbor_home_cells =
+            client.create_from_slice(u32::as_bytes(&vec![0_u32; packed.segment_count()]));
+        let neighbor_reference_positions =
+            client.create_from_slice(f32::as_bytes(&packed.positions));
         let corrections =
             client.create_from_slice(f32::as_bytes(&vec![0.0_f32; 6 * packed.segment_count()]));
         let segment_max =
@@ -462,6 +495,13 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             cell_scan_block_size,
             cell_scan_block_sums,
             cell_scan_block_offsets,
+            neighbor_state,
+            neighbor_counts,
+            neighbor_segments,
+            neighbor_home_cells,
+            neighbor_reference_positions,
+            neighbor_skin,
+            neighbor_capacity,
             corrections,
             segment_max,
             curvature_ratio,
@@ -804,16 +844,13 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             );
         }
 
+        // Host-side operations between batches (layer targets, needling
+        // commands) may have moved vertices without passing through the
+        // per-iteration displacement check.
+        self.flag_neighbor_list_displacement();
         let starting_iteration = self.total_iterations;
         for step in 0..=iterations {
-            self.rebuild_cell_list(
-                self.cell_count,
-                self.cells_x,
-                self.cells_y,
-                self.cells_z,
-                self.control.clone(),
-                4,
-            );
+            self.rebuild_neighbor_lists_if_requested();
             unsafe {
                 find_segment_corrections::launch_unchecked::<R>(
                     &self.client,
@@ -848,6 +885,18 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
                     BufferArg::from_raw_parts(self.control.clone(), 4),
                     BufferArg::from_raw_parts(
+                        self.neighbor_counts.clone(),
+                        self.packed.segment_count(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.neighbor_segments.clone(),
+                        self.packed.segment_count() * self.neighbor_capacity as usize,
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.neighbor_home_cells.clone(),
+                        self.packed.segment_count(),
+                    ),
+                    BufferArg::from_raw_parts(
                         self.corrections.clone(),
                         6 * self.packed.segment_count(),
                     ),
@@ -855,6 +904,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                         self.segment_max.clone(),
                         self.packed.segment_count(),
                     ),
+                    self.neighbor_capacity,
                     config.correction_fraction,
                     config.contact_aggregation as u32,
                     self.cells_x,
@@ -969,6 +1019,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                                 (completed_iteration / adaptive.refinement_interval) as u32,
                             );
                             self.rebuild_active_indices();
+                            self.request_neighbor_list_rebuild_after_adaptation();
                         }
                     }
                 }
@@ -1238,6 +1289,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     }
                 }
             }
+            self.flag_neighbor_list_displacement();
         }
         let status = self.read_status(config);
         self.total_iterations = status.total_iterations;
@@ -1762,6 +1814,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             self.cells_x as usize * self.cells_y as usize * self.cells_z as usize
                 <= self.cell_count
         );
+        // The grid and every vertex moved with the cell.
+        self.request_neighbor_list_rebuild();
     }
 
     /// Reduces directional pressure and penalty-energy measures from the
@@ -1887,6 +1941,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             );
         }
         self.rebuild_active_indices();
+        // Newly active fibers are missing from the lists.
+        self.request_neighbor_list_rebuild();
         (self.active_segment_count, self.active_vertex_count)
     }
 
@@ -1944,6 +2000,9 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             capture_control.clone(),
             1,
         );
+        // The shared grid now uses the capture layout, which the overflow
+        // path of the next contact pass must not read.
+        self.request_neighbor_list_rebuild();
         unsafe {
             capture_segment_contacts::launch_unchecked::<R>(
                 &self.client,
@@ -2243,6 +2302,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 epoch,
             );
         }
+        self.request_neighbor_list_rebuild();
         split_count
     }
 

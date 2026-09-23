@@ -145,6 +145,15 @@ class SettingsTests(unittest.TestCase):
         settings.adaptive_segmentation = tangle.AdaptiveSegmentationSettings.profile("fast")
         self.assertEqual(settings.adaptive_segmentation.refinement_interval, 16)
 
+    def test_neighbor_list_settings_round_trip(self):
+        cell_list = tangle.CellListSettings(neighbor_skin_scale=0.5, neighbor_capacity=16)
+        self.assertEqual(cell_list.to_dict()["neighbor_capacity"], 16)
+        settings = tangle.RelaxationSettings()
+        self.assertEqual(settings.cell_list.neighbor_skin_scale, 2.0)
+        settings.cell_list = cell_list
+        self.assertEqual(settings.cell_list.neighbor_skin_scale, 0.5)
+        self.assertEqual(settings.cell_list.neighbor_capacity, 16)
+
     def test_cpu_backend_is_selectable(self):
         settings = tangle.RelaxationSettings()
         settings.backend = "cpu"
