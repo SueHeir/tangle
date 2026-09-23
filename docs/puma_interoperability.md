@@ -56,11 +56,54 @@ and can be compared byte-for-byte with the Python fixture's VTI/native JSON.
 | Surface area | Nominal lateral area derived from radius and length in the section report | Marching-cubes surface area |
 | Void intercept lengths/connectivity | No native counterpart yet | PuMA mean intercept length and pore labeling |
 | Transport/continuum mechanics | No native characterization solver | PuMA conductivity, diffusivity/tortuosity, permeability, radiation, elasticity |
+| Contacts and neighbors | `characterize_neighbors()`: contact events, crossing angles, in-axis/out-of-axis split, excess persistence, free lengths, neighbor counts, neighbor turnover | No counterpart; voxel connectivity is not contact |
 
 PuMA's property methods are described in its
 [analysis API](https://puma-nasa.readthedocs.io/en/latest/python_api/pumapy.material_properties.html).
-Native TANGLE currently reports persistent junction **counts**, not a complete
-contact graph, coordination distribution, or connectivity analysis.
+Persistent junctions are still reported only as counts; contacts are
+characterized separately, as below.
+
+## Contacts and neighbors
+
+`characterize_neighbors()` samples every fiber at a uniform arc-length spacing
+and, at each sample, finds the closest approach to every other fiber's
+centerline. The surface gap is that axis distance minus both radii (elliptical
+sections use the equal-area radius). Periodic axes use minimum-image
+distances and must be orthorhombic.
+
+- **Contact:** another fiber within `contact_gap`. A **contact event** is one
+  maximal run of samples along a fiber over which the same other fiber stays a
+  contact. Each contact is counted once from each participating fiber.
+- **Neighbor:** another fiber within `neighbor_gap` (default: twice the largest
+  radius).
+- **In-axis / out-of-axis:** whether the acute angle between the two tangents
+  is below `in_axis_angle_degrees` (default 20°).
+- **Random baseline:** contacts per unit length expected if the same fibers,
+  with the same length density and orientation distribution, were placed
+  independently with overlap allowed, `2 λ_L E[(r_i + r_j + gap) sin γ]` (the
+  Onsager excluded volume of two cylinders). It ignores fiber ends, which adds
+  a few percent for fibers much longer than their diameter, and it uses the
+  cell volume, so it is only meaningful when fibers fill the cell.
+  `contact_ratio_to_random` above one means more contact than random
+  placement, below one means less.
+- **Excess persistence:** an out-of-axis event's length divided by the length
+  a straight crossing at the same angle and closest approach would give,
+  `2 √((r_i + r_j + gap)² − d_min²) / sin γ`. Random crossings give about one;
+  fibers that wrap around each other give more. It is not defined for in-axis
+  events; use `median_in_axis_contact_length` and turnover instead.
+- **Neighbor turnover:** the mean Jaccard similarity between a fiber's
+  neighbor sets at `s` and `s + lag`. `neighbor_correlation_length` is the lag
+  at which it falls to `1/e`, or `None` if neighbors do not turn over within
+  the largest lag (for example, a straight parallel bundle).
+- **Contact-count dispersion:** variance over mean of contacts per fiber.
+  Random placement of equal-length fibers gives about one; clustering gives
+  more.
+
+When comparing with a CT scan, run the same call on the tracked centerlines
+(inserted with `Assembly.insert()`) using the same gaps and angle. CT cannot
+resolve gaps smaller than about one voxel, so a contact tolerance of that order
+is appropriate on both sides. Fiber tracking also truncates fibers at the scan
+boundary; compare per-length quantities rather than per-fiber counts.
 
 ### Match definitions before comparing
 
@@ -171,7 +214,7 @@ orientation, surface area, connectivity, and each transport property. The
 smallest fiber diameter controls required resolution. Do not assume nominal VF
 is the exact fine-grid limit, or that convergence must be monotonic.
 
-Full distributions, contact-state/graph summaries, analytic ray/capsule void
+Contact-graph connectivity (components, clustering), analytic ray/capsule void
 intercepts, exposed union surface estimation, elliptical voxelization, and an
 export acceptance certificate remain **future work**.
 

@@ -182,6 +182,10 @@ See [solver and architecture notes](docs/architecture.md) for details.
   tolerances before running a dynamic solver.
 - **Native analysis:** lengths, nominal volume fractions, per-material and
   per-fiber summaries, curvature, and length-/volume-weighted orientation.
+- **Contacts and neighbors:** contact counts against a random-placement
+  baseline, in-axis vs crossing contacts, contact persistence, and neighbor
+  turnover along each fiber. Works on generated assemblies and on CT-tracked
+  centerlines added with `Assembly.insert()`.
 - **PuMA:** circular-capsule VTI/JSON bundles for direct `pumapy` analysis.
   Occupied voxel volume and nominal fiber volume are different quantities;
   comparisons need matched definitions and resolution checks.

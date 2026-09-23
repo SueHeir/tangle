@@ -12,6 +12,13 @@ use std::path::Path;
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 use tangle_app::prelude::*;
+mod neighbors;
+
+pub use neighbors::{
+    analyze_neighbors, ContactEvent, FiberNeighborMetrics, NeighborAnalysisConfig,
+    NeighborAnalysisError, NeighborMetrics, NEIGHBOR_SCHEMA_VERSION,
+};
+
 use tangle_core::{
     maximum_polyline_curvature, FiberAssembly, FiberId, MaterialId, Section, SectionId, Vec3,
 };
