@@ -215,6 +215,14 @@ voxels). Current results on that scan:
 The unit tests use a small three-fiber case. It is recovered exactly: 0.2 voxel
 centerline error, and diameter within 1%.
 
+`ct.geometry_report(centerlines, radii, min_bend_radius)` measures how far
+fibers are from valid Tangle fibers: the curvature ratio against the bend
+limit, the deepest overlap between two fibers and the shortest segment.
+[`ct_gpu_geometry_check.py`](../crates/tangle_python/python/examples/ct_gpu_geometry_check.py)
+uses it to check that Tangle's solver, run with the scan as an extra force,
+repairs fiber geometry: on the CPU fit with the image off, on true fibers
+damaged with sharp kinks, and on the CPU fit with the image on.
+
 ## Real data: PuMA FiberForm
 
 [`ct_fit_puma_fiberform.py`](../crates/tangle_python/python/examples/ct_fit_puma_fiberform.py)

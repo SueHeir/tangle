@@ -180,6 +180,20 @@ class CtFitTests(unittest.TestCase):
         _, _, removed = remove_off_profile(solid, [axis], radii[:1], profile, VOXEL)
         self.assertEqual(removed, 1)
 
+    def test_geometry_report_finds_overlaps_and_kinks(self):
+        straight = np.stack([np.linspace(0, 40, 9), np.zeros(9), np.zeros(9)], axis=1)
+        beside = straight + np.array([0.0, 3.0, 0.0])  # radii 2: 1 voxel deep, half a radius
+        report = ct.geometry_report([straight, beside], np.array([2.0, 2.0]), min_bend_radius=20.0)
+        self.assertAlmostEqual(report["max_penetration_radii"], 0.5, places=6)
+        self.assertEqual(report["overlapping_pairs"], 1)
+        self.assertEqual(report["fibers_over_bend_limit"], 0)
+        bent = straight.copy()
+        bent[4, 1] = 4.0  # a sharp kink in the middle
+        report = ct.geometry_report([bent, straight + np.array([0.0, 20.0, 0.0])], np.array([2.0, 2.0]), 20.0)
+        self.assertEqual(report["fibers_over_bend_limit"], 1)
+        self.assertEqual(report["overlapping_pairs"], 0)
+        self.assertAlmostEqual(report["min_segment_diameters"], 1.25, places=6)
+
     def test_thin_fibers_are_rejected(self):
         with self.assertRaises(ValueError):
             ct.fit_fibers(self.scan.volume, VOXEL, ct.FiberSpec(diameter=1 * um))

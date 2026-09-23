@@ -162,3 +162,64 @@ def score(fit, truth, *, coverage_threshold: float = 0.8, min_length: float | No
         "per_type": per_type,
         "per_true_fiber": per_truth,
     }
+
+
+def geometry_report(
+    centerlines: list[np.ndarray],
+    radii: np.ndarray,
+    min_bend_radius: float,
+    *,
+    penetration_tolerance: float = 0.05,
+) -> dict[str, Any]:
+    """How far fibers are from being valid Tangle fibers (voxel units).
+
+    * ``curvature_ratio_max`` / ``_p95``: largest discrete curvature per fiber
+      times ``min_bend_radius`` (1 is the bend limit);
+      ``fibers_over_bend_limit`` counts fibers above 1.01.
+    * ``max_penetration_radii``: deepest overlap between two different fibers'
+      capsules, in radii; ``overlapping_pairs`` counts fiber pairs that
+      overlap by more than ``penetration_tolerance`` radii.
+    * ``min_segment_diameters``: shortest segment in diameters, and
+      ``segment_length_cv`` the spread of segment lengths.
+    """
+    from scipy.spatial import cKDTree
+
+    from ._refine import curvature_ratio
+
+    radii = np.asarray(radii, dtype=np.float64)
+    lines = [np.asarray(line, dtype=np.float64) for line in centerlines if len(line) >= 2]
+    keep = [i for i, line in enumerate(centerlines) if len(line) >= 2]
+    radii = radii[keep]
+    report: dict[str, Any] = {"fibers": len(lines)}
+    if not lines:
+        return report
+    ratios = curvature_ratio(lines, min_bend_radius)
+    report["curvature_ratio_max"] = float(ratios.max())
+    report["curvature_ratio_p95"] = float(np.percentile(ratios, 95))
+    report["fibers_over_bend_limit"] = int((ratios > 1.01).sum())
+
+    spacing = 0.25 * float(radii.min())
+    dense = [resample(line, spacing) for line in lines]
+    points = np.concatenate(dense)
+    owner = np.concatenate([np.full(len(d), i) for i, d in enumerate(dense)])
+    pairs = cKDTree(points).query_pairs(2.0 * float(radii.max()), output_type="ndarray")
+    worst, overlapping = 0.0, 0
+    if len(pairs):
+        pairs = pairs[owner[pairs[:, 0]] != owner[pairs[:, 1]]]
+    if len(pairs):
+        a, b = owner[pairs[:, 0]], owner[pairs[:, 1]]
+        distance = np.linalg.norm(points[pairs[:, 0]] - points[pairs[:, 1]], axis=1)
+        scale = 0.5 * (radii[a] + radii[b])
+        depth = (radii[a] + radii[b] - distance) / scale
+        worst = float(max(depth.max(), 0.0))
+        deep = depth > penetration_tolerance
+        overlapping = len({(min(i, j), max(i, j)) for i, j in zip(a[deep], b[deep])})
+    report["max_penetration_radii"] = worst
+    report["overlapping_pairs"] = overlapping
+
+    segments = np.concatenate([np.linalg.norm(np.diff(line, axis=0), axis=1) for line in lines])
+    diameters = np.concatenate([np.full(len(line) - 1, 2.0 * r) for line, r in zip(lines, radii)])
+    report["min_segment_diameters"] = float((segments / diameters).min())
+    report["segment_length_cv"] = float(segments.std() / max(segments.mean(), 1e-12))
+    report["total_length"] = float(segments.sum())
+    return report

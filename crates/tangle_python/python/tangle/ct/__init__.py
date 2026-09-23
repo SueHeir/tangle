@@ -17,7 +17,7 @@ and PNG outputs). Install them with ``pip install numpy scipy tifffile
 matplotlib``.
 """
 
-from ._evaluate import score
+from ._evaluate import geometry_report, score
 from ._fit import FiberSpec, FitResult, FitSettings, fit_fibers, load_fit
 from ._image import Levels
 from ._profile import CrossSection
@@ -33,6 +33,7 @@ __all__ = [
     "SyntheticScan",
     "fiber_palette",
     "fit_fibers",
+    "geometry_report",
     "load_fit",
     "overlay_slice",
     "overlay_volume",
