@@ -702,7 +702,8 @@ class _Fitter:
         return _device.relax(
             self.image, lines, radii, self.bend[np.asarray(types, dtype=int)], voxel_size=self.h,
             spacing=self.spacing, rate=s.solver_image_rate, reach_radii=s.solver_reach_radii,
-            iterations=s.solver_iterations, settle=s.solver_settle_iterations, backend=s.backend, log=self.log,
+            iterations=s.solver_iterations, settle=s.solver_settle_iterations, backend=s.backend,
+            reach=np.asarray(radii, dtype=np.float64) + self.margin, log=self.log,
         )
 
     def topology(

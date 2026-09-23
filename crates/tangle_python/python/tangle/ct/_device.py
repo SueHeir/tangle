@@ -80,6 +80,7 @@ def relax(
     iterations: int,
     settle: int,
     backend: str | None,
+    reach: np.ndarray | None = None,
     log=None,
 ) -> list[np.ndarray]:
     """One batch: ends, then the solver with the image force, then a settle.
@@ -87,6 +88,8 @@ def relax(
     ``lines``, ``radii`` and ``bends`` (each fiber's bend limit) are in
     voxels. On the device, fibers use segments of 1.25 diameters, because
     Tangle's contact treats non-adjacent segments of one fiber as colliding.
+    ``reach`` is how far past each fiber's last node the foreground ends
+    (its radius plus the mask margin; the radius by default), for the ends.
     The solver's centerlines come back as they are (voxels), so the caller
     gets exactly the admissible state the solver reached.
     """
@@ -113,7 +116,7 @@ def relax(
 
     lines = _refine.respace(lines, spacing)
     occupied, _, _ = rasterize(image.shape, lines, radii, signed=True)
-    lines = _refine.end_step(image, lines, radii, step=spacing, occupied=occupied)
+    lines = _refine.end_step(image, lines, radii, step=spacing, occupied=occupied, reach=reach)
     coarse = [resample(line, max(2.5 * float(r), spacing)) for line, r in zip(lines, radii)]
     payload = np.ascontiguousarray(image, dtype="<f4").tobytes()
     relaxer = _relaxer(image, payload, coarse, radii, bends, voxel_size=h, pad=pad, settings=settings)

@@ -141,13 +141,20 @@ The fibers move only in Tangle's own relaxation, the GPU by default
 
 1. **Ends** (`_refine.end_step`), on the host before the solve, so the
    solver also cleans up what end growth does. Each end takes up to 3
-   moves:
-   - probe the image at max(spacing, r/2) beyond the tip, along the tip's
-     tangent;
-   - if the probe reads above 0.55 and no other fiber owns that voxel, add a
-     node there;
-   - otherwise, if the intensity at the tip is below 0.45, remove the tip
-     node.
+   moves. A capsule reaches r past its last node, so the foreground ends
+   about r + δ (δ the mask margin, 7b) beyond the true end of the
+   centerline:
+   - if the image along the tip's tangent at r + δ + spacing/2 past the tip
+     reads above 0.55 and no other fiber owns that voxel, add a node one
+     spacing out;
+   - otherwise, if the image at the tip, or at r + δ − spacing/2 past it,
+     reads below 0.45, remove the tip node (the second test is skipped
+     where it falls outside the scan, so fibers leaving the scan keep
+     their ends);
+   - this leaves the tip within half a spacing of the true end. (An earlier
+     rule, grow while the image one spacing ahead is fiber and trim only
+     where the tip itself is void, left traces that ran into the end cap
+     about r too long.)
 2. **Upload.** Fibers are resampled to segments of 1.25 of their own
    diameters (never shorter than one: Tangle's contact treats non-adjacent
    segments of one fiber as colliding) and placed in a closed cell padded by

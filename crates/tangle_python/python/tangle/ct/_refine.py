@@ -17,13 +17,30 @@ def end_step(
     step: float,
     occupied: np.ndarray,
     max_moves: int = 3,
+    reach: np.ndarray | None = None,
 ) -> list[np.ndarray]:
-    """Grow or trim fiber ends by up to ``max_moves`` steps of length ``step``."""
+    """Grow or trim fiber ends by up to ``max_moves`` steps of length ``step``.
+
+    A fiber's capsule reaches a radius past its last node, so the scan's
+    foreground ends about ``reach`` (the radius, plus any margin by which the
+    foreground over-reaches) beyond the true end of the centerline. An end
+    grows while the scan is still fiber half a step past that, and is trimmed
+    while it is void half a step short of it, which leaves the tip within
+    half a step of the true end.
+    """
     upper = np.array(image.shape[::-1], dtype=np.float64)
+    reach = np.asarray(radii if reach is None else reach, dtype=np.float64)
+
+    def inside(point: np.ndarray) -> bool:
+        return bool(np.all(point >= 0.5) and np.all(point <= upper - 0.5))
+
+    def value(point: np.ndarray) -> float:
+        return float(sample_image(image, point[None])[0])
+
     adjusted = []
     for index, line in enumerate(centerlines):
         line = line.copy()
-        radius = radii[index]
+        cap = float(reach[index])
         for end in (0, -1):
             for _ in range(max_moves):
                 if len(line) < 3:
@@ -32,15 +49,18 @@ def end_step(
                 tip = line[end]
                 direction = tip - inner
                 direction /= max(np.linalg.norm(direction), 1e-12)
-                probe = tip + max(step, 0.5 * radius) * direction
-                inside = np.all(probe >= 0.5) and np.all(probe <= upper - 0.5)
-                ahead = float(sample_image(image, probe[None])[0]) if inside else 0.0
-                owner = int(occupied[tuple(np.clip(np.floor(probe[::-1]).astype(int), 0, np.array(image.shape) - 1))]) if inside else 0
-                here = float(sample_image(image, tip[None])[0])
-                if inside and ahead > 0.55 and owner in (0, index + 1):
+                ahead = tip + (cap + 0.5 * step) * direction
+                short = tip + max(cap - 0.5 * step, 0.0) * direction
+                owner = (
+                    int(occupied[tuple(np.clip(np.floor(ahead[::-1]).astype(int), 0, np.array(image.shape) - 1))])
+                    if inside(ahead)
+                    else 0
+                )
+                if inside(ahead) and value(ahead) > 0.55 and owner in (0, index + 1):
                     extended = tip + step * direction
                     line = np.vstack([extended[None], line]) if end == 0 else np.vstack([line, extended[None]])
-                elif here < 0.45:
+                elif value(tip) < 0.45 or (inside(short) and value(short) < 0.45):
+                    # (A fiber that leaves the scan is not trimmed at the boundary.)
                     line = line[1:] if end == 0 else line[:-1]
                 else:
                     break
