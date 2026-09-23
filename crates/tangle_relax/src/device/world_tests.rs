@@ -1053,6 +1053,144 @@ fn curvature_limit_reaches_vertices_packed_after_dormant_fibers() {
     assert!(status.max_curvature_ratio <= 1.0 + 1.0e-5);
 }
 
+/// A pinned 81-vertex zig-zag whose every interior vertex violates the bend
+/// limit, relaxed by curvature projection alone.
+fn pinned_zigzag_world() -> DeviceFiberWorld<WgpuRuntime> {
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([2.0; 3], [false; 3]));
+    let material = assembly.materials.add("fiber");
+    let section = assembly.sections.add(Section::Circular { radius: 0.005 });
+    let intrinsic = (0..81)
+        .map(|index| [0.02 * index as f64, 0.0, 0.0])
+        .collect::<Vec<_>>();
+    let placed = (0..81)
+        .map(|index| {
+            let wiggle = if index % 2 == 0 { 0.0 } else { 0.01 };
+            [0.2 + 0.02 * index as f64, 1.0 + wiggle, 1.0]
+        })
+        .collect::<Vec<_>>();
+    assembly
+        .add_fiber(FiberId(1), material, section, &intrinsic, &placed)
+        .unwrap();
+    assembly
+        .set_fiber_bend_limit(
+            FiberId(1),
+            Some(FiberBendLimit {
+                minimum_bend_radius: 0.3,
+            }),
+        )
+        .unwrap();
+    let packed = PackedAssembly::from_assembly_with_options(&assembly, None, true).unwrap();
+    DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed,
+        CellListConfig::default(),
+        0.02,
+    )
+}
+
+#[test]
+fn curvature_cleanup_straightens_a_long_zigzag_in_few_iterations() {
+    let mut world = pinned_zigzag_world();
+    let config = RelaxationConfig {
+        penetration_tolerance: 1.0e-5,
+        stretch_stiffness: 0.0,
+        bend_stiffness: 0.0,
+        curvature_limit_stiffness: 1.0,
+        curvature_ratio_tolerance: 1.0e-5,
+        constraint_iterations: 1,
+        curvature_cleanup_sweeps: 1,
+        max_step: 0.02,
+        max_iterations: ZIGZAG_ITERATION_BUDGET,
+        iterations_per_batch: ZIGZAG_ITERATION_BUDGET,
+        ..RelaxationConfig::default()
+    };
+    let status = world.run_batch(&config, ZIGZAG_ITERATION_BUDGET);
+    // Gauss–Seidel sweeps let each projection build on its neighbors'
+    // corrections along the chain; averaged (Jacobi) projections of the same
+    // triplets need more than twice as many iterations here.
+    assert!(status.converged, "{status:?}");
+    assert!(status.max_curvature_ratio <= 1.0 + 1.0e-5, "{status:?}");
+    let positions = world.download_positions();
+    assert_eq!(&positions[0..3], &[0.2, 1.0, 1.0]);
+    assert_eq!(&positions[240..243], &[1.8, 1.0, 1.0]);
+}
+
+// Gauss–Seidel converges this fixture in 22 iterations on Metal; the averaged
+// Jacobi sweeps it replaced needed 50.
+const ZIGZAG_ITERATION_BUDGET: usize = 30;
+
+#[test]
+fn curvature_cleanup_skips_unrefined_midpoint_slots() {
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([4.0; 3], [false; 3]));
+    let material = assembly.materials.add("fiber");
+    let section = assembly.sections.add(Section::Circular { radius: 0.1 });
+    let points = [[1.0, 2.0, 2.0], [3.0, 2.0, 2.0]];
+    assembly
+        .add_fiber(FiberId(1), material, section, &points, &points)
+        .unwrap();
+    assembly
+        .set_fiber_bend_limit(
+            FiberId(1),
+            Some(FiberBendLimit {
+                minimum_bend_radius: 4.0,
+            }),
+        )
+        .unwrap();
+    let adaptive = AdaptiveSegmentationConfig {
+        contact_length_over_diameter: 100.0,
+        minimum_length_over_diameter: 1.0,
+        maximum_refinement_levels: 4,
+        refinement_interval: 1_000,
+        ..AdaptiveSegmentationConfig::default()
+    };
+    let mut packed =
+        PackedAssembly::from_assembly_with_options(&assembly, Some(adaptive), true).unwrap();
+    // Activate only the middle of the nine reserved vertex slots, so the
+    // active chain 0 - 4 - 8 is separated by inactive slots.
+    let root = 0_usize;
+    let left = packed.segment_children[2 * root] as usize;
+    let right = packed.segment_children[2 * root + 1] as usize;
+    let first = packed.segment_vertices[2 * root] as usize;
+    let second = packed.segment_vertices[2 * root + 1] as usize;
+    let midpoint = (first + second) / 2;
+    assert_eq!((first, midpoint, second), (0, 4, 8));
+    packed.segment_active[root] = 0;
+    packed.segment_active[left] = 1;
+    packed.segment_active[right] = 1;
+    packed.vertex_active[midpoint] = 1;
+    packed.vertex_segments[2 * first + 1] = left as u32;
+    packed.vertex_segments[2 * midpoint] = left as u32;
+    packed.vertex_segments[2 * midpoint + 1] = right as u32;
+    packed.vertex_segments[2 * second] = right as u32;
+    packed.positions[3 * midpoint + 1] += 0.5;
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed,
+        CellListConfig::default(),
+        0.5,
+    );
+    let config = RelaxationConfig {
+        adaptive_segmentation: Some(adaptive),
+        penetration_tolerance: 1.0e-5,
+        stretch_stiffness: 0.0,
+        bend_stiffness: 0.0,
+        curvature_limit_stiffness: 1.0,
+        curvature_ratio_tolerance: 1.0e-5,
+        constraint_iterations: 1,
+        max_step: 0.5,
+        max_iterations: 40,
+        iterations_per_batch: 40,
+        ..RelaxationConfig::default()
+    };
+    let status = world.run_batch(&config, 40);
+    assert!(status.converged, "{status:?}");
+    assert!(status.max_curvature_ratio <= 1.0 + 1.0e-5, "{status:?}");
+    let positions = world.download_positions();
+    assert!(positions[3 * midpoint + 1] < 2.5, "{positions:?}");
+    assert_eq!(&positions[0..3], &[1.0, 2.0, 2.0]);
+    assert_eq!(&positions[24..27], &[3.0, 2.0, 2.0]);
+}
+
 fn dense_crossed_mat() -> PackedAssembly {
     let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic(
         [2.4, 2.4, 1.0],
