@@ -19,6 +19,9 @@ class PeriodicDomainSweepTests(unittest.TestCase):
                 self.assertLess(
                     config.segment_length + config.diameter, 0.5 * config.side
                 )
+                self.assertGreaterEqual(
+                    config.segment_length, config.diameter * (1 - 1e-9)
+                )
                 self.assertIsNone(settings.adaptive_segmentation)
                 self.assertAlmostEqual(
                     config.fiber_count / side**2, sweep.FIBERS_PER_AREA
@@ -60,6 +63,8 @@ class PeriodicDomainSweepTests(unittest.TestCase):
     def test_cells_too_small_for_the_diameter_are_rejected(self):
         with self.assertRaises(ValueError):
             sweep.build(0.5)
+        with self.assertRaises(ValueError):
+            sweep.build(1.0, diameter=0.25)
 
 
 if __name__ == "__main__":

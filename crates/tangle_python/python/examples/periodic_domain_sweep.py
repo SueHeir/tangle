@@ -11,11 +11,13 @@ count scales with the cell area: 200 fibers (5,000 segments) at side 10 and
 times and meets its own image; that interaction is the domain effect under
 study, not an error.
 
-Fibers use 25 segments (length 0.4) wherever the cell allows it. A segment
-plus one diameter must stay below half the cell side, or a segment could touch
-two periodic images of the same neighbor and the minimum-image contact (and a
-DIRT bond or contact) becomes ambiguous; the smallest cell therefore refines
-to 50 segments per fiber.
+Fibers (diameter 0.2) use 25 segments (length 0.4) wherever the cell allows
+it. A segment plus one diameter must stay below half the cell side, or a
+segment could touch two periodic images of the same neighbor and the
+minimum-image contact (and a DIRT bond or contact) becomes ambiguous; the
+smallest cell therefore refines to 40 segments per fiber. Segments must also
+be at least one diameter long: only adjacent segments of a fiber are excluded
+from contact, so shorter segments make every next-nearest pair overlap.
 
 A flat fiber whose footprint (length times diameter) exceeds the cell area
 overlaps itself along its whole length and cannot relax apart. On such cells
@@ -43,7 +45,7 @@ import tangle
 
 OUTPUT = Path(__file__).parent / "output" / "periodic_domain_sweep"
 FIBER_LENGTH = 10.0
-DIAMETER = 0.25
+DIAMETER = 0.2
 MAX_SEGMENT_LENGTH = 0.4
 # A segment plus one diameter must fit within this fraction of the cell side.
 IMAGE_CLEARANCE = 0.45
@@ -89,11 +91,13 @@ class SweepConfig:
         allowed = min(
             self.max_segment_length, IMAGE_CLEARANCE * self.side - self.diameter
         )
-        if allowed <= 0.0:
+        segments = math.ceil(self.fiber_length / allowed - 1.0e-9)
+        if self.fiber_length / segments < self.diameter * (1.0 - 1.0e-9):
             raise ValueError(
-                f"diameter {self.diameter:g} is too large for cell side {self.side:g}"
+                f"cell side {self.side:g} needs segments shorter than the "
+                f"diameter {self.diameter:g}; use a thinner fiber or larger cell"
             )
-        return math.ceil(self.fiber_length / allowed - 1.0e-9)
+        return segments
 
     @property
     def segment_count(self) -> int:
