@@ -1794,7 +1794,8 @@ NOTEBOOKS: dict[str, list[dict]] = {
             crossing.add_fiber([[0.2 * mm, 0.5 * mm, 0.5 * mm], [0.8 * mm, 0.5 * mm, 0.5 * mm]], fiber)
             crossing.add_fiber([[0.5 * mm, 0.2 * mm, 0.5 * mm], [0.5 * mm, 0.8 * mm, 0.5 * mm]], fiber)
             cell = tangle.Cell([1 * mm, 1 * mm, 1 * mm])
-            settings = tangle.RelaxationSettings()
+            # Default tolerances suit millimeter-scale fibers, so state micrometer ones.
+            settings = tangle.RelaxationSettings(penetration_tolerance=0.1 * um, max_step=2 * um)
 
             # Save every 100 iterations so this 300-iteration run leaves a restart.
             source = tangle.CheckpointSettings(
