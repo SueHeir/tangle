@@ -20,13 +20,14 @@ crossing.add_fiber(
 
 recipe = tangle.Recipe(tangle.Cell([1.0, 1.0, 1.0]))
 inserted = recipe.insert(crossing, translation=[0.5, 0.5, 0.5])
-recipe.relax(maximum_iterations=2_000)
+recipe.relax_until_converged(max_iterations=2_000)
 
-settings = tangle.RelaxationSettings()
-settings.motion_model = "rigid_translation"
-settings.penetration_tolerance = 1.0e-6
-settings.max_iterations = 4_000
-settings.max_step = 0.01
+settings = tangle.RelaxationSettings(
+    motion_model="rigid_translation",
+    penetration_tolerance=1.0e-6,
+    max_iterations=4_000,
+    max_step=0.01,
+)
 
 result = recipe.run(settings)
 print(inserted)

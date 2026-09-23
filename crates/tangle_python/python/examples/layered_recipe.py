@@ -27,19 +27,21 @@ def planar_layer(name: str, layer: int, count: int, seed: int) -> tangle.FiberCo
     return collection
 
 
-recipe = tangle.Recipe(tangle.Cell([1.0e-3, 1.0e-3, 2.0e-3]), layer_axis=2)
+# The plies stack along z, the cell's default stack axis.
+recipe = tangle.Recipe(tangle.Cell([1.0e-3, 1.0e-3, 2.0e-3]))
 for layer in range(3):
     recipe.insert(
         planar_layer(f"ply_{layer}", layer, count=12, seed=100 + layer),
         translation=[0.0, 0.0, (layer + 1) * 0.4e-3],
     )
-    recipe.relax(maximum_iterations=2_000)
+    recipe.relax_until_converged(max_iterations=2_000)
 
-settings = tangle.RelaxationSettings()
-settings.max_iterations = 10_000
-settings.penetration_tolerance = 0.1e-6
-settings.max_step = 2.0e-6
-settings.adaptive_segmentation = tangle.AdaptiveSegmentationSettings.profile("fast")
+settings = tangle.RelaxationSettings(
+    max_iterations=10_000,
+    penetration_tolerance=0.1e-6,
+    max_step=2.0e-6,
+    adaptive_segmentation=tangle.AdaptiveSegmentationSettings.profile("fast"),
+)
 
 print("Recipe operations:")
 for operation in recipe.operations():

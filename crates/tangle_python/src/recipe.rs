@@ -386,7 +386,7 @@ impl PyRecipe {
                 material_name: material_name.clone(),
                 minimum_bend_radius: min_bend_radius,
             },
-            format!("set {material_name:?} minimum bend radius to {min_bend_radius}"),
+            format!("set {material_name:?} min bend radius to {min_bend_radius}"),
         );
         Ok(())
     }
@@ -545,11 +545,12 @@ impl PyRecipe {
     #[pyo3(signature = (settings, overrides=None))]
     fn compact(
         &mut self,
+        py: Python<'_>,
         settings: PyRef<'_, PyCompactionSettings>,
         overrides: Option<PyRef<'_, PyRelaxationOverrides>>,
     ) -> PyResult<()> {
         let config = settings.to_rust(self.stack_axis)?;
-        let description = format!("compact toward {}", settings.target_description());
+        let description = format!("compact toward {}", settings.target_description(py)?);
         let operation = if let Some(overrides) = overrides {
             FormationOperation::CompactWithOverrides {
                 config,

@@ -244,6 +244,8 @@ class SettingsTests(unittest.TestCase):
         self.assertIsInstance(population.orientation, tangle.AlignedOrientation)
         with self.assertRaises(TypeError):
             population.orientation = "planar"
+        with self.assertRaisesRegex(ValueError, "LayeredPosition"):
+            tangle.FiberPopulation(orientation=tangle.LayeredBiaxialOrientation())
 
 
 class RecipeTests(unittest.TestCase):

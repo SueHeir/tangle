@@ -16,7 +16,9 @@ are prepared on the host, packed into the device world, and activated at their
 scheduled insertion steps. Dormant fibers do not participate in contacts.
 GRASS schedules bounded batches and operation transitions; it can change layer
 targets, activate populations, and compact the cell between batches without
-re-uploading all geometry. `layer_axis=2` means layers stack along z (0=x, 1=y).
+re-uploading all geometry. The stack axis (the direction layers stack along)
+comes from the cell: its single non-periodic axis, else z. `Recipe(cell,
+stack_axis="x")` overrides it.
 
 ## Quasi-static relaxation, not a dynamics solver
 

@@ -11,14 +11,14 @@ debug cadence, and export representations can differ from the native binaries.
 
 | Rust workflow | Python script and notebook | Configurations represented |
 | --- | --- | --- |
-| `fibers_through_center_point_dem_bpm` | `center_point` | Eight rigid fibers through one point |
-| `multisegment_flexible_relaxation_dem_bpm` | `multisegment_shapes` | All four rest/placed-shape cases |
-| `adaptive_crossed_fibers` | `adaptive_crossed_fibers` | Orthogonal early-stop, shallow uniform, shallow adaptive |
-| `biased_fiber_box_dem_bpm` and `biased_fiber_stress` | `biased_fiber_box` | Isotropic, planar layered, aligned-x, and configurable high-density size |
-| `fake_tps_formation` | `fake_tps_formation` | Planar consolidation, through-thickness insertion, junction capture, compaction |
-| `fake_needled` | `fake_needled` | Six-layer random-fraction needling |
-| `fake_needled_2` | `fake_needled_2` | Physical-scale two-material needling and restart |
-| `fake_felted` | `fake_felted` | Control, needled, control/needled cleanup, and control/needled DEM-polish modes |
+| [`fibers_through_center_point`](../../../../../examples/fibers_through_center_point) | `fibers_through_center_point` | Eight rigid fibers through one point |
+| [`multisegment_flexible_relaxation`](../../../../../examples/multisegment_flexible_relaxation) | `multisegment_flexible_relaxation` | All four rest/placed-shape cases |
+| [`adaptive_crossed_fibers`](../../../../../examples/adaptive_crossed_fibers) | `adaptive_crossed_fibers` | Orthogonal early-stop, shallow uniform, shallow adaptive |
+| [`biased_fiber_box`](../../../../../examples/biased_fiber_box) and its `biased_fiber_stress` binary | `biased_fiber_box` | Isotropic, planar layered, aligned-x, and configurable high-density size |
+| [`tps_preform_formation`](../../../../../examples/tps_preform_formation) | `tps_preform_formation` | Planar consolidation, through-thickness insertion, junction capture, compaction |
+| [`needled_felt_toy`](../../../../../examples/needled_felt_toy) | `needled_felt_toy` | Unitless six-layer random-fraction needling |
+| [`needled_preform_two_fiber`](../../../../../examples/needled_preform_two_fiber) | `needled_preform_two_fiber` | Physical-scale two-material needling and restart |
+| [`felt_20ply_control_vs_needled`](../../../../../examples/felt_20ply_control_vs_needled) | `felt_20ply_control_vs_needled` | `--specimen {control,needled}` at `--stage {form,cleanup,polish}`; cleanup resumes from form, polish from cleanup |
 
 Launch the notebooks from this directory so their sibling script imports and
 case-scoped output paths remain obvious:

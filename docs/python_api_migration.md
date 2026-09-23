@@ -88,7 +88,7 @@ The generator functions take `material=Material(...)` in place of
 | `relax(maximum_iterations=)` | `relax_until_converged(max_iterations=)` |
 | `relax_until_targets_reached(tolerance, maximum_iterations)` | `settle_targets(tolerance=, max_iterations=)` |
 | `relax_with_policy(policy, overrides)` | `solve(policy, overrides=None)` |
-| `set_material_bend_radius(name, r)` | `set_min_bend_radius(material_or_name, r)`; unknown names raise `ValueError` |
+| `set_material_bend_radius(name, r)` | `set_min_bend_radius(material_or_name, r)`; an unknown name raises `ValueError` when the recipe already holds fibers, else `RecipeError` at run time |
 | `move_layers(spacing_scale)` | `scale_layer_spacing(factor)` |
 | `release_layer_targets()` | `release_layer_placement()` |
 | `needle_layer_circular(layer, center, diameter, depth, ...)` | `needle_layer(layer, footprint=CircularFootprint(center, diameter=), depth=)` |
@@ -113,6 +113,7 @@ The generator functions take `material=Material(...)` in place of
 | `multisegment_flexible_relaxation_dem_bpm`, native `multisegment_shapes` | `multisegment_flexible_relaxation` |
 
 The felt example's six `--mode` values became `--specimen {control,needled}
---stage {form,cleanup,polish}`, and its materials are now `fine_7um` and
+--stage {form,cleanup,polish}` (cleanup starts from the specimen's form
+checkpoint, polish from its cleanup checkpoint), and its materials are now `fine_7um` and
 `coarse_19um`. Checkpoints written before the rename carry the old material
 names, so re-run formation instead of resuming from them.

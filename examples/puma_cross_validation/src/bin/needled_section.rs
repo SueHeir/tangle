@@ -11,7 +11,8 @@ use tangle_export::{write_puma_bundle, PumaVoxelExportConfig};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let source = root.join("examples/fake_felted/output/needled_capsules.data");
+    let source =
+        root.join("examples/felt_20ply_control_vs_needled/output/needled_polish_capsules.data");
     let output = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
@@ -280,7 +281,7 @@ fn read_capsules(path: &Path) -> Result<(FiberAssembly, f64), Box<dyn Error>> {
     let mut cell = PeriodicCell::orthorhombic(lengths, [true, true, false]);
     cell.origin = low;
     let mut result = FiberAssembly::new(cell);
-    for name in ["7 um stiff fiber", "19 um bendy fiber"] {
+    for name in ["fine_7um", "coarse_19um"] {
         result.materials.add(name);
     }
     for radius in [3.5e-6, 9.5e-6] {

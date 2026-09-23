@@ -1254,7 +1254,7 @@ fn control_formation_recipe(
                         &mut state,
                         relaxation.iterations,
                         format!(
-                            "relax to convergence in {completed} iterations (penetration {:.3e}, bend ratio {:.6})",
+                            "relax to convergence in {completed} iterations (penetration {:.3e}, curvature ratio {:.6})",
                             relaxation.max_penetration, relaxation.max_curvature_ratio
                         ),
                     );
@@ -1268,7 +1268,7 @@ fn control_formation_recipe(
                 }
                 if completed >= *maximum_iterations {
                     let reason = format!(
-                        "failed to converge in {maximum_iterations} iterations: penetration {:.3e}, bend ratio {:.6}",
+                        "failed to converge in {maximum_iterations} iterations: penetration {:.3e}, curvature ratio {:.6}",
                         relaxation.max_penetration, relaxation.max_curvature_ratio
                     );
                     state.failure = Some(FormationFailure {
@@ -1319,7 +1319,7 @@ fn control_formation_recipe(
                         &mut state,
                         relaxation.iterations,
                         format!(
-                            "{} accepted in {completed} iterations (penetration {:.3e}, bend ratio {:.6})",
+                            "{} accepted in {completed} iterations (penetration {:.3e}, curvature ratio {:.6})",
                             policy.name,
                             relaxation.max_penetration,
                             relaxation.max_curvature_ratio
@@ -1770,7 +1770,7 @@ fn unmet_acceptance_limits(
     }
     if relaxation.max_curvature_ratio > acceptance.curvature_ratio.maximum {
         unmet.push(format!(
-            "bend ratio {:.6} > {:.6} ({:?})",
+            "curvature ratio {:.6} > {:.6} ({:?})",
             relaxation.max_curvature_ratio,
             acceptance.curvature_ratio.maximum,
             acceptance.curvature_ratio.enforcement

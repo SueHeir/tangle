@@ -8,19 +8,19 @@ They complement the workflow-oriented examples in `../examples/`.
 | --- | --- |
 | `00_installation_and_environment.ipynb` | Build the extension, register/select the kernel, and verify the import |
 | `01_high_level_overview.ipynb` | A readable end-to-end two-ply manufacturing recipe and conceptual map |
-| `02_cells_and_boundaries.ipynb` | Cell dimensions, origins, periodic axes, and hard walls |
+| `02_cells_and_boundaries.ipynb` | Cell dimensions, origins, periodic axes, hard walls, the stack axis, and `tangle.units` |
 | `03_materials_and_centerlines.ipynb` | Fiber diameters, bend limits, placed shapes, and rest shapes |
 | `04_fiber_collections.ipynb` | Detached collections, metadata, layers, selection, and composition |
-| `05_fiber_generation.ipynb` | All built-in generators and every population setting |
+| `05_fiber_generation.ipynb` | All built-in generators, every `FiberPopulation` field, and the orientation/position models |
 | `06_insertion_and_transforms.ipynb` | Recipe insertion, activation, translation, rotation, and selections |
 | `07_relaxation_settings.ipynb` | Every relaxation, contact, cell-list, and backend setting |
 | `08_adaptive_refinement.ipynb` | Every refinement/coarsening setting and the supplied profiles |
-| `09_solve_policies_and_overrides.ipynb` | Relaxation operations, acceptance policies, and per-stage overrides |
-| `10_layer_motion_and_needling.ipynb` | Layer placement, target release, needling, and cell fitting |
+| `09_solve_policies_and_overrides.ipynb` | Relaxation gates, `SolvePolicy` acceptance, override presets, and `RecipeError` |
+| `10_layer_motion_and_needling.ipynb` | Layer placement, held targets and `with` blocks, needle footprints, and cell fitting |
 | `11_compaction.ipynb` | Every target, path, kinematic choice, increment, energy, and guard setting |
 | `12_junction_capture.ipynb` | Every junction filter and explicit capture schedule |
 | `13_checkpoints_and_resume.ipynb` | Every checkpoint, continuation, and branching option |
-| `14_results_and_exports.ipynb` | Results, native analysis, OVITO, BPM, and PuMA export controls |
+| `14_results_and_exports.ipynb` | Results, `result.assembly`, native analysis, OVITO, BPM, and PuMA export controls |
 
 After installing the Python, Rust/Cargo, and native compiler prerequisites
 described step-by-step in notebook 00, install the development extension,
@@ -48,12 +48,13 @@ compiler remain required; notebook 00 contains the complete Miniforge path.
 The setup commands above are POSIX-shell commands. Tutorial 00 and the
 [Python guide](../../README.md) also provide Windows PowerShell instructions.
 After rebuilding the extension, restart the notebook kernel before using new
-API arguments. Geometry uses consistent length units (meters in these tutorials),
-not an automatic units-conversion system.
+API arguments. Lengths are in meters. The tutorials write them with the
+`tangle.units` multipliers (`um`, `mm`, `nm`), which are plain floats, not a
+unit-checking system.
 
 The notebooks are intentionally unexecuted in version control. Expensive solve
-or export cells are guarded by `RUN_SOLVER` or `RUN_RECIPE`; change the guard
-only when you want to run that calculation.
+or export cells are guarded by `RUN_OVERVIEW`, `RUN_SOLVER`, or `RUN_RECIPE`;
+change the guard only when you want to run that calculation.
 
 `generate.py` is the source used to rebuild the committed notebooks. After an
 API documentation change, run:

@@ -8,7 +8,8 @@ use tangle_generate::{
 use tangle_relax::{CompactionEnergyModel, CompactionKinematics};
 
 use crate::common::{
-    choice_name, parse_axis_mask, parse_choice, positive_finite, unit_vector, widen, with_kwargs,
+    choice_name, parse_axis_mask, parse_choice, positive_finite, repr_fields, unit_vector, widen,
+    with_kwargs,
 };
 
 const KINEMATICS: &[(&str, CompactionKinematics)] = &[
@@ -99,8 +100,8 @@ impl PyCellLengthsTarget {
         Ok(Self { lengths })
     }
 
-    fn __repr__(&self) -> String {
-        format!("CellLengthsTarget({:?})", self.lengths)
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        repr_fields(slf.as_any(), "CellLengthsTarget", &["lengths"], false)
     }
 }
 
@@ -121,8 +122,13 @@ impl PyDirectionalPressureTarget {
         Ok(Self { pressures })
     }
 
-    fn __repr__(&self) -> String {
-        format!("DirectionalPressureTarget({:?})", self.pressures)
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        repr_fields(
+            slf.as_any(),
+            "DirectionalPressureTarget",
+            &["pressures"],
+            false,
+        )
     }
 }
 
@@ -222,8 +228,8 @@ impl PyAxisWeightsPath {
         Ok(Self { weights })
     }
 
-    fn __repr__(&self) -> String {
-        format!("AxisWeightsPath({:?})", self.weights)
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        repr_fields(slf.as_any(), "AxisWeightsPath", &["weights"], false)
     }
 }
 
@@ -251,10 +257,12 @@ impl PyEqualPressurePath {
         })
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "EqualPressurePath({:?}, pressure_floor={})",
-            self.axes, self.pressure_floor
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        repr_fields(
+            slf.as_any(),
+            "EqualPressurePath",
+            &["axes", "pressure_floor"],
+            false,
         )
     }
 }
@@ -283,10 +291,12 @@ impl PyStressRatioPath {
         })
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "StressRatioPath({:?}, pressure_floor={})",
-            self.ratio, self.pressure_floor
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        repr_fields(
+            slf.as_any(),
+            "StressRatioPath",
+            &["ratio", "pressure_floor"],
+            false,
         )
     }
 }
@@ -308,8 +318,8 @@ impl PyMinimumWorkPath {
         Ok(Self { axes })
     }
 
-    fn __repr__(&self) -> String {
-        format!("MinimumWorkPath({:?})", self.axes)
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        repr_fields(slf.as_any(), "MinimumWorkPath", &["axes"], false)
     }
 }
 
@@ -531,12 +541,12 @@ impl PyCompactionSettings {
         Ok(settings)
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "CompactionSettings(target={:?}, path={:?}, kinematics={:?})",
-            self.target,
-            self.path,
-            self.kinematics()
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        repr_fields(
+            slf.as_any(),
+            "CompactionSettings",
+            &["target", "path", "kinematics"],
+            false,
         )
     }
 }
@@ -575,8 +585,8 @@ impl PyCompactionSettings {
     }
 
     /// Describes the target for `Recipe.operations()`.
-    pub(crate) fn target_description(&self) -> String {
-        format!("{:?}", self.target)
+    pub(crate) fn target_description(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(target_to_py(py, self.target)?.bind(py).repr()?.to_string())
     }
 
     pub(crate) fn to_rust(&self, stack_axis: usize) -> PyResult<CompactionConfig> {

@@ -29,8 +29,11 @@ def code(source: str) -> dict:
     }
 
 
-def table(rows: list[tuple[str, str, str]]) -> str:
-    lines = ["| Setting | Meaning | Choices / units |", "| --- | --- | --- |"]
+def table(
+    rows: list[tuple[str, str, str]],
+    header: tuple[str, str, str] = ("Setting", "Meaning", "Choices / units"),
+) -> str:
+    lines = ["| " + " | ".join(header) + " |", "| --- | --- | --- |"]
     lines.extend(f"| `{name}` | {meaning} | {choices} |" for name, meaning, choices in rows)
     return "\n".join(lines)
 
@@ -86,7 +89,7 @@ RELAXATION_FIELDS = [
     ("bend_stiffness", "Rest-shape bending projection strength.", "dimensionless"),
     ("curvature_limit_stiffness", "Admissible-curvature projection strength.", "dimensionless"),
     ("curvature_limit_safety_margin", "Keeps projected bends inside the hard limit.", "ratio"),
-    ("curvature_ratio_tolerance", "Excess ratio allowed above one: accepted bend utilization is at most 1 + this tolerance.", "dimensionless excess"),
+    ("curvature_ratio_tolerance", "Excess ratio allowed above one: the accepted curvature ratio is at most 1 + this tolerance.", "dimensionless excess"),
     ("constraint_iterations", "Constraint sweeps in each solver iteration.", "count"),
     ("curvature_cleanup_sweeps", "Extra hard-curvature projections per iteration.", "count"),
     ("max_step", "Maximum vertex displacement in one correction.", "length, m"),
@@ -94,15 +97,14 @@ RELAXATION_FIELDS = [
     ("iterations_per_batch", "Iterations in one scheduler/device batch.", "count"),
     ("debug_snapshot_interval", "Periodic OVITO cadence; `None` keeps only keyframes when run() receives a debug path.", "iterations or `None`"),
     ("save_assembled_reference", "Stores the converged geometry as an assembled reference.", "boolean"),
-    ("cell_list", "Broad-phase cell-list configuration.", "`CellListSettings`"),
-    ("cell_size_scale", "Convenience alias for `cell_list.cell_size_scale`.", "at least 1"),
-    ("adaptive_segmentation", "Optional adaptive refinement configuration.", "settings or `None`"),
+    ("cell_size_scale", "Broad-phase cell size relative to the smallest admissible cell.", "at least 1"),
+    ("adaptive_segmentation", "Optional adaptive refinement configuration.", "`AdaptiveSegmentationSettings` or `None`"),
 ]
 
 ADAPTIVE_FIELDS = [
     ("contact_length_over_diameter", "Refine contacted segments longer than this scale.", "L/D ratio"),
-    ("minimum_length_over_diameter", "Hard lower segment-length scale.", "L/D ratio"),
-    ("maximum_refinement_levels", "Depth of the preallocated dyadic split tree.", "1–30"),
+    ("min_length_over_diameter", "Hard lower segment-length scale.", "L/D ratio"),
+    ("max_refinement_levels", "Depth of the preallocated dyadic split tree.", "1–30"),
     ("refinement_interval", "Cadence for evaluating possible splits.", "iterations"),
     ("refinement_persistence", "Repeated contact observations required before splitting.", "passes"),
     ("coarsening_persistence", "Quiet observations required before merging siblings.", "passes"),
@@ -111,81 +113,111 @@ ADAPTIVE_FIELDS = [
 ]
 
 POPULATION_FIELDS = [
+    ("material", "Material assigned to every generated fiber (name, contact diameter, bend limit).", "`Material`"),
     ("count", "Number of fibers to generate.", "count"),
     ("segments_per_fiber", "Initial uniform centerline resolution.", "count"),
     ("seed", "Deterministic sampling seed.", "integer"),
-    ("length_minimum", "Shortest sampled fiber.", "m"),
-    ("length_maximum", "Longest sampled fiber.", "m"),
+    ("length", "Fiber length: one value, or a `(min, max)` uniform range.", "m or `(m, m)`"),
+    ("diameter", "Sampled contact diameter; `None` uses the material's diameter.", "m, `(m, m)`, or `None`"),
+    ("curvature_amplitude", "Generated waviness amplitude.", "m or `(m, m)`"),
     ("nominal_parent_length", "Optional physical parent length for periodic fragments.", "m or `None`"),
-    ("radius_minimum", "Smallest sampled radius.", "m"),
-    ("radius_maximum", "Largest sampled radius.", "m"),
-    ("curvature_amplitude_minimum", "Minimum generated waviness amplitude.", "m"),
-    ("curvature_amplitude_maximum", "Maximum generated waviness amplitude.", "m"),
-    ("orientation", "Orientation distribution.", "`isotropic_3d`, `planar`, `layered_biaxial`, `aligned`"),
-    ("orientation_axis", "Normal or preferred direction used by the orientation model.", "unit-like xyz vector"),
-    ("maximum_angle", "Angular support around an aligned direction.", "rad"),
-    ("maximum_tilt", "Out-of-plane support for planar distributions.", "rad"),
-    ("primary_fraction", "Layered-biaxial fraction near the primary direction.", "0–1"),
-    ("cross_fraction", "Layered-biaxial fraction near the transverse direction.", "0–1"),
-    ("maximum_in_plane_deviation", "Biaxial directional scatter.", "rad"),
-    ("layer_orientation_seed", "Independent seed for the layer basis.", "integer"),
-    ("position", "Center-position distribution.", "`uniform`, `layered`, `density_gradient`"),
-    ("position_axis", "Axis used for layers or density gradients.", "0, 1, or 2"),
-    ("layers", "Number of placement layers.", "count"),
-    ("jitter_fraction", "Random layer-position jitter relative to spacing.", "fraction"),
-    ("density_exponent", "Shape of a density-gradient distribution.", "positive exponent"),
-    ("density_toward_high", "Chooses the high-coordinate side of the gradient.", "boolean"),
-    ("minimum_bend_radius", "Optional admissible bend radius for generated fibers.", "m or `None`"),
+    ("orientation", "Orientation distribution object (see the next table).", "`IsotropicOrientation`, `PlanarOrientation`, `LayeredBiaxialOrientation`, `AlignedOrientation`"),
+    ("position", "Center-position distribution object (see below).", "`UniformPosition`, `LayeredPosition`, `DensityGradientPosition`"),
     ("max_attempts_per_fiber", "Rejection-sampling budget per fiber.", "count"),
-    ("material_name", "Material-table name assigned to the population.", "string"),
+]
+
+ORIENTATION_VARIANTS = [
+    ("IsotropicOrientation()", "Uniform directions on the sphere.", "no options"),
+    ("PlanarOrientation(normal=None, max_tilt=...)", "Directions near the plane with this normal; `normal=None` uses the cell's stack axis.", "`max_tilt` in rad"),
+    ("LayeredBiaxialOrientation(primary_fraction=, cross_fraction=, max_in_plane_deviation=, max_tilt=, seed=)", "A primary in-plane direction, its transverse direction, and a random remainder, per layer.", "fractions 0–1, angles in rad"),
+    ("AlignedOrientation(axis, max_angle=...)", "Directions within a cone around `axis`.", "axis letter/index or xyz vector; rad"),
+]
+
+POSITION_VARIANTS = [
+    ("UniformPosition()", "Centers uniform in the cell.", "no options"),
+    ("LayeredPosition(layer_count, axis=None, jitter_fraction=...)", "Centers on evenly spaced planes; each plane becomes a `formation_layer`.", "count; axis defaults to the stack axis; jitter relative to spacing"),
+    ("DensityGradientPosition(axis=None, exponent=..., toward_high=...)", "Center density rises along one axis.", "positive exponent; boolean"),
 ]
 
 COMPACTION_FIELDS = [
-    ("target_type", "Stopping observable.", "`volume_fraction`, `cell_volume`, `cell_lengths`, `mean_pressure`, `directional_pressure`, `penalty_energy`"),
-    ("target_value", "Scalar target for scalar target types.", "target-dependent"),
-    ("target_values", "Three-component target for vector target types.", "target-dependent xyz"),
-    ("path", "Rule for distributing cell motion among axes.", "`axis_weights`, `equal_pressure`, `stress_ratio`, `minimum_incremental_work`"),
-    ("axis_weights", "Prescribed relative shortening for the axis-weight path.", "nonnegative xyz"),
-    ("active_axes", "Axes available to feedback-controlled paths.", "three booleans"),
-    ("stress_ratio", "Desired directional pressure ratio.", "nonnegative xyz"),
-    ("pressure_floor", "Numerical floor in pressure-ratio calculations.", "pressure"),
+    ("target", "Stopping observable, as a target object (see the next table).", "`VolumeFractionTarget`, `CellVolumeTarget`, `CellLengthsTarget`, `MeanPressureTarget`, `DirectionalPressureTarget`, `PenaltyEnergyTarget`"),
+    ("path", "Rule for distributing cell motion among axes (see below).", "`AxisWeightsPath`, `EqualPressurePath`, `StressRatioPath`, `MinimumWorkPath`"),
     ("kinematics", "How geometry follows cell changes.", "`rigid_fiber_centers`, `moving_walls`, `affine_vertices`"),
     ("cell_anchor", "Stationary fractional point while each cell axis changes.", "xyz in [0,1]"),
     ("balance_opposing_faces", "Balances work between low and high faces.", "boolean"),
     ("face_pressure_floor", "Floor used by opposing-face balancing.", "pressure"),
     ("face_balance_strength", "Strength of opposing-face feedback.", "0–1"),
     ("initial_log_strain", "First attempted logarithmic strain increment.", "positive strain"),
-    ("minimum_log_strain", "Smallest retry increment.", "positive strain"),
-    ("maximum_log_strain", "Largest grown increment.", "positive strain"),
+    ("min_log_strain", "Smallest retry increment.", "positive strain"),
+    ("max_log_strain", "Largest grown increment.", "positive strain"),
     ("growth_factor", "Increment multiplier after easy accepted steps.", "greater than 1"),
     ("shrink_factor", "Increment multiplier after rejected steps.", "between 0 and 1"),
     ("relax_iterations", "Relaxation work allotted to each increment window.", "count"),
-    ("maximum_shortening_over_minimum_diameter", "Caps an increment by the thinnest fiber size.", "ratio"),
-    ("maximum_penetration", "Rejects a trial exceeding this overlap.", "m"),
-    ("maximum_bend_ratio", "Rejects a trial exceeding this curvature utilization.", "ratio"),
-    ("maximum_pressure", "Pressure guard.", "pressure"),
-    ("maximum_penalty_energy", "Formation-energy guard.", "energy"),
-    ("maximum_steps", "Maximum accepted/retried compaction steps.", "count"),
-    ("maximum_relax_windows", "Maximum windows spent settling one trial.", "count"),
+    ("max_shortening_over_min_diameter", "Caps an increment by the thinnest fiber size.", "ratio"),
+    ("max_penetration", "Rejects a trial exceeding this overlap.", "m"),
+    ("max_curvature_ratio", "Rejects a trial exceeding this curvature utilization.", "ratio"),
+    ("max_pressure", "Pressure guard.", "pressure"),
+    ("max_penalty_energy", "Formation-energy guard.", "energy"),
+    ("max_steps", "Maximum accepted/retried compaction steps.", "count"),
+    ("max_relax_windows", "Maximum windows spent settling one trial.", "count"),
     ("contact_energy_stiffness", "Contact contribution to the formation penalty.", "model stiffness"),
     ("stretch_energy_stiffness", "Stretch contribution to the formation penalty.", "model stiffness"),
     ("bending_energy_stiffness", "Bending contribution to the formation penalty.", "model stiffness"),
     ("target_tolerance", "Relative/absolute acceptance tolerance for the target.", "target-dependent"),
 ]
 
+COMPACTION_TARGETS = [
+    ("VolumeFractionTarget(value)", "Stop at a nominal fiber volume fraction.", "0–1"),
+    ("CellVolumeTarget(value)", "Stop at a cell volume.", "m³"),
+    ("CellLengthsTarget(lengths)", "Stop at three cell edge lengths.", "xyz, m"),
+    ("MeanPressureTarget(value)", "Stop at a mean wall pressure.", "pressure"),
+    ("DirectionalPressureTarget(pressures)", "Stop at per-axis wall pressures.", "xyz pressure"),
+    ("PenaltyEnergyTarget(value)", "Stop at a formation-penalty energy.", "energy"),
+]
+
+COMPACTION_PATHS = [
+    ("AxisWeightsPath(weights=None)", "Prescribed relative shortening; `None` shortens only the stack axis.", "`\"z\"`, `\"xy\"`, or nonnegative xyz weights"),
+    ("EqualPressurePath(axes, pressure_floor=...)", "Feedback that equalizes pressure on the active axes.", "axis set such as `\"xyz\"`"),
+    ("StressRatioPath(ratio, pressure_floor=...)", "Feedback toward a directional pressure ratio.", "nonnegative xyz"),
+    ("MinimumWorkPath(axes)", "Moves whichever active axis needs the least incremental work.", "axis set such as `\"xy\"`"),
+]
+
 JUNCTION_FIELDS = [
     ("name", "Human-readable capture-policy name.", "nonempty string"),
     ("law_name", "Symbolic downstream junction law.", "nonempty string"),
     ("parameter_set", "Junction-law parameter-table identifier.", "integer"),
-    ("maximum_surface_gap", "Largest surface gap eligible for capture.", "m"),
-    ("minimum_crossing_angle", "Smallest accepted unsigned crossing angle.", "rad, 0 to pi/2"),
-    ("maximum_crossing_angle", "Largest accepted unsigned crossing angle.", "rad, 0 to pi/2"),
+    ("max_surface_gap", "Largest surface gap eligible for capture.", "m"),
+    ("min_crossing_angle", "Smallest accepted unsigned crossing angle.", "rad, 0 to pi/2"),
+    ("max_crossing_angle", "Largest accepted unsigned crossing angle.", "rad, 0 to pi/2"),
     ("probability", "Deterministic seeded thinning probability.", "0–1"),
     ("seed", "Seed for probabilistic capture.", "integer"),
     ("material_pairs", "Optional allowed material-name pairs.", "list of pairs"),
-    ("maximum_per_fiber_pair", "Maximum anchors captured between one fiber pair.", "positive count"),
-    ("minimum_anchor_separation", "Required material-coordinate separation between anchors.", "m"),
+    ("max_per_fiber_pair", "Maximum anchors captured between one fiber pair.", "positive count"),
+    ("min_anchor_separation", "Required material-coordinate separation between anchors.", "m"),
     ("candidate_capacity", "Device candidate-buffer capacity.", "positive count"),
+]
+
+SOLVE_POLICY_FIELDS = [
+    ("name", "Stage label used in reports and errors.", "string"),
+    ("target_penetration", "Penetration residual the stage solver works toward.", "m"),
+    ("target_curvature_ratio", "Curvature ratio the stage solver works toward.", "ratio"),
+    ("max_penetration", "Penetration required to accept the stage; defaults to `target_penetration`.", "m"),
+    ("max_curvature_ratio", "Curvature ratio required to accept the stage; defaults to `target_curvature_ratio`.", "ratio"),
+    ("hard_penetration", "Whether a penetration miss fails the stage (`True`) or is only reported.", "boolean"),
+    ("hard_curvature", "Whether a curvature miss fails the stage (`True`) or is only reported.", "boolean"),
+    ("max_iterations", "Stage-specific iteration budget.", "count"),
+    ("on_budget_exhausted", "Behavior when the budget runs out before the targets are met.", "`\"fail\"` or `\"continue_if_hard_ok\"`"),
+]
+
+OVERRIDE_FIELDS = [
+    ("motion_model", "Temporary fiber motion model.", "string or `None`"),
+    ("correction_fraction", "Temporary contact correction fraction.", "float or `None`"),
+    ("contact_aggregation", "Temporary contact aggregation rule.", "string or `None`"),
+    ("stretch_stiffness", "Temporary rest-length stiffness.", "float or `None`"),
+    ("bend_stiffness", "Temporary rest-bend stiffness.", "float or `None`"),
+    ("curvature_limit_stiffness", "Temporary hard-curvature stiffness.", "float or `None`"),
+    ("constraint_iterations", "Temporary constraint sweep count.", "integer or `None`"),
+    ("curvature_cleanup_sweeps", "Temporary curvature cleanup count.", "integer or `None`"),
 ]
 
 CHECKPOINT_FIELDS = [
@@ -541,20 +573,22 @@ NOTEBOOKS: dict[str, list[dict]] = {
         ```
 
         This deliberately small two-ply example introduces the ideas developed
-        individually in tutorials 02–14. All physical quantities use SI units.
-        Building the objects is cheap; the guarded execution cell is the only
-        part that launches the solver.
+        individually in tutorials 02–14. All lengths are in meters;
+        `tangle.units` provides `um`, `mm`, and `nm` multipliers so that
+        `7 * um` reads as seven micrometers. Building the objects is cheap; the
+        guarded execution cell is the only part that launches the solver.
         """),
         code("""
         import inspect
         from pathlib import Path
 
         import tangle
+        from tangle.units import mm, um
 
         # Catch a stale compiled extension before a long recipe reaches a
-        # keyword added by a newer notebook.
+        # name or keyword added by a newer notebook.
         run_parameters = inspect.signature(tangle.Recipe.run).parameters
-        if "debug_ovito_path" not in run_parameters:
+        if not hasattr(tangle, "RecipeError") or "debug_ovito_path" not in run_parameters:
             raise RuntimeError(
                 "This kernel has an older compiled TANGLE extension loaded. "
                 "Run the installation cell in tutorial 00, restart the kernel, "
@@ -569,10 +603,12 @@ NOTEBOOKS: dict[str, list[dict]] = {
         md("""
         ## 1. Describe the domain and fibers
 
-        The cell is periodic in-plane and bounded through-thickness. A material
-        supplies capsule diameter and an optional admissible bend radius. A
-        collection holds placed centerlines, preferred rest centerlines, and
-        metadata before anything enters the simulation.
+        The cell is periodic in-plane and bounded through-thickness. Because z
+        is its only bounded axis, z becomes the cell's *stack axis*: the
+        direction that layer placement, needling, and compaction act along. A
+        material supplies capsule diameter and an optional admissible bend
+        radius. A collection holds placed centerlines, preferred rest
+        centerlines, and metadata before anything enters the simulation.
 
         Here the top large fiber is placed slightly curved but has a straight
         rest centerline: relaxation treats that initial curvature as bending.
@@ -580,32 +616,25 @@ NOTEBOOKS: dict[str, list[dict]] = {
         fiber generators.
         """),
         code("""
-        # Axis order is x, y, z. Periodic x/y represent a repeating sheet;
+        # Axis order is x, y, z. periodic="xy" represents a repeating sheet;
         # bounded z retains physical top and bottom surfaces.
-        cell = tangle.Cell(
-            [1.0e-3, 1.0e-3, 1.5e-3],
-            periodic=[True, True, False],
-        )
-        # Diameter controls contact geometry. minimum_bend_radius is the hard
+        cell = tangle.Cell([1.0 * mm, 1.0 * mm, 1.5 * mm], periodic="xy")
+        # Diameter controls contact geometry. min_bend_radius is the hard
         # admissible-curvature scale, not the preferred rest shape.
-        small = tangle.Material(
-            "small", diameter=7.0e-6, minimum_bend_radius=35.0e-6
-        )
-        large = tangle.Material(
-            "large", diameter=19.0e-6, minimum_bend_radius=75.0e-6
-        )
+        small = tangle.Material("small", diameter=7 * um, min_bend_radius=35 * um)
+        large = tangle.Material("large", diameter=19 * um, min_bend_radius=75 * um)
 
         # Collections are detached local geometry. formation_layer metadata
         # lets later recipe operations address manufacturing plies.
         bottom = tangle.FiberCollection("bottom ply")
         bottom.add_fiber(
-            [[-0.35e-3, -0.10e-3, 0.0], [0.35e-3, -0.10e-3, 0.0]],
+            [[-0.35 * mm, -0.10 * mm, 0.0], [0.35 * mm, -0.10 * mm, 0.0]],
             small,
             tags={"family": "x"},
             formation_layer=0,
         )
         bottom.add_fiber(
-            [[0.12e-3, -0.35e-3, 0.0], [0.12e-3, 0.35e-3, 0.0]],
+            [[0.12 * mm, -0.35 * mm, 0.0], [0.12 * mm, 0.35 * mm, 0.0]],
             small,
             tags={"family": "y"},
             formation_layer=0,
@@ -615,14 +644,14 @@ NOTEBOOKS: dict[str, list[dict]] = {
         # `placed` is the literal initial geometry. Giving it a straight rest
         # shape means the visible waviness initially stores bending strain.
         placed = [
-            [-0.35e-3, 0.0, 0.0],
-            [0.0, 12.0e-6, 0.0],
-            [0.35e-3, 0.0, 0.0],
+            [-0.35 * mm, 0.0, 0.0],
+            [0.0, 12 * um, 0.0],
+            [0.35 * mm, 0.0, 0.0],
         ]
         straight_rest = [
-            [-0.35e-3, 0.0, 0.0],
+            [-0.35 * mm, 0.0, 0.0],
             [0.0, 0.0, 0.0],
-            [0.35e-3, 0.0, 0.0],
+            [0.35 * mm, 0.0, 0.0],
         ]
         top.add_fiber(
             placed,
@@ -632,118 +661,139 @@ NOTEBOOKS: dict[str, list[dict]] = {
             formation_layer=1,
         )
         top.add_fiber(
-            [[-0.08e-3, -0.35e-3, 0.0], [-0.08e-3, 0.35e-3, 0.0]],
+            [[-0.08 * mm, -0.35 * mm, 0.0], [-0.08 * mm, 0.35 * mm, 0.0]],
             small,
             tags={"family": "y"},
             formation_layer=1,
         )
 
-        print(len(bottom), len(top), bottom.layers(), top.layers())
+        print(len(bottom), len(top), bottom.layer_ids(), top.layer_ids())
+        print("stack axis:", cell.stack_axis)
         """),
         md("""
         ## 2. Write the manufacturing recipe
 
         A recipe is an ordered operation list, not a time integrator. It can
-        insert dormant collections, establish temporary kinematic targets,
-        relax, release targets, compact the cell, and capture persistent
-        junction topology. Explicit relaxation gates make the intended sequence
+        insert dormant collections, hold fibers on temporary kinematic
+        targets, relax, compact the cell, and capture persistent junction
+        topology. Explicit relaxation gates make the intended sequence
         auditable before the expensive run begins.
 
+        Operations that hold fibers on targets (layer placement and needling)
+        return a `HeldTargets` handle. Used in a `with` block, it releases the
+        targets when the block ends, so every hold is visibly paired with its
+        release.
+
         This example settles the bottom ply, inserts and lowers the top ply,
-        performs one visible needling displacement, releases the needle,
-        compacts through-thickness, performs a strict final relaxation, and
-        finally records selected contacts as junctions.
+        performs one visible needling displacement, compacts through-thickness,
+        performs a strict final `solve`, and finally records selected contacts
+        as junctions.
         """),
         code("""
-        # Axis indices are 0=x, 1=y, 2=z. Here z is the stacking or
-        # through-thickness direction used by all layer-aware operations.
-        recipe = tangle.Recipe(cell, layer_axis=2)
+        # The recipe inherits stack_axis=2 (z) from the cell's bounded axis.
+        recipe = tangle.Recipe(cell)
 
         # Insert and settle the first ply before activating the second.
-        recipe.insert(bottom, translation=[0.5e-3, 0.5e-3, 0.35e-3])
-        recipe.relax(maximum_iterations=2_000)
+        recipe.insert(bottom, translation=[0.5 * mm, 0.5 * mm, 0.35 * mm])
+        recipe.relax_until_converged(max_iterations=2_000)
 
-        recipe.insert(top, translation=[0.5e-3, 0.5e-3, 0.80e-3])
-        recipe.place_layer_above(
-            layer=1, gap=5.0e-6, stiffness=0.5, max_translation=5.0e-6
-        )
+        recipe.insert(top, translation=[0.5 * mm, 0.5 * mm, 0.80 * mm])
 
-        # Penetration is hard during assembly, while bend cleanup is temporarily
-        # soft so manufacturing motion can finish before the final strict pass.
+        # A SolvePolicy is the acceptance rule for one stage. Penetration is
+        # hard during assembly, while curvature is only reported so bending
+        # cannot block deposition before the final strict pass.
         assembly_policy = tangle.SolvePolicy(
             "contact-first assembly",
-            solver_penetration=0.2e-6,
-            solver_curvature_ratio=2.0,
-            acceptance_penetration=0.3e-6,
-            penetration_enforcement="hard",
-            acceptance_curvature_ratio=2.0,
-            curvature_enforcement="soft",
-            maximum_iterations=4_000,
-            on_exhaustion="reject",
+            target_penetration=0.2 * um,
+            max_penetration=0.3 * um,
+            target_curvature_ratio=2.0,
+            hard_curvature=False,
+            max_iterations=4_000,
         )
-        assembly_overrides = tangle.RelaxationOverrides()
-        assembly_overrides.bend_stiffness = 0.2
-        recipe.relax_with_policy(assembly_policy, assembly_overrides)
-        recipe.release_layer_targets()
+        # The with block holds layer 1 just above the stack and releases the
+        # placement targets when it ends. The overrides soften rest bending
+        # for this one stage only.
+        with recipe.place_layer_above(1, gap=5 * um, stiffness=0.5, max_translation=5 * um):
+            recipe.solve(assembly_policy, tangle.RelaxationOverrides(bend_stiffness=0.2))
 
         # The needle pulls eligible large-fiber vertices; neighboring fibers
         # move only when contact transmits that displacement.
-        recipe.needle_layer_circular(
-            layer=1,
-            center=[0.5e-3, 0.5e-3],
-            diameter=120.0e-6,
-            depth=0.25e-3,
-            minimum_fiber_diameter=15.0e-6,
+        with recipe.needle_layer(
+            1,
+            footprint=tangle.CircularFootprint([0.5 * mm, 0.5 * mm], diameter=120 * um),
+            depth=0.25 * mm,
+            min_fiber_diameter=15 * um,
             stiffness=0.75,
-            max_translation=5.0e-6,
-            maximum_translation_over_fiber_diameter=0.5,
-        )
-        recipe.relax_until_targets_reached(0.2e-6, 3_000)
-        recipe.release_needles()
+            max_translation=5 * um,
+            max_translation_over_diameter=0.5,
+        ):
+            recipe.settle_targets(tolerance=0.2 * um, max_iterations=3_000)
 
-        # Only z may shrink because the axis weights are [x=0, y=0, z=1].
+        # volume_fraction() shortens only the stack axis (z) by default; any
+        # other CompactionSettings field can follow as a keyword.
         compaction = tangle.CompactionSettings.volume_fraction(
-            0.002, axis_weights=[0.0, 0.0, 1.0]
+            0.002, max_steps=20, max_relax_windows=4
         )
-        compaction.maximum_steps = 20
-        compaction.maximum_relax_windows = 4
         recipe.compact(compaction)
-        recipe.relax(maximum_iterations=4_000)
+
+        # Strict final gate: both limits are hard and default to the targets.
+        # The curvature_cleanup preset temporarily favors pulling bends back
+        # inside the admissible limit.
+        final_policy = tangle.SolvePolicy(
+            "final",
+            target_penetration=0.1 * um,
+            target_curvature_ratio=1.02,
+            max_iterations=4_000,
+        )
+        recipe.solve(final_policy, tangle.RelaxationOverrides.preset("curvature_cleanup"))
 
         # Ordinary contacts remain transient until this explicit late capture.
-        junctions = tangle.JunctionPolicy("late contact capture", "bond")
-        junctions.maximum_surface_gap = 0.2e-6
-        junctions.probability = 1.0
-        junctions.material_pairs = [("large", "small")]
+        junctions = tangle.JunctionPolicy(
+            "late contact capture",
+            "bond",
+            max_surface_gap=0.2 * um,
+            probability=1.0,
+            material_pairs=[("large", "small")],
+        )
         recipe.capture_junctions(junctions)
         """),
         md("""
         ## 3. Configure one resident solve
 
-        Global relaxation settings control contact resolution, fiber mechanics,
-        batching, backend selection, and adaptive refinement/coarsening. Recipe
-        policies above may temporarily override a few of them for one stage.
-        A checkpoint can preserve the resident formation state and operation
-        cursor for continuation.
+        Configuration objects follow three naming conventions:
+
+        - `*Settings` are run-wide: `RelaxationSettings` and
+          `CheckpointSettings` apply to every step of the recipe.
+        - A `*Policy` is the named rule one step follows: the `SolvePolicy`
+          and `JunctionPolicy` above.
+        - `*Overrides` are temporary deltas for the step they are passed to,
+          such as `RelaxationOverrides.preset("curvature_cleanup")`.
+
+        Every configuration class takes keyword arguments and has
+        `replace(**changes)` for a modified copy. The global relaxation
+        settings control contact resolution, fiber mechanics, batching,
+        backend selection, and adaptive refinement/coarsening. A checkpoint can
+        preserve the resident formation state and operation cursor for
+        continuation.
 
         The CPU backend executes the same CubeCL kernels without a GPU. Change
         `backend` to `"wgpu"` for a supported accelerator.
         """),
         code("""
-        # These are global defaults; a recipe policy may temporarily override
+        # These are global defaults; a recipe policy or override may adjust
         # selected values for one manufacturing stage.
-        settings = tangle.RelaxationSettings()
-        settings.backend = "cpu"
-        settings.motion_model = "flexible"
-        settings.penetration_tolerance = 0.1e-6
-        settings.curvature_ratio_tolerance = 1.05
-        settings.max_step = 2.0e-6
-        # Manufacturing targets are updated between batches. A short batch
-        # keeps this small target-heavy recipe responsive without controlling
-        # how many OVITO frames are retained.
-        settings.iterations_per_batch = 6
-        settings.adaptive_segmentation = (
-            tangle.AdaptiveSegmentationSettings.profile("balanced")
+        settings = tangle.RelaxationSettings(
+            backend="cpu",
+            motion_model="flexible",
+            penetration_tolerance=0.1 * um,
+            # An excess above one: accept curvature ratios up to 1.05.
+            curvature_ratio_tolerance=0.05,
+            max_step=2 * um,
+            # Manufacturing targets are updated between batches. A short batch
+            # keeps this small target-heavy recipe responsive without
+            # controlling how many OVITO frames are retained.
+            iterations_per_batch=6,
+            adaptive_segmentation=tangle.AdaptiveSegmentationSettings.profile("balanced"),
         )
 
         # The restart stores the recipe cursor and resident solver state, not
@@ -762,13 +812,17 @@ NOTEBOOKS: dict[str, list[dict]] = {
         ## 4. Run, inspect, and export
 
         `Recipe.run()` uploads the packed world, executes the ordered recipe,
-        and returns final geometry plus convergence, topology, transfer, event,
-        checkpoint, and junction reports. OVITO output visualizes the relaxed
-        spherocylinders; BPM output converts them into a bonded-particle model
-        that downstream solvers such as DIRT can consume. Passing
-        `debug_ovito_path` with no `debug_snapshot_interval` records concise
-        recipe keyframes. Set an integer interval only when detailed relaxation
-        frames are needed.
+        and returns a `RunResult` with the final geometry plus convergence,
+        topology, transfer, event, checkpoint, and junction reports. It does
+        not modify its inputs: the relaxed geometry is a new `Assembly` at
+        `result.assembly`. If a step cannot meet its policy, `run()` raises
+        `tangle.RecipeError`, which names the failing operation and the reason.
+
+        OVITO output visualizes the relaxed spherocylinders; BPM output
+        converts them into a bonded-particle model that downstream solvers
+        such as DIRT can consume. Passing `debug_ovito_path` with no
+        `debug_snapshot_interval` records concise recipe keyframes. Set an
+        integer interval only when detailed relaxation frames are needed.
 
         Change `RUN_OVERVIEW` to `True` only when you want to execute the solve.
         """),
@@ -779,19 +833,24 @@ NOTEBOOKS: dict[str, list[dict]] = {
             debug_dump = output / "overview_debug.dump"
             debug_view = output / "overview_debug_view.py"
             debug_session = output / "overview_debug.ovito"
-            result = recipe.run(
-                settings,
-                checkpoint=checkpoint,
-                debug_ovito_path=debug_dump,
-                debug_ovito_view_script_path=debug_view,
-                debug_ovito_session_path=debug_session,
-                debug_ovito_coloring="curvature_ratio",
-            )
+            try:
+                result = recipe.run(
+                    settings,
+                    checkpoint=checkpoint,
+                    debug_ovito_path=debug_dump,
+                    debug_ovito_view_script_path=debug_view,
+                    debug_ovito_session_path=debug_session,
+                    debug_ovito_coloring="curvature_ratio",
+                )
+            except tangle.RecipeError as error:
+                # The error identifies the recipe step, not just the symptom.
+                print(f"Step {error.operation_index} ({error.operation}) failed: {error.reason}")
+                raise
 
             summary = {
                 "converged": result.converged,
                 "iterations": result.iterations,
-                "max_penetration_um": result.max_penetration * 1.0e6,
+                "max_penetration_um": result.max_penetration / um,
                 "max_curvature_ratio": result.max_curvature_ratio,
                 "active_segments": result.active_segments,
                 "splits": result.segment_splits,
@@ -803,6 +862,11 @@ NOTEBOOKS: dict[str, list[dict]] = {
             print(f"OVITO view recipe: {debug_view}")
             print(f"OVITO session target: {debug_session}")
 
+            # run() leaves its inputs unchanged; the relaxed state is a new
+            # Assembly that can seed a follow-on Recipe.
+            relaxed = result.assembly
+            print(relaxed.fiber_count, relaxed.cell.lengths)
+
             # Keep a separate one-frame file for inspecting only the final state.
             result.write_ovito(
                 output / "overview_final.dump",
@@ -813,7 +877,7 @@ NOTEBOOKS: dict[str, list[dict]] = {
             # Exact spherocylinders preserve the final active segmentation.
             result.export_bpm(
                 output / "overview.data",
-                mode="spherocylinders-exact",
+                mode="spherocylinders_exact",
                 density=1_800.0,
             )
         """),
@@ -822,16 +886,16 @@ NOTEBOOKS: dict[str, list[dict]] = {
 
         | Tutorial | Focus |
         | --- | --- |
-        | 02 | Cells, periodic axes, and hard walls |
+        | 02 | Cells, periodic axes, the stack axis, and units |
         | 03 | Materials, placed geometry, and rest geometry |
         | 04 | Detached fiber collections and metadata |
-        | 05 | Seeded fiber population generation and directional bias |
+        | 05 | Seeded fiber populations, orientation, and position models |
         | 06 | Insertion, selections, and rigid transforms |
         | 07 | Relaxation, contact, mechanics, and CubeCL backends |
         | 08 | Adaptive refinement and coarsening |
-        | 09 | Per-stage solve policies and temporary overrides |
-        | 10 | Layer movement, target release, and needling |
-        | 11 | Dynamic compaction and wall control |
+        | 09 | Per-stage solve policies, override presets, and `RecipeError` |
+        | 10 | Layer movement, held targets, and needling |
+        | 11 | Dynamic compaction targets, paths, and guards |
         | 12 | Explicit junction capture |
         | 13 | Checkpoints, continuation, and branching |
         | 14 | Results, OVITO visualization, and BPM export |
@@ -842,25 +906,58 @@ NOTEBOOKS: dict[str, list[dict]] = {
         # Cells and boundary conditions
 
         A `Cell` defines the orthorhombic simulation domain. Lengths and origins
-        are SI meters. Each periodic flag independently selects periodic
-        minimum-image contact (`True`) or a bounded hard-wall axis (`False`).
+        are in meters; `tangle.units` supplies `um`, `mm`, and `nm` as plain
+        float multipliers. `periodic` names the axes that use periodic
+        minimum-image contact; every other axis is bounded by hard walls. It
+        accepts a string of axis letters such as `"xy"`, a single axis, or an
+        `[x, y, z]` bool triple.
         """),
         code("""
         import tangle
+        from tangle.units import mm, nm, um
+
+        # Units are ordinary floats in meters, so they compose with arithmetic.
+        print(7 * um, 1.5 * mm, 250 * nm)
 
         # Omitting `periodic` gives three bounded axes with the origin at zero.
-        bounded = tangle.Cell([1e-3, 2e-3, 3e-3])
-        # Flags map to [x, y, z]. This sheet repeats in-plane but has bounded
-        # through-thickness surfaces; the origin centers the x/y coordinates.
+        bounded = tangle.Cell([1 * mm, 2 * mm, 3 * mm])
+        # This sheet repeats in x and y but has bounded through-thickness
+        # surfaces; the origin centers the x/y coordinates.
         periodic_sheet = tangle.Cell(
-            [1e-3, 1e-3, 2e-3],
-            periodic=[True, True, False],
-            origin=[-0.5e-3, -0.5e-3, 0.0],
+            [1 * mm, 1 * mm, 2 * mm],
+            periodic="xy",
+            origin=[-0.5 * mm, -0.5 * mm, 0.0],
         )
         {
             "lengths": periodic_sheet.lengths,
             "periodic": periodic_sheet.periodic,
             "origin": periodic_sheet.origin,
+            "stack_axis": periodic_sheet.stack_axis,
+        }
+        """),
+        md("""
+        ## The stack axis
+
+        Layer-aware operations (layered generation, layer placement, needling,
+        and default compaction) act along one *stack axis*. When exactly one
+        axis is bounded, the cell infers it as the stack axis, so a
+        `periodic="xy"` sheet stacks along z. Otherwise the stack axis
+        defaults to z; pass `stack_axis=` to the `Cell` (or to `Recipe`) to
+        choose another. Axes may be written as `"x"`, `"y"`, `"z"` or `0`,
+        `1`, `2`; the property always reports the index.
+        """),
+        code("""
+        # A bool triple is equivalent to the axis-letter string.
+        same_sheet = tangle.Cell([1 * mm, 1 * mm, 2 * mm], periodic=[True, True, False])
+        # y is the only bounded axis here, so it is inferred as the stack axis.
+        wall_in_y = tangle.Cell([1 * mm, 2 * mm, 1 * mm], periodic="xz")
+        # A fully periodic box has no bounded axis, so name the stack axis.
+        bulk = tangle.Cell([1 * mm, 1 * mm, 1 * mm], periodic="xyz", stack_axis="x")
+        {
+            "same flags": same_sheet.periodic == periodic_sheet.periodic,
+            "wall_in_y": wall_in_y.stack_axis,
+            "bulk": bulk.stack_axis,
+            "bounded box": bounded.stack_axis,
         }
         """),
         md("""
@@ -878,24 +975,26 @@ NOTEBOOKS: dict[str, list[dict]] = {
         md("""
         # Materials, placed centerlines, and rest centerlines
 
-        `diameter` controls capsule contact. `minimum_bend_radius` is an
-        admissibility limit, not the preferred shape. A fiber's placed
-        centerline is its initial simulation geometry; its rest centerline is
-        used to derive rest lengths and rest turning angles.
+        `diameter` controls capsule contact; TANGLE always takes diameters,
+        never radii, and exposes `radius` only as a read-only convenience.
+        `min_bend_radius` is an admissibility limit, not the preferred shape.
+        A fiber's placed centerline is its initial simulation geometry; its
+        rest centerline is used to derive rest lengths and rest turning angles.
         """),
         code("""
         import tangle
+        from tangle.units import mm, um
 
-        # A missing minimum_bend_radius means there is no material curvature
-        # admissibility limit, while diameter still defines contact radius.
-        straight = tangle.Material("straight fiber", diameter=19e-6)
+        # A missing min_bend_radius means there is no material curvature
+        # admissibility limit, while diameter still defines contact size.
+        straight = tangle.Material("straight fiber", diameter=19 * um)
         bend_limited = tangle.Material(
             "bend-limited fiber",
-            diameter=7e-6,
-            minimum_bend_radius=35e-6,
+            diameter=7 * um,
+            min_bend_radius=35 * um,
         )
         print(straight.name, straight.diameter, straight.radius)
-        print(bend_limited.minimum_bend_radius)
+        print(bend_limited.min_bend_radius, straight.min_bend_radius)
         """),
         md("""
         ## The three useful shape cases
@@ -908,12 +1007,12 @@ NOTEBOOKS: dict[str, list[dict]] = {
         """),
         code("""
         # Placed coordinates are absolute simulation positions.
-        placed = [[0.2e-3, 0.2e-3, 0.5e-3],
-                  [0.5e-3, 0.3e-3, 0.5e-3],
-                  [0.8e-3, 0.2e-3, 0.5e-3]]
+        placed = [[0.2 * mm, 0.2 * mm, 0.5 * mm],
+                  [0.5 * mm, 0.3 * mm, 0.5 * mm],
+                  [0.8 * mm, 0.2 * mm, 0.5 * mm]]
         straight_rest = [[0.0, 0.0, 0.0],
-                         [0.3e-3, 0.0, 0.0],
-                         [0.6e-3, 0.0, 0.0]]
+                         [0.3 * mm, 0.0, 0.0],
+                         [0.6 * mm, 0.0, 0.0]]
 
         fibers = tangle.FiberCollection("shape semantics")
         # Same placed geometry, different rest geometry: the first fiber wants
@@ -933,47 +1032,56 @@ NOTEBOOKS: dict[str, list[dict]] = {
         """),
         code("""
         import tangle
+        from tangle.units import mm, um
 
-        material = tangle.Material("fiber", diameter=10e-6)
+        material = tangle.Material("fiber", diameter=10 * um)
         # Collection coordinates are local until Recipe.insert applies a rigid
         # transform. Overlap is allowed at this stage.
         ply = tangle.FiberCollection("ply 2")
         fiber_index = ply.add_fiber(
-            [[0.0, 0.0, 0.0], [0.5e-3, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [0.5 * mm, 0.0, 0.0]],
             material,
-            rest_centerline=[[0.0, 0.0, 0.0], [0.5e-3, 0.0, 0.0]],
+            rest_centerline=[[0.0, 0.0, 0.0], [0.5 * mm, 0.0, 0.0]],
             # Tags remain descriptive metadata; formation_layer participates in
             # later layer-aware recipe operations.
             tags={"family": "machine-direction", "source": "measured"},
             formation_layer=2,
         )
-        print(fiber_index, len(ply), ply.layers())
+        print(fiber_index, len(ply), ply.layer_ids())
         """),
         md("""
         ## Construction and selection operations
 
         - `add_fiber(...)` controls placed/rest centerlines, material, tags, and layer.
         - `from_centerlines(...)` assigns one material and optional layer in bulk.
-        - `extend(...)` concatenates detached collections.
-        - `select_layer(...)` creates a collection containing one formation layer.
+        - `a + b` returns a new collection containing both; `a.extend(b)`
+          appends `b` to `a` in place.
+        - `layer_ids()` lists the formation layers present.
+        - `select_layer(...)` creates a collection containing one formation
+          layer. A missing layer raises `ValueError` unless `allow_empty=True`.
         - `centerlines()` and `rest_centerlines()` return ordinary Python lists.
         """),
         code("""
         # Bulk construction is convenient when one material/layer applies to
         # many imported centerlines.
         transverse = tangle.FiberCollection.from_centerlines(
-            [[[0.0, 0.0, 0.0], [0.0, 0.5e-3, 0.0]]],
+            [[[0.0, 0.0, 0.0], [0.0, 0.5 * mm, 0.0]]],
             material,
             name="transverse",
             formation_layer=3,
         )
-        all_fibers = tangle.FiberCollection("two plies")
-        all_fibers.extend(ply)
-        all_fibers.extend(transverse)
+        # `+` builds a new collection and leaves both operands unchanged.
+        all_fibers = ply + transverse
+        all_fibers.name = "two plies"
+        # extend() appends in place when mutating a collection is intended.
+        growing = tangle.FiberCollection("growing")
+        growing.extend(ply)
         # Selection returns another detached collection; it does not mutate the
         # combined source collection.
         selected = all_fibers.select_layer(2, name="only ply 2")
-        print(len(all_fibers), len(selected), all_fibers.layers())
+        missing = all_fibers.select_layer(7, allow_empty=True)
+        print(len(all_fibers), len(ply), len(growing), len(selected), len(missing))
+        print(all_fibers.layer_ids())
         """),
     ],
     "05_fiber_generation.ipynb": [
@@ -983,59 +1091,110 @@ NOTEBOOKS: dict[str, list[dict]] = {
         TANGLE provides small crossing generators for mechanics tests and a
         configurable population generator for material recipes. Generation is
         seeded and deterministic; relaxation is tolerance-deterministic rather
-        than promised bitwise-identical across parallel backends.
+        than promised bitwise-identical across parallel backends. Every
+        generator takes a `material=` for fiber name, diameter, and bend limit.
         """),
         code("""
-        import tangle
+        import math
 
-        cell = tangle.Cell([1e-3, 1e-3, 1e-3])
+        import tangle
+        from tangle.units import mm, um
+
+        # periodic="xy" makes z the stack axis for layered populations below.
+        cell = tangle.Cell([1 * mm, 1 * mm, 1 * mm], periodic="xy")
+        large = tangle.Material("large", diameter=19 * um)
+        bend_limited = tangle.Material("bend-limited", diameter=19 * um, min_bend_radius=50 * um)
+
         # Point crossings are the minimal rigid-contact demonstration.
         point_crossing = tangle.generate_point_crossing(
-            cell, count=8, length=0.8e-3, radius=9.5e-6,
-            material_name="large", name="center crossing",
+            cell, material=large, count=8, length=0.8 * mm, name="center crossing",
         )
         # Distinct placed/rest shape controls create initially bent fibers.
         curved_crossing = tangle.generate_multisegment_crossing(
-            cell, count=4, segments_per_fiber=8, length=0.8e-3,
-            placed_chord_fraction=0.8, radius=9.5e-6,
+            cell, material=bend_limited, count=4, segments_per_fiber=8,
+            length=0.8 * mm, placed_chord_fraction=0.8,
             rest_shape="straight", rest_amplitude=0.0,
-            placed_shape="curved", placed_amplitude=0.1e-3,
-            minimum_bend_radius=50e-6,
+            placed_shape="curved", placed_amplitude=0.1 * mm,
         )
         # A two-fiber pair is useful for isolated refinement/contact tests.
         pair = tangle.generate_fiber_pair_crossing(
-            cell, segments_per_fiber=1, length=0.8e-3,
-            radius=9.5e-6, axis_separation=10e-6,
-            crossing_angle_degrees=90.0,
+            cell, material=large, segments_per_fiber=1, length=0.8 * mm,
+            axis_separation=10 * um, crossing_angle_degrees=90.0,
         )
         [len(point_crossing), len(curved_crossing), len(pair)]
         """),
-        md("## Every `FiberPopulationSettings` field"),
-        *settings_cells("FiberPopulationSettings", "population", POPULATION_FIELDS),
+        md("""
+        ## Every `FiberPopulation` field
+
+        `FiberPopulation` describes a seeded population with keyword
+        arguments. Length-like fields accept a single value or a `(min, max)`
+        tuple that is sampled uniformly. The defaults below are read from the
+        compiled extension.
+        """),
+        *settings_cells("FiberPopulation", "population", POPULATION_FIELDS),
+        md("""
+        ## Orientation and position distributions
+
+        Each distribution is its own class, so its options are keyword
+        arguments of that class rather than loose fields that only apply in one
+        mode. An axis or normal of `None` (the default) follows the cell's
+        stack axis. Angles are in radians. `LayeredBiaxialOrientation` chooses
+        its directions per layer, so it must be combined with
+        `LayeredPosition`.
+        """),
+        md(table(ORIENTATION_VARIANTS, header=("Orientation", "Meaning", "Options"))),
+        md(table(POSITION_VARIANTS, header=("Position", "Meaning", "Options"))),
         code("""
-        # Geometry ranges are sampled independently but reproducibly from seed.
-        population.count = 100
-        population.seed = 42
-        population.length_minimum = 0.2e-3
-        population.length_maximum = 0.3e-3
-        population.radius_minimum = 3.5e-6
-        population.radius_maximum = 9.5e-6
-        population.curvature_amplitude_minimum = 0.0
-        population.curvature_amplitude_maximum = 10e-6
-        population.minimum_bend_radius = 35e-6
-        # layered_biaxial places 40% near a primary in-plane direction, 40%
-        # near its transverse direction, and leaves the remaining 20% random.
-        population.orientation = "layered_biaxial"
-        # For planar/biaxial distributions, orientation_axis is the plane normal.
-        population.orientation_axis = [0.0, 0.0, 1.0]
-        population.primary_fraction = 0.4
-        population.cross_fraction = 0.4
-        # Position axis 2 is z, so this creates four through-thickness plies.
-        population.position = "layered"
-        population.position_axis = 2
-        population.layers = 4
+        # Keyword arguments describe the whole population in one expression.
+        population = tangle.FiberPopulation(
+            material=tangle.Material("fine", diameter=7 * um, min_bend_radius=35 * um),
+            count=100,
+            segments_per_fiber=8,
+            seed=42,
+            length=(0.2 * mm, 0.3 * mm),
+            # Sample diameters between the fine and coarse sizes; None would
+            # use the material's diameter for every fiber.
+            diameter=(7 * um, 19 * um),
+            curvature_amplitude=(0.0, 10 * um),
+            # 40% near a primary in-plane direction, 40% near its transverse
+            # direction, and the remaining 20% random. The plane normal
+            # defaults to the stack axis (z).
+            orientation=tangle.LayeredBiaxialOrientation(
+                primary_fraction=0.4,
+                cross_fraction=0.4,
+                max_in_plane_deviation=math.radians(10),
+                max_tilt=math.radians(5),
+                seed=3,
+            ),
+            # Four evenly spaced planes along z become formation layers 0-3.
+            position=tangle.LayeredPosition(4, jitter_fraction=0.2),
+            max_attempts_per_fiber=256,
+        )
         generated = tangle.generate_fiber_population(cell, population, name="four plies")
-        print(len(generated), generated.layers())
+        print(len(generated), generated.layer_ids())
+        """),
+        code("""
+        # replace() returns a modified copy, so variants share every other field.
+        variants = {
+            "isotropic, uniform": population.replace(
+                orientation=tangle.IsotropicOrientation(),
+                position=tangle.UniformPosition(),
+            ),
+            "planar felt": population.replace(
+                orientation=tangle.PlanarOrientation(max_tilt=math.radians(5)),
+            ),
+            "aligned with x": population.replace(
+                orientation=tangle.AlignedOrientation("x", max_angle=math.radians(15)),
+                length=0.25 * mm,
+            ),
+            # Layered-biaxial orientation needs layers, so pair the density
+            # gradient with a planar orientation instead.
+            "denser toward high z": population.replace(
+                orientation=tangle.PlanarOrientation(max_tilt=math.radians(5)),
+                position=tangle.DensityGradientPosition(exponent=2.0, toward_high=True),
+            ),
+        }
+        {name: len(tangle.generate_fiber_population(cell, variant)) for name, variant in variants.items()}
         """),
     ],
     "06_insertion_and_transforms.ipynb": [
@@ -1048,29 +1207,31 @@ NOTEBOOKS: dict[str, list[dict]] = {
         """),
         code("""
         import tangle
+        from tangle.units import mm, um
 
         # This collection is authored around a local origin and is not yet in
         # the periodic simulation cell.
-        cell = tangle.Cell([1e-3, 1e-3, 2e-3], periodic=[True, True, False])
-        material = tangle.Material("fiber", diameter=19e-6)
+        cell = tangle.Cell([1 * mm, 1 * mm, 2 * mm], periodic="xy")
+        material = tangle.Material("fiber", diameter=19 * um)
         collection = tangle.FiberCollection.from_centerlines(
-            [[[-0.3e-3, 0.0, 0.0], [0.3e-3, 0.0, 0.0]]],
+            [[[-0.3 * mm, 0.0, 0.0], [0.3 * mm, 0.0, 0.0]]],
             material,
             name="local-coordinate ply",
             formation_layer=0,
         )
-        # 0=x, 1=y, 2=z; z is the layer stacking direction here.
-        recipe = tangle.Recipe(cell, layer_axis=2)
+        # The recipe takes its stack axis (z) from the cell; pass
+        # stack_axis="x" (or 0) to Recipe to override it.
+        recipe = tangle.Recipe(cell)
         # Rotation is applied first, then translation places the rotated fiber.
         selection = recipe.insert(
             collection,
             name="placed ply",
-            translation=[0.5e-3, 0.5e-3, 0.4e-3],
+            translation=[0.5 * mm, 0.5 * mm, 0.4 * mm],
             rotation=[[0.0, -1.0, 0.0],
                       [1.0,  0.0, 0.0],
                       [0.0,  0.0, 1.0]],
         )
-        print(selection.name, selection.fiber_ids, selection.formation_step)
+        print(recipe.stack_axis, selection.name, selection.fiber_ids, selection.formation_step)
         """),
         md("""
         `name` labels the returned `FiberSelection`; `translation` is in meters;
@@ -1078,10 +1239,14 @@ NOTEBOOKS: dict[str, list[dict]] = {
         stable handles for reporting and future selection-scoped APIs. Use
         `recipe.operations()` to audit ordering before a costly run and
         `recipe.centerlines()` to inspect the packed initial geometry.
+
+        A `Recipe` can also start from an existing `Assembly`, such as the
+        `result.assembly` of an earlier run, to continue manufacturing from
+        relaxed geometry.
         """),
         code("""
         # Methods append ordered operations; no solver launches until run().
-        recipe.relax(maximum_iterations=2_000)
+        recipe.relax_until_converged(max_iterations=2_000)
         print(*recipe.operations(), sep="\\n")
         recipe.centerlines()
         """),
@@ -1093,10 +1258,39 @@ NOTEBOOKS: dict[str, list[dict]] = {
         Relaxation is a quasi-static sequence of contact, stretch, rest-bend,
         and admissible-curvature projections. Convergence requires both the
         penetration and curvature residuals to satisfy their configured limits.
+        `RelaxationSettings` is run-wide: it applies to every step of a recipe
+        unless a step receives temporary `RelaxationOverrides` (tutorial 09).
         """),
-        code("# Settings objects expose the same defaults used by Rust.\nimport tangle"),
+        code("# Settings objects expose the same defaults used by Rust.\nimport tangle\nfrom tangle.units import um"),
         md("## Every `RelaxationSettings` field"),
         *settings_cells("RelaxationSettings", "settings", RELAXATION_FIELDS),
+        md("""
+        ## Building and editing settings
+
+        Pass only the values that differ from the defaults as keyword
+        arguments. `replace(**changes)` returns a modified copy and leaves the
+        original alone; attributes remain assignable for incremental edits.
+        Misspelled keywords raise `TypeError` and unknown option strings raise
+        `ValueError` on the line that introduced them.
+        """),
+        code("""
+        # Keyword construction names only what differs from the defaults.
+        settings = tangle.RelaxationSettings(
+            backend="cpu", max_iterations=500, penetration_tolerance=0.1 * um
+        )
+        # replace() derives a stricter variant without touching `settings`.
+        strict = settings.replace(max_iterations=5_000, curvature_ratio_tolerance=0.0)
+        # Direct assignment still works for one-off edits.
+        strict.max_step = 2 * um
+
+        # Typos and invalid option strings fail immediately.
+        for bad in ({"backnd": "cpu"}, {"backend": "cuda"}):
+            try:
+                tangle.RelaxationSettings(**bad)
+            except (TypeError, ValueError) as error:
+                print(type(error).__name__, error)
+        settings.max_iterations, strict.max_iterations
+        """),
         md("""
         ## Cell-list broad phase
 
@@ -1107,10 +1301,8 @@ NOTEBOOKS: dict[str, list[dict]] = {
         code("""
         # Broad-phase cells must be at least one contact diameter wide. Larger
         # values trade fewer cells for more candidate capsule pairs per cell.
-        settings.cell_list = tangle.CellListSettings(cell_size_scale=1.25)
-        # The alias edits the same nested value.
-        settings.cell_size_scale = 1.5
-        settings.to_dict()
+        coarse_cells = settings.replace(cell_size_scale=1.5)
+        coarse_cells.to_dict()
         """),
         md("""
         Use `motion_model="rigid_translation"` for straight rigid fibers and
@@ -1139,6 +1331,10 @@ NOTEBOOKS: dict[str, list[dict]] = {
             name: tangle.AdaptiveSegmentationSettings.profile(name).to_dict()
             for name in ("fast", "balanced", "strict")
         }
+        # Keywords after the profile name adjust individual fields.
+        tuned = tangle.AdaptiveSegmentationSettings.profile(
+            "balanced", refinement_interval=25, max_refinement_levels=6
+        )
         profiles
         """),
         md("""
@@ -1147,10 +1343,9 @@ NOTEBOOKS: dict[str, list[dict]] = {
         pinned, targeted, substantially bent, and junction-bearing topology.
         """),
         code("""
-        # Assigning None disables adaptation; the convenience methods install
-        # or remove a default settings object explicitly.
-        settings = tangle.RelaxationSettings()
-        settings.adaptive_segmentation = adaptive
+        # Pass adaptive settings to the constructor; None disables adaptation.
+        settings = tangle.RelaxationSettings(adaptive_segmentation=tuned)
+        # The convenience methods install or remove a default settings object.
         settings.disable_adaptive_segmentation()
         assert settings.adaptive_segmentation is None
         settings.enable_adaptive_segmentation()
@@ -1161,139 +1356,233 @@ NOTEBOOKS: dict[str, list[dict]] = {
         md("""
         # Recipe relaxation gates, solve policies, and overrides
 
-        Global `RelaxationSettings` describe the solver. A `SolvePolicy`
-        describes what one recipe gate must achieve, while
+        Global `RelaxationSettings` describe the solver for the whole run. A
+        `SolvePolicy` is the rule one recipe gate must satisfy, while
         `RelaxationOverrides` temporarily changes how that gate approaches its
-        target. This supports contact-first assembly followed by strict final
-        bending cleanup.
+        targets. Both are passed to `Recipe.solve(policy, overrides)`. This
+        supports contact-first assembly followed by strict final bending
+        cleanup.
         """),
-        code("# Policies control acceptance; overrides control the path there.\nimport tangle"),
-        md(table([
-            ("name", "Stage label used in reports.", "string"),
-            ("solver_penetration", "Residual the stage solver works toward.", "m"),
-            ("solver_curvature_ratio", "Curvature target used by the stage solver.", "ratio"),
-            ("acceptance_penetration", "Residual required to accept the operation.", "m"),
-            ("penetration_enforcement", "Whether failure rejects the stage.", "`hard` or `soft`"),
-            ("acceptance_curvature_ratio", "Curvature ratio required for acceptance.", "ratio"),
-            ("curvature_enforcement", "Whether curvature failure rejects the stage.", "`hard` or `soft`"),
-            ("maximum_iterations", "Stage-specific iteration budget.", "count"),
-            ("on_exhaustion", "Behavior when the budget is exhausted.", "`reject` or `continue`"),
-        ])),
+        code("# Policies control acceptance; overrides control the path there.\nimport tangle\nfrom tangle.units import mm, um"),
+        md("## Every `SolvePolicy` field"),
+        *settings_cells(
+            "SolvePolicy",
+            "default_policy",
+            SOLVE_POLICY_FIELDS,
+            extra="""
+            A policy usually needs only its targets. `max_penetration` and
+            `max_curvature_ratio` default to the targets, both limits are hard,
+            and an exhausted budget fails the recipe. Loosen acceptance only
+            where a stage should tolerate it.
+            """,
+        ),
         code("""
-        # This assembly stage must resolve contact but temporarily accepts a
-        # curvature ratio up to 5 so bending cannot block deposition.
+        # This assembly stage must resolve contact but only reports curvature,
+        # accepting ratios up to 5 so bending cannot block deposition.
         contact_first = tangle.SolvePolicy(
             "contact-first settling",
-            solver_penetration=0.1e-6,
-            solver_curvature_ratio=5.0,
-            acceptance_penetration=0.2e-6,
-            penetration_enforcement="hard",
-            acceptance_curvature_ratio=5.0,
-            curvature_enforcement="soft",
-            maximum_iterations=10_000,
-            on_exhaustion="reject",
+            target_penetration=0.1 * um,
+            max_penetration=0.2 * um,
+            target_curvature_ratio=5.0,
+            hard_curvature=False,
+            max_iterations=10_000,
         )
+        # A strict final gate needs only its targets; the acceptance limits
+        # default to them and both are hard.
+        final = tangle.SolvePolicy(
+            "final",
+            target_penetration=0.1 * um,
+            target_curvature_ratio=1.02,
+            max_iterations=5_000,
+        )
+        # Continue past an exhausted budget when every hard limit is met.
+        lenient = final.replace(
+            name="final (lenient)",
+            hard_curvature=False,
+            on_budget_exhausted="continue_if_hard_ok",
+        )
+        [final.max_penetration, final.max_curvature_ratio, final.hard_penetration, lenient.on_budget_exhausted]
         """),
-        md(table([
-            ("motion_model", "Temporary fiber motion model.", "string or `None`"),
-            ("correction_fraction", "Temporary contact correction fraction.", "float or `None`"),
-            ("contact_aggregation", "Temporary contact aggregation rule.", "string or `None`"),
-            ("stretch_stiffness", "Temporary rest-length stiffness.", "float or `None`"),
-            ("bend_stiffness", "Temporary rest-bend stiffness.", "float or `None`"),
-            ("curvature_limit_stiffness", "Temporary hard-curvature stiffness.", "float or `None`"),
-            ("constraint_iterations", "Temporary constraint sweep count.", "integer or `None`"),
-            ("curvature_cleanup_sweeps", "Temporary curvature cleanup count.", "integer or `None`"),
-        ])),
-        code("""
-        # Overrides apply only to relax_with_policy; global settings return for
-        # later operations.
-        overrides = tangle.RelaxationOverrides()
-        overrides.bend_stiffness = 0.1
-        overrides.curvature_limit_stiffness = 1.0
-        overrides.contact_aggregation = "deepest_only"
+        md("## Every `RelaxationOverrides` field"),
+        md(table(OVERRIDE_FIELDS)),
+        md("""
+        A field left as `None` keeps the global setting. Three presets capture
+        the common staging choices, and any field can follow the preset name
+        as a keyword:
 
-        recipe = tangle.Recipe(tangle.Cell([1e-3, 1e-3, 1e-3]))
+        - `contact_first`: full contact corrections with loose, cheap mechanics
+          (no rest bending, weak curvature limit, one constraint sweep).
+        - `contact_cleanup`: full contact corrections with strong stretch and
+          curvature projection and many sweeps.
+        - `curvature_cleanup`: small contact corrections with full curvature
+          projection and many cleanup sweeps, for pulling bends back inside
+          the admissible limit.
+        """),
+        code("""
+        # Presets are ordinary RelaxationOverrides; print them to see exactly
+        # which fields each one sets.
+        for preset in ("contact_first", "contact_cleanup", "curvature_cleanup"):
+            print(repr(tangle.RelaxationOverrides.preset(preset)))
+        # Keywords after the preset name adjust individual fields.
+        cleanup = tangle.RelaxationOverrides.preset("curvature_cleanup", curvature_cleanup_sweeps=32)
+        # Hand-written overrides set only the fields they name.
+        softer_bending = tangle.RelaxationOverrides(bend_stiffness=0.1, contact_aggregation="deepest_only")
+        softer_bending
+        """),
+        code("""
+        # Overrides apply only to the solve() they are passed to; the global
+        # settings return for later operations.
+        recipe = tangle.Recipe(tangle.Cell([1 * mm, 1 * mm, 1 * mm]))
         # These calls represent distinct amounts or acceptance conditions.
         recipe.relax_for(100)  # fixed work; no acceptance gate
-        recipe.relax(maximum_iterations=2_000)  # default hard gate
-        recipe.relax_with_policy(contact_first, overrides)
-        recipe.relax_until_targets_reached(0.1e-6, 5_000)
-        recipe.set_material_bend_radius("fiber", 50e-6)
+        recipe.relax_until_converged(max_iterations=2_000)  # default hard gate
+        recipe.solve(contact_first, tangle.RelaxationOverrides.preset("contact_first"))
+        recipe.solve(final, cleanup)
+        # Bend limits can change between stages, by material name or object.
+        recipe.set_min_bend_radius("fiber", 50 * um)
         print(*recipe.operations(), sep="\\n")
+        """),
+        md("""
+        `settle_targets(tolerance=, max_iterations=)` is the gate for fibers
+        held on layer-placement or needle targets; tutorial 10 uses it.
+
+        ## When a stage fails
+
+        `Recipe.run()` raises `tangle.RecipeError` (a `RuntimeError`) when an
+        operation cannot meet a hard limit within its budget, or fails
+        validation. The exception says which step failed: `operation_index`
+        (zero-based position in `recipe.operations()`), `operation` (its
+        description), `iteration` (the solver iteration at failure), and
+        `reason`.
+        """),
+        code("""
+        # Deliberately give a stage one iteration to show the error fields.
+        # Running it takes a few seconds on the CPU backend, so it is opt-in.
+        RUN_SOLVER = False
+        if RUN_SOLVER:
+            cell = tangle.Cell([1 * mm, 1 * mm, 1 * mm])
+            fibers = tangle.generate_fiber_pair_crossing(
+                cell,
+                material=tangle.Material("fiber", diameter=19 * um),
+                length=0.8 * mm,
+                axis_separation=10 * um,
+            )
+            failing = tangle.Recipe(cell)
+            failing.insert(fibers)
+            failing.solve(final.replace(name="too short", max_iterations=1))
+            try:
+                failing.run(tangle.RelaxationSettings(backend="cpu"))
+            except tangle.RecipeError as error:
+                print(error.operation_index, error.operation, error.iteration)
+                print(error.reason)
         """),
     ],
     "10_layer_motion_and_needling.ipynb": [
         md("""
         # Layer placement and needling operations
 
-        These recipe commands approximate manufacturing by applying temporary
-        device-resident targets. They must be separated by explicit relaxation
-        operations. Releasing a target lets the displaced fibers and their
-        contacts settle mechanically.
+        These recipe commands approximate manufacturing by holding fibers on
+        temporary device-resident targets. Each hold must be followed by an
+        explicit relaxation. Releasing a target lets the displaced fibers and
+        their contacts settle mechanically.
+
+        Placement and needling return a `HeldTargets` handle. Use it as a
+        context manager: the targets are held for the relaxation inside the
+        `with` block and released when the block ends. Without `with`, call
+        `release_layer_placement()` or `release_needles()` yourself.
         """),
         code("""
         import tangle
+        from tangle.units import mm, um
 
-        recipe = tangle.Recipe(
-            tangle.Cell([1e-3, 1e-3, 3e-3], periodic=[True, True, False]),
-            # 0=x, 1=y, 2=z; z is the layer and needle-motion direction.
-            layer_axis=2,
-        )
+        # periodic="xy" leaves z as the only bounded axis, so z is the stack
+        # axis for layer and needle motion.
+        recipe = tangle.Recipe(tangle.Cell([1 * mm, 1 * mm, 3 * mm], periodic="xy"))
+        recipe.stack_axis
         """),
         md("""
         ## Layer commands
 
-        - `move_layers(spacing_scale, stiffness, max_translation)` scales all
-          current layer-center spacings.
-        - `place_layer_above(layer, gap, ...)` brings one layer to a surface gap
-          above the active stack.
-        - `release_layer_targets()` removes those temporary clamps.
-        - `fit_cell_to_active_fibers(axes, padding)` removes empty domain space.
+        - `scale_layer_spacing(factor, stiffness=, max_translation=)` scales
+          all current layer-center spacings.
+        - `place_layer_above(layer, gap=, ...)` brings one layer to a surface
+          gap above the active stack.
+        - `settle_targets(tolerance=, max_iterations=)` relaxes until held
+          fibers reach their targets.
+        - `release_layer_placement()` removes those temporary targets; a `with`
+          block calls it for you.
+        - `fit_cell_to_active_fibers(axes=, padding=)` removes empty domain
+          space; `axes` accepts letters such as `"z"`.
         """),
         code("""
-        # move_layers scales current layer-center spacing; it does not teleport
-        # fibers or bypass contact relaxation.
-        recipe.move_layers(0.8, stiffness=0.5, max_translation=5e-6)
-        recipe.relax_for(500)
-        recipe.place_layer_above(2, gap=2e-6, stiffness=0.5, max_translation=5e-6)
-        recipe.relax_until_targets_reached(0.1e-6, 2_000)
-        # Releasing temporary clamps lets later stages move the stack freely.
-        recipe.release_layer_targets()
-        recipe.fit_cell_to_active_fibers(
-            axes=[False, False, True], padding=25e-6
-        )
+        # scale_layer_spacing scales current layer-center spacing; it does not
+        # teleport fibers or bypass contact relaxation. The with block
+        # releases the layer targets when it ends.
+        with recipe.scale_layer_spacing(0.8, stiffness=0.5, max_translation=5 * um):
+            recipe.relax_for(500)
+
+        # Without `with`, the targets stay held until released explicitly.
+        recipe.place_layer_above(2, gap=2 * um, stiffness=0.5, max_translation=5 * um)
+        recipe.settle_targets(tolerance=0.1 * um, max_iterations=2_000)
+        recipe.release_layer_placement()
+
+        # Shrink the bounded z extent to the active fibers plus padding.
+        recipe.fit_cell_to_active_fibers(axes="z", padding=25 * um)
         """),
         md("""
         ## Needle commands
 
-        `needle_layer_circular` selects one internal vertex from each eligible
-        fiber intersecting a circular footprint. `needle_layer_random` samples
-        eligible fibers by fraction. Both accept depth, optional minimum fiber
-        diameter, target stiffness, absolute maximum motion, and a motion cap
-        relative to the selected fiber diameter. Needle locations can be made
-        random by sampling `center` in Python before adding the operation.
+        `needle_layer(layer, footprint=, depth=, ...)` pulls one internal
+        vertex of each eligible fiber in `layer` along the stack axis by
+        `depth`. The footprint chooses the fibers:
+
+        - `CircularFootprint(center, diameter=)` selects fibers crossing an
+          in-plane circle; `center` holds the two in-plane coordinates.
+        - `CircularFootprint.random(diameter=, seed=)` places that circle at a
+          seeded random center. The layer index is mixed into the seed, so one
+          seed gives different punch locations on different layers.
+        - `RandomFiberFraction(fraction, seed=)` samples a fraction of the
+          layer's eligible fibers regardless of location.
+
+        `min_fiber_diameter` restricts needling to thick fibers; `stiffness`,
+        `max_translation`, and `max_translation_over_diameter` limit how fast
+        the targets pull.
         """),
         code("""
-        # Circular needling selects one internal vertex per eligible fiber in
-        # the x/y footprint because z is the configured layer axis.
-        recipe.needle_layer_circular(
-            layer=2, center=[0.45e-3, 0.55e-3], diameter=100e-6,
-            depth=0.6e-3, minimum_fiber_diameter=15e-6,
-            stiffness=0.75, max_translation=5e-6,
-            maximum_translation_over_fiber_diameter=0.5,
-        )
-        recipe.relax_until_targets_reached(0.1e-6, 5_000)
-        # Hold the target through relaxation, then release it before continuing.
-        recipe.release_needles()
+        # A fixed circular punch in x/y (the axes other than the stack axis).
+        with recipe.needle_layer(
+            2,
+            footprint=tangle.CircularFootprint([0.45 * mm, 0.55 * mm], diameter=100 * um),
+            depth=0.6 * mm,
+            min_fiber_diameter=15 * um,
+            stiffness=0.75,
+            max_translation=5 * um,
+            max_translation_over_diameter=0.5,
+        ):
+            # Hold the target through relaxation; the block end releases it.
+            recipe.settle_targets(tolerance=0.1 * um, max_iterations=5_000)
 
-        # Random needling samples fibers reproducibly from seed rather than by
-        # spatial footprint.
-        recipe.needle_layer_random(
-            layer=3, fraction=0.15, depth=0.6e-3, seed=2026,
-            minimum_fiber_diameter=15e-6, stiffness=0.75,
-            max_translation=5e-6,
-            maximum_translation_over_fiber_diameter=0.5,
+        # Seeded random punch locations: one stroke per seed.
+        for stroke in range(3):
+            with recipe.needle_layer(
+                2,
+                footprint=tangle.CircularFootprint.random(diameter=150 * um, seed=stroke),
+                depth=350 * um,
+            ):
+                recipe.settle_targets(tolerance=0.1 * um, max_iterations=2_000)
+
+        # Random needling samples fibers reproducibly by fraction rather than
+        # by spatial footprint. Here the needle is released explicitly.
+        recipe.needle_layer(
+            3,
+            footprint=tangle.RandomFiberFraction(0.15, seed=2026),
+            depth=0.6 * mm,
+            min_fiber_diameter=15 * um,
+            stiffness=0.75,
+            max_translation=5 * um,
+            max_translation_over_diameter=0.5,
         )
+        recipe.settle_targets(tolerance=0.1 * um, max_iterations=5_000)
         recipe.release_needles()
         print(*recipe.operations(), sep="\\n")
         """),
@@ -1306,42 +1595,68 @@ NOTEBOOKS: dict[str, list[dict]] = {
         changes. Each trial changes the cell, relaxes, checks guards, and is
         accepted or rolled back before the next increment.
         """),
-        code("# Compaction is configured independently from the recipe using it.\nimport tangle"),
+        code("# Compaction is configured independently from the recipe using it.\nimport tangle\nfrom tangle.units import mm, um"),
         md("## Every `CompactionSettings` field"),
         *settings_cells("CompactionSettings", "compaction", COMPACTION_FIELDS),
         md("""
+        ## Targets and paths
+
+        The target says when to stop; the path says how the cell moves to get
+        there. Both are small objects that carry only their own options, and
+        they are chosen independently.
+        """),
+        md(table(COMPACTION_TARGETS, header=("Target", "Stops at", "Value"))),
+        md(table(COMPACTION_PATHS, header=("Path", "Meaning", "Options"))),
+        md("""
         ## Common target/path combinations
 
-        `volume_fraction()` is the concise constructor. Other stopping targets
-        are selected by changing `target_type` and the scalar `target_value` or
-        vector `target_values`. The path is independent of the target.
+        `CompactionSettings.volume_fraction(v, **changes)` is the concise
+        constructor: it sets `VolumeFractionTarget(v)` and the default
+        `AxisWeightsPath()`, which shortens only the recipe's stack axis. Any
+        other field follows as a keyword. `replace()` then swaps a target or
+        path while keeping every guard.
         """),
         code("""
-        # axis_weights map to [x, y, z]; only the bounded z direction shortens.
+        # Only the stack axis (z for a periodic="xy" cell) shortens by default.
         compaction = tangle.CompactionSettings.volume_fraction(
-            0.40, axis_weights=[0.0, 0.0, 1.0]
+            0.40,
+            kinematics="moving_walls",
+            cell_anchor=[0.5, 0.5, 0.5],  # both z faces move
+            balance_opposing_faces=True,
+            max_penetration=0.1 * um,
+            max_curvature_ratio=1.05,
         )
-        compaction.kinematics = "moving_walls"
-        compaction.cell_anchor = [0.5, 0.5, 0.5]  # both z faces move
-        compaction.balance_opposing_faces = True
-        compaction.maximum_penetration = 0.1e-6
-        compaction.maximum_bend_ratio = 1.05
 
-        # Copies make it easy to compare paths without rebuilding every guard.
-        equal_pressure = compaction.copy()
-        equal_pressure.path = "equal_pressure"
-        equal_pressure.active_axes = [True, True, True]
+        # replace() compares paths and targets without rebuilding every guard.
+        explicit_z = compaction.replace(path=tangle.AxisWeightsPath("z"))
+        equal_pressure = compaction.replace(path=tangle.EqualPressurePath("xyz"))
+        stress_ratio = compaction.replace(
+            path=tangle.StressRatioPath([1.0, 1.0, 2.0], pressure_floor=1.0)
+        )
+        least_work = compaction.replace(path=tangle.MinimumWorkPath("xy"))
+        target_lengths = compaction.replace(
+            target=tangle.CellLengthsTarget([0.8 * mm, 0.8 * mm, 1.2 * mm])
+        )
+        target_pressure = compaction.replace(target=tangle.MeanPressureTarget(1.0e3))
 
-        target_lengths = compaction.copy()
-        target_lengths.target_type = "cell_lengths"
-        target_lengths.target_values = [0.8e-3, 0.8e-3, 1.2e-3]
+        # The constructor takes the target object directly, too.
+        by_volume = tangle.CompactionSettings(
+            tangle.CellVolumeTarget(0.8e-9), path=tangle.AxisWeightsPath([1.0, 1.0, 1.0])
+        )
+        by_direction = tangle.CompactionSettings(tangle.DirectionalPressureTarget([0.0, 0.0, 1.0e3]))
+        by_energy = tangle.CompactionSettings(tangle.PenaltyEnergyTarget(1.0e-9))
+        [compaction.target, compaction.path, equal_pressure.path, target_lengths.target]
         """),
         code("""
-        # Stage overrides affect only this compaction operation's relaxation.
-        recipe = tangle.Recipe(tangle.Cell([1e-3, 1e-3, 2e-3]))
-        stage_overrides = tangle.RelaxationOverrides()
-        stage_overrides.contact_aggregation = "deepest_only"
-        recipe.compact(compaction, stage_overrides)
+        # Overrides affect only the compaction operation they are passed to.
+        recipe = tangle.Recipe(tangle.Cell([1 * mm, 1 * mm, 2 * mm], periodic="xy"))
+        # A gentle first densification with a relaxation preset...
+        recipe.compact(
+            tangle.CompactionSettings.volume_fraction(0.13, kinematics="moving_walls"),
+            tangle.RelaxationOverrides.preset("contact_first"),
+        )
+        # ...then the guarded final compaction with a hand-written override.
+        recipe.compact(compaction, tangle.RelaxationOverrides(contact_aggregation="deepest_only"))
         recipe.operations()
         """),
     ],
@@ -1354,43 +1669,49 @@ NOTEBOOKS: dict[str, list[dict]] = {
         is substantially relaxed. Anchors use material coordinates so they
         survive adaptive remeshing.
         """),
-        code("# Junction angles are expressed in radians.\nimport math\nimport tangle"),
+        code("# Junction angles are expressed in radians.\nimport math\nimport tangle\nfrom tangle.units import mm, um"),
         md("## Every `JunctionPolicy` field"),
         *settings_cells("JunctionPolicy", "policy", JUNCTION_FIELDS),
         code("""
         # The law name and parameter set are downstream labels; capture filters
         # decide which current contacts receive persistent material anchors.
-        policy.name = "cured binder contacts"
-        policy.law_name = "cohesive bond"
-        policy.parameter_set = 2
-        policy.maximum_surface_gap = 0.2e-6
-        policy.minimum_crossing_angle = math.radians(20)
-        policy.maximum_crossing_angle = math.pi / 2
-        # Probability is deterministic for a fixed seed and candidate set.
-        policy.probability = 0.25
-        policy.seed = 9
-        policy.material_pairs = [("large", "small"), ("large", "large")]
-        policy.maximum_per_fiber_pair = 1
-        policy.minimum_anchor_separation = 50e-6
-        policy.candidate_capacity = 100_000
+        policy = tangle.JunctionPolicy(
+            "cured binder contacts",
+            "cohesive bond",
+            parameter_set=2,
+            max_surface_gap=0.2 * um,
+            min_crossing_angle=math.radians(20),
+            max_crossing_angle=math.pi / 2,
+            # Probability is deterministic for a fixed seed and candidate set.
+            probability=0.25,
+            seed=9,
+            material_pairs=[("large", "small"), ("large", "large")],
+            max_per_fiber_pair=1,
+            min_anchor_separation=50 * um,
+            candidate_capacity=100_000,
+        )
+        # replace() derives a variant without repeating every filter.
+        every_contact = policy.replace(name="all binder contacts", probability=1.0)
         """),
         md("""
         `capture_junctions(policy)` samples once at that recipe point.
-        `relax_and_capture(iterations, every, policy)` samples repeatedly at an
-        explicit cadence independent of scheduler batch size. Captured
-        junctions are topology/export data; current relaxation does not enforce
-        their mechanics, so late capture is normally the physically appropriate
-        workflow.
+        `relax_and_capture(iterations=, capture_every=, policy=)` samples
+        repeatedly at an explicit cadence independent of scheduler batch size.
+        Captured junctions are topology/export data; current relaxation does
+        not enforce their mechanics, so late capture is normally the physically
+        appropriate workflow.
         """),
         code("""
-        recipe = tangle.Recipe(tangle.Cell([1e-3, 1e-3, 1e-3]))
+        recipe = tangle.Recipe(tangle.Cell([1 * mm, 1 * mm, 1 * mm]))
         # Late capture records bonds after geometry has settled; contacts before
         # this explicit operation remain transient.
-        recipe.relax(maximum_iterations=5_000)
+        recipe.relax_until_converged(max_iterations=5_000)
         recipe.capture_junctions(policy)
-        # Alternative repeated capture:
-        # recipe.relax_and_capture(iterations=2_000, every=250, policy=policy)
-        recipe.operations()
+
+        # Alternative: capture repeatedly while relaxing.
+        repeated = tangle.Recipe(tangle.Cell([1 * mm, 1 * mm, 1 * mm]))
+        repeated.relax_and_capture(iterations=2_000, capture_every=250, policy=every_contact)
+        recipe.operations() + repeated.operations()
         """),
     ],
     "13_checkpoints_and_resume.ipynb": [
@@ -1432,18 +1753,21 @@ NOTEBOOKS: dict[str, list[dict]] = {
         code("""
         # Branching reads the old checkpoint but writes future progress to a new
         # rolling file, leaving the source restart untouched.
-        branch = checkpoint.copy()
-        branch.path = Path("output/alternate_cleanup.restart")
-        branch.resume = True
-        branch.resume_path = checkpoint.path
-        branch.resume_case_id = checkpoint.case_id
-        branch.fresh_formation_on_resume = True
+        branch = checkpoint.replace(
+            path=Path("output/alternate_cleanup.restart"),
+            resume=True,
+            resume_path=checkpoint.path,
+            resume_case_id=checkpoint.case_id,
+            fresh_formation_on_resume=True,
+        )
 
         # Expensive execution is deliberately opt-in in this reference notebook.
         RUN_RECIPE = False
         if RUN_RECIPE:
             recipe = tangle.Recipe(tangle.Cell([1e-3, 1e-3, 1e-3]))
             result = recipe.run(tangle.RelaxationSettings(), checkpoint=branch)
+            # The resumed, relaxed geometry is a new Assembly on the result.
+            print(result.resumed, result.resumed_iteration, result.assembly.fiber_count)
         """),
     ],
     "14_results_and_exports.ipynb": [
@@ -1456,8 +1780,13 @@ NOTEBOOKS: dict[str, list[dict]] = {
         snapshots were requested. Check `converged`, residuals, warnings, and
         recipe events before claiming a relaxed specimen. Export methods do
         not independently certify mechanical admissibility.
+
+        `run()` never modifies its inputs. The relaxed geometry is a new
+        `Assembly` at `result.assembly`, which can seed a follow-on `Recipe`.
+        A step that cannot meet its policy raises `tangle.RecipeError` instead
+        of returning a result (tutorial 09).
         """),
-        code("# Export methods accept pathlib paths as well as strings.\nfrom pathlib import Path\nimport tangle"),
+        code("# Export methods accept pathlib paths as well as strings.\nfrom pathlib import Path\nimport tangle\nfrom tangle.units import mm, um"),
         md(table([
             ("fiber_count", "Fibers in the assembly.", "count"),
             ("iterations", "Lifetime solver iteration.", "count"),
@@ -1483,24 +1812,42 @@ NOTEBOOKS: dict[str, list[dict]] = {
             ("last_checkpoint_bytes", "Serialized size of the last save.", "bytes or `None`"),
             ("debug_ovito_frames", "Sparse debug trajectory frames written during the run.", "count"),
             ("junction_count", "Persistent junctions in the result.", "count"),
+            ("assembly", "Relaxed geometry as a new assembly; the recipe's inputs are unchanged.", "`Assembly`"),
         ])),
         code("""
         # Build a minimal intersecting pair so the result contains meaningful
         # contact and curvature diagnostics.
-        cell = tangle.Cell([1e-3, 1e-3, 1e-3])
-        fibers = tangle.generate_fiber_pair_crossing(cell)
+        cell = tangle.Cell([1 * mm, 1 * mm, 1 * mm])
+        fibers = tangle.generate_fiber_pair_crossing(
+            cell,
+            material=tangle.Material("fiber", diameter=19 * um),
+            length=0.8 * mm,
+            axis_separation=10 * um,
+        )
         recipe = tangle.Recipe(cell)
         recipe.insert(fibers)
-        recipe.relax(maximum_iterations=2_000)
+        recipe.relax_until_converged(max_iterations=2_000)
 
         # Keep reference notebooks safe to execute top-to-bottom by default.
         RUN_SOLVER = False
         if RUN_SOLVER:
-            settings = tangle.RelaxationSettings()
-            result = recipe.run(settings)
+            # Default tolerances suit millimeter-scale fibers, so state
+            # micrometer ones here. The default backend is "wgpu"; add
+            # backend="cpu" on a machine without a supported GPU.
+            settings = tangle.RelaxationSettings(penetration_tolerance=0.1 * um, max_step=2 * um)
+            try:
+                result = recipe.run(settings)
+            except tangle.RecipeError as error:
+                # The error names the failing step and why it failed.
+                print(error.operation_index, error.operation, error.iteration, error.reason)
+                raise
             print(result.events)
             print(result.warnings)
             final_centerlines = result.centerlines()
+            # The relaxed Assembly can seed a follow-on recipe.
+            relaxed = result.assembly
+            follow_on = tangle.Recipe(relaxed)
+            print(relaxed.fiber_count, relaxed.cell.lengths)
         """),
         md("""
         ## OVITO output
@@ -1530,12 +1877,12 @@ NOTEBOOKS: dict[str, list[dict]] = {
         laws. The four modes separate exact centerline sampling from
         endpoint-preserving or constant-resolution sampling:
 
-        - `spheres-exact` keeps the requested arc spacing exactly and shares
+        - `spheres_exact` keeps the requested arc spacing exactly and shares
           unused length between the two fiber ends.
-        - `spheres-dynamic` preserves every source segment endpoint and adjusts
+        - `spheres_dynamic` preserves every source segment endpoint and adjusts
           the spacing inside each segment.
-        - `spherocylinders-exact` writes one capsule per active segment.
-        - `spherocylinders-constant` uses the shortest active segment length
+        - `spherocylinders_exact` writes one capsule per active segment.
+        - `spherocylinders_constant` uses the shortest active segment length
           throughout, with a shorter remainder only where required.
 
         Sphere center spacing is specified in radii and must lie from `1/3`
@@ -1548,7 +1895,7 @@ NOTEBOOKS: dict[str, list[dict]] = {
             # spacing may shift locally around the requested one-third radius.
             particles, bonds = result.export_bpm(
                 output / "result.data",
-                mode="spheres-dynamic",
+                mode="spheres_dynamic",
                 sphere_spacing_over_radius=1.0 / 3.0,
                 density=1800.0,
                 atom_type=1,
@@ -1560,9 +1907,12 @@ NOTEBOOKS: dict[str, list[dict]] = {
         ## Native characterization
 
         `characterize()` calls the Rust `tangle_characterize` crate on the
-        exact centerlines and sections. It reports nominal swept volume rather
-        than the geometric union of solids, so the field is deliberately named
-        `nominal_swept_volume_fraction`. The complete versioned report is
+        exact centerlines and sections; `result.assembly.characterize()` gives
+        the same report. It reports nominal swept volume rather than the
+        geometric union of solids, so the field is deliberately named
+        `nominal_swept_volume_fraction`. Curvature is summarized by
+        `max_curvature`, `max_curvature_ratio`, and
+        `curvature_limit_violations`. The complete versioned report is
         available as a dictionary, JSON string, or JSON file.
         """),
         code("""
@@ -1572,6 +1922,7 @@ NOTEBOOKS: dict[str, list[dict]] = {
             analysis = result.characterize()
             print(analysis.length_weighted_orientation_tensor)
             print(analysis.volume_weighted_orientation_tensor)
+            print(analysis.max_curvature_ratio, analysis.curvature_limit_violations)
             analysis.write_json(output / "tangle_analysis.json")
         """),
         md("""
@@ -1591,7 +1942,7 @@ NOTEBOOKS: dict[str, list[dict]] = {
             # The cubic voxel size must tile all three orthorhombic cell edges.
             puma_bundle = result.export_puma(
                 output / "result.puma",
-                voxel_size=20e-6,
+                voxel_size=20 * um,
                 include_fiber_ids=True,
                 include_interface=True,
             )

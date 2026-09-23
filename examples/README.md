@@ -8,14 +8,14 @@ individual settings. Each script below has a matching notebook beside it.
 | Concept | Python script | Native notes |
 | --- | --- | --- |
 | Minimal crossing | [crossed_fibers](../crates/tangle_python/python/examples/crossed_fibers.py) | Small complete workflow |
-| Rigid separation | [center_point](../crates/tangle_python/python/examples/native/center_point.py) | [README](fibers_through_center_point_dem_bpm/README.md) |
-| Rest shape and bend limits | [multisegment_shapes](../crates/tangle_python/python/examples/native/multisegment_shapes.py) | [README](multisegment_flexible_relaxation_dem_bpm/README.md) |
+| Rigid separation | [fibers_through_center_point](../crates/tangle_python/python/examples/native/fibers_through_center_point.py) | [README](fibers_through_center_point/README.md) |
+| Rest shape and bend limits | [multisegment_flexible_relaxation](../crates/tangle_python/python/examples/native/multisegment_flexible_relaxation.py) | [README](multisegment_flexible_relaxation/README.md) |
 | Adaptive versus uniform resolution | [adaptive_crossed_fibers](../crates/tangle_python/python/examples/native/adaptive_crossed_fibers.py) | [README](adaptive_crossed_fibers/README.md) |
-| Biased populations | [biased_fiber_box](../crates/tangle_python/python/examples/native/biased_fiber_box.py) | [README](biased_fiber_box_dem_bpm/README.md) |
-| Staged manufacturing | [fake_tps_formation](../crates/tangle_python/python/examples/native/fake_tps_formation.py) | [README](fake_tps_formation/README.md) |
-| Six-layer needling | [fake_needled](../crates/tangle_python/python/examples/native/fake_needled.py) | [README](fake_needled/README.md) |
-| Two-material needling | [fake_needled_2](../crates/tangle_python/python/examples/native/fake_needled_2.py) | [README](fake_needled_2/README.md) |
-| Twenty-ply control and needled felt | [fake_felted](../crates/tangle_python/python/examples/native/fake_felted.py) | [README](fake_felted/README.md) |
+| Biased populations | [biased_fiber_box](../crates/tangle_python/python/examples/native/biased_fiber_box.py) | [README](biased_fiber_box/README.md) |
+| Staged manufacturing | [tps_preform_formation](../crates/tangle_python/python/examples/native/tps_preform_formation.py) | [README](tps_preform_formation/README.md) |
+| Six-layer needling | [needled_felt_toy](../crates/tangle_python/python/examples/native/needled_felt_toy.py) | [README](needled_felt_toy/README.md) |
+| Two-material needling | [needled_preform_two_fiber](../crates/tangle_python/python/examples/native/needled_preform_two_fiber.py) | [README](needled_preform_two_fiber/README.md) |
+| Twenty-ply control and needled felt | [felt_20ply_control_vs_needled](../crates/tangle_python/python/examples/native/felt_20ply_control_vs_needled.py) | [README](felt_20ply_control_vs_needled/README.md) |
 | Native versus voxel analysis | [puma_cross_validation](../crates/tangle_python/python/examples/puma_cross_validation.py) | [PuMA](puma_cross_validation/README.md) |
 
 For another small staged-insertion example, see

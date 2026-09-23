@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use tangle_checkpoint::CheckpointConfig;
 
-use crate::common::with_kwargs;
+use crate::common::{repr_fields, with_kwargs};
 
 /// Periodic restart checkpoint and optional resume settings.
 #[pyclass(name = "CheckpointSettings", module = "tangle._tangle")]
@@ -62,10 +62,12 @@ impl PyCheckpointSettings {
         Ok(settings)
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "CheckpointSettings(case_id={:?}, path={:?}, interval_iterations={}, resume={})",
-            self.case_id, self.path, self.interval_iterations, self.resume
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        repr_fields(
+            slf.as_any(),
+            "CheckpointSettings",
+            &["case_id", "path", "interval_iterations", "resume"],
+            false,
         )
     }
 }

@@ -28,8 +28,9 @@ VTI and native-analysis files for this fixture.
 
 ## Saved needled-felt section report
 
-With `examples/fake_felted/output/needled_capsules.data` present, analyze a
-central 240 µm cube of the saved 1 mm specimen:
+With `examples/felt_20ply_control_vs_needled/output/needled_polish_capsules.data`
+present (written by `--specimen needled --stage polish`), analyze a central
+240 µm cube of the saved 1 mm specimen:
 
 This source file is a local archived result, not included in a fresh clone.
 The reconstruction binary is a specimen-specific utility, not a general

@@ -54,8 +54,7 @@ class TutorialNotebookTests(unittest.TestCase):
             if isinstance(node, ast.ClassDef)
         }
         notebook_for_class = {
-            "FiberPopulationSettings": "05_fiber_generation.ipynb",
-            "CellListSettings": "07_relaxation_settings.ipynb",
+            "FiberPopulation": "05_fiber_generation.ipynb",
             "RelaxationSettings": "07_relaxation_settings.ipynb",
             "AdaptiveSegmentationSettings": "08_adaptive_refinement.ipynb",
             "RelaxationOverrides": "09_solve_policies_and_overrides.ipynb",

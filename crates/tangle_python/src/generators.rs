@@ -444,7 +444,9 @@ impl PyFiberPopulation {
     #[new]
     #[pyo3(signature = (**kwargs))]
     fn new(py: Python<'_>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        with_kwargs(py, Self::default(), kwargs, "FiberPopulation")
+        let population = with_kwargs(py, Self::default(), kwargs, "FiberPopulation")?;
+        population.check_combination()?;
+        Ok(population)
     }
 
     #[getter]
@@ -512,7 +514,9 @@ impl PyFiberPopulation {
 
     #[pyo3(signature = (**changes))]
     fn replace(&self, py: Python<'_>, changes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        with_kwargs(py, self.clone(), changes, "replace")
+        let population = with_kwargs(py, self.clone(), changes, "replace")?;
+        population.check_combination()?;
+        Ok(population)
     }
 
     fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -535,6 +539,18 @@ impl PyFiberPopulation {
 }
 
 impl PyFiberPopulation {
+    /// Rejects variant pairs the generator cannot combine.
+    fn check_combination(&self) -> PyResult<()> {
+        if matches!(self.orientation, Orientation::LayeredBiaxial(_))
+            && !matches!(self.position, Position::Layered(_))
+        {
+            return Err(PyValueError::new_err(
+                "LayeredBiaxialOrientation picks a direction per layer, so it needs position=LayeredPosition(...)",
+            ));
+        }
+        Ok(())
+    }
+
     fn to_rust(&self, stack_axis: usize) -> FiberPopulationSpec {
         let diameter = self
             .diameter
@@ -679,6 +695,7 @@ pub(crate) fn generate_fiber_population_py(
     name: String,
 ) -> PyResult<PyFiberCollection> {
     let mut assembly = FiberAssembly::new(cell.inner);
+    population.check_combination()?;
     generate_biased_fiber_population(&mut assembly, &population.to_rust(cell.stack_axis))
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     PyFiberCollection::from_assembly(name, &assembly)

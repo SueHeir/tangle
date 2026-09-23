@@ -551,7 +551,7 @@ pub(super) fn guard_reached(
         return Some("maximum penetration".to_string());
     }
     if relaxation.max_curvature_ratio > config.guards.maximum_bend_ratio {
-        return Some("maximum bend ratio".to_string());
+        return Some("max curvature ratio".to_string());
     }
     if metrics
         .pressure
