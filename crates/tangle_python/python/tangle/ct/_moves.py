@@ -464,13 +464,23 @@ def render_occupancy(
     """Soft union occupancy of capsules over the voxel box ``[low, high)`` (x, y, z)."""
     from ._geometry import _box_segment_distances
 
+    box_low = np.asarray(box_low, dtype=int)
+    box_high = np.asarray(box_high, dtype=int)
     occupancy = np.zeros(tuple(int(n) for n in (box_high - box_low)[::-1]))
     for line, radius in zip(lines, radii):
         for a, b in zip(line[:-1], line[1:]):
-            if np.any(np.minimum(a, b) - radius - 2 * edge > box_high) or np.any(np.maximum(a, b) + radius + 2 * edge < box_low):
+            # Only the part of the box the capsule's soft edge can reach.
+            low = np.maximum(np.floor(np.minimum(a, b) - radius - 2 * edge).astype(int), box_low)
+            high = np.minimum(np.ceil(np.maximum(a, b) + radius + 2 * edge).astype(int), box_high)
+            if np.any(high <= low):
                 continue
-            distance = _box_segment_distances(box_low, box_high, a, b)
-            np.maximum(occupancy, np.clip(0.5 - (distance - radius) / (2 * edge), 0.0, 1.0), out=occupancy)
+            distance = _box_segment_distances(low, high, a, b)
+            view = occupancy[
+                low[2] - box_low[2] : high[2] - box_low[2],
+                low[1] - box_low[1] : high[1] - box_low[1],
+                low[0] - box_low[0] : high[0] - box_low[0],
+            ]
+            np.maximum(view, np.clip(0.5 - (distance - radius) / (2 * edge), 0.0, 1.0), out=view)
     return occupancy
 
 
@@ -483,58 +493,84 @@ def resolve_side_by_side(
     reach: float = 2.3,
     end_cost: float = 0.0,
     scale: float = 1.0,
+    max_angle_degrees: float = 30.0,
 ) -> tuple[list[np.ndarray], np.ndarray, int]:
     """Decide, from the image, whether two adjacent parallel fits are one fiber.
 
-    When two fits land on one fiber, the non-overlap step pushes them apart
-    until each sits about a radius off the true axis, where they look like two
-    touching fibers. For every pair running side by side, the image in their
-    neighborhood is compared with two renderings: both fibers as they are, and
-    one fiber along their midline (the weaker fit is removed there). The
-    rendering with the smaller squared residual wins. With an ``end_cost``
-    (the fiber-length prior), each fiber end a rendering adds or removes is
-    charged or credited ``end_cost`` nats, the residual being measured in
-    units of ``scale``.
+    When two fits land on one fiber, contact pushes them apart until each
+    sits about a radius off the true axis, where they look like two touching
+    fibers. For every pair running side by side (at least 3 nodes of one fit
+    within ``reach`` radii of the other, with tangents within
+    ``max_angle_degrees``), the image in their neighborhood is compared with
+    two renderings: both fibers as they are, and one fiber along their
+    midline (the weaker fit is removed there). The rendering with the
+    smaller squared residual wins. With an ``end_cost`` (the fiber-length
+    prior), each fiber end a rendering adds or removes is charged or
+    credited ``end_cost`` nats, the residual being measured in units of
+    ``scale``. Fits that only cross are not tested.
     """
     from scipy.spatial import cKDTree
+
+    from ._geometry import tangents
 
     lines = [line.copy() for line in centerlines]
     radii = np.asarray(radii, dtype=np.float64).copy()
     upper = np.array(image.shape[::-1])
+    cos_limit = np.cos(np.radians(max_angle_degrees))
     changed = 0
+
+    def index():
+        """One tree over every fit's nodes; rebuilt only after a change."""
+        live = [k for k in range(len(lines)) if len(lines[k]) >= 2]
+        points = np.concatenate([lines[k] for k in live]) if live else np.zeros((0, 3))
+        owner = np.concatenate([np.full(len(lines[k]), k) for k in live]) if live else np.zeros(0, dtype=int)
+        starts = dict(zip(live, np.cumsum([0] + [len(lines[k]) for k in live])[:-1]))
+        lows = np.array([lines[k].min(axis=0) - 2 * radii[k] if len(lines[k]) >= 2 else np.full(3, np.inf) for k in range(len(lines))])
+        highs = np.array([lines[k].max(axis=0) + 2 * radii[k] if len(lines[k]) >= 2 else np.full(3, -np.inf) for k in range(len(lines))])
+        return cKDTree(points) if len(points) else None, points, owner, starts, lows, highs
+
+    tree, points, owner, starts, lows, highs = index()
     order = list(np.argsort([float(sample_image(image, line).mean()) for line in lines]))
     done: set[int] = set()
-    while order:
+    while order and tree is not None:
         i = order.pop(0)
         if i in done or len(lines[i]) < 2:
             continue
-        others = [j for j in range(len(lines)) if j != i and len(lines[j]) >= 2]
-        if not others:
+        # Nearest node of any other fit, for each node of fit i: ask for
+        # enough neighbors to get past fit i's own nodes within ``reach``.
+        segment = float(np.median(np.linalg.norm(np.diff(lines[i], axis=0), axis=1)))
+        own = int(2.0 * reach * radii[i] / max(segment, 1e-6)) + 1
+        k_near = min(own + 8, len(points))
+        if k_near < 2:
             break
-        points = np.concatenate([lines[j] for j in others])
-        owner = np.concatenate([np.full(len(lines[j]), j) for j in others])
-        starts = {j: s for j, s in zip(others, np.cumsum([0] + [len(lines[j]) for j in others])[:-1])}
-        distance, nearest = cKDTree(points).query(lines[i])
-        close = distance < reach * radii[i]
-        if close.sum() < 3:
+        distance, nearest = tree.query(lines[i], k=k_near, distance_upper_bound=reach * radii[i])
+        other = (nearest < len(points)) & (owner[np.minimum(nearest, len(points) - 1)] != i)
+        has = other.any(axis=1)
+        if has.sum() < 3:
             continue
-        partners, counts = np.unique(owner[nearest[close]], return_counts=True)
+        first = np.argmax(other, axis=1)
+        rows = np.arange(len(lines[i]))
+        near_point = nearest[rows, first]
+        close = has & (distance[rows, first] < reach * radii[i])
+        partner = np.where(close, owner[np.minimum(near_point, len(points) - 1)], -1)
+        partners, counts = np.unique(partner[close], return_counts=True)
+        if counts.size == 0 or counts.max() < 3:
+            continue
         j = int(partners[np.argmax(counts)])
-        mine = np.flatnonzero(close & (owner[nearest] == j))
-        if len(mine) < 3:
+        mine = np.flatnonzero(partner == j)
+        theirs = near_point[mine] - starts[j]
+        # Crossing fits come close at a few nodes but are not parallel.
+        cosine = np.abs((tangents(lines[i])[mine] * tangents(lines[j])[theirs]).sum(axis=1))
+        if np.median(cosine) < cos_limit:
             continue
-        theirs = nearest[mine] - starts[j]
         region = np.vstack([lines[i][mine], lines[j][theirs]])
         margin = 2.5 * max(radii[i], radii[j])
         low = np.maximum(np.floor(region.min(axis=0) - margin).astype(int), 0)
         high = np.minimum(np.ceil(region.max(axis=0) + margin).astype(int), upper)
         observed = image[low[2] : high[2], low[1] : high[1], low[0] : high[0]]
-        neighbors = [
-            k for k in range(len(lines))
-            if k not in (i, j) and len(lines[k]) >= 2
-            and np.all(lines[k].min(axis=0) - 2 * radii[k] < high)
-            and np.all(lines[k].max(axis=0) + 2 * radii[k] > low)
-        ]
+        overlap = np.all(lows < high, axis=1) & np.all(highs > low, axis=1)
+        overlap[[i, j]] = False
+        neighbors = list(np.flatnonzero(overlap))
         context = [lines[k] for k in neighbors]
         context_radii = radii[neighbors]
         both = render_occupancy(low, high, context + [lines[i], lines[j]], np.concatenate([context_radii, [radii[i], radii[j]]]))
@@ -557,6 +593,7 @@ def resolve_side_by_side(
                 radii = np.append(radii, radii[i])
             done.add(j)
             changed += 1
+            tree, points, owner, starts, lows, highs = index()
         done.add(i)
     keep = [k for k, line in enumerate(lines) if len(line) >= 2]
     return [lines[k] for k in keep], radii[keep], changed

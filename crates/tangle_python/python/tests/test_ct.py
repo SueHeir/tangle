@@ -144,6 +144,30 @@ class CtToolTests(unittest.TestCase):
         image, _ = _mask_image(ring, None, settings, largest_radius=3.0)
         self.assertEqual(float(image[15, 15, 15]), 0.0)
 
+    def test_side_by_side_merges_two_fits_on_one_fiber_only(self):
+        from tangle.ct._moves import render_occupancy, resolve_side_by_side
+
+        low, high = np.zeros(3, dtype=int), np.array([48, 40, 40])
+        x = np.linspace(4.0, 44.0, 11)
+
+        def along(y):
+            return np.stack([x, np.full_like(x, y), np.full_like(x, 20.0)], axis=1)
+
+        radii = np.array([4.0, 4.0])
+        one_fiber = render_occupancy(low, high, [along(20.0)], radii[:1])
+        # Two fits pushed a radius off either side of one fiber's axis: one fiber.
+        kept, _, changed = resolve_side_by_side(one_fiber, [along(16.0), along(24.0)], radii, min_length=12.0)
+        self.assertEqual((changed, len(kept)), (1, 1))
+        # Two real touching fibers: kept.
+        two_fibers = render_occupancy(low, high, [along(16.0), along(24.0)], radii)
+        kept, _, changed = resolve_side_by_side(two_fibers, [along(16.0), along(24.0)], radii, min_length=12.0)
+        self.assertEqual((changed, len(kept)), (0, 2))
+        # Fits that only cross are not tested.
+        across = np.stack([np.full_like(x, 24.0), x - 4.0, np.full_like(x, 20.0)], axis=1)
+        crossing = render_occupancy(low, high, [along(20.0), across], radii)
+        kept, _, changed = resolve_side_by_side(crossing, [along(20.0), across], radii, min_length=12.0)
+        self.assertEqual((changed, len(kept)), (0, 2))
+
     def test_geometry_report_finds_overlaps_and_kinks(self):
         straight = np.stack([np.linspace(0, 40, 9), np.zeros(9), np.zeros(9)], axis=1)
         beside = straight + np.array([0.0, 3.0, 0.0])  # radii 2: 1 voxel deep, half a radius
