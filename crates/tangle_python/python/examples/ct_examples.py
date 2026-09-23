@@ -441,6 +441,8 @@ def run(name: str, output: Path) -> dict:
         "confidence AUC (voxel/fiber)": "/".join(
             "-" if check[k] is None else f"{check[k]:.2f}" for k in ("voxel_auc", "fiber_auc")
         ),
+        "sure coverage": _sure_coverage(fit.history),
+        "redraws kept": sum(1 for e in fit.history if e["stage"].startswith("redraw") and e.get("kept")),
         "end error max (vox)": extra.get("end_error_max_voxels"),
         "overlaps": geometry.get("overlapping_pairs"),
         "over bend limit": geometry.get("fibers_over_bend_limit"),
@@ -448,6 +450,15 @@ def run(name: str, output: Path) -> dict:
     }
     print("  " + ", ".join(f"{k} {v:.3g}" if isinstance(v, float) else f"{k} {v}" for k, v in row.items()))
     return row
+
+
+def _sure_coverage(history: list[dict]) -> float | None:
+    """The fit's final sure coverage: the last kept redraw's, else the first confidence's."""
+    value = None
+    for entry in history:
+        if entry["stage"] == "confidence" or (entry["stage"].startswith("redraw") and entry.get("kept")):
+            value = entry.get("sure_coverage")
+    return value
 
 
 def write_summary(output: Path, rows: list[dict]) -> None:
