@@ -16,8 +16,9 @@ misuse. There are no deprecated aliases: old names raise `AttributeError` or
   `*Overrides` are temporary per-step deltas.
 - Every settings, policy and overrides class takes keyword arguments and has
   `replace(**changes)`; the small typed option classes (orientations,
-  positions, compaction targets and paths, footprints) are immutable. Unknown keywords raise `TypeError`; bad option strings
-  raise `ValueError` on the line that set them.
+  positions, compaction targets and paths, footprints) are immutable.
+  Unknown keywords raise `TypeError`; bad option strings raise `ValueError`
+  on the line that set them.
 - Recipe failures raise `tangle.RecipeError` (a `RuntimeError`) with
   `operation_index`, `operation`, `iteration` and `reason`.
 - `tangle.units` provides `um`, `mm` and `nm` in meters.
@@ -90,7 +91,7 @@ The generator functions take `material=Material(...)` in place of
 | `relax(maximum_iterations=)` | `relax_until_converged(max_iterations=)` |
 | `relax_until_targets_reached(tolerance, maximum_iterations)` | `settle_targets(tolerance=, max_iterations=)` |
 | `relax_with_policy(policy, overrides)` | `solve(policy, overrides=None)` |
-| `set_material_bend_radius(name, r)` | `set_min_bend_radius(material_or_name, r)`; an unknown name raises `ValueError` when the recipe already holds fibers, else `RecipeError` at run time |
+| `set_material_bend_radius(name, r)` | `set_min_bend_radius(material_or_name, r)`; `run()` raises `ValueError` for a name no inserted material has (or `RecipeError` when resuming from a checkpoint) |
 | `move_layers(spacing_scale)` | `scale_layer_spacing(factor)` |
 | `release_layer_targets()` | `release_layer_placement()` |
 | `needle_layer_circular(layer, center, diameter, depth, ...)` | `needle_layer(layer, footprint=CircularFootprint(center, diameter=), depth=)` |
