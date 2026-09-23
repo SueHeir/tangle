@@ -27,6 +27,8 @@ use tangle_contact::device::{capture_segment_contacts, find_segment_corrections}
 const CELL_SCAN_BLOCK_SIZE: usize = 256;
 /// Largest neighbor-list buffer, below WGPU's default 128 MiB binding limit.
 const MAXIMUM_NEIGHBOR_LIST_BYTES: usize = 120 << 20;
+/// Cell room for proxy pieces of segments stretched past their rest length.
+const PROXY_STRETCH_ALLOWANCE: f32 = 1.05;
 
 /// One unique inter-fiber capsule contact captured from the resident GPU world.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -372,7 +374,16 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             .iter()
             .map(|&proxies| proxies as usize)
             .sum();
-        let cell_size = (proxy_length + interaction_margin) * cell_list.cell_size_scale;
+        // Pieces of a segment stretched past its rest and initial length are
+        // longer than `proxy_length`; in a dyadic tree every root of the
+        // longest length has zero slack, so pieces get 5 % of room to stretch.
+        // A uniform layout keeps its previous grid.
+        let piece_length = if proxy_length < maximum_length {
+            PROXY_STRETCH_ALLOWANCE * proxy_length
+        } else {
+            proxy_length
+        };
+        let cell_size = (piece_length + interaction_margin) * cell_list.cell_size_scale;
         // Contact capture bins whole segments.
         let segment_cell_size = (maximum_length + interaction_margin) * cell_list.cell_size_scale;
         let cell_extent = [
