@@ -348,7 +348,14 @@ class CheckpointSettings:
 
 class CellListSettings:
     cell_size_scale: float
-    def __init__(self, cell_size_scale: float | None = ...) -> None: ...
+    neighbor_skin_scale: float
+    neighbor_capacity: int
+    def __init__(
+        self,
+        cell_size_scale: float | None = ...,
+        neighbor_skin_scale: float | None = ...,
+        neighbor_capacity: int | None = ...,
+    ) -> None: ...
     def copy(self) -> CellListSettings: ...
     def to_dict(self) -> dict[str, Any]: ...
 

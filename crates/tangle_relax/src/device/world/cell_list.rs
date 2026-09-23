@@ -10,7 +10,15 @@ use tangle_contact::device::{
 use super::DeviceFiberWorld;
 
 impl<R: Runtime> DeviceFiberWorld<R> {
-    fn scan_cell_counts(&self, input: Handle, output: Handle, length: usize, level: usize) {
+    fn scan_cell_counts(
+        &self,
+        input: Handle,
+        output: Handle,
+        length: usize,
+        level: usize,
+        control: Handle,
+        control_len: usize,
+    ) {
         let blocks = length.div_ceil(self.cell_scan_block_size);
         unsafe {
             exclusive_scan_cell_blocks::launch_unchecked::<R>(
@@ -20,6 +28,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 BufferArg::from_raw_parts(input, length),
                 BufferArg::from_raw_parts(output.clone(), length),
                 BufferArg::from_raw_parts(self.cell_scan_block_sums[level].clone(), blocks),
+                BufferArg::from_raw_parts(control.clone(), control_len),
                 length as u32,
                 self.cell_scan_block_size,
             );
@@ -33,6 +42,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             self.cell_scan_block_offsets[level].clone(),
             blocks,
             level + 1,
+            control.clone(),
+            control_len,
         );
         unsafe {
             add_cell_block_offsets::launch_unchecked::<R>(
@@ -41,6 +52,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 CubeDim::new_1d(self.cell_scan_block_size as u32),
                 BufferArg::from_raw_parts(output, length),
                 BufferArg::from_raw_parts(self.cell_scan_block_offsets[level].clone(), blocks),
+                BufferArg::from_raw_parts(control, control_len),
                 length as u32,
             );
         }
@@ -97,6 +109,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             self.cell_offsets.clone(),
             cell_count,
             0,
+            control.clone(),
+            control_len,
         );
         unsafe {
             scatter_cell_segments::launch_unchecked::<R>(

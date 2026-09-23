@@ -22,11 +22,11 @@ use super::{
 };
 use crate::CellListConfig;
 use crate::{CompactionEnergyModel, CompactionKinematics, CompactionMetrics};
-use tangle_contact::device::{
-    capture_segment_contacts, find_segment_corrections, flag_neighbor_list_displacement,
-};
+use tangle_contact::device::{capture_segment_contacts, find_segment_corrections};
 
 const CELL_SCAN_BLOCK_SIZE: usize = 256;
+/// Largest neighbor-list buffer, below WGPU's default 128 MiB binding limit.
+const MAXIMUM_NEIGHBOR_LIST_BYTES: usize = 120 << 20;
 
 /// One unique inter-fiber capsule contact captured from the resident GPU world.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -390,7 +390,12 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             }
             scan_length = blocks;
         }
-        let neighbor_capacity = cell_list.neighbor_capacity;
+        // Keep the list buffer within a single binding on every backend; an
+        // overflowing segment only falls back to scanning its cells.
+        let neighbor_capacity = cell_list.neighbor_capacity.min(
+            (MAXIMUM_NEIGHBOR_LIST_BYTES / (core::mem::size_of::<u32>() * packed.segment_count()))
+                .max(1) as u32,
+        );
         // Lists start stale so the first contact pass builds them.
         let neighbor_state = client.create_from_slice(u32::as_bytes(&[1_u32, 0]));
         let neighbor_counts =
@@ -703,8 +708,6 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         let counts = u32::from_bytes(&bytes);
         self.active_segment_count = counts[0] as usize;
         self.active_vertex_count = counts[1] as usize;
-        // Activity changed, so lists may miss segments that just became active.
-        self.request_neighbor_list_rebuild();
     }
 
     fn launch_curvature_cleanup(&self, config: &RelaxationConfig) {
@@ -841,6 +844,10 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             );
         }
 
+        // Host-side operations between batches (layer targets, needling
+        // commands) may have moved vertices without passing through the
+        // per-iteration displacement check.
+        self.flag_neighbor_list_displacement();
         let starting_iteration = self.total_iterations;
         for step in 0..=iterations {
             self.rebuild_neighbor_lists_if_requested();
@@ -1012,6 +1019,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                                 (completed_iteration / adaptive.refinement_interval) as u32,
                             );
                             self.rebuild_active_indices();
+                            self.request_neighbor_list_rebuild_after_adaptation();
                         }
                     }
                 }
@@ -1280,24 +1288,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                         );
                     }
                 }
-                flag_neighbor_list_displacement::launch_unchecked::<R>(
-                    &self.client,
-                    CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1),
-                    cube_dim.clone(),
-                    BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                    BufferArg::from_raw_parts(
-                        self.neighbor_reference_positions.clone(),
-                        self.packed.positions.len(),
-                    ),
-                    BufferArg::from_raw_parts(
-                        self.active_vertex_indices.clone(),
-                        self.packed.vertex_count(),
-                    ),
-                    BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
-                    BufferArg::from_raw_parts(self.neighbor_state.clone(), 2),
-                    0.5 * self.neighbor_skin,
-                );
             }
+            self.flag_neighbor_list_displacement();
         }
         let status = self.read_status(config);
         self.total_iterations = status.total_iterations;
@@ -1949,6 +1941,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             );
         }
         self.rebuild_active_indices();
+        // Newly active fibers are missing from the lists.
+        self.request_neighbor_list_rebuild();
         (self.active_segment_count, self.active_vertex_count)
     }
 
@@ -2006,6 +2000,9 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             capture_control.clone(),
             1,
         );
+        // The shared grid now uses the capture layout, which the overflow
+        // path of the next contact pass must not read.
+        self.request_neighbor_list_rebuild();
         unsafe {
             capture_segment_contacts::launch_unchecked::<R>(
                 &self.client,

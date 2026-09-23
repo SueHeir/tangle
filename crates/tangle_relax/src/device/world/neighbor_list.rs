@@ -2,11 +2,12 @@
 
 use cubecl::prelude::*;
 use tangle_contact::device::{
-    build_segment_neighbor_lists, finish_neighbor_list_rebuild, request_neighbor_list_rebuild,
-    snapshot_neighbor_reference_positions,
+    build_segment_neighbor_lists, finish_neighbor_list_rebuild, flag_neighbor_list_displacement,
+    request_neighbor_list_rebuild, snapshot_neighbor_reference_positions,
 };
 
 use super::DeviceFiberWorld;
+use crate::device::kernels::request_neighbor_list_rebuild_after_adaptation;
 
 impl<R: Runtime> DeviceFiberWorld<R> {
     /// Rebuilds the cell list and neighbor lists when a rebuild is pending.
@@ -100,6 +101,44 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 CubeCount::Static(1, 1, 1),
                 CubeDim::new_1d(1),
                 BufferArg::from_raw_parts(self.neighbor_state.clone(), 2),
+            );
+        }
+    }
+
+    /// Requests a rebuild when the last adaptation epoch split or merged any
+    /// segment, without a host readback.
+    pub(super) fn request_neighbor_list_rebuild_after_adaptation(&self) {
+        unsafe {
+            request_neighbor_list_rebuild_after_adaptation::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new_1d(1),
+                BufferArg::from_raw_parts(self.refinement_count.clone(), 6),
+                BufferArg::from_raw_parts(self.neighbor_state.clone(), 2),
+            );
+        }
+    }
+
+    /// Requests a rebuild once any active vertex has moved half the skin
+    /// since the lists were built.
+    pub(super) fn flag_neighbor_list_displacement(&self) {
+        unsafe {
+            flag_neighbor_list_displacement::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1),
+                CubeDim::new_1d(64),
+                BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                BufferArg::from_raw_parts(
+                    self.neighbor_reference_positions.clone(),
+                    self.packed.positions.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.active_vertex_indices.clone(),
+                    self.packed.vertex_count(),
+                ),
+                BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                BufferArg::from_raw_parts(self.neighbor_state.clone(), 2),
+                0.5 * self.neighbor_skin,
             );
         }
     }

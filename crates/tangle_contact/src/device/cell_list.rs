@@ -77,9 +77,15 @@ pub fn exclusive_scan_cell_blocks(
     input: &[u32],
     output: &mut [u32],
     block_sums: &mut [u32],
+    control: &[u32],
     length: u32,
     #[comptime] block_size: usize,
 ) {
+    // Every unit reads the same flag, so the whole cube leaves together and
+    // no unit is left waiting at a barrier.
+    if control[0] == 0 {
+        terminate!();
+    }
     let mut shared = Shared::new_slice(block_size);
     let lane = UNIT_POS as usize;
     let index = CUBE_POS * block_size + lane;
@@ -159,9 +165,14 @@ pub fn exclusive_scan_cell_blocks(
 
 /// Adds recursively scanned block totals to one scan level.
 #[cube(launch_unchecked)]
-pub fn add_cell_block_offsets(output: &mut [u32], block_offsets: &[u32], length: u32) {
+pub fn add_cell_block_offsets(
+    output: &mut [u32],
+    block_offsets: &[u32],
+    control: &[u32],
+    length: u32,
+) {
     let index = ABSOLUTE_POS;
-    if index >= length as usize {
+    if index >= length as usize || control[0] == 0 {
         terminate!();
     }
     output[index as usize] += block_offsets[CUBE_POS];
