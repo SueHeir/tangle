@@ -147,6 +147,10 @@ class CollectionTests(unittest.TestCase):
         self.assertAlmostEqual(report.median_crossing_angle_degrees, 90.0)
         self.assertAlmostEqual(report.median_excess_persistence, 1.0, delta=0.1)
         self.assertEqual(len(report.crossing_angles_degrees), 2)
+        graph = report.contact_graph()
+        self.assertEqual(graph["edges"], 1)
+        self.assertEqual(graph["degrees"], [1, 1])
+        self.assertEqual(graph["components"], 1)
         self.assertEqual(report.to_dict()["schema_version"], 1)
         self.assertIn('"contacts": 2', report.to_json())
         with tempfile.TemporaryDirectory() as directory:

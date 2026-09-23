@@ -185,8 +185,9 @@ See [solver and architecture notes](docs/architecture.md) for details.
   per-fiber summaries, curvature, and length-/volume-weighted orientation.
 - **Contacts and neighbors:** contact counts against a random-placement
   baseline, in-axis vs crossing contacts, contact persistence, and neighbor
-  turnover along each fiber. Works on generated assemblies and on CT-tracked
-  centerlines added with `Assembly.insert()`.
+  turnover along each fiber, plus the contact network (coordination number,
+  clustering, repeated contacts, percolation). Works on generated assemblies
+  and on CT-tracked centerlines added with `Assembly.insert()`.
 - **Fiber shape:** curvature and torsion distributions, tangent correlation and
   persistence length, curl index, and a Schladitz β orientation fit, from
   `characterize_shape()` on the same generated or CT-tracked centerlines.

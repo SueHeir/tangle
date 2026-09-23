@@ -13,11 +13,13 @@ use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 use tangle_app::prelude::*;
 mod distribution;
+mod graph;
 mod neighbors;
 mod scorecard;
 mod shape;
 
 pub use distribution::Distribution;
+pub use graph::{analyze_contact_graph, ContactGraphMetrics, CONTACT_GRAPH_SCHEMA_VERSION};
 pub use neighbors::{
     analyze_neighbors, ContactEvent, FiberNeighborMetrics, NeighborAnalysisConfig,
     NeighborAnalysisError, NeighborMetrics, NEIGHBOR_SCHEMA_VERSION,

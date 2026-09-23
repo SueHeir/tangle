@@ -30,8 +30,8 @@ use tangle_core::{FiberAssembly, FiberId, PeriodicCell, Vec3};
 use crate::distribution::Distribution;
 use crate::neighbors::{add, norm, scale, sub};
 use crate::{
-    analyze_neighbors, analyze_shape, characterize_assembly, NeighborAnalysisConfig,
-    NeighborAnalysisError, ShapeAnalysisConfig, ShapeAnalysisError,
+    analyze_contact_graph, analyze_neighbors, analyze_shape, characterize_assembly,
+    NeighborAnalysisConfig, NeighborAnalysisError, ShapeAnalysisConfig, ShapeAnalysisError,
 };
 
 /// Schema version of [`Scorecard`] and [`StructureProfile`].
@@ -59,7 +59,10 @@ pub struct StructureProfile {
 /// Scalars: `volume_fraction`, `length_density`, `mean_squared_axis_cosine`,
 /// `log_schladitz_beta`, `persistence_length`, `tangent_correlation_length`,
 /// `contacts_per_length`, `contact_ratio_to_random`,
-/// `in_axis_contact_fraction`, `mean_neighbors`, `neighbor_correlation_length`.
+/// `in_axis_contact_fraction`, `mean_neighbors`, `neighbor_correlation_length`,
+/// and from the contact graph `contact_degree_per_length`,
+/// `contact_clustering`, `repeated_contact_fraction` and
+/// `largest_component_length_fraction`.
 ///
 /// Distributions: `curvature`, `absolute_torsion`, `curl_index`,
 /// `axis_cosine`, `fiber_length`, `crossing_angle` (radians), `free_length`,
@@ -72,6 +75,7 @@ pub fn profile_structure(
     let basic = characterize_assembly(assembly);
     let shape_metrics = analyze_shape(assembly, shape)?;
     let neighbor_metrics = analyze_neighbors(assembly, neighbors)?;
+    let graph = analyze_contact_graph(&neighbor_metrics);
     let quantiles = shape.quantile_count;
     let volume = basic.cell.volume;
     let has_length = neighbor_metrics.total_length > 0.0;
@@ -117,6 +121,13 @@ pub fn profile_structure(
         (
             "neighbor_correlation_length",
             neighbor_metrics.neighbor_correlation_length,
+        ),
+        ("contact_degree_per_length", graph.degree_per_length),
+        ("contact_clustering", graph.average_clustering),
+        ("repeated_contact_fraction", graph.repeated_contact_fraction),
+        (
+            "largest_component_length_fraction",
+            (graph.fibers > 0).then_some(graph.largest_component_length_fraction),
         ),
     ]
     .into_iter()

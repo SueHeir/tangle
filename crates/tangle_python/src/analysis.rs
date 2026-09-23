@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use tangle_characterize::{
-    analyze_neighbors, analyze_shape, score_structure, write_analysis_json, AssemblyMetrics,
-    Distribution, NeighborAnalysisConfig, NeighborMetrics, Scorecard, ScorecardConfig,
-    ShapeAnalysisConfig, ShapeMetrics,
+    analyze_contact_graph, analyze_neighbors, analyze_shape, score_structure, write_analysis_json,
+    AssemblyMetrics, Distribution, NeighborAnalysisConfig, NeighborMetrics, Scorecard,
+    ScorecardConfig, ShapeAnalysisConfig, ShapeMetrics,
 };
 use tangle_core::FiberAssembly;
 use tangle_export::PumaExportReport;
@@ -353,6 +353,15 @@ impl PyNeighborReport {
             .filter(|event| !event.in_axis)
             .map(|event| event.excess_persistence())
             .collect()
+    }
+
+    /// Contact-network statistics: degree (coordination number), clustering,
+    /// repeated contacts per pair and connected components.
+    fn contact_graph(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(
+            py,
+            serde_json::to_string(&analyze_contact_graph(&self.inner)),
+        )
     }
 
     /// Contact events per unit length for every fiber.

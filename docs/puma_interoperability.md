@@ -99,6 +99,14 @@ distances and must be orthorhombic.
 - **Contact-count dispersion:** variance over mean of contacts per fiber.
   Random placement of equal-length fibers gives about one; clustering gives
   more.
+- **Contact graph:** `NeighborReport.contact_graph()` treats fibers as nodes
+  joined when they touch at least once. It reports the degree (coordination
+  number) and its histogram, `degree_per_length` (partners per unit length,
+  insensitive to truncation at a scan boundary), the number of separate
+  contacts per pair and the fraction of pairs that touch more than once
+  (wrapping or wandering back), the average local clustering and global
+  transitivity, and connected components with the fraction of fibers and
+  of length in the largest one (percolation).
 
 When comparing with a CT scan, run the same call on the tracked centerlines
 (inserted with `Assembly.insert()`) using the same gaps and angle. CT cannot
@@ -200,7 +208,7 @@ first.
 
 | Kind | Metrics |
 | --- | --- |
-| Scalars | `volume_fraction`, `length_density`, `mean_squared_axis_cosine`, `log_schladitz_beta`, `persistence_length`, `tangent_correlation_length`, `contacts_per_length`, `contact_ratio_to_random`, `in_axis_contact_fraction`, `mean_neighbors`, `neighbor_correlation_length` |
+| Scalars | `volume_fraction`, `length_density`, `mean_squared_axis_cosine`, `log_schladitz_beta`, `persistence_length`, `tangent_correlation_length`, `contacts_per_length`, `contact_ratio_to_random`, `in_axis_contact_fraction`, `mean_neighbors`, `neighbor_correlation_length`, `contact_degree_per_length`, `contact_clustering`, `repeated_contact_fraction`, `largest_component_length_fraction` |
 | Distributions | `curvature`, `absolute_torsion`, `curl_index`, `axis_cosine`, `fiber_length`, `crossing_angle`, `free_length`, `excess_persistence` |
 
 - **Same settings on both sides.** Sample spacings, the neighbor gap, lag
