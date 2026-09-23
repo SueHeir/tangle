@@ -87,7 +87,14 @@ class Tracer:
         axis /= np.linalg.norm(axis)
         return np.cos(self.max_turn) * current + np.sin(self.max_turn) * axis
 
-    def trace_one_way(self, start: np.ndarray, direction: np.ndarray, max_steps: int) -> list[np.ndarray]:
+    def trace_one_way(
+        self, start: np.ndarray, direction: np.ndarray, max_steps: int, own_label: int = 0
+    ) -> list[np.ndarray]:
+        """Step from ``start`` along ``direction`` until the core leaves the fiber.
+
+        Voxels of ``claimed`` labelled ``own_label`` are not down-weighted
+        (the fiber being extended).
+        """
         points: list[np.ndarray] = []
         position = start.copy()
         misses = 0
@@ -95,7 +102,7 @@ class Tracer:
             candidate = position + self.step * direction
             if not self._inside(candidate):
                 break
-            candidate = self.recenter(candidate, direction)
+            candidate = self.recenter(candidate, direction, own_label)
             axis, tubularity = self.hessian.directions(candidate)
             axis = axis[0]
             if axis @ direction < 0:

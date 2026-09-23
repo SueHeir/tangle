@@ -9,7 +9,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from . import _confidence, _moves, _refine
+from . import _confidence, _moves, _refine, _regrow
 from ._ends import end_cost, end_statistics, evidence_scale
 from ._geometry import polyline_length, rasterize, tangents
 from ._image import HessianField, Levels, normalize
@@ -86,6 +86,12 @@ class FitSettings:
     solver_settle_iterations: int = 100
     solver_image_rate: float = 0.3
     solver_reach_radii: float = 1.4
+    # Redraw passes after the fit: cut out nodes whose confidence is below
+    # ``confidence_threshold``, grow the sure pieces back into the gaps,
+    # re-solve with the sure pieces pinned, and keep the result only if more
+    # of the foreground is explained by sure fibers (see ``_regrow``).
+    redraw_passes: int = 2
+    confidence_threshold: float = 0.5
 
     def replace(self, **changes: Any) -> "FitSettings":
         return replace(self, **changes)
@@ -544,7 +550,22 @@ def fit_fibers(
         lines = fitter.solve(lines, radii, types)
         log("final solve", lines, types=fitter.counts(types))
         confidence, summary = fitter.confidence(lines, radii, previous=before)
-        log("confidence", lines, **summary)
+        coverage = _confidence.sure_coverage(fitter.foreground, lines, radii, confidence)
+        log("confidence", lines, **summary, sure_coverage=round(coverage, 4))
+        for pass_index in range(settings.redraw_passes):
+            redrawn = fitter.redraw(lines, radii, types, confidence)
+            if redrawn is None:
+                break
+            new_lines, new_radii, new_types, new_confidence, counts = redrawn
+            new_coverage = _confidence.sure_coverage(fitter.foreground, new_lines, new_radii, new_confidence)
+            kept = new_coverage > coverage + 1e-3
+            log(
+                f"redraw {pass_index + 1}", new_lines, **counts, sure_coverage=round(new_coverage, 4),
+                kept=kept, types=fitter.counts(new_types),
+            )
+            if not kept:
+                break
+            lines, radii, types, confidence, coverage = new_lines, new_radii, new_types, new_confidence, new_coverage
 
     return FitResult(
         shape=tuple(int(n) for n in volume.shape),
@@ -722,7 +743,9 @@ class _Fitter:
         radius = np.maximum(radius, 0.25)
         return np.argmin(np.abs(np.log(radius[:, None]) - np.log(self.radius[None, :])), axis=1).astype(int)
 
-    def solve(self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray) -> list[np.ndarray]:
+    def solve(
+        self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray, anchors: list[np.ndarray] | None = None
+    ) -> list[np.ndarray]:
         from . import _device
 
         s = self.settings
@@ -731,7 +754,65 @@ class _Fitter:
             spacing=self.spacing, rate=s.solver_image_rate, reach_radii=s.solver_reach_radii,
             iterations=s.solver_iterations, settle=s.solver_settle_iterations, backend=s.backend,
             reach=np.asarray(radii, dtype=np.float64) + self.margin, log=self.log,
+            anchors=anchors, anchor_tolerance=0.3 * float(self.radius.min()),
         )
+
+    def redraw(
+        self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray, confidence: list[np.ndarray]
+    ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, list[np.ndarray], dict[str, Any]] | None:
+        """One redraw pass (see ``_regrow``); ``None`` when no node is unsure."""
+        from ._trace import Tracer
+
+        s = self.settings
+        types = np.asarray(types, dtype=int)
+        cut = _regrow.cut_unsure(
+            lines, confidence, np.asarray(radii), threshold=s.confidence_threshold, spacing=self.spacing
+        )
+        if cut is None:
+            return None
+        piece_types = types[cut.parent]
+        piece_radii = np.asarray(radii, dtype=np.float64)[cut.parent]
+
+        def tracer_for(index: int, claimed: np.ndarray) -> Tracer:
+            kind = int(piece_types[index])
+            r = float(self.radius[kind])
+            return Tracer(
+                self.image, self.hessian(kind), radius=r, min_bend_radius=float(self.bend[kind]),
+                step=max(0.75, 0.5 * r), claimed=claimed,
+            )
+
+        pieces, grown = _regrow.grow_cut_ends(
+            cut.pieces, cut.cut_ends, piece_radii, tracer_for=tracer_for, shape=self.image.shape,
+            spacing=self.spacing, max_length=20.0 * float(self.radius.max()),
+        )
+        born = self.trace(pieces, piece_radii)
+        born_radii, born_types = self.classify(born)
+        lines = pieces + born
+        radii = np.concatenate([piece_radii, born_radii])
+        types = np.concatenate([piece_types, born_types]).astype(int)
+        lines, radii, types, counts = self.topology(lines, radii, types)
+        for _ in range(s.solver_batches):
+            if not lines:
+                break
+            lines = self.solve(lines, radii, types, anchors=cut.anchors)
+            radii, types = self.classify(lines)
+            lines = _refine.respace(lines, self.spacing)
+        confidence: list[np.ndarray] = []
+        summary: dict[str, Any] = {}
+        if lines:
+            before = lines
+            lines = self.solve(lines, radii, types, anchors=cut.anchors)
+            confidence, summary = self.confidence(lines, radii, previous=before)
+        info = {
+            "unsure_nodes_cut": cut.removed_nodes,
+            "fibers_removed": cut.removed_fibers,
+            "sure_pieces": len(cut.pieces),
+            "grown_length_voxels": round(grown, 1),
+            "born": len(born),
+            "merges": counts.get("merges"),
+            "confidence_mean": summary.get("mean"),
+        }
+        return lines, radii, types, confidence, info
 
     def confidence(
         self, lines: list[np.ndarray], radii: np.ndarray, *, previous: list[np.ndarray] | None = None

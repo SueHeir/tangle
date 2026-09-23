@@ -220,8 +220,27 @@ is trusted when, where it sits:
   along the contact of two touching fibers reads the wrong thickness);
 - it barely moved in the final solve (**stability**).
 
-The confidence is the product of the five. The plan is to use it to keep
-confident fibers fixed and re-solve only the unsure regions.
+The confidence is the product of the five.
+
+The fit then uses it to **redraw the unsure parts**
+(`FitSettings.redraw_passes`, 2 by default). Each pass:
+
+1. cuts every stretch whose confidence is below
+   `FitSettings.confidence_threshold` (0.5) out of its fiber, keeping the
+   sure pieces;
+2. grows each cut end forward along its own direction into the gap, with
+   the tracer: it follows the scan, keeps within the bend limit, keeps its
+   direction through a crossing, and stops where it would run onto another
+   piece;
+3. joins ends that meet and traces new fibers in whatever is still
+   unexplained, with the usual steps;
+4. re-solves with the sure pieces pinned, so they stay where they are and
+   everything else fits around them.
+
+A pass is kept only if it raises the **sure coverage**: the fraction of the
+foreground explained by the fit, each voxel weighted by the confidence of
+the fit that owns it. Missing fibers, unsure fits and fits over void all
+lower it. The history records every pass and whether it was kept.
 
 ## Examples
 

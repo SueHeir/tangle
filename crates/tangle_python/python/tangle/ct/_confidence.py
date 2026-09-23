@@ -228,3 +228,31 @@ def _to_nodes(line: np.ndarray, points: np.ndarray, value: np.ndarray) -> np.nda
             else float(np.interp(node_arc[i], sample_arc, value))
         )
     return out
+
+
+def sure_coverage(
+    foreground: np.ndarray,
+    lines: list[np.ndarray],
+    radii: np.ndarray,
+    confidence: list[np.ndarray],
+) -> float:
+    """The fraction of the foreground explained by the fit, weighted by confidence.
+
+    Each foreground voxel counts the confidence of the fit that owns it (the
+    nearest capsule surface; 0 when no fit does). Missing fibers, unsure
+    fits and fits over void all lower it, so a redraw is kept only when it
+    raises it.
+    """
+    from ._geometry import rasterize
+
+    total = float(foreground.sum())
+    if not lines or total == 0.0:
+        return 0.0
+    _, _, segments = rasterize(
+        foreground.shape, lines, np.asarray(radii, dtype=np.float64), signed=True
+    )
+    table = np.concatenate([0.5 * (c[:-1] + c[1:]) for c in confidence]).astype(
+        np.float64
+    )
+    owned = foreground & (segments >= 0)
+    return float(table[segments[owned]].sum()) / total

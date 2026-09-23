@@ -200,6 +200,48 @@ class CtToolTests(unittest.TestCase):
         moved = mean([along(16.0), along(24.0)], previous=[along(13.0), along(27.0)])
         self.assertLess(moved, 0.5 * right)
 
+    def test_redraw_cuts_unsure_stretches_and_grows_the_sure_ends_back(self):
+        from tangle.ct._geometry import paint
+        from tangle.ct._image import HessianField
+        from tangle.ct._regrow import cut_unsure, grow_cut_ends, pinned_flags
+        from tangle.ct._trace import Tracer
+
+        occupied = np.zeros((40, 40, 64), dtype=np.int32)
+        axis = np.array([[4.0, 20.0, 20.0], [60.0, 20.0, 20.0]])
+        paint(occupied, axis, 4.0, 1)  # one straight fiber, radius 4, along x
+        image = occupied.astype(np.float32)
+        line = np.stack([np.arange(8.0, 57.0, 4.0), np.full(13, 20.0), np.full(13, 20.0)], axis=1)
+        confidence = np.where((line[:, 0] > 22) & (line[:, 0] < 42), 0.2, 0.9)
+
+        cut = cut_unsure([line], [confidence], np.array([4.0]), threshold=0.5, spacing=4.0)
+        self.assertEqual(len(cut.pieces), 2)
+        self.assertEqual(sorted(cut.cut_ends), [(0, -1), (1, 0)])
+        self.assertLessEqual(cut.pieces[0][:, 0].max(), 22.0)
+        self.assertGreaterEqual(cut.pieces[1][:, 0].min(), 42.0)
+        # Anchors leave two radii free at each cut end.
+        self.assertLessEqual(max(a[:, 0].max() for a in cut.anchors if a[0, 0] < 30), 22.0 - 8.0 + 1e-6)
+        self.assertIsNone(cut_unsure([line], [np.full(13, 0.9)], np.array([4.0]), threshold=0.5, spacing=4.0))
+
+        hessian = HessianField(image, sigma=2.4)
+
+        def tracer_for(index, claimed):
+            return Tracer(image, hessian, radius=4.0, min_bend_radius=40.0, step=2.0, claimed=claimed)
+
+        pieces, grown = grow_cut_ends(
+            cut.pieces, cut.cut_ends, np.array([4.0, 4.0]), tracer_for=tracer_for, shape=image.shape,
+            spacing=4.0, max_length=80.0,
+        )
+        self.assertGreater(grown, 4.0)
+        first, second = sorted(pieces, key=lambda p: p[:, 0].min())
+        # The ends grew toward each other and stopped short of overlapping.
+        self.assertGreater(first[:, 0].max(), 26.0)
+        self.assertLess(first[:, 0].max(), second[:, 0].min())
+        self.assertLess(second[:, 0].min() - first[:, 0].max(), 16.0)  # within the join gap
+        self.assertLess(np.abs(first[:, 1:] - 20.0).max(), 1.0)  # stayed on the fiber axis
+        flags = pinned_flags([first], cut.anchors, 0.5)[0]
+        self.assertTrue(flags[0])
+        self.assertFalse(flags[-1])
+
     def test_geometry_report_finds_overlaps_and_kinks(self):
         straight = np.stack([np.linspace(0, 40, 9), np.zeros(9), np.zeros(9)], axis=1)
         beside = straight + np.array([0.0, 3.0, 0.0])  # radii 2: 1 voxel deep, half a radius
@@ -257,6 +299,10 @@ class CtFitTests(unittest.TestCase):
         self.assertTrue(((values >= 0) & (values <= 1)).all())
         # Three well separated, correctly fitted fibers: mostly sure.
         self.assertGreater(float(values.mean()), 0.6)
+        stages = [entry["stage"] for entry in self.fit.history]
+        self.assertIn("confidence", stages)
+        coverage = next(e for e in self.fit.history if e["stage"] == "confidence")["sure_coverage"]
+        self.assertGreater(coverage, 0.5)
         volume = self.fit.confidence_volume()
         fitted = self.fit.label_volume() > 0
         self.assertTrue(np.isnan(volume[~fitted]).all())
