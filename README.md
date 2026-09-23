@@ -1,6 +1,5 @@
 # TANGLE
 
-[![CI](https://github.com/SueHeir/tangle/actions/workflows/ci.yml/badge.svg)](https://github.com/SueHeir/tangle/actions/workflows/ci.yml)
 
 **Thread Assembly, Network Generation, Linking, and Equilibration**
 
