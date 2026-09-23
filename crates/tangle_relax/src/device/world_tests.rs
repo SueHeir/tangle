@@ -1,4 +1,7 @@
 use super::*;
+#[cfg(all(not(feature = "wgpu"), feature = "cpu"))]
+use cubecl::cpu::{CpuDevice as WgpuDevice, CpuRuntime as WgpuRuntime};
+#[cfg(feature = "wgpu")]
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 use tangle_core::{FiberAssembly, FiberBendLimit, FiberId, PeriodicCell, Section};
 

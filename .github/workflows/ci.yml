@@ -13,6 +13,9 @@ jobs:
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check workspace
@@ -26,3 +29,19 @@ jobs:
           -p tangle_core
           -p tangle_export
           -p tangle_generate
+      - name: Run CubeCL CPU relaxation tests
+        run: >-
+          cargo test
+          -p tangle_relax
+          --no-default-features
+          --features cpu
+          --lib
+          --
+          --test-threads=1
+      - name: Build and test the Python user interface
+        run: |
+          python -m venv .venv-ci
+          source .venv-ci/bin/activate
+          python -m pip install "maturin>=1.8,<2" numpy
+          maturin develop --manifest-path crates/tangle_python/Cargo.toml
+          python -m unittest discover -s crates/tangle_python/python/tests -v

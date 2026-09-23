@@ -7,20 +7,21 @@ use tangle_contact::device::{
     scatter_cell_segments,
 };
 
-use super::{DeviceFiberWorld, CELL_SCAN_BLOCK_SIZE};
+use super::DeviceFiberWorld;
 
 impl<R: Runtime> DeviceFiberWorld<R> {
     fn scan_cell_counts(&self, input: Handle, output: Handle, length: usize, level: usize) {
-        let blocks = length.div_ceil(CELL_SCAN_BLOCK_SIZE);
+        let blocks = length.div_ceil(self.cell_scan_block_size);
         unsafe {
             exclusive_scan_cell_blocks::launch_unchecked::<R>(
                 &self.client,
                 CubeCount::Static(blocks as u32, 1, 1),
-                CubeDim::new_1d(CELL_SCAN_BLOCK_SIZE as u32),
-                ArrayArg::from_raw_parts(input, length),
-                ArrayArg::from_raw_parts(output.clone(), length),
-                ArrayArg::from_raw_parts(self.cell_scan_block_sums[level].clone(), blocks),
+                CubeDim::new_1d(self.cell_scan_block_size as u32),
+                BufferArg::from_raw_parts(input, length),
+                BufferArg::from_raw_parts(output.clone(), length),
+                BufferArg::from_raw_parts(self.cell_scan_block_sums[level].clone(), blocks),
                 length as u32,
+                self.cell_scan_block_size,
             );
         }
         if blocks == 1 {
@@ -37,9 +38,9 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             add_cell_block_offsets::launch_unchecked::<R>(
                 &self.client,
                 CubeCount::Static(blocks as u32, 1, 1),
-                CubeDim::new_1d(CELL_SCAN_BLOCK_SIZE as u32),
-                ArrayArg::from_raw_parts(output, length),
-                ArrayArg::from_raw_parts(self.cell_scan_block_offsets[level].clone(), blocks),
+                CubeDim::new_1d(self.cell_scan_block_size as u32),
+                BufferArg::from_raw_parts(output, length),
+                BufferArg::from_raw_parts(self.cell_scan_block_offsets[level].clone(), blocks),
                 length as u32,
             );
         }
@@ -62,30 +63,30 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 &self.client,
                 cell_cubes.clone(),
                 cube_dim.clone(),
-                ArrayArg::from_raw_parts(self.cell_counts.clone(), cell_count),
-                ArrayArg::from_raw_parts(self.cell_cursors.clone(), cell_count),
-                ArrayArg::from_raw_parts(self.cell_overflow.clone(), 1),
-                ArrayArg::from_raw_parts(control.clone(), control_len),
+                BufferArg::from_raw_parts(self.cell_counts.clone(), cell_count),
+                BufferArg::from_raw_parts(self.cell_cursors.clone(), cell_count),
+                BufferArg::from_raw_parts(self.cell_overflow.clone(), 1),
+                BufferArg::from_raw_parts(control.clone(), control_len),
             );
             count_cell_segments::launch_unchecked::<R>(
                 &self.client,
                 segment_cubes.clone(),
                 cube_dim.clone(),
-                ArrayArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                BufferArg::from_raw_parts(
                     self.segment_vertices.clone(),
                     self.packed.segment_vertices.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.active_segment_indices.clone(),
                     self.packed.segment_count(),
                 ),
-                ArrayArg::from_raw_parts(self.active_index_counts.clone(), 2),
-                ArrayArg::from_raw_parts(self.cell_counts.clone(), cell_count),
-                ArrayArg::from_raw_parts(self.cell_lower.clone(), 3),
-                ArrayArg::from_raw_parts(self.cell_upper.clone(), 3),
-                ArrayArg::from_raw_parts(self.cell_periodic.clone(), 3),
-                ArrayArg::from_raw_parts(control.clone(), control_len),
+                BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                BufferArg::from_raw_parts(self.cell_counts.clone(), cell_count),
+                BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
+                BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
+                BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
+                BufferArg::from_raw_parts(control.clone(), control_len),
                 cells_x,
                 cells_y,
                 cells_z,
@@ -102,23 +103,23 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 &self.client,
                 segment_cubes,
                 cube_dim.clone(),
-                ArrayArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                BufferArg::from_raw_parts(
                     self.segment_vertices.clone(),
                     self.packed.segment_vertices.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.active_segment_indices.clone(),
                     self.packed.segment_count(),
                 ),
-                ArrayArg::from_raw_parts(self.active_index_counts.clone(), 2),
-                ArrayArg::from_raw_parts(self.cell_offsets.clone(), cell_count),
-                ArrayArg::from_raw_parts(self.cell_cursors.clone(), cell_count),
-                ArrayArg::from_raw_parts(self.cell_segments.clone(), self.packed.segment_count()),
-                ArrayArg::from_raw_parts(self.cell_lower.clone(), 3),
-                ArrayArg::from_raw_parts(self.cell_upper.clone(), 3),
-                ArrayArg::from_raw_parts(self.cell_periodic.clone(), 3),
-                ArrayArg::from_raw_parts(control.clone(), control_len),
+                BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                BufferArg::from_raw_parts(self.cell_offsets.clone(), cell_count),
+                BufferArg::from_raw_parts(self.cell_cursors.clone(), cell_count),
+                BufferArg::from_raw_parts(self.cell_segments.clone(), self.packed.segment_count()),
+                BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
+                BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
+                BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
+                BufferArg::from_raw_parts(control.clone(), control_len),
                 cells_x,
                 cells_y,
                 cells_z,

@@ -1,5 +1,11 @@
 # Adaptive crossed fibers
 
+Start with the **[Python notebook](../../crates/tangle_python/python/examples/native/adaptive_crossed_fibers.ipynb)**
+or [editable script](../../crates/tangle_python/python/examples/native/adaptive_crossed_fibers.py).
+See the [installation guide](../../crates/tangle_python/README.md) first.
+The commands and output paths below describe the native Rust version; Python
+uses the same solver but can have different export/debug defaults and paths.
+
 This example separates two useful adaptive-segmentation behaviors:
 
 - `orthogonal_stop_early` starts with one segment per fiber at a 90-degree

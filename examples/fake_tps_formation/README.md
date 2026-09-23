@@ -1,5 +1,11 @@
 # Fake TPS formation
 
+Start with the **[Python notebook](../../crates/tangle_python/python/examples/native/fake_tps_formation.ipynb)**
+or [editable script](../../crates/tangle_python/python/examples/native/fake_tps_formation.py).
+See the [installation guide](../../crates/tangle_python/README.md) first.
+The commands and output paths below describe the native Rust version; Python
+uses the same solver but can have different export/debug defaults and paths.
+
 [![A staged fake-TPS manufacturing recipe](../../docs/media/formation-recipe.png)](../../docs/media/formation-recipe.mp4)
 
 *Click the preview to play the OVITO rendering.*
@@ -69,7 +75,7 @@ With the OVITO Python package or `ovitos` available, render the trajectory from
 a fixed three-quarter camera as a 1280×720 MP4:
 
 ```console
-python render_movie.py
+python examples/fake_tps_formation/render_movie.py
 ```
 
 The movie is written to `output/fake_tps_formation.mp4`.
@@ -81,6 +87,9 @@ capacity. An explicit `CaptureJunctions` operation samples once; a
 `RelaxAndCapture` operation has a cadence independent of the GRASS GPU batch
 size. Accepted contacts become persistent material-coordinate `FiberAnchor`s
 and are exported as inter-fiber DEM-BPM bonds.
+These junctions are export topology only; later TANGLE relaxation does not
+enforce their mechanical laws. Early capture here demonstrates scheduling,
+not the mechanical action of curing binder. Use late capture for that workflow.
 
 This is intentionally a fake material, not a calibrated FiberForm or MERINO
 model. The population distributions and formation operations are the extension

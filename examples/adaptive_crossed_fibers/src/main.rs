@@ -3,8 +3,7 @@ use tangle_app::prelude::*;
 use tangle_core::PeriodicCell;
 use tangle_example_support::ExampleOutput;
 use tangle_export::{
-    DemBpmExportPlugin, DemBpmExportReport, OvitoColoring, OvitoTrajectoryPlugin,
-    OvitoTrajectoryReport,
+    BpmExportPlugin, BpmExportReport, OvitoColoring, OvitoTrajectoryPlugin, OvitoTrajectoryReport,
 };
 use tangle_generate::{FiberPairCrossingConfig, FiberPairCrossingGeneratorPlugin};
 use tangle_relax::{
@@ -132,8 +131,8 @@ fn run_case(case: Case) -> CaseResult {
     });
 
     // 4. Export the final centerlines as an ordinary DEM-BPM model.
-    app.add_plugins(DemBpmExportPlugin {
-        config: output.dem_bpm(1_800.0),
+    app.add_plugins(BpmExportPlugin {
+        config: output.sphere_bpm(1_800.0),
     });
 
     app.start();
@@ -146,8 +145,8 @@ fn run_case(case: Case) -> CaseResult {
         .get_resource_ref::<OvitoTrajectoryReport>()
         .expect("OvitoTrajectoryPlugin should install OvitoTrajectoryReport");
     let export = app
-        .get_resource_ref::<DemBpmExportReport>()
-        .expect("DemBpmExportPlugin should install DemBpmExportReport");
+        .get_resource_ref::<BpmExportReport>()
+        .expect("BpmExportPlugin should install BpmExportReport");
 
     println!("\n{}: {}", case.slug, case.description);
     println!(

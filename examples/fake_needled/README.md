@@ -1,5 +1,11 @@
 # Fake needled felt
 
+Start with the **[Python notebook](../../crates/tangle_python/python/examples/native/fake_needled.ipynb)**
+or [editable script](../../crates/tangle_python/python/examples/native/fake_needled.py).
+See the [installation guide](../../crates/tangle_python/README.md) first.
+The commands and output paths below describe the native Rust version; Python
+uses the same solver but can have different export/debug defaults and paths.
+
 [![Layer-by-layer insertion and needling](../../docs/media/layered-needling.png)](../../docs/media/layered-needling.mp4)
 
 *Click the preview to play the OVITO rendering.*

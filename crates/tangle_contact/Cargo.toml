@@ -7,8 +7,9 @@ repository.workspace = true
 description = "Device-resident broad phase and capsule contact kernels for TANGLE"
 
 [features]
-default = ["wgpu"]
+default = ["wgpu", "cpu"]
 wgpu = ["cubecl/wgpu"]
+cpu = ["cubecl/cpu"]
 cuda = ["cubecl/cuda"]
 hip = ["cubecl/hip"]
 

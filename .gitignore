@@ -1,6 +1,9 @@
 /target/
+/.venv/
+/.venv-tangle/
 /.codex-tmp/
 /.codex-*/
+/.vscode
 /presentation-output/
 .DS_Store
 **/output/
@@ -8,3 +11,11 @@
 *.key
 *.pptx
 *.inspect.ndjson
+__pycache__/
+*.py[cod]
+/.venv-*/
+/logs/
+**/.ipynb_checkpoints/
+crates/tangle_python/python/tangle/_tangle*.so
+crates/tangle_python/python/tangle/_tangle*.pyd
+crates/tangle_python/python/tangle/_tangle*.dylib

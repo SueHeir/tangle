@@ -96,7 +96,9 @@ pub(super) fn advance_compaction(
                 let at_minimum =
                     attempted <= config.increment.minimum_log_strain * (1.0 + 16.0 * f32::EPSILON);
                 if at_minimum || active.relaxation_windows >= config.guards.maximum_relax_windows {
-                    record_debug_snapshot(relaxation_config, world, assembly, relaxation);
+                    if relaxation_config.debug_snapshot_interval != Some(usize::MAX) {
+                        record_debug_snapshot(relaxation_config, world, assembly, relaxation);
+                    }
                     return finish_compaction(
                         state,
                         assembly,
@@ -113,7 +115,9 @@ pub(super) fn advance_compaction(
                 .compaction_metrics(relaxation_config.correction_fraction, config.energy_model);
             let face_pressures = world.wall_face_pressures();
             relaxation.downloaded_bytes += 13 * std::mem::size_of::<f32>();
-            record_debug_snapshot(relaxation_config, world, assembly, relaxation);
+            if relaxation_config.debug_snapshot_interval != Some(usize::MAX) {
+                record_debug_snapshot(relaxation_config, world, assembly, relaxation);
+            }
             if active.baseline_pending {
                 active.baseline_pending = false;
                 active.pending_started_at = None;
@@ -393,6 +397,7 @@ pub(super) fn record_debug_snapshot(
         positions,
         assembly: Some(snapshot_assembly),
     });
+    relaxation.last_snapshot_iteration = Some(relaxation.iterations);
 }
 
 pub(super) fn finish_compaction(

@@ -7,8 +7,9 @@ repository.workspace = true
 description = "Device-resident fiber relaxation mechanics and GRASS plugins for TANGLE"
 
 [features]
-default = ["wgpu"]
+default = ["wgpu", "cpu"]
 wgpu = ["cubecl/wgpu", "tangle_contact/wgpu"]
+cpu = ["cubecl/cpu", "tangle_contact/cpu"]
 cuda = ["cubecl/cuda", "tangle_contact/cuda"]
 hip = ["cubecl/hip", "tangle_contact/hip"]
 

@@ -167,7 +167,6 @@ pub fn write_ovito_assembly_frame(
                 assembly,
                 &DemBpmExportConfig {
                     data_path: PathBuf::new(),
-                    dirt_config_path: None,
                     density: 1.0,
                     spacing_ratio,
                     atom_type: config.atom_type,
@@ -650,6 +649,10 @@ pub fn write_ovito_view_script(
     writeln!(
         writer,
         "pipeline = import_file(str(trajectory_path), sort_particles=True)"
+    )?;
+    writeln!(
+        writer,
+        "print(f'Loaded {{pipeline.num_frames}} OVITO frames from {{trajectory_path}}')"
     )?;
     if config.representation == OvitoRepresentation::ConnectedFiberSegments {
         let sphere_type = config

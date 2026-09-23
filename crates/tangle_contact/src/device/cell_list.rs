@@ -6,10 +6,10 @@ use cubecl::prelude::*;
 
 #[cube(launch_unchecked)]
 pub fn clear_cell_list(
-    cell_counts: &mut Array<Atomic<u32>>,
-    cell_cursors: &mut Array<Atomic<u32>>,
-    overflow: &mut Array<Atomic<u32>>,
-    control: &Array<u32>,
+    cell_counts: &mut [Atomic<u32>],
+    cell_cursors: &mut [Atomic<u32>],
+    overflow: &mut [Atomic<u32>],
+    control: &[u32],
 ) {
     let cell = ABSOLUTE_POS;
     if cell >= cell_counts.len() || control[0] == 0 {
@@ -24,15 +24,15 @@ pub fn clear_cell_list(
 
 #[cube(launch_unchecked)]
 pub fn count_cell_segments(
-    positions: &Array<f32>,
-    segment_vertices: &Array<u32>,
-    active_segments: &Array<u32>,
-    active_counts: &Array<Atomic<u32>>,
-    cell_counts: &mut Array<Atomic<u32>>,
-    cell_lower: &Array<f32>,
-    cell_upper: &Array<f32>,
-    cell_periodic: &Array<u32>,
-    control: &Array<u32>,
+    positions: &[f32],
+    segment_vertices: &[u32],
+    active_segments: &[u32],
+    active_counts: &[Atomic<u32>],
+    cell_counts: &mut [Atomic<u32>],
+    cell_lower: &[f32],
+    cell_upper: &[f32],
+    cell_periodic: &[u32],
+    control: &[u32],
     cells_x: u32,
     cells_y: u32,
     cells_z: u32,
@@ -74,14 +74,15 @@ pub fn count_cell_segments(
 /// Scans one 256-element block and emits the block total for recursive scans.
 #[cube(launch_unchecked)]
 pub fn exclusive_scan_cell_blocks(
-    input: &Array<u32>,
-    output: &mut Array<u32>,
-    block_sums: &mut Array<u32>,
+    input: &[u32],
+    output: &mut [u32],
+    block_sums: &mut [u32],
     length: u32,
+    #[comptime] block_size: usize,
 ) {
-    let mut shared = SharedMemory::<u32>::new(256usize);
+    let mut shared = Shared::new_slice(block_size);
     let lane = UNIT_POS as usize;
-    let index = CUBE_POS * 256usize + lane;
+    let index = CUBE_POS * block_size + lane;
     let mut value = 0_u32;
     if index < length as usize {
         value = input[index];
@@ -151,14 +152,14 @@ pub fn exclusive_scan_cell_blocks(
         }
         output[index] = exclusive;
     }
-    if UNIT_POS == 255 {
+    if UNIT_POS as usize == block_size - 1 {
         block_sums[CUBE_POS] = shared[lane];
     }
 }
 
 /// Adds recursively scanned block totals to one scan level.
 #[cube(launch_unchecked)]
-pub fn add_cell_block_offsets(output: &mut Array<u32>, block_offsets: &Array<u32>, length: u32) {
+pub fn add_cell_block_offsets(output: &mut [u32], block_offsets: &[u32], length: u32) {
     let index = ABSOLUTE_POS;
     if index >= length as usize {
         terminate!();
@@ -168,17 +169,17 @@ pub fn add_cell_block_offsets(output: &mut Array<u32>, block_offsets: &Array<u32
 
 #[cube(launch_unchecked)]
 pub fn scatter_cell_segments(
-    positions: &Array<f32>,
-    segment_vertices: &Array<u32>,
-    active_segments: &Array<u32>,
-    active_counts: &Array<Atomic<u32>>,
-    cell_offsets: &Array<u32>,
-    cell_cursors: &mut Array<Atomic<u32>>,
-    cell_segments: &mut Array<u32>,
-    cell_lower: &Array<f32>,
-    cell_upper: &Array<f32>,
-    cell_periodic: &Array<u32>,
-    control: &Array<u32>,
+    positions: &[f32],
+    segment_vertices: &[u32],
+    active_segments: &[u32],
+    active_counts: &[Atomic<u32>],
+    cell_offsets: &[u32],
+    cell_cursors: &mut [Atomic<u32>],
+    cell_segments: &mut [u32],
+    cell_lower: &[f32],
+    cell_upper: &[f32],
+    cell_periodic: &[u32],
+    control: &[u32],
     cells_x: u32,
     cells_y: u32,
     cells_z: u32,

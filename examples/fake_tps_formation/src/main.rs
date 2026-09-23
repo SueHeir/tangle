@@ -11,8 +11,7 @@ use tangle_app::prelude::*;
 use tangle_core::{FiberAssembly, JunctionParameterId, PeriodicCell, Section};
 use tangle_example_support::{debug_ovito_requested, ExampleOutput};
 use tangle_export::{
-    DemBpmExportPlugin, DemBpmExportReport, OvitoColoring, OvitoTrajectoryPlugin,
-    OvitoTrajectoryReport,
+    BpmExportPlugin, BpmExportReport, OvitoColoring, OvitoTrajectoryPlugin, OvitoTrajectoryReport,
 };
 use tangle_generate::{
     AdaptiveCompactionIncrement, CompactionConfig, CompactionGuards, CompactionPath,
@@ -124,8 +123,8 @@ fn main() {
     }
 
     // 5. Export sees the final active assembly, independent of how it formed.
-    app.add_plugins(DemBpmExportPlugin {
-        config: output.dem_bpm(1_800.0),
+    app.add_plugins(BpmExportPlugin {
+        config: output.sphere_bpm(1_800.0),
     });
     app.start();
 
@@ -273,8 +272,8 @@ fn report(app: &App) {
         .get_resource_ref::<FormationRecipeState>()
         .expect("FormationRecipePlugin should install FormationRecipeState");
     let export = app
-        .get_resource_ref::<DemBpmExportReport>()
-        .expect("DemBpmExportPlugin should install DemBpmExportReport");
+        .get_resource_ref::<BpmExportReport>()
+        .expect("BpmExportPlugin should install BpmExportReport");
     let assembly = app
         .get_resource_ref::<FiberAssembly>()
         .expect("TangleAssemblyPlugin should install FiberAssembly");

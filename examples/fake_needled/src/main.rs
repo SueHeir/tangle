@@ -10,8 +10,7 @@ use tangle_app::prelude::*;
 use tangle_core::{FiberAssembly, PeriodicCell};
 use tangle_example_support::{debug_ovito_requested, ExampleOutput};
 use tangle_export::{
-    DemBpmExportPlugin, DemBpmExportReport, OvitoColoring, OvitoTrajectoryPlugin,
-    OvitoTrajectoryReport,
+    BpmExportPlugin, BpmExportReport, OvitoColoring, OvitoTrajectoryPlugin, OvitoTrajectoryReport,
 };
 use tangle_generate::{
     AdaptiveCompactionIncrement, CompactionConfig, CompactionGuards, CompactionPath,
@@ -78,8 +77,8 @@ fn main() {
                 .with_initial_frame(false),
         });
     }
-    app.add_plugins(DemBpmExportPlugin {
-        config: output.dem_bpm(1_800.0),
+    app.add_plugins(BpmExportPlugin {
+        config: output.sphere_bpm(1_800.0),
     });
     app.start();
 
@@ -219,8 +218,8 @@ fn report(app: &App) {
         .get_resource_ref::<FiberAssembly>()
         .expect("TangleAssemblyPlugin should install FiberAssembly");
     let export = app
-        .get_resource_ref::<DemBpmExportReport>()
-        .expect("DemBpmExportPlugin should install DemBpmExportReport");
+        .get_resource_ref::<BpmExportReport>()
+        .expect("BpmExportPlugin should install BpmExportReport");
 
     println!("fake needled formation recipe:");
     for event in &recipe.events {

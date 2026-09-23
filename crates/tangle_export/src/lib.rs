@@ -2,12 +2,19 @@
 
 #![warn(missing_docs)]
 
+mod bpm;
 mod ovito;
+mod puma;
 mod trajectory;
 
+pub use bpm::{build_bpm_model, write_bpm_lammps_data, BpmExportPlugin, BpmExportReport};
 pub use ovito::{
     write_ovito_assembly_frame, write_ovito_dump_frame, write_ovito_view_script, OvitoColoring,
     OvitoRepresentation, OvitoTrajectoryConfig, OvitoTrajectoryReport,
+};
+pub use puma::{
+    write_puma_bundle, PumaExportError, PumaExportReport, PumaVoxelExportConfig,
+    PUMA_BUNDLE_SCHEMA_VERSION,
 };
 pub use trajectory::OvitoTrajectoryPlugin;
 
@@ -17,9 +24,6 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use grass_app::prelude::*;
-use grass_scheduler::prelude::*;
-use tangle_app::prelude::*;
 use tangle_core::{FiberAssembly, MaterialId, Section, Vec3};
 
 /// One sphere in a bonded-particle discretization.
@@ -116,13 +120,125 @@ pub struct DemCapsuleBpmModel {
     pub box_high: Vec3,
 }
 
-/// DEM-BPM discretization and output configuration.
+/// Centerline discretization used by the solver-neutral BPM exporter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BpmExportMode {
+    /// Constant sphere spacing along the complete fiber arc. Any unused arc
+    /// length is divided equally between the two fiber ends.
+    SpheresExact,
+    /// Preserve every centerline vertex and adjust sphere spacing separately
+    /// inside each source segment.
+    SpheresDynamic,
+    /// Export one spherocylinder for every active TANGLE segment.
+    #[default]
+    SpherocylindersExact,
+    /// Tile every source segment with the shortest active segment length,
+    /// followed by one shorter end remainder when necessary.
+    SpherocylindersConstant,
+}
+
+impl BpmExportMode {
+    /// Stable kebab-case name used by Python and documentation.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SpheresExact => "spheres-exact",
+            Self::SpheresDynamic => "spheres-dynamic",
+            Self::SpherocylindersExact => "spherocylinders-exact",
+            Self::SpherocylindersConstant => "spherocylinders-constant",
+        }
+    }
+}
+
+/// Unified BPM discretization and LAMMPS-data output configuration.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DemBpmExportConfig {
+pub struct BpmExportConfig {
     /// LAMMPS-data output path.
     pub data_path: PathBuf,
-    /// Optional directly usable DIRT configuration output path.
-    pub dirt_config_path: Option<PathBuf>,
+    /// Geometry representation and sampling policy.
+    pub mode: BpmExportMode,
+    /// Sphere center spacing divided by fiber radius. Sphere modes support
+    /// values from one third through one radius, inclusive.
+    pub sphere_spacing_over_radius: f64,
+    /// Particle material density.
+    pub density: f64,
+    /// First atom type assigned to TANGLE material zero.
+    pub atom_type: u32,
+    /// Intra-fiber bond type written to the data file.
+    pub bond_type: u32,
+}
+
+impl BpmExportConfig {
+    /// Creates an exact active-segment spherocylinder export.
+    pub fn new(data_path: impl Into<PathBuf>) -> Self {
+        Self {
+            data_path: data_path.into(),
+            mode: BpmExportMode::SpherocylindersExact,
+            sphere_spacing_over_radius: 1.0 / 3.0,
+            density: 1.0,
+            atom_type: 1,
+            bond_type: 1,
+        }
+    }
+
+    /// Selects the exported geometry representation and sampling policy.
+    pub fn with_mode(mut self, mode: BpmExportMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Sets sphere center spacing as a multiple of fiber radius.
+    pub fn with_sphere_spacing_over_radius(mut self, spacing: f64) -> Self {
+        self.sphere_spacing_over_radius = spacing;
+        self
+    }
+
+    /// Sets particle material density.
+    pub fn with_density(mut self, density: f64) -> Self {
+        self.density = density;
+        self
+    }
+}
+
+/// Geometry produced by the unified BPM discretizer.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BpmModel {
+    /// Bonded spheres.
+    Spheres(DemBpmModel),
+    /// Bonded spherocylinders.
+    Spherocylinders(DemCapsuleBpmModel),
+}
+
+impl BpmModel {
+    /// Number of sphere or spherocylinder particles.
+    pub fn particles(&self) -> usize {
+        match self {
+            Self::Spheres(model) => model.particles.len(),
+            Self::Spherocylinders(model) => model.capsules.len(),
+        }
+    }
+
+    /// Number of intra-fiber and junction bonds.
+    pub fn bonds(&self) -> usize {
+        match self {
+            Self::Spheres(model) => model.bonds.len(),
+            Self::Spherocylinders(model) => model.bonds.len(),
+        }
+    }
+
+    /// Material-to-atom-type mappings used by the particles.
+    pub fn atom_types(&self) -> &[DemAtomType] {
+        match self {
+            Self::Spheres(model) => &model.atom_types,
+            Self::Spherocylinders(model) => &model.atom_types,
+        }
+    }
+}
+
+/// DEM-BPM discretization and output configuration.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DemBpmExportConfig {
+    /// LAMMPS-data output path.
+    pub data_path: PathBuf,
     /// Sphere material density.
     pub density: f64,
     /// Maximum center spacing as a fraction of sphere diameter.
@@ -134,12 +250,12 @@ pub struct DemBpmExportConfig {
     pub bond_type: u32,
 }
 
+#[cfg(test)]
 impl DemBpmExportConfig {
     /// Creates a conventional bonded-sphere export configuration.
     pub fn new(data_path: impl Into<PathBuf>) -> Self {
         Self {
             data_path: data_path.into(),
-            dirt_config_path: None,
             density: 1.0,
             spacing_ratio: 0.9,
             atom_type: 1,
@@ -162,11 +278,9 @@ impl DemBpmExportConfig {
 
 /// Adaptive-segment capsule discretization and output configuration.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DemCapsuleBpmExportConfig {
-    /// DIRT-oriented extended LAMMPS-data output path.
+pub(crate) struct DemCapsuleBpmExportConfig {
+    /// Extended LAMMPS-data output path.
     pub data_path: PathBuf,
-    /// Optional DIRT configuration written beside the capsule data.
-    pub dirt_config_path: Option<PathBuf>,
     /// Capsule material density.
     pub density: f64,
     /// First atom type assigned to TANGLE material zero.
@@ -178,12 +292,12 @@ pub struct DemCapsuleBpmExportConfig {
     pub maximum_length_over_diameter: Option<f64>,
 }
 
+#[cfg(test)]
 impl DemCapsuleBpmExportConfig {
     /// Creates an adaptive-capsule export configuration.
     pub fn new(data_path: impl Into<PathBuf>) -> Self {
         Self {
             data_path: data_path.into(),
-            dirt_config_path: None,
             density: 1.0,
             atom_type: 1,
             bond_type: 1,
@@ -202,46 +316,6 @@ impl DemCapsuleBpmExportConfig {
         self.maximum_length_over_diameter = Some(ratio);
         self
     }
-
-    /// Requests a directly runnable DIRT loading configuration.
-    pub fn with_dirt_config(mut self, path: impl Into<PathBuf>) -> Self {
-        self.dirt_config_path = Some(path.into());
-        self
-    }
-}
-
-/// Summary of a completed DEM-BPM export.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct DemBpmExportReport {
-    /// Number of written particles.
-    pub particles: usize,
-    /// Number of written bonds.
-    pub bonds: usize,
-    /// Inter-fiber bonds derived from persistent junctions.
-    pub junction_bonds: usize,
-    /// Material-to-atom-type mappings written to the data file.
-    pub atom_types: Vec<DemAtomType>,
-    /// Written data file.
-    pub data_path: PathBuf,
-    /// Written DIRT configuration, when requested.
-    pub dirt_config_path: Option<PathBuf>,
-}
-
-/// Summary of a completed adaptive-capsule DEM-BPM export.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct DemCapsuleBpmExportReport {
-    /// Number of written capsule particles.
-    pub capsules: usize,
-    /// Number of written bonds.
-    pub bonds: usize,
-    /// Inter-fiber bonds derived from persistent junctions.
-    pub junction_bonds: usize,
-    /// Material-to-atom-type mappings written to the data file.
-    pub atom_types: Vec<DemAtomType>,
-    /// Written data file.
-    pub data_path: PathBuf,
-    /// Written DIRT loading configuration, when requested.
-    pub dirt_config_path: Option<PathBuf>,
 }
 
 /// Failure while discretizing or writing a DEM-BPM model.
@@ -251,6 +325,8 @@ pub enum ExportError {
     InvalidDensity(f64),
     /// Spacing ratio was outside the supported interval.
     InvalidSpacingRatio(f64),
+    /// Radius-based sphere spacing was outside the supported interval.
+    InvalidSphereSpacingOverRadius(f64),
     /// Capsule export length ratio was not positive and finite.
     InvalidCapsuleLengthRatio(f64),
     /// First atom type was zero; LAMMPS types are one-based.
@@ -261,6 +337,8 @@ pub enum ExportError {
     MissingSection(u32),
     /// Fiber geometry lookup failed.
     InvalidFiberSpan(u32),
+    /// A constant spherocylinder length could not be found.
+    NoActiveSegments,
     /// Fiber material lookup failed.
     MissingMaterial(u32),
     /// The current LAMMPS-data writer requires an orthorhombic positive cell.
@@ -278,6 +356,10 @@ impl fmt::Display for ExportError {
             Self::InvalidSpacingRatio(value) => {
                 write!(f, "spacing_ratio must be in (0, 1], got {value}")
             }
+            Self::InvalidSphereSpacingOverRadius(value) => write!(
+                f,
+                "sphere_spacing_over_radius must be in [1/3, 1], got {value}"
+            ),
             Self::InvalidCapsuleLengthRatio(value) => write!(
                 f,
                 "maximum_length_over_diameter must be positive, got {value}"
@@ -290,6 +372,9 @@ impl fmt::Display for ExportError {
             }
             Self::MissingSection(id) => write!(f, "fiber {id} references a missing section"),
             Self::InvalidFiberSpan(id) => write!(f, "fiber {id} has an invalid placed span"),
+            Self::NoActiveSegments => {
+                f.write_str("constant spherocylinder export requires an active segment")
+            }
             Self::MissingMaterial(id) => write!(f, "fiber {id} references a missing material"),
             Self::NonOrthorhombicCell => {
                 f.write_str("DEM-BPM LAMMPS export currently requires a positive orthorhombic cell")
@@ -316,7 +401,7 @@ impl From<std::io::Error> for ExportError {
 }
 
 /// Discretizes placed centerlines into overlapping or touching bonded spheres.
-pub fn build_dem_bpm_model(
+pub(crate) fn build_dem_bpm_model(
     assembly: &FiberAssembly,
     config: &DemBpmExportConfig,
 ) -> Result<DemBpmModel, ExportError> {
@@ -455,7 +540,7 @@ pub fn build_dem_bpm_model(
 /// Unlike the bonded-sphere export, this preserves TANGLE's adaptive
 /// segmentation. `maximum_length_over_diameter` can impose a downstream DEM
 /// resolution ceiling without modifying the relaxed assembly.
-pub fn build_dem_capsule_bpm_model(
+pub(crate) fn build_dem_capsule_bpm_model(
     assembly: &FiberAssembly,
     config: &DemCapsuleBpmExportConfig,
 ) -> Result<DemCapsuleBpmModel, ExportError> {
@@ -588,12 +673,10 @@ pub fn build_dem_capsule_bpm_model(
         }
     }
 
-    // TANGLE keeps long periodic fibers in an unwrapped representation so their
-    // centerlines remain continuous across many cell traversals. DIRT, however,
-    // expects every inserted particle center to begin inside the primary cell;
-    // its exchange step is intentionally only a neighboring-rank migration, not
-    // an arbitrary multi-box fold. Wrap only after junction-anchor lookup so the
-    // latter can still compare capsules and anchors in the same unwrapped frame.
+    // TANGLE keeps long periodic fibers unwrapped so their centerlines remain
+    // continuous across many cell traversals. BPM consumers generally require
+    // inserted particle centers in the primary cell. Wrap only after junction
+    // lookup so capsules and anchors are compared in the same unwrapped frame.
     for capsule in &mut model.capsules {
         for axis in 0..3 {
             if assembly.cell.periodic[axis] {
@@ -607,8 +690,8 @@ pub fn build_dem_capsule_bpm_model(
     Ok(model)
 }
 
-/// Writes a DIRT-compatible LAMMPS data file using the bpm/sphere atom style.
-pub fn write_lammps_data(model: &DemBpmModel, path: &Path) -> Result<(), ExportError> {
+/// Writes a LAMMPS data file using the `bpm/sphere` atom style.
+pub(crate) fn write_lammps_data(model: &DemBpmModel, path: &Path) -> Result<(), ExportError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -689,8 +772,8 @@ pub fn write_lammps_data(model: &DemBpmModel, path: &Path) -> Result<(), ExportE
     Ok(())
 }
 
-/// Writes an extended DIRT data file with `Atoms`, `Capsules`, and `Bonds` sections.
-pub fn write_capsule_lammps_data(
+/// Writes extended BPM data with `Atoms`, `Capsules`, and `Bonds` sections.
+pub(crate) fn write_capsule_lammps_data(
     model: &DemCapsuleBpmModel,
     path: &Path,
 ) -> Result<(), ExportError> {
@@ -785,228 +868,6 @@ pub fn write_capsule_lammps_data(
     Ok(())
 }
 
-/// Writes a zero-step DIRT loading configuration for an exported capsule model.
-/// Material and bond coefficients are intentionally conservative placeholders;
-/// loading and topology can be checked before a physical test law is selected.
-pub fn write_dirt_capsule_config(
-    model: &DemCapsuleBpmModel,
-    data_path: &Path,
-    config_path: &Path,
-    periodic: [bool; 3],
-) -> Result<(), ExportError> {
-    if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut writer = BufWriter::new(File::create(config_path)?);
-    let data_path = data_path
-        .canonicalize()
-        .unwrap_or_else(|_| data_path.to_path_buf());
-    let data_path = toml_string(&data_path.to_string_lossy());
-    writeln!(writer, "# Generated by TANGLE for DIRT capsule loading.")?;
-    writeln!(
-        writer,
-        "# Replace the placeholder material/bond laws before a physical test."
-    )?;
-    writeln!(writer, "[comm]")?;
-    writeln!(writer, "processors_x = 1")?;
-    writeln!(writer, "processors_y = 1")?;
-    writeln!(writer, "processors_z = 1")?;
-    writeln!(writer)?;
-    writeln!(writer, "[domain]")?;
-    for (axis, name) in ["x", "y", "z"].into_iter().enumerate() {
-        writeln!(writer, "{name}_low = {:.17e}", model.box_low[axis])?;
-        writeln!(writer, "{name}_high = {:.17e}", model.box_high[axis])?;
-        writeln!(
-            writer,
-            "boundary_{name} = {:?}",
-            if periodic[axis] { "periodic" } else { "fixed" }
-        )?;
-    }
-    writeln!(writer)?;
-    writeln!(writer, "[neighbor]")?;
-    writeln!(writer, "skin_fraction = 1.2")?;
-    // DIRT's scalar neighbor grid defaults to a 1 m bin, which degenerates to
-    // one O(N^2) bucket for micron-scale specimens. A capsule's conservative
-    // contact reach is COM-to-tip (half-length + radius); two largest capsules
-    // plus the configured skin therefore define a safe, scale-aware bin size.
-    let maximum_reach = model
-        .capsules
-        .iter()
-        .map(|capsule| capsule.half_length + 0.5 * capsule.diameter)
-        .fold(0.0_f64, f64::max);
-    let bin_size = (2.0 * 1.2 * maximum_reach).max(f64::EPSILON);
-    writeln!(writer, "bin_size = {bin_size:.17e}")?;
-    writeln!(writer, "every = 20")?;
-    writeln!(writer)?;
-    writeln!(writer, "[dem]")?;
-    writeln!(writer, "contact_model = {:?}", "hertz")?;
-    writeln!(writer, "tangential_model = {:?}", "linear_nohistory")?;
-    for mapping in &model.atom_types {
-        writeln!(writer)?;
-        writeln!(writer, "[[dem.materials]]")?;
-        writeln!(writer, "name = {}", toml_string(&mapping.material_name))?;
-        writeln!(writer, "youngs_mod = 1.0e9")?;
-        writeln!(writer, "poisson_ratio = 0.25")?;
-        writeln!(writer, "restitution = 0.3")?;
-        writeln!(writer, "friction = 0.3")?;
-    }
-    let fallback_material = model
-        .atom_types
-        .first()
-        .map(|mapping| mapping.material_name.as_str())
-        .unwrap_or("fiber");
-    writeln!(writer)?;
-    writeln!(writer, "[[particles.insert]]")?;
-    writeln!(writer, "source = {:?}", "file")?;
-    writeln!(writer, "file = {data_path}")?;
-    writeln!(writer, "format = {:?}", "lammps_data")?;
-    writeln!(writer, "atom_style = {:?}", "bpm/sphere")?;
-    writeln!(writer, "material = {}", toml_string(fallback_material))?;
-    write!(writer, "type_map = {{ ")?;
-    for (index, mapping) in model.atom_types.iter().enumerate() {
-        if index > 0 {
-            write!(writer, ", ")?;
-        }
-        write!(
-            writer,
-            "{:?} = {}",
-            mapping.atom_type.to_string(),
-            toml_string(&mapping.material_name)
-        )?;
-    }
-    writeln!(writer, " }}")?;
-    writeln!(writer)?;
-    writeln!(writer, "[capsule]")?;
-    writeln!(writer, "file = {data_path}")?;
-    writeln!(writer)?;
-    writeln!(writer, "[bonds]")?;
-    writeln!(writer, "file = {data_path}")?;
-    writeln!(writer, "format = {:?}", "lammps_data")?;
-    writeln!(writer, "auto_bond = false")?;
-    writeln!(writer, "bond_radius_ratio = 1.0")?;
-    writeln!(writer, "youngs_modulus = 1.0e9")?;
-    writeln!(writer, "shear_modulus = 4.0e8")?;
-    writeln!(writer, "bending_modulus = 1.0e9")?;
-    writeln!(writer, "twist_modulus = 4.0e8")?;
-    writeln!(writer)?;
-    writeln!(writer, "[run]")?;
-    writeln!(writer, "steps = 0")?;
-    writeln!(writer, "thermo = 1")?;
-    writer.flush()?;
-    Ok(())
-}
-
-fn toml_string(value: &str) -> String {
-    format!("{:?}", value)
-}
-
-/// GRASS export plugin that writes a DEM-BPM model and finishes the workflow.
-pub struct DemBpmExportPlugin {
-    /// Export configuration.
-    pub config: DemBpmExportConfig,
-}
-
-/// GRASS export plugin that writes an adaptive-capsule DEM-BPM model.
-pub struct DemCapsuleBpmExportPlugin {
-    /// Export configuration.
-    pub config: DemCapsuleBpmExportConfig,
-}
-
-impl Plugin for DemCapsuleBpmExportPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_resource(self.config.clone())
-            .add_resource(DemCapsuleBpmExportReport::default())
-            .add_update_system(
-                export_capsules_system.run_if(in_state(TangleStage::Export)),
-                TanglePhase::Export,
-            );
-    }
-
-    fn provides_capabilities(&self) -> Vec<CapabilityId> {
-        vec![TANGLE_EXPORT.clone()]
-    }
-
-    fn requires_capabilities(&self) -> Vec<CapabilityId> {
-        vec![TANGLE_WORKFLOW.clone(), TANGLE_ASSEMBLY.clone()]
-    }
-}
-
-impl Plugin for DemBpmExportPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_resource(self.config.clone())
-            .add_resource(DemBpmExportReport::default())
-            .add_update_system(
-                export_system.run_if(in_state(TangleStage::Export)),
-                TanglePhase::Export,
-            );
-    }
-
-    fn provides_capabilities(&self) -> Vec<CapabilityId> {
-        vec![TANGLE_EXPORT.clone()]
-    }
-
-    fn requires_capabilities(&self) -> Vec<CapabilityId> {
-        vec![TANGLE_WORKFLOW.clone(), TANGLE_ASSEMBLY.clone()]
-    }
-}
-
-fn export_system(
-    assembly: Res<FiberAssembly>,
-    config: Res<DemBpmExportConfig>,
-    mut report: ResMut<DemBpmExportReport>,
-    mut next: ResMut<NextState<TangleStage>>,
-) {
-    let model = build_dem_bpm_model(&assembly, &config)
-        .unwrap_or_else(|error| panic!("DEM-BPM discretization failed: {error}"));
-    write_lammps_data(&model, &config.data_path)
-        .unwrap_or_else(|error| panic!("DEM-BPM data export failed: {error}"));
-
-    *report = DemBpmExportReport {
-        particles: model.particles.len(),
-        bonds: model.bonds.len(),
-        junction_bonds: assembly
-            .junctions
-            .junctions
-            .iter()
-            .map(|junction| junction.anchors.len.saturating_sub(1) as usize)
-            .sum(),
-        atom_types: model.atom_types.clone(),
-        data_path: config.data_path.clone(),
-        dirt_config_path: config.dirt_config_path.clone(),
-    };
-    next.set(TangleStage::Done);
-}
-
-fn export_capsules_system(
-    assembly: Res<FiberAssembly>,
-    config: Res<DemCapsuleBpmExportConfig>,
-    mut report: ResMut<DemCapsuleBpmExportReport>,
-    mut next: ResMut<NextState<TangleStage>>,
-) {
-    let model = build_dem_capsule_bpm_model(&assembly, &config)
-        .unwrap_or_else(|error| panic!("capsule DEM-BPM discretization failed: {error}"));
-    write_capsule_lammps_data(&model, &config.data_path)
-        .unwrap_or_else(|error| panic!("capsule DEM-BPM data export failed: {error}"));
-    if let Some(path) = config.dirt_config_path.as_deref() {
-        write_dirt_capsule_config(&model, &config.data_path, path, assembly.cell.periodic)
-            .unwrap_or_else(|error| panic!("DIRT capsule configuration export failed: {error}"));
-    }
-    *report = DemCapsuleBpmExportReport {
-        capsules: model.capsules.len(),
-        bonds: model.bonds.len(),
-        junction_bonds: assembly
-            .junctions
-            .junctions
-            .iter()
-            .map(|junction| junction.anchors.len.saturating_sub(1) as usize)
-            .sum(),
-        atom_types: model.atom_types.clone(),
-        data_path: config.data_path.clone(),
-        dirt_config_path: config.dirt_config_path.clone(),
-    };
-    next.set(TangleStage::Done);
-}
-
 fn orthorhombic_bounds(assembly: &FiberAssembly) -> Result<(Vec3, Vec3), ExportError> {
     let basis = assembly.cell.basis;
     let off_diagonal = [
@@ -1038,6 +899,9 @@ fn sample_polyline(points: &[Vec3], requested: f64) -> Vec3 {
     let mut traversed = 0.0;
     for pair in points.windows(2) {
         let segment_length = distance(pair[0], pair[1]);
+        if segment_length <= f64::EPSILON {
+            continue;
+        }
         if requested <= traversed + segment_length {
             let coordinate = ((requested - traversed) / segment_length).clamp(0.0, 1.0);
             return add(pair[0], scale(sub(pair[1], pair[0]), coordinate));
@@ -1150,7 +1014,6 @@ mod tests {
         }
         let config = DemBpmExportConfig {
             data_path: PathBuf::new(),
-            dirt_config_path: None,
             density: 1_000.0,
             spacing_ratio: 1.0,
             atom_type: 1,

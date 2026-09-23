@@ -1,5 +1,11 @@
 # Biased fiber-box generation
 
+Start with the **[Python notebook](../../crates/tangle_python/python/examples/native/biased_fiber_box.ipynb)**
+or [editable script](../../crates/tangle_python/python/examples/native/biased_fiber_box.py).
+See the [installation guide](../../crates/tangle_python/README.md) first.
+The commands and output paths below describe the native Rust version; Python
+uses the same solver but can have different export/debug defaults and paths.
+
 [![Biased planar fiber layers relaxing](../../docs/media/planar-bias.png)](../../docs/media/planar-bias.mp4)
 
 *Click the preview to play the planar-layered OVITO rendering.*
@@ -26,7 +32,7 @@ and exports a bonded-sphere DEM model.
 cargo run --release -p biased_fiber_box_dem_bpm
 cargo run --release -p biased_fiber_box_dem_bpm -- --debug-ovito
 cargo run --release -p biased_fiber_box_dem_bpm --bin biased_fiber_stress -- \
-  --case planar_layered --fiber-count 800 --cell-capacity 128 --max-iterations 6000
+  --case planar_layered --fiber-count 800 --max-iterations 6000
 ```
 
 The default binary is the teaching example. Its code follows the physical
@@ -36,9 +42,9 @@ binary owns the large-run command-line interface so those controls do not hide
 the tutorial's GRASS plugin schedule.
 
 Stress-run controls are `--case`, `--fiber-count`, `--segments-per-fiber`,
-`--cell-capacity`, `--max-iterations`, and `--batch-iterations`. The case names
-are `isotropic_3d`, `planar_layered`, and `aligned_x`. Capacity overflow and
-iteration-limit exits are reported as normal stress-test outcomes rather than
+`--max-iterations`, and `--batch-iterations`. The case names
+are `isotropic_3d`, `planar_layered`, and `aligned_x`. Allocation failures and
+iteration-limit exits must be treated as stress-test outcomes rather than
 being mistaken for a valid relaxed material.
 
 The planar case also installs the GRASS-controlled layered formation protocol.
@@ -62,5 +68,5 @@ Initial geometry and flat topology are uploaded once. A device-side uniform
 cell list supplies the contact broad phase; cell construction, exact capsule
 contact, stretch, bend-surrogate, boundary, and convergence operations remain
 on the device until final geometry is downloaded for characterization and
-DEM-BPM export. A fixed cell capacity detects dense-cell overflow and fails
-explicitly instead of silently dropping candidate segments.
+DEM-BPM export. The compact count/scan/scatter list sizes entries from actual
+occupancy; the old fixed `--cell-capacity` control has been removed.

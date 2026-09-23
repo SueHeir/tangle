@@ -10,8 +10,7 @@ use tangle_characterize::{
 use tangle_core::PeriodicCell;
 use tangle_example_support::ExampleOutput;
 use tangle_export::{
-    DemBpmExportPlugin, DemBpmExportReport, OvitoColoring, OvitoTrajectoryPlugin,
-    OvitoTrajectoryReport,
+    BpmExportPlugin, BpmExportReport, OvitoColoring, OvitoTrajectoryPlugin, OvitoTrajectoryReport,
 };
 use tangle_generate::{BiasedFiberPopulationGeneratorPlugin, LayeredFormationPlugin};
 use tangle_relax::{RelaxationConfig, RelaxationPlugin, RelaxationState};
@@ -108,8 +107,8 @@ fn run_case(case: PopulationCase, options: &RunOptions) {
             config: output.ovito_segments(SNAPSHOT_INTERVAL, OvitoColoring::CurvatureRatio),
         });
     }
-    app.add_plugins(DemBpmExportPlugin {
-        config: output.dem_bpm(1_800.0),
+    app.add_plugins(BpmExportPlugin {
+        config: output.sphere_bpm(1_800.0),
     });
     app.start();
 
@@ -147,8 +146,8 @@ fn report_case(app: &App, case: PopulationCase) {
         .as_ref()
         .expect("relaxed metrics should be captured");
     let export = app
-        .get_resource_ref::<DemBpmExportReport>()
-        .expect("DemBpmExportPlugin should install DemBpmExportReport");
+        .get_resource_ref::<BpmExportReport>()
+        .expect("BpmExportPlugin should install BpmExportReport");
     println!(
         "  converged in {} iterations; penetration {:.3e}",
         relaxation.iterations, relaxation.max_penetration

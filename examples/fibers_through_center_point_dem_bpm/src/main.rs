@@ -2,7 +2,7 @@ use grass_app::prelude::*;
 use tangle_app::prelude::*;
 use tangle_core::PeriodicCell;
 use tangle_example_support::{debug_ovito_requested, ExampleOutput};
-use tangle_export::{DemBpmExportPlugin, OvitoColoring, OvitoTrajectoryPlugin};
+use tangle_export::{BpmExportPlugin, OvitoColoring, OvitoTrajectoryPlugin};
 use tangle_generate::{PointCrossingConfig, PointCrossingGeneratorPlugin};
 use tangle_relax::{RelaxationConfig, RelaxationPlugin, RelaxationState};
 
@@ -46,8 +46,8 @@ fn main() {
     }
 
     // 4. Discretize each relaxed centerline into a bonded-particle chain.
-    app.add_plugins(DemBpmExportPlugin {
-        config: output.dem_bpm(1_800.0),
+    app.add_plugins(BpmExportPlugin {
+        config: output.sphere_bpm(1_800.0),
     });
     app.start();
 

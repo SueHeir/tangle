@@ -2,7 +2,7 @@
 //!
 //! Relaxation is implemented with CubeCL kernels and persistent device buffers.
 //! The public API is organized around mechanics concepts rather than a
-//! particular GPU backend.
+//! particular accelerator or CPU backend.
 
 #![warn(missing_docs)]
 

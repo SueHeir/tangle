@@ -15,6 +15,9 @@ pub enum RelaxationBackend {
     /// CubeCL's WGPU runtime (Metal on supported Apple systems).
     #[cfg(feature = "wgpu")]
     Wgpu,
+    /// CubeCL's native multithreaded CPU runtime.
+    #[cfg(feature = "cpu")]
+    Cpu,
     /// CubeCL's CUDA runtime.
     #[cfg(feature = "cuda")]
     Cuda,
@@ -53,9 +56,16 @@ impl Default for RelaxationBackend {
     fn default() -> Self {
         #[cfg(feature = "wgpu")]
         return Self::Wgpu;
-        #[cfg(all(not(feature = "wgpu"), feature = "cuda"))]
+        #[cfg(all(not(feature = "wgpu"), feature = "cpu"))]
+        return Self::Cpu;
+        #[cfg(all(not(feature = "wgpu"), not(feature = "cpu"), feature = "cuda"))]
         return Self::Cuda;
-        #[cfg(all(not(feature = "wgpu"), not(feature = "cuda"), feature = "hip"))]
+        #[cfg(all(
+            not(feature = "wgpu"),
+            not(feature = "cpu"),
+            not(feature = "cuda"),
+            feature = "hip"
+        ))]
         return Self::Hip;
         panic!("tangle_relax requires at least one runtime feature");
     }
@@ -234,7 +244,7 @@ impl RelaxationConfig {
 pub struct RelaxationState {
     /// Number of corrections applied on-device.
     pub iterations: usize,
-    /// Number of GRASS-controlled GPU batches completed.
+    /// Number of GRASS-controlled device batches completed.
     pub batches: usize,
     /// Final maximum penetration.
     pub max_penetration: f32,
@@ -250,19 +260,23 @@ pub struct RelaxationState {
     pub uploaded_bytes: usize,
     /// Bytes downloaded for final positions and scalar status.
     pub downloaded_bytes: usize,
-    /// Explicitly requested intermediate GPU geometry readbacks.
+    /// Explicitly requested intermediate device geometry readbacks.
     pub snapshots: Vec<RelaxationSnapshot>,
+    /// Most recent iteration captured, retained after trajectory consumers
+    /// release the corresponding host-side geometry.
+    #[serde(default)]
+    pub last_snapshot_iteration: Option<usize>,
     /// Width of one broad-phase cell.
     pub cell_size: f32,
     /// Number of broad-phase cells.
     pub cell_count: usize,
-    /// Number of GPU refinement passes that activated at least one midpoint.
+    /// Number of device refinement passes that activated at least one midpoint.
     pub refinement_passes: usize,
-    /// Total parent segments split on the GPU.
+    /// Total parent segments split on the selected device.
     pub segment_splits: usize,
-    /// Number of sibling-pair merges performed on the GPU.
+    /// Number of sibling-pair merges performed on the selected device.
     pub segment_merges: usize,
-    /// Number of GPU adaptation passes that removed at least one midpoint.
+    /// Number of device adaptation passes that removed at least one midpoint.
     pub coarsening_passes: usize,
     /// Current active segment count.
     pub active_segments: usize,
@@ -275,6 +289,9 @@ pub enum DeviceWorld {
     /// WGPU-resident fiber buffers.
     #[cfg(feature = "wgpu")]
     Wgpu(DeviceFiberWorld<cubecl::wgpu::WgpuRuntime>),
+    /// CPU-resident fiber buffers executed by CubeCL's native CPU runtime.
+    #[cfg(feature = "cpu")]
+    Cpu(DeviceFiberWorld<cubecl::cpu::CpuRuntime>),
     /// CUDA-resident fiber buffers.
     #[cfg(feature = "cuda")]
     Cuda(DeviceFiberWorld<cubecl::cuda::CudaRuntime>),
@@ -293,6 +310,13 @@ impl DeviceWorld {
                 config.cell_list,
                 config.max_step,
             )),
+            #[cfg(feature = "cpu")]
+            RelaxationBackend::Cpu => Self::Cpu(DeviceFiberWorld::upload(
+                &cubecl::cpu::CpuDevice::default(),
+                packed,
+                config.cell_list,
+                config.max_step,
+            )),
             #[cfg(feature = "cuda")]
             RelaxationBackend::Cuda => Self::Cuda(DeviceFiberWorld::upload(
                 &cubecl::cuda::CudaDevice::default(),
@@ -302,7 +326,7 @@ impl DeviceWorld {
             )),
             #[cfg(feature = "hip")]
             RelaxationBackend::Hip => Self::Hip(DeviceFiberWorld::upload(
-                &cubecl::hip::HipDevice::default(),
+                &cubecl::hip::AmdDevice::default(),
                 packed,
                 config.cell_list,
                 config.max_step,
@@ -320,6 +344,13 @@ impl DeviceWorld {
                 config.cell_list,
                 config.max_step,
             )),
+            #[cfg(feature = "cpu")]
+            RelaxationBackend::Cpu => Self::Cpu(DeviceFiberWorld::restore(
+                &cubecl::cpu::CpuDevice::default(),
+                checkpoint,
+                config.cell_list,
+                config.max_step,
+            )),
             #[cfg(feature = "cuda")]
             RelaxationBackend::Cuda => Self::Cuda(DeviceFiberWorld::restore(
                 &cubecl::cuda::CudaDevice::default(),
@@ -329,7 +360,7 @@ impl DeviceWorld {
             )),
             #[cfg(feature = "hip")]
             RelaxationBackend::Hip => Self::Hip(DeviceFiberWorld::restore(
-                &cubecl::hip::HipDevice::default(),
+                &cubecl::hip::AmdDevice::default(),
                 checkpoint,
                 config.cell_list,
                 config.max_step,
@@ -342,6 +373,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.checkpoint(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.checkpoint(),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.checkpoint(),
             #[cfg(feature = "hip")]
@@ -354,6 +387,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.run_batch(config, iterations),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.run_batch(config, iterations),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.run_batch(config, iterations),
             #[cfg(feature = "hip")]
@@ -366,6 +401,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.download_positions(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.download_positions(),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.download_positions(),
             #[cfg(feature = "hip")]
@@ -378,6 +415,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.download_vertex_active(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.download_vertex_active(),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.download_vertex_active(),
             #[cfg(feature = "hip")]
@@ -390,6 +429,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.download_segment_active(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.download_segment_active(),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.download_segment_active(),
             #[cfg(feature = "hip")]
@@ -406,6 +447,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.activate_refinement_vertices(vertices, refinement_interval),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.activate_refinement_vertices(vertices, refinement_interval),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.activate_refinement_vertices(vertices, refinement_interval),
             #[cfg(feature = "hip")]
@@ -422,6 +465,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.unpack_positions(positions, assembly),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.unpack_positions(positions, assembly),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.unpack_positions(positions, assembly),
             #[cfg(feature = "hip")]
@@ -434,6 +479,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.cell_size(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.cell_size(),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.cell_size(),
             #[cfg(feature = "hip")]
@@ -446,6 +493,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.cell_count(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.cell_count(),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.cell_count(),
             #[cfg(feature = "hip")]
@@ -458,6 +507,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.packed(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.packed(),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.packed(),
             #[cfg(feature = "hip")]
@@ -476,6 +527,10 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => {
+                world.apply_layer_targets(axis, targets, stiffness, max_translation)
+            }
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => {
                 world.apply_layer_targets(axis, targets, stiffness, max_translation)
             }
             #[cfg(feature = "cuda")]
@@ -503,6 +558,10 @@ impl DeviceWorld {
             Self::Wgpu(world) => {
                 world.apply_single_layer_target(axis, targets, layer, stiffness, max_translation)
             }
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => {
+                world.apply_single_layer_target(axis, targets, layer, stiffness, max_translation)
+            }
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => {
                 world.apply_single_layer_target(axis, targets, layer, stiffness, max_translation)
@@ -519,6 +578,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.clear_layer_targets(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.clear_layer_targets(),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.clear_layer_targets(),
             #[cfg(feature = "hip")]
@@ -538,6 +599,14 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.apply_vertex_displacement_targets(
+                axis,
+                vertex_indices,
+                displacement,
+                stiffness,
+                max_translation,
+            ),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.apply_vertex_displacement_targets(
                 axis,
                 vertex_indices,
                 displacement,
@@ -568,6 +637,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.clear_vertex_targets(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.clear_vertex_targets(),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.clear_vertex_targets(),
             #[cfg(feature = "hip")]
@@ -580,6 +651,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.formation_target_error(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.formation_target_error(),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.formation_target_error(),
             #[cfg(feature = "hip")]
@@ -592,6 +665,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.activate_formation_step(maximum_step),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.activate_formation_step(maximum_step),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.activate_formation_step(maximum_step),
             #[cfg(feature = "hip")]
@@ -604,6 +679,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.set_fiber_maximum_curvatures(maximum_curvatures),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.set_fiber_maximum_curvatures(maximum_curvatures),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.set_fiber_maximum_curvatures(maximum_curvatures),
             #[cfg(feature = "hip")]
@@ -620,6 +697,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.capture_contacts(maximum_surface_gap, capacity),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.capture_contacts(maximum_surface_gap, capacity),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.capture_contacts(maximum_surface_gap, capacity),
             #[cfg(feature = "hip")]
@@ -637,6 +716,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.compact_cell(new_lower, new_upper, kinematics),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.compact_cell(new_lower, new_upper, kinematics),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.compact_cell(new_lower, new_upper, kinematics),
             #[cfg(feature = "hip")]
@@ -653,6 +734,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.compaction_metrics(correction_fraction, model),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.compaction_metrics(correction_fraction, model),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.compaction_metrics(correction_fraction, model),
             #[cfg(feature = "hip")]
@@ -666,6 +749,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.wall_face_pressures(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.wall_face_pressures(),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.wall_face_pressures(),
             #[cfg(feature = "hip")]
@@ -678,6 +763,8 @@ impl DeviceWorld {
         match self {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(world) => world.cell_bounds(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.cell_bounds(),
             #[cfg(feature = "cuda")]
             Self::Cuda(world) => world.cell_bounds(),
             #[cfg(feature = "hip")]
@@ -924,16 +1011,10 @@ fn run_device_batch(
         if interval < config.iterations_per_batch {
             status.total_iterations % interval == 0
         } else {
-            let previous = state
-                .snapshots
-                .last()
-                .map_or(0, |snapshot| snapshot.iteration);
+            let previous = state.last_snapshot_iteration.unwrap_or(0);
             status.total_iterations / interval > previous / interval
         }
-    }) && state
-        .snapshots
-        .last()
-        .is_none_or(|snapshot| snapshot.iteration != status.total_iterations);
+    }) && state.last_snapshot_iteration != Some(status.total_iterations);
     let downloaded_positions = (snapshot_due || terminal).then(|| world.download_positions());
     if snapshot_due {
         let positions = downloaded_positions.as_ref().unwrap();
@@ -958,6 +1039,7 @@ fn run_device_batch(
             positions: positions.clone(),
             assembly: snapshot_assembly,
         });
+        state.last_snapshot_iteration = Some(status.total_iterations);
     }
     if !terminal {
         return;

@@ -4,36 +4,118 @@
 
 **Thread Assembly, Network Generation, Linking, and Equilibration**
 
-TANGLE is an experimental, solver-neutral representation and generation
-framework for fibrous material assemblies. Its central object is a
+TANGLE is an experimental framework for generating and relaxing fibrous
+materials. **Python is the primary user interface**: build fiber collections,
+compose manufacturing recipes, inspect the result, and export to downstream
+tools. Rust and CubeCL implement the geometry and numerical kernels underneath.
+Its central object is a
 `FiberAssembly`: intrinsic fiber centerlines, their placed geometry, persistent
 junction topology, a simulation cell, and enough provenance to reproduce how
 the assembly was made.
 
-The same assembly is intended to support several derived representations:
+The same assembly supports solver-neutral BPM and voxel exports:
 
-- beam-element meshes for FEM;
 - particles, capsules, and bonds for DEM-BPM;
 - swept-volume voxelizations for PuMA and image-based solvers;
-- graph views for connectivity and transport analysis.
+
+Dedicated FEM mesh and graph-analysis exporters are future work.
 
 Those representations are views or exports, not the canonical data model.
 
-## Example progression
+## Python quick start
 
-The examples build from one deliberately impossible contact to staged material
-formation. Click any preview to play the short OVITO rendering.
+Python is the simplest way to construct fiber collections and manufacturing
+recipes. The `tangle` extension calls the same Rust data model and CubeCL
+solver as the native applications; relaxation does not run as a Python loop.
 
-| Stage | Demonstration |
+Start with the [installation guide](crates/tangle_python/README.md) or
+[tutorial 00](crates/tangle_python/python/tutorials/00_installation_and_environment.ipynb).
+This is currently a **source install**, not a published-wheel installation.
+You need Python 3.10+, Rust/Cargo, and a native compiler/linker. CubeCL downloads
+its matching LLVM build dependency; a system `llvm-config` is not required.
+
+After installing those prerequisites, from the repository root (macOS/Linux):
+
+```console
+python3 -m venv .venv-tangle
+source .venv-tangle/bin/activate
+python -m pip install "maturin>=1.8,<2" jupyterlab ipykernel
+maturin develop --release --manifest-path crates/tangle_python/Cargo.toml
+python -m ipykernel install --user --name tangle --display-name "Python (TANGLE)"
+jupyter lab crates/tangle_python/python/tutorials
+```
+
+```python
+import tangle
+
+fiber = tangle.Material("fiber", diameter=19e-6)
+layer = tangle.FiberCollection("first ply")
+layer.add_fiber(
+    [[-0.4e-3, 0, 0], [0.4e-3, 0, 0]],
+    fiber,
+    formation_layer=0,
+)
+
+assembly = tangle.Assembly(
+    tangle.Cell([1e-3, 1e-3, 2e-3], periodic=[True, True, False])
+)
+recipe = tangle.Recipe(assembly)
+recipe.insert(layer, translation=[0.5e-3, 0.5e-3, 0.5e-3])
+recipe.relax()
+
+settings = tangle.RelaxationSettings()
+settings.penetration_tolerance = 0.1e-6
+settings.adaptive_segmentation = tangle.AdaptiveSegmentationSettings()
+# Use settings.backend = "cpu" on a system without a usable GPU.
+result = recipe.run(settings)
+print(result.converged, result.max_penetration, result.max_curvature_ratio)
+analysis = result.characterize()
+print(analysis.nominal_swept_volume_fraction)
+```
+
+Select the **Python (TANGLE)** notebook kernel. The installation guide includes
+Windows and Miniforge alternatives. After rebuilding the extension, restart
+the kernel before using new API arguments. Lengths in this example are meters;
+TANGLE does not automatically convert units.
+
+All relaxation, cell-list, refinement, coarsening, compaction, checkpoint, and
+recipe-stage controls are inspectable Python attributes with Rust-backed
+defaults. Executable scripts and matching notebooks cover the
+[small Python workflows](crates/tangle_python/python/examples) and
+[the native Rust example configurations](crates/tangle_python/python/examples/native).
+The [topic notebook series](crates/tangle_python/python/tutorials) treats one
+piece of the API at a time and enumerates every exposed setting. See the
+[Python guide](crates/tangle_python/README.md) for the complete API and
+installation notes. Follow [01: high-level overview](crates/tangle_python/python/tutorials/01_high_level_overview.ipynb)
+for staged insertion, relaxation, junction capture, and OVITO keyframes, then
+use the [example index](examples/README.md) to choose a larger workflow.
+
+TANGLE writes a versioned PuMA interoperability bundle through `export_puma()`:
+`domain.vti` carries phase IDs and exact centerline tangents, while JSON files
+preserve native characterization, material/fiber mappings, grid conventions,
+and ambiguity diagnostics. The paired
+[native fixture](examples/puma_cross_validation) and
+[Python notebook](crates/tangle_python/python/examples/puma_cross_validation.ipynb)
+build the same orthogonal-fiber fixture; the Python side imports `pumapy`
+directly for comparison. See the
+[interoperability specification](docs/puma_interoperability.md) for definitions
+and resolution-study guidance. PuMA remains a downstream application, not a
+TANGLE runtime dependency.
+
+## Twenty-ply felt construction
+
+The largest example builds otherwise matched control and needled specimens
+from twenty planar plies. Click either OVITO preview to play the construction.
+
+| Control | Needled |
 | --- | --- |
-| 1. Rigid separation | [![Fibers crossing at one point](docs/media/center-point.png)](docs/media/center-point.mp4) |
-| 2. Rest curvature | [![A curved placement recovering toward a straight rest shape](docs/media/rest-curvature.png)](docs/media/rest-curvature.mp4) |
-| 3. Admissible bend limit | [![An over-bent fiber projected back below its curvature limit](docs/media/bend-limit.png)](docs/media/bend-limit.mp4) |
-| 4. Biased planar population | [![A layered planar fiber population relaxing](docs/media/planar-bias.png)](docs/media/planar-bias.mp4) |
-| 5. Manufacturing recipe | [![Staged insertion, relaxation, and compaction](docs/media/formation-recipe.png)](docs/media/formation-recipe.mp4) |
-| 6. Layer-by-layer needling | [![A small educational needling recipe](docs/media/layered-needling.png)](docs/media/layered-needling.mp4) |
-| 7. Twenty-ply control | [![The unneedled fake felt construction](docs/media/felted-control.png)](docs/media/felted-control.mp4) |
-| 8. Twenty-ply needled material | [![The needled fake felt construction](docs/media/felted-needled.png)](docs/media/felted-needled.mp4) |
+| [![The unneedled twenty-ply fake felt construction](docs/media/felted-control.png)](docs/media/felted-control.mp4) | [![The twenty-ply needled fake felt construction](docs/media/felted-needled.png)](docs/media/felted-needled.mp4) |
+
+Both populations contain 7 and 19 micrometer fibers, split 50:50 by nominal
+fiber volume rather than fiber count. The needled recipe deposits and relaxes
+the plies in sequence, applies localized through-thickness pulls to the larger
+fibers, releases those targets, and performs final contact and curvature
+cleanup. Ordinary contacts are not converted into permanent junctions.
 
 ## Downstream mechanics in DIRT
 
@@ -56,156 +138,89 @@ At approximately 16.6% strain, the needled specimen retains a larger,
 intermittent load path while the unneedled control has fallen close to zero
 stress. No bonds have broken at this point. This is a developing numerical
 demonstration of the TANGLE-to-DIRT workflow, not a calibrated material
-prediction; both simulations continue toward 50% strain.
+prediction. This figure is an archived interim snapshot, not a live indication
+of simulation progress.
 
-## Current scope
+## Representative examples
 
-The first implementation contains `tangle_core`, which establishes:
+The smaller examples isolate individual mechanics concepts. These two give a
+compact progression from contact resolution to constrained deformation; the
+[examples directory](examples) contains the complete set and per-example
+settings.
 
-- stable fiber, material, section, junction, and junction-law identifiers;
-- intrinsic, placed, and optional assembled-reference centerlines;
-- material-coordinate `FiberAnchor`s that survive centerline remeshing;
-- two-or-more-anchor persistent junctions;
-- structural and geometric validation;
-- resolution of an anchor onto the current piecewise-linear discretization.
+| Concept | Demonstration |
+| --- | --- |
+| Contact separation | [![Fibers crossing at one point](docs/media/center-point.png)](docs/media/center-point.mp4) |
+| Rest shape and bend limits | [![An over-bent fiber projected below its curvature limit](docs/media/bend-limit.png)](docs/media/bend-limit.mp4) |
 
-The `tangle_app` crate adds a GRASS workflow contract for ordering generation,
-contact detection, iterative relaxation, junction formation, deformation, and
-export. It does not implement those scientific algorithms; replaceable plugins
-will supply them.
+## What the solver does
 
-The first real pipelines are split across focused crates:
+Recipes approximate quasi-static manufacturing as explicit operations:
+insert → relax → move/needle/compact → relax → capture junctions → export.
+A recipe is not a time-accurate manufacturing simulation. Relaxation applies
+iterative contact, stretch, rest-shape bending, and admissible-curvature
+corrections; its iteration count is not physical time.
 
-- `tangle_generate` creates deterministic straight and multi-segment crossing
-  fibers with independent intrinsic and initially placed shapes;
-- `tangle_contact` owns device-resident uniform-grid broad phase and capsule
-  contact kernels;
-- `tangle_characterize` measures swept-volume fraction and the length-weighted
-  second-order orientation tensor before and after relaxation;
-- `tangle_relax` owns the persistent device world, CubeCL runtime selection,
-  and rigid or flexible centerline mechanics;
-- `tangle_checkpoint` provides versioned, atomic restart files for long
-  device-resident formation runs;
-- `tangle_export` discretizes relaxed centerlines as a bonded-sphere model.
+Rest centerlines define preferred lengths and bends. Placed centerlines are
+the current geometry. A natural bend preference and a maximum permitted bend
+are separate settings. Contacts are transient; captured junctions are persistent
+topology for export, **not mechanically enforced bonds during relaxation**.
+Usually capture them after the geometry has settled.
 
-## Run the examples
+Check `result.converged`, residuals, warnings, and recipe events before using
+an output as a relaxed specimen. A soft intermediate gate is not proof of final
+hard admissibility. Exporting an assembly does not itself certify equilibrium.
+See [solver and architecture notes](docs/architecture.md) for details.
 
-TANGLE requires a Rust toolchain and a CubeCL/WGPU-compatible device. GRASS is
-resolved from its tagged Git repository, so a sibling checkout is not required.
+## Outputs and analysis
+
+- **OVITO:** final geometry or an opt-in multi-frame spherocylinder trajectory.
+  Keyframes reduce snapshot traffic; dense debug output can dominate runtime.
+- **BPM:** `spheres-exact`, `spheres-dynamic`, `spherocylinders-exact`, and
+  `spherocylinders-constant`. TANGLE writes geometry and bonds, not DIRT runtime
+  configuration files. Check downstream atom-style compatibility and overlap
+  tolerances before running a dynamic solver.
+- **Native analysis:** lengths, nominal volume fractions, per-material and
+  per-fiber summaries, curvature, and length-/volume-weighted orientation.
+- **PuMA:** circular-capsule VTI/JSON bundles for direct `pumapy` analysis.
+  Occupied voxel volume and nominal fiber volume are different quantities;
+  comparisons need matched definitions and resolution checks.
+
+[Results/export tutorial](crates/tangle_python/python/tutorials/14_results_and_exports.ipynb)
+· [PuMA analysis guide](docs/puma_interoperability.md)
+
+## Backends and reproducibility
+
+WGPU is the default; CPU execution is explicitly selected with
+`settings.backend = "cpu"`. Both use CubeCL kernels, with no silent CPU
+fallback. Large manufacturing recipes are intended for accelerators.
+
+Seeded generation is deterministic. GPU/CPU relaxation is not guaranteed
+bitwise identical across runs or devices; assess reproducibility using explicit
+geometric and residual tolerances. Save the recipe, settings, code revision,
+and backend with your results.
+
+Checkpoints preserve partial recipe and device state, but this experimental
+project does **not** guarantee restart compatibility across revisions. Keep the
+generating commit and an independent geometry export. Output folders, local
+environments, and notebooks' generated results are excluded from Git.
+
+## Rust and development
+
+Rust is the implementation and plugin-extension path, not a prerequisite for
+writing Python recipes once the extension is installed.
+See [architecture](docs/architecture.md), [native examples](examples/README.md),
+and the [Python guide](crates/tangle_python/README.md).
 
 ```console
-cargo run -p tangle_core --example crossed_fibers
-cargo run -p fibers_through_center_point_dem_bpm
-cargo run -p fibers_through_center_point_dem_bpm -- --debug-ovito
-cargo run -p multisegment_flexible_relaxation_dem_bpm
-cargo run -p multisegment_flexible_relaxation_dem_bpm -- --debug-ovito
-cargo run --release -p biased_fiber_box_dem_bpm
-cargo run --release -p biased_fiber_box_dem_bpm -- --debug-ovito
-cargo run --release -p fake_tps_formation -- --debug-ovito
-cargo run --release -p fake_needled -- --debug-ovito
-cargo run --release -p fake_needled_2 -- --checkpoint
-cargo run --release -p fake_needled_2 -- --resume
-cargo run --release -p biased_fiber_box_dem_bpm --bin biased_fiber_stress -- \
-  --case planar_layered --fiber-count 800
+cargo fmt --all -- --check
+cargo check --workspace --all-targets
 cargo test --workspace
+python -m unittest discover -s crates/tangle_python/python/tests -v
 ```
 
-The `--debug-ovito` option records relaxation as a multi-frame LAMMPS dump of
-oriented spherocylinders and writes an OVITO Python viewing recipe beside it.
-The multi-segment example compares straight/straight, straight/curved, and
-curved/curved shape semantics with free endpoints, plus an intentionally
-over-bent placement. A per-fiber minimum bend radius prevents geometric
-relaxation from creating nonphysical kinks, and OVITO colors each capsule by
-its fraction of the admissible curvature. The example captures each converged
-geometry as the optional assembled reference before producing its DEM-BPM
-model.
+Device tests need a supported runtime. For CPU-only relaxation tests:
 
-CubeCL is the first-class execution path rather than a separate feature crate.
-Contact code lives in `tangle_contact`, relaxation code in `tangle_relax`,
-formation schedules in `tangle_generate`, and device snapshot export in
-`tangle_export`. All physical examples pack topology, intrinsic constraint
-data, and placed geometry
-into flat buffers and uploads them into a persistent `DeviceFiberWorld`.
-GRASS controls bounded GPU relaxation batches and can insert formation plugins
-between them without downloading geometry. Each correction pass rebuilds a
-compact count/scan/scatter cell list on the device, then runs exact capsule contacts, Jacobi
-vertex corrections, stretch constraints, rest-chord bending constraints, and
-a pinned-aware three-point admissible-curvature projection. A state is accepted
-as converged only when capsule penetration and maximum bend ratio both satisfy
-their configured hard tolerances. Formation recipes may add bounded
-`RelaxUntilConverged` gates between manufacturing commands; a failed gate
-terminates the recipe explicitly instead of exporting an inadmissible state.
-The motion model can instead apply one translation per fiber when exact rigid
-centerline preservation is required.
-Orthorhombic periodic axes use wrapped cell-list neighborhoods and minimum-image
-capsule contacts; bounded axes retain hard planar walls.
-Normal batches download only scalar status; final positions are downloaded for
-export. `--debug-ovito` explicitly requests sparse geometry snapshots. The
-current WGPU backend uses Metal on supported Apple systems.
-
-Seeded generation is deterministic. Relaxation is reproducible to configured
-physical tolerances, but is not promised to be bitwise identical: parallel
-atomic insertion may visit same-cell candidates in a different order, and
-floating-point accumulation can differ across runs, devices, and backends.
-Tests and restart acceptance should therefore compare residuals and geometry
-with explicit tolerances rather than byte-for-byte output.
-
-Optional adaptive centerlines reserve dyadic segment trees once, then alter
-only device-resident activity masks. Refinement requires persistent unresolved
-contact instead of reacting to one overlap sample. Contact-free collinear
-siblings can coarsen after a separate cooldown; pinned, actively targeted,
-significantly bent, and junction-bearing topology is retained. Both clocks use
-lifetime solver iterations and are independent of GRASS batch boundaries.
-
-Long runs can opt into sparse restart checkpoints without adding readback to
-ordinary batches. A checkpoint atomically captures the assembly, formation
-recipe cursor and partial operation, relaxation counters, exact device
-positions and active topology, adaptive refinement/coarsening history, cell bounds, and
-active layer or needle targets. Scratch contact buffers are rebuilt after
-resume. The `fake_needled_2` example exposes this as `--checkpoint` and
-`--resume`; its rolling file is written under the example's `output` folder.
-
-The planar population installs a separate `LayeredFormationPlugin`. Generated
-fibers retain explicit manufacturing-layer labels; the plugin first relaxes at
-the generated spacing, sends small target-plane commands between GPU batches,
-compacts the layers incrementally, stops issuing layer targets, and then allows
-the ordinary relaxation plugin to complete. Alternative manufacturing plugins
-can operate on the same resident world and workflow-control resource.
-
-The `fake_tps_formation` example makes that modularity explicit. It preallocates
-planar and through-thickness populations, then executes an editable recipe of
-`ActivateFibersThrough`, `RelaxFor`, `MoveLayers`, and closed-loop `Compact`
-operations. Fiber geometry stays resident while the sequence performs insert →
-relax → compact → relax → insert → relax. Its OVITO trajectory omits dormant
-preallocated fibers, so the through-thickness insertion is visible as a
-topology change.
-
-The `fake_needled` example uses a layer-staged population and repeats deposit →
-place → relax → needle → relax. Before each needle pull it releases the
-layer-center tethers, so prescribed top-layer vertices transmit motion through
-ordinary contacts into a mechanically free stack. After six layers it lowers
-the top platen to a 40% nominal volume-fraction target.
-
-`Compact` changes the resident cell in small logarithmic-strain increments,
-relaxes after every increment, and stops on nominal volume fraction, cell
-volume or lengths, directional pressure, mean pressure, or formation penalty
-energy. Prescribed axis ratios, equal-pressure control, stress-ratio control,
-and minimum-incremental-work selection share the same controller. Fibers may
-follow the cell by rigid center translation, affine vertex deformation, or
-moving hard walls. Step size grows after inexpensive convergence and shrinks
-after difficult relaxation; penetration, admissible curvature, pressure,
-energy, step-count, and jamming guards produce explicit reports. The large
-topology and geometry buffers remain resident while only small status and
-pressure/energy summaries are read at controller checkpoints.
-Each compaction increment is transactional: the controller snapshots the last
-accepted device state, rolls back a failed trial exactly, reduces the strain
-step, and retries. A rejected penetrated state is therefore never accumulated
-into later compaction.
-
-Formation recipes can also use `CaptureJunctions` at explicit process points or
-`RelaxAndCapture` at an iteration cadence independent of GRASS batch size. A
-junction policy filters GPU-captured contact candidates by material pair,
-surface gap, crossing angle, deterministic probability, multiplicity, and
-material-coordinate spacing, then assigns a symbolic junction law and parameter
-set. Persistent junctions export as inter-fiber DEM-BPM bonds; ordinary contacts
-remain transient and are not stored as junctions.
+```console
+cargo test -p tangle_relax --no-default-features --features cpu --lib -- --test-threads=1
+```

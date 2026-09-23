@@ -12,7 +12,7 @@ use tangle_checkpoint::{CheckpointConfig, CheckpointPlugin, CheckpointReport};
 use tangle_core::{FiberAssembly, PeriodicCell};
 use tangle_example_support::ExampleOutput;
 use tangle_export::{
-    write_ovito_assembly_frame, write_ovito_view_script, DemBpmExportPlugin, DemBpmExportReport,
+    write_ovito_assembly_frame, write_ovito_view_script, BpmExportPlugin, BpmExportReport,
     OvitoColoring, OvitoTrajectoryConfig, OvitoTrajectoryPlugin, OvitoTrajectoryReport,
 };
 use tangle_generate::{
@@ -161,8 +161,8 @@ fn main() {
     // A full bead-chain export contains millions of particles at these aspect
     // ratios, so it is explicit rather than part of the normal teaching run.
     if export_dem {
-        app.add_plugins(DemBpmExportPlugin {
-            config: output.dem_bpm(1_800.0),
+        app.add_plugins(BpmExportPlugin {
+            config: output.sphere_bpm(1_800.0),
         });
     }
     app.start();
@@ -633,7 +633,7 @@ fn report(app: &App) {
         1.0e6 * relaxation.max_penetration,
         relaxation.max_curvature_ratio
     );
-    if let Some(export) = app.get_resource_ref::<DemBpmExportReport>() {
+    if let Some(export) = app.get_resource_ref::<BpmExportReport>() {
         println!(
             "  DEM-BPM: {} particles and {} bonds at {}",
             export.particles,

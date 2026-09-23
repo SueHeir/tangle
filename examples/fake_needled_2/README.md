@@ -1,5 +1,11 @@
 # Fake needled 2.0
 
+Start with the **[Python notebook](../../crates/tangle_python/python/examples/native/fake_needled_2.ipynb)**
+or [editable script](../../crates/tangle_python/python/examples/native/fake_needled_2.py).
+See the [installation guide](../../crates/tangle_python/README.md) first.
+The commands and output paths below describe the native Rust version; Python
+uses the same solver but can have different export/debug defaults and paths.
+
 This experiment moves the needled-layer recipe into physical SI units and a
 two-material population:
 
@@ -11,9 +17,9 @@ two-material population:
 - 188 nominally 19 µm diameter local fiber windows with a 60 µm minimum bend radius;
 - 3–4 mm simulated centerline windows representing nominal 50.8 mm (2 inch)
   manufacturing fibers;
-- a final nominal volume-fraction target of 13%, representative of a nominal
-  `0.20 g/cc` MERINO felt if the fully dense carbon-phenolic blend is
-  approximately `1.5 g/cc`.
+- a final nominal volume-fraction target of 13%, an illustrative value obtained
+  from assumed bulk/solid densities of `0.20 / 1.5 g/cc`; this is not a measured
+  or validated MERINO specification.
 
 Each deposited layer receives a reproducibly random in-plane reference
 direction. Approximately 40% of its fibers lie within 10 degrees of that
@@ -48,11 +54,13 @@ and penalty energy, so a long or jammed run can be diagnosed while it runs.
 Every deposition, approach, and needling command is followed by an explicit
 admissibility gate. A newly activated layer first relaxes in its physically
 separated staging plane, then moves alone through two approach steps toward the
-previously deposited stack. The recipe cannot advance until capsule
-penetration is at or below 0.30 µm and every bend ratio is at or below one. If
-a gate exhausts its local iteration budget, formation is rejected and no final
-OVITO state is written. Once a temporary layer target is released, contact
-transmits its load through the free stack.
+previously deposited stack. Formation gates require capsule penetration at or
+below 0.30 µm and use a soft bend-ratio acceptance target of 1.05. On budget
+exhaustion, a soft gate may continue if its hard limits pass. Final cleanup
+uses hard penetration and bend-ratio limits (0.30 µm and 1.001); failure rejects
+the final state. Layer targets are released after approach and a 100-iteration
+dwell, allowing contacts to settle in a free stack. These are staged solve
+policies, not a claim that every intermediate bend meets its final hard limit.
 
 The 1,504 initially active segments are a deliberately coarse, four-segment
 root discretization. Adaptive segmentation reserves dyadic refinement trees on
@@ -113,12 +121,10 @@ footprint; the 7 um stiff population is not needled. The deliberately visible
 teaching footprint is 150 um in diameter. Needling begins after the third ply
 has been deposited, and selected vertices are pulled downward by seven 50 um
 layer spacings (350 um) into the free space below the bottom ply. The needle
-advances by at most 0.5 um per solver iteration—well below the 7 um obstacle
-diameter—and remains active for at least 1,400 iterations. A hard contact and
-bend convergence gate must then pass while the target is still held. Only that
-admissible threaded configuration may release the needle; the free stack must
-pass a second hard gate afterward. This quasi-static ordering prevents a thick
-fiber from jumping through a thin one between discrete solver states.
+advances by at most 1 um per solver iteration, also capped relative to fiber
+diameter. Target-error convergence ends the advance, followed by a 150-iteration
+dwell, release, and a free-stack formation gate. Small increments help contacts
+respond but do not constitute a continuous-collision/topology guarantee.
 
 Detailed OVITO output is optional because refinement can grow well beyond the 1,504 initial
 centerline segments. It streams a frame every 100 solver iterations and also

@@ -1,0 +1,13 @@
+[package]
+name = "puma_cross_validation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+default-run = "puma_cross_validation"
+
+[dependencies]
+tangle_characterize.workspace = true
+tangle_core.workspace = true
+tangle_export.workspace = true
+serde_json.workspace = true

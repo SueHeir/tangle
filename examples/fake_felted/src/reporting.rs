@@ -84,11 +84,11 @@ pub(super) fn report(app: &App) {
     // inter-fiber residual from a nonadjacent self-contact and makes the DEM
     // startup tolerance independently visible in successful runs.
     print_contact_diagnostic(app, relaxation.max_penetration);
-    if let Some(export) = app.get_resource_ref::<DemCapsuleBpmExportReport>() {
+    if let Some(export) = app.get_resource_ref::<BpmExportReport>() {
         if !export.data_path.as_os_str().is_empty() {
             println!(
                 "  exported {} capsules and {} bonds to {}",
-                export.capsules,
+                export.particles,
                 export.bonds,
                 export.data_path.display()
             );
@@ -97,9 +97,6 @@ pub(super) fn report(app: &App) {
                     "    atom type {}: {} ({} capsules)",
                     mapping.atom_type, mapping.material_name, mapping.particles
                 );
-            }
-            if let Some(path) = &export.dirt_config_path {
-                println!("  DIRT loading config: {}", path.display());
             }
         }
     }

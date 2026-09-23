@@ -11,9 +11,7 @@ use tangle_app::prelude::*;
 use tangle_checkpoint::{CheckpointConfig, CheckpointPlugin, CheckpointReport};
 use tangle_core::{FiberAssembly, PeriodicCell};
 use tangle_example_support::ExampleOutput;
-use tangle_export::{
-    DemCapsuleBpmExportPlugin, DemCapsuleBpmExportReport, OvitoColoring, OvitoTrajectoryPlugin,
-};
+use tangle_export::{BpmExportPlugin, BpmExportReport, OvitoColoring, OvitoTrajectoryPlugin};
 use tangle_generate::{
     AcceptanceLimit, AdaptiveCompactionIncrement, CompactionConfig, CompactionGuards,
     CompactionPath, CompactionTarget, FiberPopulationSpec, FormationOperation,
@@ -398,12 +396,8 @@ fn main() {
         "relaxation"
     };
     let dem_path = output.directory.join(format!("{stem}_capsules.data"));
-    let dirt_path = output.directory.join(format!("{stem}_dirt.toml"));
-    app.add_plugins(DemCapsuleBpmExportPlugin {
-        config: tangle_export::DemCapsuleBpmExportConfig::new(dem_path)
-            .with_density(DENSITY)
-            .with_maximum_length_over_diameter(4.0)
-            .with_dirt_config(dirt_path),
+    app.add_plugins(BpmExportPlugin {
+        config: tangle_export::BpmExportConfig::new(dem_path).with_density(DENSITY),
     });
     app.start();
     report(&app);

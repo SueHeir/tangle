@@ -1,5 +1,11 @@
 # Fibers through center point → DEM-BPM
 
+Start with the **[Python notebook](../../crates/tangle_python/python/examples/native/center_point.ipynb)**
+or [editable script](../../crates/tangle_python/python/examples/native/center_point.py).
+See the [installation guide](../../crates/tangle_python/README.md) first.
+The commands and output paths below describe the native Rust version; Python
+uses the same solver but can have different export/debug defaults and paths.
+
 [![Eight rigid fibers separating from a shared center point](../../docs/media/center-point.png)](../../docs/media/center-point.mp4)
 
 *Click the preview to play the OVITO rendering.*
@@ -37,8 +43,8 @@ To record the relaxation for inspection in OVITO:
 This opt-in mode explicitly downloads debug snapshots and writes
 `output/relaxation.dump`, a multi-frame LAMMPS dump
 containing one spherocylinder per centerline segment. For this straight-fiber
-example that means eight capsules per frame instead of the 136 spheres in the
-DEM discretization. Each capsule carries its stable segment ID, source-fiber
+example that means eight capsules per frame instead of the denser sphere-chain
+BPM discretization. Each capsule carries its stable segment ID, source-fiber
 ID, radius, length, orientation, local segment index, and fiber point count.
 
 It also writes `output/relaxation_view.py`, a portable viewing recipe that
@@ -51,10 +57,11 @@ Python package:
 OVITO Basic users can open `relaxation.dump`, select the Spherocylinder particle
 shape, and use **File → Save Session State** to create the same `.ovito` file.
 
-The exported data file contains both the `bpm/sphere` Atoms section and the
-explicit Bonds section. A future combined GRASS application can install the
-TANGLE and DIRT plugins together and consume this model without this example
-owning DIRT's runtime configuration.
+The exported data file uses `spheres-dynamic` mode with one-radius target
+spacing, so source centerline endpoints remain explicit. It contains both the
+`bpm/sphere` Atoms section and the Bonds section. DIRT or another compatible
+LAMMPS BPM workflow can consume the model without TANGLE owning its runtime
+configuration.
 
 Useful first experiments are changing `FIBER_COUNT`, the generator radius, or
 the penetration tolerance. Increasing the radius makes the initial collision

@@ -85,26 +85,34 @@ fn record_device_trajectory(
     );
 
     if !state.initialized {
-        if stage.0 == TangleStage::Generate {
-            if config.write_initial_frame {
-                write_ovito_assembly_frame(&assembly, &config, 0, false)
-                    .unwrap_or_else(|error| panic!("OVITO trajectory output failed: {error}"));
-                state.last_written_step = Some(0);
-                state.next_frame_index = 1;
-                report.frames = 1;
-                report.last_timestep = Some(0);
-            } else if let Err(error) = std::fs::remove_file(&config.dump_path) {
-                assert_eq!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound,
-                    "could not reset OVITO trajectory {}: {error}",
-                    config.dump_path.display()
-                );
-            }
+        if config.write_initial_frame {
+            write_ovito_assembly_frame(&assembly, &config, 0, false)
+                .unwrap_or_else(|error| panic!("OVITO trajectory output failed: {error}"));
+            state.last_written_step = Some(0);
+            state.next_frame_index = 1;
+            report.frames = 1;
+            report.last_timestep = Some(0);
+        } else if let Err(error) = std::fs::remove_file(&config.dump_path) {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::NotFound,
+                "could not reset OVITO trajectory {}: {error}",
+                config.dump_path.display()
+            );
         }
         if let Some(script_path) = &config.view_script_path {
             write_ovito_view_script(&config, script_path)
                 .unwrap_or_else(|error| panic!("OVITO viewing-recipe output failed: {error}"));
+        }
+        if let Some(session_path) = &config.session_path {
+            if let Err(error) = std::fs::remove_file(session_path) {
+                assert_eq!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound,
+                    "could not reset OVITO session target {}: {error}",
+                    session_path.display()
+                );
+            }
         }
         state.initialized = true;
         if stage.0 == TangleStage::Generate {

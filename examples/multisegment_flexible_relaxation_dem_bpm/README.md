@@ -1,5 +1,11 @@
 # Multi-segment flexible-fiber relaxation
 
+Start with the **[Python notebook](../../crates/tangle_python/python/examples/native/multisegment_shapes.ipynb)**
+or [editable script](../../crates/tangle_python/python/examples/native/multisegment_shapes.py).
+See the [installation guide](../../crates/tangle_python/README.md) first.
+The commands and output paths below describe the native Rust version; Python
+uses the same solver but can have different export/debug defaults and paths.
+
 [![Curved placed fibers responding to their straight rest shape](../../docs/media/rest-curvature.png)](../../docs/media/rest-curvature.mp4)
 
 [Rest-curvature video](../../docs/media/rest-curvature.mp4) ·

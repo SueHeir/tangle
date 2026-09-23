@@ -5,9 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tangle_export::{
-    DemBpmExportConfig, DemCapsuleBpmExportConfig, OvitoColoring, OvitoTrajectoryConfig,
-};
+use tangle_export::{BpmExportConfig, BpmExportMode, OvitoColoring, OvitoTrajectoryConfig};
 
 /// Conventional output files for one example or example case.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,14 +40,17 @@ impl ExampleOutput {
         }
     }
 
-    /// Creates the standard DEM-BPM output used by the examples.
-    pub fn dem_bpm(&self, density: f64) -> DemBpmExportConfig {
-        DemBpmExportConfig::new(&self.dem_data).with_density(density)
+    /// Creates an endpoint-preserving bonded-sphere BPM output.
+    pub fn sphere_bpm(&self, density: f64) -> BpmExportConfig {
+        BpmExportConfig::new(&self.dem_data)
+            .with_mode(BpmExportMode::SpheresDynamic)
+            .with_sphere_spacing_over_radius(1.0)
+            .with_density(density)
     }
 
-    /// Creates the adaptive-segment capsule DEM-BPM output used by DIRT.
-    pub fn capsule_bpm(&self, density: f64) -> DemCapsuleBpmExportConfig {
-        DemCapsuleBpmExportConfig::new(&self.dem_data).with_density(density)
+    /// Creates the exact active-segment spherocylinder BPM output.
+    pub fn capsule_bpm(&self, density: f64) -> BpmExportConfig {
+        BpmExportConfig::new(&self.dem_data).with_density(density)
     }
 
     /// Creates an oriented-segment trajectory with a generated viewing recipe.

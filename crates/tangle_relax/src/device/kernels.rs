@@ -1,7 +1,7 @@
 use cubecl::prelude::*;
 
 #[cube(launch_unchecked)]
-pub(crate) fn begin_relaxation_batch(control: &mut Array<u32>) {
+pub(crate) fn begin_relaxation_batch(control: &mut [u32]) {
     if ABSOLUTE_POS != 0 {
         terminate!();
     }
@@ -12,7 +12,7 @@ pub(crate) fn begin_relaxation_batch(control: &mut Array<u32>) {
 }
 
 #[cube(launch_unchecked)]
-pub(crate) fn clear_wall_reactions(wall_reactions: &mut Array<f32>, control: &Array<u32>) {
+pub(crate) fn clear_wall_reactions(wall_reactions: &mut [f32], control: &[u32]) {
     let vertex = ABSOLUTE_POS;
     if vertex >= wall_reactions.len() / 3 || control[0] == 0 {
         terminate!();
@@ -24,7 +24,7 @@ pub(crate) fn clear_wall_reactions(wall_reactions: &mut Array<f32>, control: &Ar
 }
 
 #[cube(launch_unchecked)]
-pub(crate) fn clear_adaptation_epoch(count: &mut Array<Atomic<u32>>) {
+pub(crate) fn clear_adaptation_epoch(count: &mut [Atomic<u32>]) {
     if ABSOLUTE_POS == 0 {
         count[1].store(0);
         count[4].store(0);
@@ -32,7 +32,7 @@ pub(crate) fn clear_adaptation_epoch(count: &mut Array<Atomic<u32>>) {
 }
 
 #[cube(launch_unchecked)]
-pub(crate) fn finish_adaptation_epoch(count: &mut Array<Atomic<u32>>) {
+pub(crate) fn finish_adaptation_epoch(count: &mut [Atomic<u32>]) {
     if ABSOLUTE_POS == 0 {
         if count[1].load() > 0 {
             count[2].fetch_add(1);
@@ -44,7 +44,7 @@ pub(crate) fn finish_adaptation_epoch(count: &mut Array<Atomic<u32>>) {
 }
 
 #[cube(launch_unchecked)]
-pub(crate) fn clear_active_index_counts(counts: &mut Array<Atomic<u32>>) {
+pub(crate) fn clear_active_index_counts(counts: &mut [Atomic<u32>]) {
     if ABSOLUTE_POS == 0 {
         counts[0].store(0);
         counts[1].store(0);
@@ -54,11 +54,11 @@ pub(crate) fn clear_active_index_counts(counts: &mut Array<Atomic<u32>>) {
 /// Compacts sparse adaptive topology masks into dense device-resident lists.
 #[cube(launch_unchecked)]
 pub(crate) fn compact_active_indices(
-    segment_active: &Array<u32>,
-    vertex_active: &Array<u32>,
-    active_segments: &mut Array<u32>,
-    active_vertices: &mut Array<u32>,
-    counts: &mut Array<Atomic<u32>>,
+    segment_active: &[u32],
+    vertex_active: &[u32],
+    active_segments: &mut [u32],
+    active_vertices: &mut [u32],
+    counts: &mut [Atomic<u32>],
 ) {
     let index = ABSOLUTE_POS;
     if index < segment_active.len() && segment_active[index as usize] != 0 {
@@ -72,7 +72,7 @@ pub(crate) fn compact_active_indices(
 }
 
 #[cube(launch_unchecked)]
-pub(crate) fn clear_reduced_metrics(metrics: &mut Array<Atomic<u32>>) {
+pub(crate) fn clear_reduced_metrics(metrics: &mut [Atomic<u32>]) {
     if ABSOLUTE_POS == 0 {
         metrics[0].store(0);
         metrics[1].store(0);
@@ -84,10 +84,10 @@ pub(crate) fn clear_reduced_metrics(metrics: &mut Array<Atomic<u32>>) {
 /// Positive IEEE-754 bit patterns have the same ordering as `u32`.
 #[cube(launch_unchecked)]
 pub(crate) fn reduce_active_segment_penetration(
-    active_segments: &Array<u32>,
-    counts: &Array<Atomic<u32>>,
-    segment_max_penetration: &Array<f32>,
-    metrics: &mut Array<Atomic<u32>>,
+    active_segments: &[u32],
+    counts: &[Atomic<u32>],
+    segment_max_penetration: &[f32],
+    metrics: &mut [Atomic<u32>],
 ) {
     let work = ABSOLUTE_POS;
     if work >= counts[0].load() as usize {
@@ -99,11 +99,11 @@ pub(crate) fn reduce_active_segment_penetration(
 
 #[cube(launch_unchecked)]
 pub(crate) fn reduce_active_vertex_metrics(
-    active_vertices: &Array<u32>,
-    counts: &Array<Atomic<u32>>,
-    curvature_ratio: &Array<f32>,
-    vertex_step: &Array<f32>,
-    metrics: &mut Array<Atomic<u32>>,
+    active_vertices: &[u32],
+    counts: &[Atomic<u32>],
+    curvature_ratio: &[f32],
+    vertex_step: &[f32],
+    metrics: &mut [Atomic<u32>],
 ) {
     let work = ABSOLUTE_POS;
     if work >= counts[1].load() as usize {
@@ -116,10 +116,10 @@ pub(crate) fn reduce_active_vertex_metrics(
 
 #[cube(launch_unchecked)]
 pub(crate) fn assess_reduced_metrics(
-    reduced: &Array<Atomic<u32>>,
-    cell_overflow: &Array<Atomic<u32>>,
-    control: &mut Array<u32>,
-    metrics: &mut Array<f32>,
+    reduced: &[Atomic<u32>],
+    cell_overflow: &[Atomic<u32>],
+    control: &mut [u32],
+    metrics: &mut [f32],
     penetration_tolerance: f32,
     curvature_ratio_tolerance: f32,
     max_iterations: u32,
@@ -155,13 +155,13 @@ pub(crate) fn assess_reduced_metrics(
 /// adaptive refinement owns these same topology masks after relaxation starts.
 #[cube(launch_unchecked)]
 pub(crate) fn activate_formation_step(
-    fiber_steps: &Array<u32>,
-    fiber_segment_spans: &Array<u32>,
-    fiber_vertex_spans: &Array<u32>,
-    segment_refinement_levels: &Array<u32>,
-    vertex_refinement_levels: &Array<u32>,
-    segment_active: &mut Array<u32>,
-    vertex_active: &mut Array<u32>,
+    fiber_steps: &[u32],
+    fiber_segment_spans: &[u32],
+    fiber_vertex_spans: &[u32],
+    segment_refinement_levels: &[u32],
+    vertex_refinement_levels: &[u32],
+    segment_active: &mut [u32],
+    vertex_active: &mut [u32],
     maximum_step: u32,
 ) {
     let fiber = ABSOLUTE_POS;
@@ -210,20 +210,20 @@ pub(crate) fn activate_formation_step(
 
 #[cube(launch_unchecked)]
 pub(crate) fn refine_contact_segments(
-    positions: &mut Array<f32>,
-    segment_vertices: &Array<u32>,
-    segment_radii: &Array<f32>,
-    segment_rest_lengths: &Array<f32>,
-    segment_children: &Array<u32>,
-    segment_max_penetration: &Array<f32>,
-    segment_active: &mut Array<u32>,
-    segment_birth_epochs: &mut Array<u32>,
-    segment_contact_epochs: &mut Array<u32>,
-    segment_quiet_epochs: &mut Array<u32>,
-    vertex_active: &mut Array<u32>,
-    vertex_segments: &mut Array<u32>,
-    control: &Array<u32>,
-    refinement_count: &mut Array<Atomic<u32>>,
+    positions: &mut [f32],
+    segment_vertices: &[u32],
+    segment_radii: &[f32],
+    segment_rest_lengths: &[f32],
+    segment_children: &[u32],
+    segment_max_penetration: &[f32],
+    segment_active: &mut [u32],
+    segment_birth_epochs: &mut [u32],
+    segment_contact_epochs: &mut [u32],
+    segment_quiet_epochs: &mut [u32],
+    vertex_active: &mut [u32],
+    vertex_segments: &mut [u32],
+    control: &[u32],
+    refinement_count: &mut [Atomic<u32>],
     epoch: u32,
     penetration_threshold: f32,
     contact_length_over_diameter: f32,
@@ -299,18 +299,18 @@ pub(crate) fn refine_contact_segments(
 /// sequentially without conflicting with another target thread.
 #[cube(launch_unchecked)]
 pub(crate) fn refine_vertex_paths(
-    positions: &mut Array<f32>,
-    segment_vertices: &Array<u32>,
-    segment_children: &Array<u32>,
-    segment_active: &mut Array<u32>,
-    segment_birth_epochs: &mut Array<u32>,
-    segment_contact_epochs: &mut Array<u32>,
-    segment_quiet_epochs: &mut Array<u32>,
-    vertex_active: &mut Array<u32>,
-    vertex_segments: &mut Array<u32>,
-    path_spans: &Array<u32>,
-    path_segments: &Array<u32>,
-    refinement_count: &mut Array<Atomic<u32>>,
+    positions: &mut [f32],
+    segment_vertices: &[u32],
+    segment_children: &[u32],
+    segment_active: &mut [u32],
+    segment_birth_epochs: &mut [u32],
+    segment_contact_epochs: &mut [u32],
+    segment_quiet_epochs: &mut [u32],
+    vertex_active: &mut [u32],
+    vertex_segments: &mut [u32],
+    path_spans: &[u32],
+    path_segments: &[u32],
+    refinement_count: &mut [Atomic<u32>],
     epoch: u32,
 ) {
     let target = ABSOLUTE_POS;
@@ -362,18 +362,18 @@ pub(crate) fn refine_vertex_paths(
 /// This read-only topology pass prevents parent/child races during merging.
 #[cube(launch_unchecked)]
 pub(crate) fn mark_coarsening_candidates(
-    positions: &Array<f32>,
-    segment_vertices: &Array<u32>,
-    segment_radii: &Array<f32>,
-    segment_children: &Array<u32>,
-    segment_max_penetration: &Array<f32>,
-    segment_active: &Array<u32>,
-    segment_quiet_epochs: &mut Array<u32>,
-    vertex_active: &Array<u32>,
-    vertex_pinned: &Array<u32>,
-    curvature_ratio: &Array<f32>,
-    control: &Array<u32>,
-    candidates: &mut Array<u32>,
+    positions: &[f32],
+    segment_vertices: &[u32],
+    segment_radii: &[f32],
+    segment_children: &[u32],
+    segment_max_penetration: &[f32],
+    segment_active: &[u32],
+    segment_quiet_epochs: &mut [u32],
+    vertex_active: &[u32],
+    vertex_pinned: &[u32],
+    curvature_ratio: &[f32],
+    control: &[u32],
+    candidates: &mut [u32],
     penetration_threshold: f32,
     required_quiet_epochs: u32,
     maximum_error_over_diameter: f32,
@@ -437,17 +437,17 @@ pub(crate) fn mark_coarsening_candidates(
 /// the preceding read-only pass.
 #[cube(launch_unchecked)]
 pub(crate) fn apply_coarsening_candidates(
-    segment_vertices: &Array<u32>,
-    segment_children: &Array<u32>,
-    segment_active: &mut Array<u32>,
-    segment_birth_epochs: &mut Array<u32>,
-    segment_contact_epochs: &mut Array<u32>,
-    segment_quiet_epochs: &mut Array<u32>,
-    vertex_active: &mut Array<u32>,
-    vertex_segments: &mut Array<u32>,
-    candidates: &Array<u32>,
-    control: &Array<u32>,
-    refinement_count: &mut Array<Atomic<u32>>,
+    segment_vertices: &[u32],
+    segment_children: &[u32],
+    segment_active: &mut [u32],
+    segment_birth_epochs: &mut [u32],
+    segment_contact_epochs: &mut [u32],
+    segment_quiet_epochs: &mut [u32],
+    vertex_active: &mut [u32],
+    vertex_segments: &mut [u32],
+    candidates: &[u32],
+    control: &[u32],
+    refinement_count: &mut [Atomic<u32>],
     epoch: u32,
 ) {
     let segment = ABSOLUTE_POS;
@@ -485,12 +485,12 @@ pub(crate) fn apply_coarsening_candidates(
 
 #[cube(launch_unchecked)]
 pub(crate) fn apply_formation_layer_targets(
-    positions: &mut Array<f32>,
-    fiber_vertex_spans: &Array<u32>,
-    fiber_layers: &Array<u32>,
-    vertex_active: &Array<u32>,
-    layer_targets: &Array<f32>,
-    control: &Array<u32>,
+    positions: &mut [f32],
+    fiber_vertex_spans: &[u32],
+    fiber_layers: &[u32],
+    vertex_active: &[u32],
+    layer_targets: &[f32],
+    control: &[u32],
     axis: u32,
     first_layer: u32,
     last_layer: u32,
@@ -532,10 +532,10 @@ pub(crate) fn apply_formation_layer_targets(
 /// device-resident position plus a prescribed displacement.
 #[cube(launch_unchecked)]
 pub(crate) fn initialize_vertex_displacement_targets(
-    positions: &Array<f32>,
-    vertex_indices: &Array<u32>,
-    target_coordinates: &mut Array<f32>,
-    command_coordinates: &mut Array<f32>,
+    positions: &[f32],
+    vertex_indices: &[u32],
+    target_coordinates: &mut [f32],
+    command_coordinates: &mut [f32],
     axis: u32,
     displacement: f32,
 ) {
@@ -555,12 +555,12 @@ pub(crate) fn initialize_vertex_displacement_targets(
 /// iteration while contacts and fiber constraints relax around the needle.
 #[cube(launch_unchecked)]
 pub(crate) fn apply_vertex_targets(
-    positions: &mut Array<f32>,
-    vertex_indices: &Array<u32>,
-    target_coordinates: &Array<f32>,
-    command_coordinates: &mut Array<f32>,
-    vertex_active: &Array<u32>,
-    control: &Array<u32>,
+    positions: &mut [f32],
+    vertex_indices: &[u32],
+    target_coordinates: &[f32],
+    command_coordinates: &mut [f32],
+    vertex_active: &[u32],
+    control: &[u32],
     axis: u32,
     stiffness: f32,
     max_translation: f32,
@@ -589,12 +589,12 @@ pub(crate) fn apply_vertex_targets(
 /// downloading the resident geometry.
 #[cube(launch_unchecked)]
 pub(crate) fn measure_layer_target_error(
-    positions: &Array<f32>,
-    fiber_vertex_spans: &Array<u32>,
-    fiber_layers: &Array<u32>,
-    vertex_active: &Array<u32>,
-    layer_targets: &Array<f32>,
-    output: &mut Array<f32>,
+    positions: &[f32],
+    fiber_vertex_spans: &[u32],
+    fiber_layers: &[u32],
+    vertex_active: &[u32],
+    layer_targets: &[f32],
+    output: &mut [f32],
     axis: u32,
     first_layer: u32,
     last_layer: u32,
@@ -632,11 +632,11 @@ pub(crate) fn measure_layer_target_error(
 /// Reduces all active needle targets to one maximum coordinate error.
 #[cube(launch_unchecked)]
 pub(crate) fn measure_vertex_target_error(
-    positions: &Array<f32>,
-    vertex_indices: &Array<u32>,
-    target_coordinates: &Array<f32>,
-    vertex_active: &Array<u32>,
-    output: &mut Array<f32>,
+    positions: &[f32],
+    vertex_indices: &[u32],
+    target_coordinates: &[f32],
+    vertex_active: &[u32],
+    output: &mut [f32],
     axis: u32,
 ) {
     if ABSOLUTE_POS != 0 {
@@ -661,14 +661,14 @@ pub(crate) fn measure_vertex_target_error(
 /// centerline as a rigid shape.
 #[cube(launch_unchecked)]
 pub(crate) fn compact_rigid_fiber_centers(
-    positions: &mut Array<f32>,
-    fiber_vertex_spans: &Array<u32>,
-    vertex_active: &Array<u32>,
-    old_lower: &Array<f32>,
-    old_upper: &Array<f32>,
-    new_lower: &Array<f32>,
-    new_upper: &Array<f32>,
-    wall_reactions: &mut Array<f32>,
+    positions: &mut [f32],
+    fiber_vertex_spans: &[u32],
+    vertex_active: &[u32],
+    old_lower: &[f32],
+    old_upper: &[f32],
+    new_lower: &[f32],
+    new_upper: &[f32],
+    wall_reactions: &mut [f32],
 ) {
     let fiber = ABSOLUTE_POS;
     if fiber >= fiber_vertex_spans.len() / 2 {
@@ -712,13 +712,13 @@ pub(crate) fn compact_rigid_fiber_centers(
 /// Applies the cell deformation gradient to each active vertex.
 #[cube(launch_unchecked)]
 pub(crate) fn compact_affine_vertices(
-    positions: &mut Array<f32>,
-    vertex_active: &Array<u32>,
-    old_lower: &Array<f32>,
-    old_upper: &Array<f32>,
-    new_lower: &Array<f32>,
-    new_upper: &Array<f32>,
-    wall_reactions: &mut Array<f32>,
+    positions: &mut [f32],
+    vertex_active: &[u32],
+    old_lower: &[f32],
+    old_upper: &[f32],
+    new_lower: &[f32],
+    new_upper: &[f32],
+    wall_reactions: &mut [f32],
 ) {
     let vertex = ABSOLUTE_POS;
     if vertex >= vertex_active.len() || vertex_active[vertex as usize] == 0 {
@@ -737,15 +737,15 @@ pub(crate) fn compact_affine_vertices(
 /// Advances hard planar walls and projects active fiber material inside them.
 #[cube(launch_unchecked)]
 pub(crate) fn compact_moving_walls(
-    positions: &mut Array<f32>,
-    segment_radii: &Array<f32>,
-    vertex_fibers: &Array<u32>,
-    fiber_segment_spans: &Array<u32>,
-    vertex_active: &Array<u32>,
-    new_lower: &Array<f32>,
-    new_upper: &Array<f32>,
-    cell_periodic: &Array<u32>,
-    wall_reactions: &mut Array<f32>,
+    positions: &mut [f32],
+    segment_radii: &[f32],
+    vertex_fibers: &[u32],
+    fiber_segment_spans: &[u32],
+    vertex_active: &[u32],
+    new_lower: &[f32],
+    new_upper: &[f32],
+    cell_periodic: &[u32],
+    wall_reactions: &mut [f32],
 ) {
     let vertex = ABSOLUTE_POS;
     if vertex >= vertex_active.len() || vertex_active[vertex as usize] == 0 {
@@ -773,18 +773,18 @@ pub(crate) fn compact_moving_walls(
 /// energy measures used by the formation controller.
 #[cube(launch_unchecked)]
 pub(crate) fn measure_compaction_metrics(
-    positions: &Array<f32>,
-    segment_vertices: &Array<u32>,
-    segment_rest_lengths: &Array<f32>,
-    segment_active: &Array<u32>,
-    corrections: &Array<f32>,
-    segment_max_penetration: &Array<f32>,
-    curvature_ratio: &Array<f32>,
-    wall_reactions: &Array<f32>,
-    cell_lower: &Array<f32>,
-    cell_upper: &Array<f32>,
-    cell_periodic: &Array<u32>,
-    output: &mut Array<f32>,
+    positions: &[f32],
+    segment_vertices: &[u32],
+    segment_rest_lengths: &[f32],
+    segment_active: &[u32],
+    corrections: &[f32],
+    segment_max_penetration: &[f32],
+    curvature_ratio: &[f32],
+    wall_reactions: &[f32],
+    cell_lower: &[f32],
+    cell_upper: &[f32],
+    cell_periodic: &[u32],
+    output: &mut [f32],
     correction_fraction: f32,
     contact_stiffness: f32,
     stretch_stiffness: f32,
@@ -876,15 +876,15 @@ pub(crate) fn measure_compaction_metrics(
 
 #[cube(launch_unchecked)]
 pub(crate) fn measure_curvature_ratio(
-    positions: &Array<f32>,
-    vertex_max_curvature: &Array<f32>,
-    active_vertices: &Array<u32>,
-    active_counts: &Array<Atomic<u32>>,
-    vertex_active: &Array<u32>,
-    vertex_segments: &Array<u32>,
-    segment_vertices: &Array<u32>,
-    control: &Array<u32>,
-    curvature_ratio: &mut Array<f32>,
+    positions: &[f32],
+    vertex_max_curvature: &[f32],
+    active_vertices: &[u32],
+    active_counts: &[Atomic<u32>],
+    vertex_active: &[u32],
+    vertex_segments: &[u32],
+    segment_vertices: &[u32],
+    control: &[u32],
+    curvature_ratio: &mut [f32],
 ) {
     let work = ABSOLUTE_POS;
     if work >= active_counts[1].load() as usize || control[0] == 0 {
@@ -933,11 +933,11 @@ pub(crate) fn measure_curvature_ratio(
 
 #[cube(launch_unchecked)]
 pub(crate) fn assess_contacts(
-    segment_max_penetration: &Array<f32>,
-    curvature_ratio: &Array<f32>,
-    cell_overflow: &Array<Atomic<u32>>,
-    control: &mut Array<u32>,
-    metrics: &mut Array<f32>,
+    segment_max_penetration: &[f32],
+    curvature_ratio: &[f32],
+    cell_overflow: &[Atomic<u32>],
+    control: &mut [u32],
+    metrics: &mut [f32],
     penetration_tolerance: f32,
     curvature_ratio_tolerance: f32,
     max_iterations: u32,
@@ -978,17 +978,17 @@ pub(crate) fn assess_contacts(
 
 #[cube(launch_unchecked)]
 pub(crate) fn find_internal_corrections(
-    positions: &Array<f32>,
-    intrinsic_positions: &Array<f32>,
-    segment_vertices: &Array<u32>,
-    segment_rest_lengths: &Array<f32>,
-    active_vertices: &Array<u32>,
-    active_counts: &Array<Atomic<u32>>,
-    vertex_active: &Array<u32>,
-    vertex_pinned: &Array<u32>,
-    vertex_segments: &Array<u32>,
-    control: &Array<u32>,
-    internal_corrections: &mut Array<f32>,
+    positions: &[f32],
+    intrinsic_positions: &[f32],
+    segment_vertices: &[u32],
+    segment_rest_lengths: &[f32],
+    active_vertices: &[u32],
+    active_counts: &[Atomic<u32>],
+    vertex_active: &[u32],
+    vertex_pinned: &[u32],
+    vertex_segments: &[u32],
+    control: &[u32],
+    internal_corrections: &mut [f32],
     stretch_stiffness: f32,
     bend_stiffness: f32,
 ) {
@@ -1121,14 +1121,14 @@ pub(crate) fn find_internal_corrections(
 /// vertices receive the complete projection.
 #[cube(launch_unchecked)]
 pub(crate) fn find_curvature_limit_corrections(
-    positions: &Array<f32>,
-    segment_vertices: &Array<u32>,
-    vertex_max_curvature: &Array<f32>,
-    vertex_active: &Array<u32>,
-    vertex_pinned: &Array<u32>,
-    vertex_segments: &Array<u32>,
-    control: &Array<u32>,
-    bend_corrections: &mut Array<f32>,
+    positions: &[f32],
+    segment_vertices: &[u32],
+    vertex_max_curvature: &[f32],
+    vertex_active: &[u32],
+    vertex_pinned: &[u32],
+    vertex_segments: &[u32],
+    control: &[u32],
+    bend_corrections: &mut [f32],
     stiffness: f32,
     safety_margin: f32,
 ) {
@@ -1234,12 +1234,12 @@ pub(crate) fn find_curvature_limit_corrections(
 
 #[cube]
 fn project_curvature_triplet_in_place(
-    positions: &mut Array<f32>,
-    vertex_max_curvature: &Array<f32>,
-    vertex_pinned: &Array<u32>,
-    cell_lower: &Array<f32>,
-    cell_upper: &Array<f32>,
-    cell_periodic: &Array<u32>,
+    positions: &mut [f32],
+    vertex_max_curvature: &[f32],
+    vertex_pinned: &[u32],
+    cell_lower: &[f32],
+    cell_upper: &[f32],
+    cell_periodic: &[u32],
     previous: usize,
     center: usize,
     next: usize,
@@ -1360,17 +1360,17 @@ fn project_curvature_triplet_in_place(
 /// are race-free while adjacent constraints observe each other's corrections.
 #[cube(launch_unchecked)]
 pub(crate) fn project_fiber_curvature_in_place(
-    positions: &mut Array<f32>,
-    fiber_segment_spans: &Array<u32>,
-    fiber_vertex_spans: &Array<u32>,
-    segment_radii: &Array<f32>,
-    vertex_max_curvature: &Array<f32>,
-    vertex_active: &Array<u32>,
-    vertex_pinned: &Array<u32>,
-    cell_lower: &Array<f32>,
-    cell_upper: &Array<f32>,
-    cell_periodic: &Array<u32>,
-    control: &Array<u32>,
+    positions: &mut [f32],
+    fiber_segment_spans: &[u32],
+    fiber_vertex_spans: &[u32],
+    segment_radii: &[f32],
+    vertex_max_curvature: &[f32],
+    vertex_active: &[u32],
+    vertex_pinned: &[u32],
+    cell_lower: &[f32],
+    cell_upper: &[f32],
+    cell_periodic: &[u32],
+    control: &[u32],
     sweeps: u32,
     stiffness: f32,
     safety_margin: f32,
@@ -1457,13 +1457,13 @@ pub(crate) fn project_fiber_curvature_in_place(
 /// Gathers the at-most-three bend constraints incident to each vertex.
 #[cube(launch_unchecked)]
 pub(crate) fn gather_curvature_limit_corrections(
-    segment_vertices: &Array<u32>,
-    vertex_active: &Array<u32>,
-    vertex_pinned: &Array<u32>,
-    vertex_segments: &Array<u32>,
-    control: &Array<u32>,
-    bend_corrections: &Array<f32>,
-    vertex_corrections: &mut Array<f32>,
+    segment_vertices: &[u32],
+    vertex_active: &[u32],
+    vertex_pinned: &[u32],
+    vertex_segments: &[u32],
+    control: &[u32],
+    bend_corrections: &[f32],
+    vertex_corrections: &mut [f32],
 ) {
     let vertex = ABSOLUTE_POS;
     if vertex >= vertex_active.len() || control[0] == 0 {
@@ -1507,20 +1507,20 @@ pub(crate) fn gather_curvature_limit_corrections(
 
 #[cube(launch_unchecked)]
 pub(crate) fn apply_internal_corrections(
-    positions: &mut Array<f32>,
-    internal_corrections: &Array<f32>,
-    segment_radii: &Array<f32>,
-    vertex_fibers: &Array<u32>,
-    fiber_segment_spans: &Array<u32>,
-    active_vertices: &Array<u32>,
-    active_counts: &Array<Atomic<u32>>,
-    vertex_active: &Array<u32>,
-    vertex_pinned: &Array<u32>,
-    cell_lower: &Array<f32>,
-    cell_upper: &Array<f32>,
-    cell_periodic: &Array<u32>,
-    wall_reactions: &mut Array<f32>,
-    control: &Array<u32>,
+    positions: &mut [f32],
+    internal_corrections: &[f32],
+    segment_radii: &[f32],
+    vertex_fibers: &[u32],
+    fiber_segment_spans: &[u32],
+    active_vertices: &[u32],
+    active_counts: &[Atomic<u32>],
+    vertex_active: &[u32],
+    vertex_pinned: &[u32],
+    cell_lower: &[f32],
+    cell_upper: &[f32],
+    cell_periodic: &[u32],
+    wall_reactions: &mut [f32],
+    control: &[u32],
 ) {
     let work = ABSOLUTE_POS;
     if work >= active_counts[1].load() as usize || control[0] == 0 {
@@ -1549,22 +1549,22 @@ pub(crate) fn apply_internal_corrections(
 
 #[cube(launch_unchecked)]
 pub(crate) fn apply_contact_corrections(
-    positions: &mut Array<f32>,
-    corrections: &Array<f32>,
-    vertex_segments: &Array<u32>,
-    segment_radii: &Array<f32>,
-    vertex_fibers: &Array<u32>,
-    fiber_segment_spans: &Array<u32>,
-    active_vertices: &Array<u32>,
-    active_counts: &Array<Atomic<u32>>,
-    vertex_active: &Array<u32>,
-    vertex_pinned: &Array<u32>,
-    cell_lower: &Array<f32>,
-    cell_upper: &Array<f32>,
-    cell_periodic: &Array<u32>,
-    wall_reactions: &mut Array<f32>,
-    control: &Array<u32>,
-    vertex_step: &mut Array<f32>,
+    positions: &mut [f32],
+    corrections: &[f32],
+    vertex_segments: &[u32],
+    segment_radii: &[f32],
+    vertex_fibers: &[u32],
+    fiber_segment_spans: &[u32],
+    active_vertices: &[u32],
+    active_counts: &[Atomic<u32>],
+    vertex_active: &[u32],
+    vertex_pinned: &[u32],
+    cell_lower: &[f32],
+    cell_upper: &[f32],
+    cell_periodic: &[u32],
+    wall_reactions: &mut [f32],
+    control: &[u32],
+    vertex_step: &mut [f32],
     max_step: f32,
 ) {
     let work = ABSOLUTE_POS;
@@ -1635,17 +1635,17 @@ pub(crate) fn apply_contact_corrections(
 
 #[cube(launch_unchecked)]
 pub(crate) fn apply_rigid_contact_corrections(
-    positions: &mut Array<f32>,
-    corrections: &Array<f32>,
-    fiber_segment_spans: &Array<u32>,
-    fiber_vertex_spans: &Array<u32>,
-    segment_radii: &Array<f32>,
-    cell_lower: &Array<f32>,
-    cell_upper: &Array<f32>,
-    cell_periodic: &Array<u32>,
-    wall_reactions: &mut Array<f32>,
-    control: &Array<u32>,
-    vertex_step: &mut Array<f32>,
+    positions: &mut [f32],
+    corrections: &[f32],
+    fiber_segment_spans: &[u32],
+    fiber_vertex_spans: &[u32],
+    segment_radii: &[f32],
+    cell_lower: &[f32],
+    cell_upper: &[f32],
+    cell_periodic: &[u32],
+    wall_reactions: &mut [f32],
+    control: &[u32],
+    vertex_step: &mut [f32],
     max_step: f32,
 ) {
     let fiber = ABSOLUTE_POS;
@@ -1740,11 +1740,7 @@ pub(crate) fn apply_rigid_contact_corrections(
 }
 
 #[cube(launch_unchecked)]
-pub(crate) fn measure_step(
-    vertex_step: &Array<f32>,
-    control: &Array<u32>,
-    metrics: &mut Array<f32>,
-) {
+pub(crate) fn measure_step(vertex_step: &[f32], control: &[u32], metrics: &mut [f32]) {
     if ABSOLUTE_POS != 0 || control[0] == 0 {
         terminate!();
     }

@@ -9,11 +9,12 @@ use super::kernels::{
     apply_vertex_targets, assess_reduced_metrics, begin_relaxation_batch,
     clear_active_index_counts, clear_adaptation_epoch, clear_reduced_metrics, clear_wall_reactions,
     compact_active_indices, compact_affine_vertices, compact_moving_walls,
-    compact_rigid_fiber_centers, find_internal_corrections, finish_adaptation_epoch,
+    compact_rigid_fiber_centers, find_curvature_limit_corrections, find_internal_corrections,
+    finish_adaptation_epoch, gather_curvature_limit_corrections,
     initialize_vertex_displacement_targets, mark_coarsening_candidates, measure_compaction_metrics,
     measure_curvature_ratio, measure_layer_target_error, measure_vertex_target_error,
-    project_fiber_curvature_in_place, reduce_active_segment_penetration,
-    reduce_active_vertex_metrics, refine_contact_segments, refine_vertex_paths,
+    reduce_active_segment_penetration, reduce_active_vertex_metrics, refine_contact_segments,
+    refine_vertex_paths,
 };
 use super::{
     AdaptiveSegmentationConfig, FiberMotion, PackedAssembly, PackingError, RelaxationConfig,
@@ -138,11 +139,13 @@ pub struct DeviceFiberWorld<R: Runtime> {
     cell_cursors: Handle,
     cell_segments: Handle,
     cell_overflow: Handle,
+    cell_scan_block_size: usize,
     cell_scan_block_sums: Vec<Handle>,
     cell_scan_block_offsets: Vec<Handle>,
     corrections: Handle,
     segment_max: Handle,
     curvature_ratio: Handle,
+    bend_corrections: Handle,
     internal_corrections: Handle,
     vertex_step: Handle,
     wall_reactions: Handle,
@@ -354,11 +357,16 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         let cell_cursors = client.create_from_slice(u32::as_bytes(&vec![0_u32; cell_count]));
         let cell_segments = client.empty(packed.segment_count() * core::mem::size_of::<u32>());
         let cell_overflow = client.create_from_slice(u32::as_bytes(&[0_u32]));
+        let maximum_scan_block_size = CELL_SCAN_BLOCK_SIZE
+            .min(client.properties().hardware.max_cube_dim.0 as usize)
+            .min(client.properties().hardware.max_units_per_cube as usize)
+            .max(1);
+        let cell_scan_block_size = 1usize << maximum_scan_block_size.ilog2();
         let mut cell_scan_block_sums = Vec::new();
         let mut cell_scan_block_offsets = Vec::new();
         let mut scan_length = cell_count;
         loop {
-            let blocks = scan_length.div_ceil(CELL_SCAN_BLOCK_SIZE);
+            let blocks = scan_length.div_ceil(cell_scan_block_size);
             cell_scan_block_sums.push(client.empty(blocks * core::mem::size_of::<u32>()));
             cell_scan_block_offsets.push(client.empty(blocks * core::mem::size_of::<u32>()));
             if blocks == 1 {
@@ -372,6 +380,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             client.create_from_slice(f32::as_bytes(&vec![0.0_f32; packed.segment_count()]));
         let curvature_ratio =
             client.create_from_slice(f32::as_bytes(&vec![0.0_f32; packed.vertex_count()]));
+        let bend_corrections =
+            client.empty(9 * packed.vertex_count() * core::mem::size_of::<f32>());
         let internal_corrections =
             client.empty(3 * packed.vertex_count() * core::mem::size_of::<f32>());
         let vertex_step =
@@ -449,11 +459,13 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             cell_cursors,
             cell_segments,
             cell_overflow,
+            cell_scan_block_size,
             cell_scan_block_sums,
             cell_scan_block_offsets,
             corrections,
             segment_max,
             curvature_ratio,
+            bend_corrections,
             internal_corrections,
             vertex_step,
             wall_reactions,
@@ -624,29 +636,29 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 &self.client,
                 CubeCount::Static(1, 1, 1),
                 CubeDim::new_1d(1),
-                ArrayArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
             );
             compact_active_indices::launch_unchecked::<R>(
                 &self.client,
                 CubeCount::Static(capacity.div_ceil(64) as u32, 1, 1),
                 cube_dim.clone(),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_active.clone(),
                     self.packed.segment_active.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.vertex_active.clone(),
                     self.packed.vertex_active.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.active_segment_indices.clone(),
                     self.packed.segment_count(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.active_vertex_indices.clone(),
                     self.packed.vertex_count(),
                 ),
-                ArrayArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
             );
         }
         let bytes = self
@@ -659,44 +671,117 @@ impl<R: Runtime> DeviceFiberWorld<R> {
     }
 
     fn launch_curvature_cleanup(&self, config: &RelaxationConfig) {
-        unsafe {
-            project_fiber_curvature_in_place::launch_unchecked::<R>(
-                &self.client,
-                CubeCount::Static(self.packed.fiber_count().div_ceil(64) as u32, 1, 1),
-                CubeDim::new_1d(64),
-                ArrayArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                ArrayArg::from_raw_parts(
-                    self.fiber_segment_spans.clone(),
-                    self.packed.fiber_segment_spans.len(),
-                ),
-                ArrayArg::from_raw_parts(
-                    self.fiber_vertex_spans.clone(),
-                    self.packed.fiber_vertex_spans.len(),
-                ),
-                ArrayArg::from_raw_parts(
-                    self.segment_radii.clone(),
-                    self.packed.segment_radii.len(),
-                ),
-                ArrayArg::from_raw_parts(
-                    self.vertex_max_curvature.clone(),
-                    self.packed.vertex_max_curvature.len(),
-                ),
-                ArrayArg::from_raw_parts(
-                    self.vertex_active.clone(),
-                    self.packed.vertex_active.len(),
-                ),
-                ArrayArg::from_raw_parts(
-                    self.vertex_pinned.clone(),
-                    self.packed.vertex_pinned.len(),
-                ),
-                ArrayArg::from_raw_parts(self.cell_lower.clone(), 3),
-                ArrayArg::from_raw_parts(self.cell_upper.clone(), 3),
-                ArrayArg::from_raw_parts(self.cell_periodic.clone(), 3),
-                ArrayArg::from_raw_parts(self.control.clone(), 4),
-                config.curvature_cleanup_sweeps as u32,
-                config.curvature_limit_stiffness,
-                config.curvature_limit_safety_margin,
-            );
+        let cube_dim = CubeDim::new_1d(64);
+        let vertex_cubes = CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1);
+        for _ in 0..config.curvature_cleanup_sweeps {
+            unsafe {
+                find_curvature_limit_corrections::launch_unchecked::<R>(
+                    &self.client,
+                    vertex_cubes.clone(),
+                    cube_dim.clone(),
+                    BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                    BufferArg::from_raw_parts(
+                        self.segment_vertices.clone(),
+                        self.packed.segment_vertices.len(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.vertex_max_curvature.clone(),
+                        self.packed.vertex_max_curvature.len(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.vertex_active.clone(),
+                        self.packed.vertex_active.len(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.vertex_pinned.clone(),
+                        self.packed.vertex_pinned.len(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.vertex_segments.clone(),
+                        self.packed.vertex_segments.len(),
+                    ),
+                    BufferArg::from_raw_parts(self.control.clone(), 4),
+                    BufferArg::from_raw_parts(
+                        self.bend_corrections.clone(),
+                        9 * self.packed.vertex_count(),
+                    ),
+                    config.curvature_limit_stiffness,
+                    config.curvature_limit_safety_margin,
+                );
+                gather_curvature_limit_corrections::launch_unchecked::<R>(
+                    &self.client,
+                    vertex_cubes.clone(),
+                    cube_dim.clone(),
+                    BufferArg::from_raw_parts(
+                        self.segment_vertices.clone(),
+                        self.packed.segment_vertices.len(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.vertex_active.clone(),
+                        self.packed.vertex_active.len(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.vertex_pinned.clone(),
+                        self.packed.vertex_pinned.len(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.vertex_segments.clone(),
+                        self.packed.vertex_segments.len(),
+                    ),
+                    BufferArg::from_raw_parts(self.control.clone(), 4),
+                    BufferArg::from_raw_parts(
+                        self.bend_corrections.clone(),
+                        9 * self.packed.vertex_count(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.internal_corrections.clone(),
+                        3 * self.packed.vertex_count(),
+                    ),
+                );
+                apply_internal_corrections::launch_unchecked::<R>(
+                    &self.client,
+                    vertex_cubes.clone(),
+                    cube_dim.clone(),
+                    BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                    BufferArg::from_raw_parts(
+                        self.internal_corrections.clone(),
+                        3 * self.packed.vertex_count(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.segment_radii.clone(),
+                        self.packed.segment_radii.len(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.vertex_fibers.clone(),
+                        self.packed.vertex_fibers.len(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.fiber_segment_spans.clone(),
+                        self.packed.fiber_segment_spans.len(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.active_vertex_indices.clone(),
+                        self.packed.vertex_count(),
+                    ),
+                    BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                    BufferArg::from_raw_parts(
+                        self.vertex_active.clone(),
+                        self.packed.vertex_active.len(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.vertex_pinned.clone(),
+                        self.packed.vertex_pinned.len(),
+                    ),
+                    BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
+                    BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
+                    BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
+                    BufferArg::from_raw_parts(
+                        self.wall_reactions.clone(),
+                        3 * self.packed.vertex_count(),
+                    ),
+                    BufferArg::from_raw_parts(self.control.clone(), 4),
+                );
+            }
         }
     }
 
@@ -711,7 +796,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 &self.client,
                 CubeCount::Static(1, 1, 1),
                 CubeDim::new_1d(1),
-                ArrayArg::from_raw_parts(self.control.clone(), 4),
+                BufferArg::from_raw_parts(self.control.clone(), 4),
             );
         }
 
@@ -730,39 +815,42 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     &self.client,
                     CubeCount::Static(self.active_segment_count.div_ceil(64) as u32, 1, 1),
                     cube_dim.clone(),
-                    ArrayArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                    BufferArg::from_raw_parts(
                         self.segment_vertices.clone(),
                         self.packed.segment_vertices.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.segment_fibers.clone(),
                         self.packed.segment_fibers.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.segment_radii.clone(),
                         self.packed.segment_radii.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.active_segment_indices.clone(),
                         self.packed.segment_count(),
                     ),
-                    ArrayArg::from_raw_parts(self.active_index_counts.clone(), 2),
-                    ArrayArg::from_raw_parts(self.cell_counts.clone(), self.cell_count),
-                    ArrayArg::from_raw_parts(self.cell_offsets.clone(), self.cell_count),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                    BufferArg::from_raw_parts(self.cell_counts.clone(), self.cell_count),
+                    BufferArg::from_raw_parts(self.cell_offsets.clone(), self.cell_count),
+                    BufferArg::from_raw_parts(
                         self.cell_segments.clone(),
                         self.packed.segment_count(),
                     ),
-                    ArrayArg::from_raw_parts(self.cell_lower.clone(), 3),
-                    ArrayArg::from_raw_parts(self.cell_upper.clone(), 3),
-                    ArrayArg::from_raw_parts(self.cell_periodic.clone(), 3),
-                    ArrayArg::from_raw_parts(self.control.clone(), 4),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
+                    BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
+                    BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
+                    BufferArg::from_raw_parts(self.control.clone(), 4),
+                    BufferArg::from_raw_parts(
                         self.corrections.clone(),
                         6 * self.packed.segment_count(),
                     ),
-                    ArrayArg::from_raw_parts(self.segment_max.clone(), self.packed.segment_count()),
+                    BufferArg::from_raw_parts(
+                        self.segment_max.clone(),
+                        self.packed.segment_count(),
+                    ),
                     config.correction_fraction,
                     config.contact_aggregation as u32,
                     self.cells_x,
@@ -773,30 +861,30 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     &self.client,
                     CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1),
                     cube_dim.clone(),
-                    ArrayArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                    BufferArg::from_raw_parts(
                         self.vertex_max_curvature.clone(),
                         self.packed.vertex_max_curvature.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.active_vertex_indices.clone(),
                         self.packed.vertex_count(),
                     ),
-                    ArrayArg::from_raw_parts(self.active_index_counts.clone(), 2),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                    BufferArg::from_raw_parts(
                         self.vertex_active.clone(),
                         self.packed.vertex_active.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.vertex_segments.clone(),
                         self.packed.vertex_segments.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.segment_vertices.clone(),
                         self.packed.segment_vertices.len(),
                     ),
-                    ArrayArg::from_raw_parts(self.control.clone(), 4),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(self.control.clone(), 4),
+                    BufferArg::from_raw_parts(
                         self.curvature_ratio.clone(),
                         self.packed.vertex_count(),
                     ),
@@ -805,44 +893,47 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     &self.client,
                     CubeCount::Static(1, 1, 1),
                     CubeDim::new_1d(1),
-                    ArrayArg::from_raw_parts(self.reduced_metrics.clone(), 3),
+                    BufferArg::from_raw_parts(self.reduced_metrics.clone(), 3),
                 );
                 reduce_active_segment_penetration::launch_unchecked::<R>(
                     &self.client,
                     CubeCount::Static(self.active_segment_count.div_ceil(64) as u32, 1, 1),
                     cube_dim.clone(),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.active_segment_indices.clone(),
                         self.packed.segment_count(),
                     ),
-                    ArrayArg::from_raw_parts(self.active_index_counts.clone(), 2),
-                    ArrayArg::from_raw_parts(self.segment_max.clone(), self.packed.segment_count()),
-                    ArrayArg::from_raw_parts(self.reduced_metrics.clone(), 3),
+                    BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                    BufferArg::from_raw_parts(
+                        self.segment_max.clone(),
+                        self.packed.segment_count(),
+                    ),
+                    BufferArg::from_raw_parts(self.reduced_metrics.clone(), 3),
                 );
                 reduce_active_vertex_metrics::launch_unchecked::<R>(
                     &self.client,
                     CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1),
                     cube_dim.clone(),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.active_vertex_indices.clone(),
                         self.packed.vertex_count(),
                     ),
-                    ArrayArg::from_raw_parts(self.active_index_counts.clone(), 2),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                    BufferArg::from_raw_parts(
                         self.curvature_ratio.clone(),
                         self.packed.vertex_count(),
                     ),
-                    ArrayArg::from_raw_parts(self.vertex_step.clone(), self.packed.vertex_count()),
-                    ArrayArg::from_raw_parts(self.reduced_metrics.clone(), 3),
+                    BufferArg::from_raw_parts(self.vertex_step.clone(), self.packed.vertex_count()),
+                    BufferArg::from_raw_parts(self.reduced_metrics.clone(), 3),
                 );
                 assess_reduced_metrics::launch_unchecked::<R>(
                     &self.client,
                     CubeCount::Static(1, 1, 1),
                     CubeDim::new_1d(1),
-                    ArrayArg::from_raw_parts(self.reduced_metrics.clone(), 3),
-                    ArrayArg::from_raw_parts(self.cell_overflow.clone(), 1),
-                    ArrayArg::from_raw_parts(self.control.clone(), 4),
-                    ArrayArg::from_raw_parts(self.metrics.clone(), 3),
+                    BufferArg::from_raw_parts(self.reduced_metrics.clone(), 3),
+                    BufferArg::from_raw_parts(self.cell_overflow.clone(), 1),
+                    BufferArg::from_raw_parts(self.control.clone(), 4),
+                    BufferArg::from_raw_parts(self.metrics.clone(), 3),
                     config.penetration_tolerance,
                     config.curvature_ratio_tolerance,
                     iterations as u32,
@@ -852,11 +943,11 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     &self.client,
                     vertex_cubes.clone(),
                     cube_dim.clone(),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.wall_reactions.clone(),
                         3 * self.packed.vertex_count(),
                     ),
-                    ArrayArg::from_raw_parts(self.control.clone(), 4),
+                    BufferArg::from_raw_parts(self.control.clone(), 4),
                 );
                 // A rigid-only settling stage must preserve both the fiber
                 // shape and the discretization on which its accepted
@@ -883,41 +974,41 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                             &self.client,
                             CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1),
                             cube_dim.clone(),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.positions.clone(),
                                 self.packed.positions.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.intrinsic_positions.clone(),
                                 self.packed.intrinsic_positions.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.segment_vertices.clone(),
                                 self.packed.segment_vertices.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.segment_rest_lengths.clone(),
                                 self.packed.segment_rest_lengths.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.active_vertex_indices.clone(),
                                 self.packed.vertex_count(),
                             ),
-                            ArrayArg::from_raw_parts(self.active_index_counts.clone(), 2),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                            BufferArg::from_raw_parts(
                                 self.vertex_active.clone(),
                                 self.packed.vertex_active.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.vertex_pinned.clone(),
                                 self.packed.vertex_pinned.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.vertex_segments.clone(),
                                 self.packed.vertex_segments.len(),
                             ),
-                            ArrayArg::from_raw_parts(self.control.clone(), 4),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(self.control.clone(), 4),
+                            BufferArg::from_raw_parts(
                                 self.internal_corrections.clone(),
                                 3 * self.packed.vertex_count(),
                             ),
@@ -928,47 +1019,47 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                             &self.client,
                             CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1),
                             cube_dim.clone(),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.positions.clone(),
                                 self.packed.positions.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.internal_corrections.clone(),
                                 3 * self.packed.vertex_count(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.segment_radii.clone(),
                                 self.packed.segment_radii.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.vertex_fibers.clone(),
                                 self.packed.vertex_fibers.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.fiber_segment_spans.clone(),
                                 self.packed.fiber_segment_spans.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.active_vertex_indices.clone(),
                                 self.packed.vertex_count(),
                             ),
-                            ArrayArg::from_raw_parts(self.active_index_counts.clone(), 2),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                            BufferArg::from_raw_parts(
                                 self.vertex_active.clone(),
                                 self.packed.vertex_active.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.vertex_pinned.clone(),
                                 self.packed.vertex_pinned.len(),
                             ),
-                            ArrayArg::from_raw_parts(self.cell_lower.clone(), 3),
-                            ArrayArg::from_raw_parts(self.cell_upper.clone(), 3),
-                            ArrayArg::from_raw_parts(self.cell_periodic.clone(), 3),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
+                            BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
+                            BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
+                            BufferArg::from_raw_parts(
                                 self.wall_reactions.clone(),
                                 3 * self.packed.vertex_count(),
                             ),
-                            ArrayArg::from_raw_parts(self.control.clone(), 4),
+                            BufferArg::from_raw_parts(self.control.clone(), 4),
                         );
                     }
                 }
@@ -978,52 +1069,52 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                             &self.client,
                             CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1),
                             cube_dim.clone(),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.positions.clone(),
                                 self.packed.positions.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.corrections.clone(),
                                 6 * self.packed.segment_count(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.vertex_segments.clone(),
                                 self.packed.vertex_segments.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.segment_radii.clone(),
                                 self.packed.segment_radii.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.vertex_fibers.clone(),
                                 self.packed.vertex_fibers.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.fiber_segment_spans.clone(),
                                 self.packed.fiber_segment_spans.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.active_vertex_indices.clone(),
                                 self.packed.vertex_count(),
                             ),
-                            ArrayArg::from_raw_parts(self.active_index_counts.clone(), 2),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                            BufferArg::from_raw_parts(
                                 self.vertex_active.clone(),
                                 self.packed.vertex_active.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.vertex_pinned.clone(),
                                 self.packed.vertex_pinned.len(),
                             ),
-                            ArrayArg::from_raw_parts(self.cell_lower.clone(), 3),
-                            ArrayArg::from_raw_parts(self.cell_upper.clone(), 3),
-                            ArrayArg::from_raw_parts(self.cell_periodic.clone(), 3),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
+                            BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
+                            BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
+                            BufferArg::from_raw_parts(
                                 self.wall_reactions.clone(),
                                 3 * self.packed.vertex_count(),
                             ),
-                            ArrayArg::from_raw_parts(self.control.clone(), 4),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(self.control.clone(), 4),
+                            BufferArg::from_raw_parts(
                                 self.vertex_step.clone(),
                                 self.packed.vertex_count(),
                             ),
@@ -1035,35 +1126,35 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                             &self.client,
                             CubeCount::Static(self.packed.fiber_count().div_ceil(64) as u32, 1, 1),
                             cube_dim.clone(),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.positions.clone(),
                                 self.packed.positions.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.corrections.clone(),
                                 6 * self.packed.segment_count(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.fiber_segment_spans.clone(),
                                 self.packed.fiber_segment_spans.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.fiber_vertex_spans.clone(),
                                 self.packed.fiber_vertex_spans.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.segment_radii.clone(),
                                 self.packed.segment_radii.len(),
                             ),
-                            ArrayArg::from_raw_parts(self.cell_lower.clone(), 3),
-                            ArrayArg::from_raw_parts(self.cell_upper.clone(), 3),
-                            ArrayArg::from_raw_parts(self.cell_periodic.clone(), 3),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
+                            BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
+                            BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
+                            BufferArg::from_raw_parts(
                                 self.wall_reactions.clone(),
                                 3 * self.packed.vertex_count(),
                             ),
-                            ArrayArg::from_raw_parts(self.control.clone(), 4),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(self.control.clone(), 4),
+                            BufferArg::from_raw_parts(
                                 self.vertex_step.clone(),
                                 self.packed.vertex_count(),
                             ),
@@ -1088,27 +1179,27 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                             &self.client,
                             CubeCount::Static(self.packed.fiber_count().div_ceil(64) as u32, 1, 1),
                             cube_dim.clone(),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.positions.clone(),
                                 self.packed.positions.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.fiber_vertex_spans.clone(),
                                 self.packed.fiber_vertex_spans.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.fiber_formation_layers.clone(),
                                 self.packed.fiber_formation_layers.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.vertex_active.clone(),
                                 self.packed.vertex_active.len(),
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 targets.clone(),
                                 self.active_layer_target_count,
                             ),
-                            ArrayArg::from_raw_parts(self.control.clone(), 4),
+                            BufferArg::from_raw_parts(self.control.clone(), 4),
                             self.active_layer_axis as u32,
                             self.active_layer_first,
                             self.active_layer_last,
@@ -1121,21 +1212,21 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                             &self.client,
                             CubeCount::Static(targets.count.div_ceil(64) as u32, 1, 1),
                             cube_dim.clone(),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.positions.clone(),
                                 self.packed.positions.len(),
                             ),
-                            ArrayArg::from_raw_parts(targets.indices.clone(), targets.count),
-                            ArrayArg::from_raw_parts(targets.coordinates.clone(), targets.count),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(targets.indices.clone(), targets.count),
+                            BufferArg::from_raw_parts(targets.coordinates.clone(), targets.count),
+                            BufferArg::from_raw_parts(
                                 targets.command_coordinates.clone(),
                                 targets.count,
                             ),
-                            ArrayArg::from_raw_parts(
+                            BufferArg::from_raw_parts(
                                 self.vertex_active.clone(),
                                 self.packed.vertex_active.len(),
                             ),
-                            ArrayArg::from_raw_parts(self.control.clone(), 4),
+                            BufferArg::from_raw_parts(self.control.clone(), 4),
                             targets.axis as u32,
                             targets.stiffness,
                             targets.max_translation,
@@ -1163,56 +1254,56 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 &self.client,
                 CubeCount::Static(1, 1, 1),
                 CubeDim::new_1d(1),
-                ArrayArg::from_raw_parts(self.refinement_count.clone(), 6),
+                BufferArg::from_raw_parts(self.refinement_count.clone(), 6),
             );
             refine_contact_segments::launch_unchecked::<R>(
                 &self.client,
                 CubeCount::Static(self.packed.segment_count().div_ceil(64) as u32, 1, 1),
                 CubeDim::new_1d(64),
-                ArrayArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                BufferArg::from_raw_parts(
                     self.segment_vertices.clone(),
                     self.packed.segment_vertices.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_radii.clone(),
                     self.packed.segment_radii.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_rest_lengths.clone(),
                     self.packed.segment_rest_lengths.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_children.clone(),
                     self.packed.segment_children.len(),
                 ),
-                ArrayArg::from_raw_parts(self.segment_max.clone(), self.packed.segment_count()),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(self.segment_max.clone(), self.packed.segment_count()),
+                BufferArg::from_raw_parts(
                     self.segment_active.clone(),
                     self.packed.segment_active.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_birth_epochs.clone(),
                     self.packed.segment_birth_epochs.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_contact_epochs.clone(),
                     self.packed.segment_contact_epochs.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_quiet_epochs.clone(),
                     self.packed.segment_quiet_epochs.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.vertex_active.clone(),
                     self.packed.vertex_active.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.vertex_segments.clone(),
                     self.packed.vertex_segments.len(),
                 ),
-                ArrayArg::from_raw_parts(self.control.clone(), 4),
-                ArrayArg::from_raw_parts(self.refinement_count.clone(), 6),
+                BufferArg::from_raw_parts(self.control.clone(), 4),
+                BufferArg::from_raw_parts(self.refinement_count.clone(), 6),
                 epoch,
                 penetration_threshold,
                 config.contact_length_over_diameter,
@@ -1228,42 +1319,45 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     &self.client,
                     CubeCount::Static(self.packed.segment_count().div_ceil(64) as u32, 1, 1),
                     CubeDim::new_1d(64),
-                    ArrayArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                    BufferArg::from_raw_parts(
                         self.segment_vertices.clone(),
                         self.packed.segment_vertices.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.segment_radii.clone(),
                         self.packed.segment_radii.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.segment_children.clone(),
                         self.packed.segment_children.len(),
                     ),
-                    ArrayArg::from_raw_parts(self.segment_max.clone(), self.packed.segment_count()),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
+                        self.segment_max.clone(),
+                        self.packed.segment_count(),
+                    ),
+                    BufferArg::from_raw_parts(
                         self.segment_active.clone(),
                         self.packed.segment_active.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.segment_quiet_epochs.clone(),
                         self.packed.segment_quiet_epochs.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.vertex_active.clone(),
                         self.packed.vertex_active.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.vertex_pinned.clone(),
                         self.packed.vertex_pinned.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.curvature_ratio.clone(),
                         self.packed.vertex_count(),
                     ),
-                    ArrayArg::from_raw_parts(self.control.clone(), 4),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(self.control.clone(), 4),
+                    BufferArg::from_raw_parts(
                         self.coarsening_candidates.clone(),
                         self.packed.segment_count(),
                     ),
@@ -1276,44 +1370,44 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     &self.client,
                     CubeCount::Static(self.packed.segment_count().div_ceil(64) as u32, 1, 1),
                     CubeDim::new_1d(64),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.segment_vertices.clone(),
                         self.packed.segment_vertices.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.segment_children.clone(),
                         self.packed.segment_children.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.segment_active.clone(),
                         self.packed.segment_active.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.segment_birth_epochs.clone(),
                         self.packed.segment_birth_epochs.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.segment_contact_epochs.clone(),
                         self.packed.segment_contact_epochs.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.segment_quiet_epochs.clone(),
                         self.packed.segment_quiet_epochs.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.vertex_active.clone(),
                         self.packed.vertex_active.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.vertex_segments.clone(),
                         self.packed.vertex_segments.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.coarsening_candidates.clone(),
                         self.packed.segment_count(),
                     ),
-                    ArrayArg::from_raw_parts(self.control.clone(), 4),
-                    ArrayArg::from_raw_parts(self.refinement_count.clone(), 6),
+                    BufferArg::from_raw_parts(self.control.clone(), 4),
+                    BufferArg::from_raw_parts(self.refinement_count.clone(), 6),
                     epoch,
                 );
             }
@@ -1322,7 +1416,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 &self.client,
                 CubeCount::Static(1, 1, 1),
                 CubeDim::new_1d(1),
-                ArrayArg::from_raw_parts(self.refinement_count.clone(), 6),
+                BufferArg::from_raw_parts(self.refinement_count.clone(), 6),
             );
         }
     }
@@ -1380,21 +1474,21 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 &self.client,
                 CubeCount::Static(self.packed.fiber_count().div_ceil(64) as u32, 1, 1),
                 CubeDim::new_1d(64),
-                ArrayArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                BufferArg::from_raw_parts(
                     self.fiber_vertex_spans.clone(),
                     self.packed.fiber_vertex_spans.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.fiber_formation_layers.clone(),
                     self.packed.fiber_formation_layers.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.vertex_active.clone(),
                     self.packed.vertex_active.len(),
                 ),
-                ArrayArg::from_raw_parts(target_buffer.clone(), targets.len()),
-                ArrayArg::from_raw_parts(immediate_control, 1),
+                BufferArg::from_raw_parts(target_buffer.clone(), targets.len()),
+                BufferArg::from_raw_parts(immediate_control, 1),
                 axis as u32,
                 first_layer,
                 last_layer,
@@ -1447,10 +1541,10 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 &self.client,
                 CubeCount::Static(vertex_indices.len().div_ceil(64) as u32, 1, 1),
                 CubeDim::new_1d(64),
-                ArrayArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                ArrayArg::from_raw_parts(indices.clone(), vertex_indices.len()),
-                ArrayArg::from_raw_parts(coordinates.clone(), vertex_indices.len()),
-                ArrayArg::from_raw_parts(command_coordinates.clone(), vertex_indices.len()),
+                BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                BufferArg::from_raw_parts(indices.clone(), vertex_indices.len()),
+                BufferArg::from_raw_parts(coordinates.clone(), vertex_indices.len()),
+                BufferArg::from_raw_parts(command_coordinates.clone(), vertex_indices.len()),
                 axis as u32,
                 displacement,
             );
@@ -1480,21 +1574,21 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     &self.client,
                     CubeCount::Static(1, 1, 1),
                     CubeDim::new_1d(1),
-                    ArrayArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                    BufferArg::from_raw_parts(
                         self.fiber_vertex_spans.clone(),
                         self.packed.fiber_vertex_spans.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.fiber_formation_layers.clone(),
                         self.packed.fiber_formation_layers.len(),
                     ),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(
                         self.vertex_active.clone(),
                         self.packed.vertex_active.len(),
                     ),
-                    ArrayArg::from_raw_parts(targets.clone(), self.active_layer_target_count),
-                    ArrayArg::from_raw_parts(self.formation_target_error.clone(), 2),
+                    BufferArg::from_raw_parts(targets.clone(), self.active_layer_target_count),
+                    BufferArg::from_raw_parts(self.formation_target_error.clone(), 2),
                     self.active_layer_axis as u32,
                     self.active_layer_first,
                     self.active_layer_last,
@@ -1508,14 +1602,14 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     &self.client,
                     CubeCount::Static(1, 1, 1),
                     CubeDim::new_1d(1),
-                    ArrayArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                    ArrayArg::from_raw_parts(targets.indices.clone(), targets.count),
-                    ArrayArg::from_raw_parts(targets.coordinates.clone(), targets.count),
-                    ArrayArg::from_raw_parts(
+                    BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                    BufferArg::from_raw_parts(targets.indices.clone(), targets.count),
+                    BufferArg::from_raw_parts(targets.coordinates.clone(), targets.count),
+                    BufferArg::from_raw_parts(
                         self.vertex_active.clone(),
                         self.packed.vertex_active.len(),
                     ),
-                    ArrayArg::from_raw_parts(self.formation_target_error.clone(), 2),
+                    BufferArg::from_raw_parts(self.formation_target_error.clone(), 2),
                     targets.axis as u32,
                 );
             }
@@ -1564,23 +1658,23 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                         &self.client,
                         CubeCount::Static(self.packed.fiber_count().div_ceil(64) as u32, 1, 1),
                         CubeDim::new_1d(64),
-                        ArrayArg::from_raw_parts(
+                        BufferArg::from_raw_parts(
                             self.positions.clone(),
                             self.packed.positions.len(),
                         ),
-                        ArrayArg::from_raw_parts(
+                        BufferArg::from_raw_parts(
                             self.fiber_vertex_spans.clone(),
                             self.packed.fiber_vertex_spans.len(),
                         ),
-                        ArrayArg::from_raw_parts(
+                        BufferArg::from_raw_parts(
                             self.vertex_active.clone(),
                             self.packed.vertex_active.len(),
                         ),
-                        ArrayArg::from_raw_parts(self.cell_lower.clone(), 3),
-                        ArrayArg::from_raw_parts(self.cell_upper.clone(), 3),
-                        ArrayArg::from_raw_parts(new_lower_buffer.clone(), 3),
-                        ArrayArg::from_raw_parts(new_upper_buffer.clone(), 3),
-                        ArrayArg::from_raw_parts(
+                        BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
+                        BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
+                        BufferArg::from_raw_parts(new_lower_buffer.clone(), 3),
+                        BufferArg::from_raw_parts(new_upper_buffer.clone(), 3),
+                        BufferArg::from_raw_parts(
                             self.wall_reactions.clone(),
                             3 * self.packed.vertex_count(),
                         ),
@@ -1591,30 +1685,30 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                         &self.client,
                         CubeCount::Static(self.packed.vertex_count().div_ceil(64) as u32, 1, 1),
                         CubeDim::new_1d(64),
-                        ArrayArg::from_raw_parts(
+                        BufferArg::from_raw_parts(
                             self.positions.clone(),
                             self.packed.positions.len(),
                         ),
-                        ArrayArg::from_raw_parts(
+                        BufferArg::from_raw_parts(
                             self.segment_radii.clone(),
                             self.packed.segment_radii.len(),
                         ),
-                        ArrayArg::from_raw_parts(
+                        BufferArg::from_raw_parts(
                             self.vertex_fibers.clone(),
                             self.packed.vertex_fibers.len(),
                         ),
-                        ArrayArg::from_raw_parts(
+                        BufferArg::from_raw_parts(
                             self.fiber_segment_spans.clone(),
                             self.packed.fiber_segment_spans.len(),
                         ),
-                        ArrayArg::from_raw_parts(
+                        BufferArg::from_raw_parts(
                             self.vertex_active.clone(),
                             self.packed.vertex_active.len(),
                         ),
-                        ArrayArg::from_raw_parts(new_lower_buffer.clone(), 3),
-                        ArrayArg::from_raw_parts(new_upper_buffer.clone(), 3),
-                        ArrayArg::from_raw_parts(self.cell_periodic.clone(), 3),
-                        ArrayArg::from_raw_parts(
+                        BufferArg::from_raw_parts(new_lower_buffer.clone(), 3),
+                        BufferArg::from_raw_parts(new_upper_buffer.clone(), 3),
+                        BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
+                        BufferArg::from_raw_parts(
                             self.wall_reactions.clone(),
                             3 * self.packed.vertex_count(),
                         ),
@@ -1625,19 +1719,19 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                         &self.client,
                         CubeCount::Static(self.packed.vertex_count().div_ceil(64) as u32, 1, 1),
                         CubeDim::new_1d(64),
-                        ArrayArg::from_raw_parts(
+                        BufferArg::from_raw_parts(
                             self.positions.clone(),
                             self.packed.positions.len(),
                         ),
-                        ArrayArg::from_raw_parts(
+                        BufferArg::from_raw_parts(
                             self.vertex_active.clone(),
                             self.packed.vertex_active.len(),
                         ),
-                        ArrayArg::from_raw_parts(self.cell_lower.clone(), 3),
-                        ArrayArg::from_raw_parts(self.cell_upper.clone(), 3),
-                        ArrayArg::from_raw_parts(new_lower_buffer.clone(), 3),
-                        ArrayArg::from_raw_parts(new_upper_buffer.clone(), 3),
-                        ArrayArg::from_raw_parts(
+                        BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
+                        BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
+                        BufferArg::from_raw_parts(new_lower_buffer.clone(), 3),
+                        BufferArg::from_raw_parts(new_upper_buffer.clone(), 3),
+                        BufferArg::from_raw_parts(
                             self.wall_reactions.clone(),
                             3 * self.packed.vertex_count(),
                         ),
@@ -1682,30 +1776,33 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 &self.client,
                 CubeCount::Static(1, 1, 1),
                 CubeDim::new_1d(1),
-                ArrayArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                BufferArg::from_raw_parts(
                     self.segment_vertices.clone(),
                     self.packed.segment_vertices.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_rest_lengths.clone(),
                     self.packed.segment_rest_lengths.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_active.clone(),
                     self.packed.segment_active.len(),
                 ),
-                ArrayArg::from_raw_parts(self.corrections.clone(), 6 * self.packed.segment_count()),
-                ArrayArg::from_raw_parts(self.segment_max.clone(), self.packed.segment_count()),
-                ArrayArg::from_raw_parts(self.curvature_ratio.clone(), self.packed.vertex_count()),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
+                    self.corrections.clone(),
+                    6 * self.packed.segment_count(),
+                ),
+                BufferArg::from_raw_parts(self.segment_max.clone(), self.packed.segment_count()),
+                BufferArg::from_raw_parts(self.curvature_ratio.clone(), self.packed.vertex_count()),
+                BufferArg::from_raw_parts(
                     self.wall_reactions.clone(),
                     3 * self.packed.vertex_count(),
                 ),
-                ArrayArg::from_raw_parts(self.cell_lower.clone(), 3),
-                ArrayArg::from_raw_parts(self.cell_upper.clone(), 3),
-                ArrayArg::from_raw_parts(self.cell_periodic.clone(), 3),
-                ArrayArg::from_raw_parts(self.compaction_metrics.clone(), 13),
+                BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
+                BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
+                BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
+                BufferArg::from_raw_parts(self.compaction_metrics.clone(), 13),
                 correction_fraction,
                 model.contact_stiffness,
                 model.stretch_stiffness,
@@ -1754,31 +1851,31 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 &self.client,
                 CubeCount::Static(self.packed.fiber_count().div_ceil(64) as u32, 1, 1),
                 CubeDim::new_1d(64),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.fiber_formation_steps.clone(),
                     self.packed.fiber_formation_steps.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.fiber_segment_spans.clone(),
                     self.packed.fiber_segment_spans.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.fiber_vertex_spans.clone(),
                     self.packed.fiber_vertex_spans.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_refinement_levels.clone(),
                     self.packed.segment_refinement_levels.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.vertex_refinement_levels.clone(),
                     self.packed.vertex_refinement_levels.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_active.clone(),
                     self.packed.segment_active.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.vertex_active.clone(),
                     self.packed.vertex_active.len(),
                 ),
@@ -1848,35 +1945,35 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 &self.client,
                 CubeCount::Static(self.active_segment_count.div_ceil(64) as u32, 1, 1),
                 cube_dim,
-                ArrayArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                BufferArg::from_raw_parts(
                     self.segment_vertices.clone(),
                     self.packed.segment_vertices.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_fibers.clone(),
                     self.packed.segment_fibers.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_radii.clone(),
                     self.packed.segment_radii.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.active_segment_indices.clone(),
                     self.packed.segment_count(),
                 ),
-                ArrayArg::from_raw_parts(self.active_index_counts.clone(), 2),
-                ArrayArg::from_raw_parts(self.cell_counts.clone(), cell_count),
-                ArrayArg::from_raw_parts(self.cell_offsets.clone(), cell_count),
-                ArrayArg::from_raw_parts(self.cell_segments.clone(), self.packed.segment_count()),
-                ArrayArg::from_raw_parts(self.cell_lower.clone(), 3),
-                ArrayArg::from_raw_parts(self.cell_upper.clone(), 3),
-                ArrayArg::from_raw_parts(self.cell_periodic.clone(), 3),
-                ArrayArg::from_raw_parts(captured_count.clone(), 2),
-                ArrayArg::from_raw_parts(captured_segments.clone(), 2 * capacity),
-                ArrayArg::from_raw_parts(captured_coordinates.clone(), 2 * capacity),
-                ArrayArg::from_raw_parts(captured_surface_gaps.clone(), capacity),
-                ArrayArg::from_raw_parts(captured_crossing_angles.clone(), capacity),
+                BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                BufferArg::from_raw_parts(self.cell_counts.clone(), cell_count),
+                BufferArg::from_raw_parts(self.cell_offsets.clone(), cell_count),
+                BufferArg::from_raw_parts(self.cell_segments.clone(), self.packed.segment_count()),
+                BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
+                BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
+                BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
+                BufferArg::from_raw_parts(captured_count.clone(), 2),
+                BufferArg::from_raw_parts(captured_segments.clone(), 2 * capacity),
+                BufferArg::from_raw_parts(captured_coordinates.clone(), 2 * capacity),
+                BufferArg::from_raw_parts(captured_surface_gaps.clone(), capacity),
+                BufferArg::from_raw_parts(captured_crossing_angles.clone(), capacity),
                 maximum_surface_gap,
                 cells_x,
                 cells_y,
@@ -2108,42 +2205,42 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 &self.client,
                 CubeCount::Static(target_count.div_ceil(64) as u32, 1, 1),
                 CubeDim::new_1d(64),
-                ArrayArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                BufferArg::from_raw_parts(
                     self.segment_vertices.clone(),
                     self.packed.segment_vertices.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_children.clone(),
                     self.packed.segment_children.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_active.clone(),
                     self.packed.segment_active.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_birth_epochs.clone(),
                     self.packed.segment_birth_epochs.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_contact_epochs.clone(),
                     self.packed.segment_contact_epochs.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.segment_quiet_epochs.clone(),
                     self.packed.segment_quiet_epochs.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.vertex_active.clone(),
                     self.packed.vertex_active.len(),
                 ),
-                ArrayArg::from_raw_parts(
+                BufferArg::from_raw_parts(
                     self.vertex_segments.clone(),
                     self.packed.vertex_segments.len(),
                 ),
-                ArrayArg::from_raw_parts(spans, path_spans.len()),
-                ArrayArg::from_raw_parts(segments, path_segments.len()),
-                ArrayArg::from_raw_parts(self.refinement_count.clone(), 6),
+                BufferArg::from_raw_parts(spans, path_spans.len()),
+                BufferArg::from_raw_parts(segments, path_segments.len()),
+                BufferArg::from_raw_parts(self.refinement_count.clone(), 6),
                 epoch,
             );
         }
@@ -2166,6 +2263,6 @@ impl<R: Runtime> DeviceFiberWorld<R> {
     }
 }
 
-#[cfg(all(test, feature = "wgpu"))]
+#[cfg(all(test, any(feature = "wgpu", feature = "cpu")))]
 #[path = "world_tests.rs"]
 mod tests;

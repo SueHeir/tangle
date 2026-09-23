@@ -1,5 +1,11 @@
 # Fake felted material
 
+Start with the **[Python notebook](../../crates/tangle_python/python/examples/native/fake_felted.ipynb)**
+or [editable script](../../crates/tangle_python/python/examples/native/fake_felted.py).
+See the [installation guide](../../crates/tangle_python/README.md) first.
+The commands and output paths below describe the native Rust version; Python
+uses the same solver but can have different export/debug defaults and paths.
+
 This example builds the larger twenty-ply control and needled specimens used
 by the paired DIRT through-thickness tension experiments. It is a hypothetical
 material-generation study rather than a calibrated material model.

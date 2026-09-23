@@ -1128,6 +1128,12 @@ fn control_formation_recipe(
                     CompactionProgress::Pending => return,
                     CompactionProgress::Finished(description) => {
                         finish_operation(&mut state, relaxation.iterations, description);
+                        record_debug_snapshot(
+                            &relaxation_config,
+                            device.world.as_ref().unwrap(),
+                            &assembly,
+                            &mut relaxation,
+                        );
                         continue;
                     }
                 }
@@ -1154,6 +1160,12 @@ fn control_formation_recipe(
                     CompactionProgress::Finished(description) => {
                         clear_recipe_solver_targets(&mut workflow);
                         finish_operation(&mut state, relaxation.iterations, description);
+                        record_debug_snapshot(
+                            &relaxation_config,
+                            device.world.as_ref().unwrap(),
+                            &assembly,
+                            &mut relaxation,
+                        );
                         continue;
                     }
                 }

@@ -138,6 +138,18 @@ pub struct TangleAssemblyPlugin {
     pub cell: PeriodicCell,
 }
 
+/// Installs an existing, fully constructed [`FiberAssembly`] as the canonical
+/// assembly resource.
+///
+/// This is the import-side counterpart to [`TangleAssemblyPlugin`]. It is
+/// useful for front ends such as the Python bindings, which construct fiber
+/// collections before handing the complete staged assembly to the GPU
+/// workflow.
+pub struct TanglePreparedAssemblyPlugin {
+    /// Assembly installed when the plugin is built.
+    pub assembly: FiberAssembly,
+}
+
 impl TangleAssemblyPlugin {
     /// Creates an assembly plugin for the supplied cell.
     pub fn new(cell: PeriodicCell) -> Self {
@@ -148,6 +160,16 @@ impl TangleAssemblyPlugin {
 impl Plugin for TangleAssemblyPlugin {
     fn build(&self, app: &mut App) {
         app.add_resource(FiberAssembly::new(self.cell));
+    }
+
+    fn provides_capabilities(&self) -> Vec<CapabilityId> {
+        vec![TANGLE_ASSEMBLY.clone()]
+    }
+}
+
+impl Plugin for TanglePreparedAssemblyPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_resource(self.assembly.clone());
     }
 
     fn provides_capabilities(&self) -> Vec<CapabilityId> {
@@ -167,9 +189,10 @@ fn finish_when_done(
 /// Common imports for TANGLE application and plugin authors.
 pub mod prelude {
     pub use crate::{
-        TangleAssemblyPlugin, TanglePhase, TangleStage, TangleWorkflowPlugin, TANGLE_ASSEMBLY,
-        TANGLE_CHARACTERIZATION, TANGLE_CONTACTS, TANGLE_DEBUG_OUTPUT, TANGLE_EXPORT,
-        TANGLE_FORMATION, TANGLE_GENERATION, TANGLE_JUNCTIONS, TANGLE_RELAXATION, TANGLE_WORKFLOW,
+        TangleAssemblyPlugin, TanglePhase, TanglePreparedAssemblyPlugin, TangleStage,
+        TangleWorkflowPlugin, TANGLE_ASSEMBLY, TANGLE_CHARACTERIZATION, TANGLE_CONTACTS,
+        TANGLE_DEBUG_OUTPUT, TANGLE_EXPORT, TANGLE_FORMATION, TANGLE_GENERATION, TANGLE_JUNCTIONS,
+        TANGLE_RELAXATION, TANGLE_WORKFLOW,
     };
 }
 
