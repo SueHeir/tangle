@@ -17,6 +17,7 @@ individual settings. Each script below has a matching notebook beside it.
 | Two-material needling | [needled_preform_two_fiber](../crates/tangle_python/python/examples/native/needled_preform_two_fiber.py) | [README](needled_preform_two_fiber/README.md) |
 | Twenty-ply control and needled felt | [felt_20ply_control_vs_needled](../crates/tangle_python/python/examples/native/felt_20ply_control_vs_needled.py) | [README](felt_20ply_control_vs_needled/README.md) |
 | Native versus voxel analysis | [puma_cross_validation](../crates/tangle_python/python/examples/puma_cross_validation.py) | [PuMA](puma_cross_validation/README.md) |
+| Periodic domain size for DIRT | [periodic_domain_sweep](../crates/tangle_python/python/examples/periodic_domain_sweep.py) | Python only; side 10 to 1 at fixed fiber length |
 
 For another small staged-insertion example, see
 [layered_recipe](../crates/tangle_python/python/examples/layered_recipe.ipynb).
