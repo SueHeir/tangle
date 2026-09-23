@@ -10,8 +10,9 @@ use tangle_core::{FiberAssembly, FiberBendLimit, FiberId, PeriodicCell, Section,
 use tangle_export::{write_puma_bundle, PumaVoxelExportConfig};
 
 use crate::analysis::{
-    characterize_entanglement, characterize_neighbors, characterize_shape, PyAnalysisReport,
-    PyEntanglementReport, PyNeighborReport, PyPumaExportReport, PyShapeReport,
+    characterize_entanglement, characterize_neighbors, characterize_shape, characterize_slices,
+    PyAnalysisReport, PyEntanglementReport, PyNeighborReport, PyPumaExportReport, PyShapeReport,
+    PySliceReport,
 };
 use crate::common::{axis_name, parse_axis, parse_axis_mask, DEFAULT_STACK_AXIS};
 
@@ -533,6 +534,28 @@ impl PyAssembly {
             sample_spacing,
             window,
             neighbor_sample_spacing,
+            quantile_count,
+        )
+    }
+
+    /// Measures nearest-neighbor distances and the pair correlation g(r) of
+    /// fiber cross-sections in planes normal to one cell axis.
+    #[pyo3(signature = (*, axis=2, slice_count=16, max_radius=None, bin_count=40, quantile_count=101))]
+    fn characterize_slices(
+        &self,
+        axis: usize,
+        slice_count: usize,
+        max_radius: Option<f64>,
+        bin_count: usize,
+        quantile_count: usize,
+    ) -> PyResult<PySliceReport> {
+        let model = self.model.lock().expect("assembly lock poisoned");
+        characterize_slices(
+            &model.assembly,
+            axis,
+            slice_count,
+            max_radius,
+            bin_count,
             quantile_count,
         )
     }

@@ -194,6 +194,9 @@ See [solver and architecture notes](docs/architecture.md) for details.
 - **Entanglement:** per-fiber writhe and the Gauss linking of contacting
   fibers, from `characterize_entanglement()`, to tell wrapped fibers from ones
   that only cross.
+- **Cross-sections:** nearest-neighbor distances, the Clark-Evans ratio and
+  the pair correlation g(r) of fiber sections in slice planes, from
+  `characterize_slices()`, the way a CT slice is read.
 - **Scorecard against a scan:** `tangle.score_structure(candidate, reference,
   contact_gap)` scores every shape, contact and orientation metric by its
   distance to the reference divided by the reference's own

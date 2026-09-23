@@ -21,8 +21,9 @@ use tangle_generate::{
 use tangle_relax::{RelaxationPlugin, RelaxationState};
 
 use crate::analysis::{
-    characterize_entanglement, characterize_neighbors, characterize_shape, PyAnalysisReport,
-    PyEntanglementReport, PyNeighborReport, PyPumaExportReport, PyShapeReport,
+    characterize_entanglement, characterize_neighbors, characterize_shape, characterize_slices,
+    PyAnalysisReport, PyEntanglementReport, PyNeighborReport, PyPumaExportReport, PyShapeReport,
+    PySliceReport,
 };
 use crate::checkpoint::PyCheckpointSettings;
 use crate::collection::{
@@ -988,6 +989,27 @@ impl PyRunResult {
             sample_spacing,
             window,
             neighbor_sample_spacing,
+            quantile_count,
+        )
+    }
+
+    /// Measures nearest-neighbor distances and the pair correlation g(r) of
+    /// fiber cross-sections in planes normal to one cell axis.
+    #[pyo3(signature = (*, axis=2, slice_count=16, max_radius=None, bin_count=40, quantile_count=101))]
+    fn characterize_slices(
+        &self,
+        axis: usize,
+        slice_count: usize,
+        max_radius: Option<f64>,
+        bin_count: usize,
+        quantile_count: usize,
+    ) -> PyResult<PySliceReport> {
+        characterize_slices(
+            &self.model().assembly,
+            axis,
+            slice_count,
+            max_radius,
+            bin_count,
             quantile_count,
         )
     }

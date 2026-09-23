@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use tangle_characterize::{
-    analyze_contact_graph, analyze_entanglement, analyze_neighbors, analyze_shape, score_structure,
-    write_analysis_json, AssemblyMetrics, Distribution, EntanglementConfig, EntanglementMetrics,
-    NeighborAnalysisConfig, NeighborMetrics, Scorecard, ScorecardConfig, ShapeAnalysisConfig,
-    ShapeMetrics,
+    analyze_contact_graph, analyze_entanglement, analyze_neighbors, analyze_shape, analyze_slices,
+    score_structure, write_analysis_json, AssemblyMetrics, Distribution, EntanglementConfig,
+    EntanglementMetrics, NeighborAnalysisConfig, NeighborMetrics, Scorecard, ScorecardConfig,
+    ShapeAnalysisConfig, ShapeMetrics, SliceAnalysisConfig, SliceMetrics,
 };
 use tangle_core::FiberAssembly;
 use tangle_export::PumaExportReport;
@@ -626,7 +626,7 @@ impl PyShapeReport {
 
 /// Scores a candidate structure against a reference, metric by metric.
 #[pyfunction]
-#[pyo3(name = "score_structure", signature = (candidate, reference, contact_gap, *, subdivisions=[2, 2, 2], candidate_region=None, reference_region=None, max_candidate_subvolumes=64, min_piece_length=None, sample_spacing=None, neighbor_sample_spacing=None, neighbor_gap=None, in_axis_angle_degrees=20.0, orientation_axis=[0.0, 0.0, 1.0], quantile_count=101, linking_window=None))]
+#[pyo3(name = "score_structure", signature = (candidate, reference, contact_gap, *, subdivisions=[2, 2, 2], candidate_region=None, reference_region=None, max_candidate_subvolumes=64, min_piece_length=None, sample_spacing=None, neighbor_sample_spacing=None, neighbor_gap=None, in_axis_angle_degrees=20.0, orientation_axis=[0.0, 0.0, 1.0], quantile_count=101, linking_window=None, slice_axis=2, slice_count=16))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn score_structure_py(
     candidate: PyRef<'_, PyAssembly>,
@@ -644,6 +644,8 @@ pub(crate) fn score_structure_py(
     orientation_axis: [f64; 3],
     quantile_count: usize,
     linking_window: Option<f64>,
+    slice_axis: usize,
+    slice_count: usize,
 ) -> PyResult<PyScorecard> {
     // Copy each assembly out of its lock in turn, so passing the same
     // assembly twice cannot deadlock.
@@ -673,6 +675,9 @@ pub(crate) fn score_structure_py(
     config.neighbors.in_axis_angle = in_axis_angle_degrees.to_radians();
     config.entanglement.window = linking_window;
     config.entanglement.quantile_count = quantile_count;
+    config.slices.axis = slice_axis;
+    config.slices.slice_count = slice_count;
+    config.slices.quantile_count = quantile_count;
     score_structure(&candidate, &reference, &config)
         .map(|inner| PyScorecard { inner })
         .map_err(|error| PyValueError::new_err(error.to_string()))
@@ -951,6 +956,139 @@ impl PyEntanglementReport {
                     .as_ref()
                     .map(Distribution::median)
             ),
+        )
+    }
+}
+
+/// Measures fiber cross-sections in planes normal to one cell axis.
+pub(crate) fn characterize_slices(
+    assembly: &FiberAssembly,
+    axis: usize,
+    slice_count: usize,
+    max_radius: Option<f64>,
+    bin_count: usize,
+    quantile_count: usize,
+) -> PyResult<PySliceReport> {
+    let config = SliceAnalysisConfig {
+        axis,
+        slice_count,
+        maximum_radius: max_radius,
+        bin_count,
+        quantile_count,
+    };
+    analyze_slices(assembly, &config)
+        .map(|inner| PySliceReport { inner })
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyclass(name = "SliceReport", module = "tangle._tangle", frozen)]
+#[derive(Clone)]
+pub(crate) struct PySliceReport {
+    pub(crate) inner: SliceMetrics,
+}
+
+#[pymethods]
+impl PySliceReport {
+    #[getter]
+    fn schema_version(&self) -> u32 {
+        self.inner.schema_version
+    }
+
+    #[getter]
+    fn axis(&self) -> usize {
+        self.inner.axis
+    }
+
+    #[getter]
+    fn slice_positions(&self) -> Vec<f64> {
+        self.inner.slice_positions.clone()
+    }
+
+    #[getter]
+    fn section_counts(&self) -> Vec<usize> {
+        self.inner.section_counts.clone()
+    }
+
+    #[getter]
+    fn slice_area(&self) -> f64 {
+        self.inner.slice_area
+    }
+
+    #[getter]
+    fn sections_per_area(&self) -> Option<f64> {
+        self.inner.sections_per_area
+    }
+
+    /// Edge-corrected nearest-neighbor distances between section centers:
+    /// ``count``, ``mean``, ``standard_deviation`` and ``quantiles``.
+    #[getter]
+    fn nearest_neighbor_distance(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(
+            py,
+            serde_json::to_string(&self.inner.nearest_neighbor_distance),
+        )
+    }
+
+    #[getter]
+    fn clark_evans_ratio(&self) -> Option<f64> {
+        self.inner.clark_evans_ratio
+    }
+
+    #[getter]
+    fn max_radius(&self) -> f64 {
+        self.inner.maximum_radius
+    }
+
+    #[getter]
+    fn pair_correlation_radii(&self) -> Vec<f64> {
+        self.inner.pair_correlation_radii.clone()
+    }
+
+    #[getter]
+    fn pair_correlation(&self) -> Vec<Option<f64>> {
+        self.inner.pair_correlation.clone()
+    }
+
+    #[getter]
+    fn pair_correlation_sections(&self) -> usize {
+        self.inner.pair_correlation_sections
+    }
+
+    #[pyo3(signature = (pretty=true))]
+    fn to_json(&self, pretty: bool) -> PyResult<String> {
+        if pretty {
+            serde_json::to_string_pretty(&self.inner)
+        } else {
+            serde_json::to_string(&self.inner)
+        }
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(py, serde_json::to_string(&self.inner))
+    }
+
+    fn write_json(&self, path: PathBuf) -> PyResult<()> {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        }
+        let encoded = serde_json::to_string_pretty(&self.inner)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        std::fs::write(path, encoded).map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    fn __repr__(&self) -> String {
+        let format = |value: Option<f64>| value.map_or("None".to_owned(), |v| format!("{v:.4}"));
+        format!(
+            "SliceReport(axis={}, slices={}, sections_per_area={}, clark_evans_ratio={})",
+            self.inner.axis,
+            self.inner.slice_positions.len(),
+            format(self.inner.sections_per_area),
+            format(self.inner.clark_evans_ratio),
         )
     }
 }

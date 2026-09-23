@@ -181,6 +181,35 @@ class Scorecard:
     def to_dict(self) -> dict[str, Any]: ...
     def write_json(self, path: Path) -> None: ...
 
+class SliceReport:
+    @property
+    def schema_version(self) -> int: ...
+    @property
+    def axis(self) -> int: ...
+    @property
+    def slice_positions(self) -> list[float]: ...
+    @property
+    def section_counts(self) -> list[int]: ...
+    @property
+    def slice_area(self) -> float: ...
+    @property
+    def sections_per_area(self) -> float | None: ...
+    @property
+    def nearest_neighbor_distance(self) -> ShapeDistribution | None: ...
+    @property
+    def clark_evans_ratio(self) -> float | None: ...
+    @property
+    def max_radius(self) -> float: ...
+    @property
+    def pair_correlation_radii(self) -> list[float]: ...
+    @property
+    def pair_correlation(self) -> list[float | None]: ...
+    @property
+    def pair_correlation_sections(self) -> int: ...
+    def to_json(self, pretty: bool = ...) -> str: ...
+    def to_dict(self) -> dict[str, Any]: ...
+    def write_json(self, path: Path) -> None: ...
+
 class ShapeReport:
     @property
     def schema_version(self) -> int: ...
@@ -337,6 +366,15 @@ class Assembly:
         neighbor_sample_spacing: float | None = ...,
         quantile_count: int = ...,
     ) -> EntanglementReport: ...
+    def characterize_slices(
+        self,
+        *,
+        axis: int = ...,
+        slice_count: int = ...,
+        max_radius: float | None = ...,
+        bin_count: int = ...,
+        quantile_count: int = ...,
+    ) -> SliceReport: ...
     def export_puma(
         self,
         output_directory: Path,
@@ -553,6 +591,8 @@ def score_structure(
     orientation_axis: Point = ...,
     quantile_count: int = ...,
     linking_window: float | None = ...,
+    slice_axis: int = ...,
+    slice_count: int = ...,
 ) -> Scorecard: ...
 
 # --- Settings, policies, and overrides ---------------------------------------
@@ -1085,6 +1125,15 @@ class RunResult:
         neighbor_sample_spacing: float | None = ...,
         quantile_count: int = ...,
     ) -> EntanglementReport: ...
+    def characterize_slices(
+        self,
+        *,
+        axis: int = ...,
+        slice_count: int = ...,
+        max_radius: float | None = ...,
+        bin_count: int = ...,
+        quantile_count: int = ...,
+    ) -> SliceReport: ...
     def write_ovito(
         self,
         path: Path,

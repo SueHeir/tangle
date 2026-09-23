@@ -189,6 +189,35 @@ class CollectionTests(unittest.TestCase):
             report.write_json(path)
             self.assertTrue(path.is_file())
 
+    def test_slice_analysis_measures_a_square_lattice(self):
+        material = tangle.Material("fiber", diameter=0.1)
+        collection = tangle.FiberCollection.from_centerlines(
+            [
+                [[i + 0.5, j + 0.5, 0.0], [i + 0.5, j + 0.5, 2.0]]
+                for i in range(4)
+                for j in range(4)
+            ],
+            material,
+        )
+        assembly = tangle.Assembly(tangle.Cell([4.0, 4.0, 2.0], periodic="xy"))
+        assembly.insert(collection)
+
+        report = assembly.characterize_slices(slice_count=4, bin_count=8)
+        self.assertIsInstance(report, tangle.SliceReport)
+        self.assertEqual(report.section_counts, [16, 16, 16, 16])
+        self.assertAlmostEqual(report.sections_per_area, 1.0)
+        nearest = report.nearest_neighbor_distance
+        self.assertEqual(nearest["count"], 64)
+        self.assertAlmostEqual(nearest["quantiles"][0], 1.0)
+        self.assertAlmostEqual(nearest["quantiles"][-1], 1.0)
+        self.assertGreater(report.clark_evans_ratio, 1.9)
+        self.assertAlmostEqual(report.max_radius, 2.0)
+        self.assertEqual(len(report.pair_correlation), 8)
+        self.assertEqual(report.pair_correlation[0], 0.0)
+        self.assertEqual(report.to_dict()["schema_version"], 1)
+        with self.assertRaises(ValueError):
+            assembly.characterize_slices(axis=3)
+
     def test_shape_analysis_measures_a_helix(self):
         a, c = 1.0, 0.5
         helix = [

@@ -205,6 +205,32 @@ formula of Klenin and Langowski (2000), on fibers resampled at
 Both depend on the spacing and the window, so compare structures only at the
 same settings; the scorecard resolves them once from the reference.
 
+## Cross-sections
+
+`characterize_slices()` measures what a CT slice shows: the centers of the
+fiber sections in `slice_count` evenly spaced planes normal to `axis`
+(default z). A fiber lying in a slice plane gives no section there; an
+oblique fiber gives the center of an elongated one.
+
+- **Nearest-neighbor distance:** center-to-center distance from each section
+  to the closest other section in the same slice.
+- **Clark-Evans ratio:** mean nearest-neighbor distance over `0.5 / √λ`, its
+  value for randomly placed sections at the same density `λ`. Below one is
+  clustered (bundles); above one is more even than random.
+- **Pair correlation `g(r)`:** density of sections at distance `r` from a
+  typical section relative to random placement, in `bin_count` bins up to
+  `max_radius` (default eight mean section spacings). Values below one at
+  short range show excluded volume, a peak near one diameter shows packing,
+  and `g → 1` far away means no long-range order.
+
+Periodic in-plane axes use minimum-image distances. Along a non-periodic
+axis (a CT volume, a scorecard subvolume) sections near the edge have
+neighbors outside the view, so a nearest-neighbor distance only counts when it
+is no larger than the section's distance to the edge (Hanisch), and `g(r)` is
+averaged only over sections at least `max_radius` from every edge. That is
+why `max_radius` may be at most a quarter of a non-periodic in-plane length
+(half of a periodic one).
+
 ## Scoring against a scan
 
 `tangle.score_structure(candidate, reference, contact_gap)` compares a
@@ -232,14 +258,16 @@ first.
 
 | Kind | Metrics |
 | --- | --- |
-| Scalars | `volume_fraction`, `length_density`, `mean_squared_axis_cosine`, `log_schladitz_beta`, `persistence_length`, `tangent_correlation_length`, `contacts_per_length`, `contact_ratio_to_random`, `in_axis_contact_fraction`, `mean_neighbors`, `neighbor_correlation_length`, `contact_degree_per_length`, `contact_clustering`, `repeated_contact_fraction`, `largest_component_length_fraction` |
-| Distributions | `curvature`, `absolute_torsion`, `curl_index`, `axis_cosine`, `fiber_length`, `crossing_angle`, `free_length`, `excess_persistence`, `absolute_writhe_per_length`, `absolute_contact_linking` |
+| Scalars | `volume_fraction`, `length_density`, `mean_squared_axis_cosine`, `log_schladitz_beta`, `persistence_length`, `tangent_correlation_length`, `contacts_per_length`, `contact_ratio_to_random`, `in_axis_contact_fraction`, `mean_neighbors`, `neighbor_correlation_length`, `contact_degree_per_length`, `contact_clustering`, `repeated_contact_fraction`, `largest_component_length_fraction`, `sections_per_area`, `clark_evans_ratio` |
+| Distributions | `curvature`, `absolute_torsion`, `curl_index`, `axis_cosine`, `fiber_length`, `crossing_angle`, `free_length`, `excess_persistence`, `absolute_writhe_per_length`, `absolute_contact_linking`, `section_nearest_neighbor_distance` |
 
 - **Same settings on both sides.** Sample spacings, the neighbor gap, lag
   ranges and the torsion threshold are resolved once from the whole reference
   region and reused for every subvolume; the resolved values are in the
   report's `shape`, `neighbors` and `entanglement` settings. The linking
-  window defaults to 20 shape sample spacings (`linking_window`).
+  window defaults to 20 shape sample spacings (`linking_window`). Sections are
+  taken in `slice_count` planes normal to `slice_axis` in every subvolume;
+  `g(r)` is not scored.
 - **Cropping.** Each subvolume is analyzed as a non-periodic box. Fibers are
   clipped at its faces (periodic images included), and pieces shorter than
   `min_piece_length` (default the largest reference fiber diameter) are

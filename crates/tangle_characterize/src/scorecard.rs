@@ -30,9 +30,10 @@ use tangle_core::{FiberAssembly, FiberId, PeriodicCell, Vec3};
 use crate::distribution::Distribution;
 use crate::neighbors::{add, norm, scale, sub};
 use crate::{
-    analyze_contact_graph, analyze_entanglement, analyze_neighbors, analyze_shape,
+    analyze_contact_graph, analyze_entanglement, analyze_neighbors, analyze_shape, analyze_slices,
     characterize_assembly, EntanglementConfig, EntanglementError, NeighborAnalysisConfig,
-    NeighborAnalysisError, ShapeAnalysisConfig, ShapeAnalysisError,
+    NeighborAnalysisError, ShapeAnalysisConfig, ShapeAnalysisError, SliceAnalysisConfig,
+    SliceAnalysisError,
 };
 
 /// Schema version of [`Scorecard`] and [`StructureProfile`].
@@ -63,23 +64,26 @@ pub struct StructureProfile {
 /// `in_axis_contact_fraction`, `mean_neighbors`, `neighbor_correlation_length`,
 /// and from the contact graph `contact_degree_per_length`,
 /// `contact_clustering`, `repeated_contact_fraction` and
-/// `largest_component_length_fraction`.
+/// `largest_component_length_fraction`, and from the slices
+/// `sections_per_area` and `clark_evans_ratio`.
 ///
 /// Distributions: `curvature`, `absolute_torsion`, `curl_index`,
 /// `axis_cosine`, `fiber_length`, `crossing_angle` (radians), `free_length`,
 /// `excess_persistence`, `absolute_writhe_per_length`,
-/// `absolute_contact_linking`.
+/// `absolute_contact_linking`, `section_nearest_neighbor_distance`.
 pub fn profile_structure(
     assembly: &FiberAssembly,
     shape: &ShapeAnalysisConfig,
     neighbors: &NeighborAnalysisConfig,
     entanglement: &EntanglementConfig,
+    slices: &SliceAnalysisConfig,
 ) -> Result<StructureProfile, ScorecardError> {
     let basic = characterize_assembly(assembly);
     let shape_metrics = analyze_shape(assembly, shape)?;
     let neighbor_metrics = analyze_neighbors(assembly, neighbors)?;
     let graph = analyze_contact_graph(&neighbor_metrics);
     let entanglement_metrics = analyze_entanglement(assembly, &neighbor_metrics, entanglement)?;
+    let slice_metrics = analyze_slices(assembly, slices)?;
     let quantiles = shape.quantile_count;
     let volume = basic.cell.volume;
     let has_length = neighbor_metrics.total_length > 0.0;
@@ -133,6 +137,8 @@ pub fn profile_structure(
             "largest_component_length_fraction",
             (graph.fibers > 0).then_some(graph.largest_component_length_fraction),
         ),
+        ("sections_per_area", slice_metrics.sections_per_area),
+        ("clark_evans_ratio", slice_metrics.clark_evans_ratio),
     ]
     .into_iter()
     .map(|(name, value)| (name.to_owned(), value))
@@ -170,6 +176,10 @@ pub fn profile_structure(
         (
             "absolute_contact_linking",
             entanglement_metrics.absolute_contact_linking,
+        ),
+        (
+            "section_nearest_neighbor_distance",
+            slice_metrics.nearest_neighbor_distance,
         ),
     ]
     .into_iter()
@@ -215,6 +225,9 @@ pub struct ScorecardConfig {
     /// Entanglement settings. An unset spacing uses the resolved shape
     /// spacing, and an unset window 20 of those spacings.
     pub entanglement: EntanglementConfig,
+    /// Cross-section settings. `g(r)` is not scored, so its bins are
+    /// skipped.
+    pub slices: SliceAnalysisConfig,
 }
 
 impl ScorecardConfig {
@@ -230,6 +243,7 @@ impl ScorecardConfig {
             shape: ShapeAnalysisConfig::default(),
             neighbors: NeighborAnalysisConfig::new(contact_gap),
             entanglement: EntanglementConfig::default(),
+            slices: SliceAnalysisConfig::default(),
         }
     }
 }
@@ -276,6 +290,8 @@ pub struct Scorecard {
     pub neighbors: NeighborAnalysisConfig,
     /// Entanglement settings actually used, with lengths resolved.
     pub entanglement: EntanglementConfig,
+    /// Cross-section settings actually used.
+    pub slices: SliceAnalysisConfig,
     /// One row per metric, scalars first, in name order.
     pub rows: Vec<ScoreRow>,
     /// Metrics of the whole candidate region.
@@ -293,6 +309,8 @@ pub enum ScorecardError {
     Neighbors(NeighborAnalysisError),
     /// The entanglement settings were invalid.
     Entanglement(EntanglementError),
+    /// The cross-section settings were invalid.
+    Slices(SliceAnalysisError),
     /// A subdivision count was zero, or the total was below two.
     InvalidSubdivisions([usize; 3]),
     /// A region had a non-positive or non-finite extent.
@@ -324,6 +342,7 @@ impl fmt::Display for ScorecardError {
             Self::Shape(error) => write!(formatter, "{error}"),
             Self::Neighbors(error) => write!(formatter, "{error}"),
             Self::Entanglement(error) => write!(formatter, "{error}"),
+            Self::Slices(error) => write!(formatter, "{error}"),
             Self::InvalidSubdivisions(counts) => write!(
                 formatter,
                 "subdivisions must be positive and give at least two subvolumes, got {counts:?}"
@@ -357,6 +376,12 @@ impl Error for ScorecardError {}
 impl From<ShapeAnalysisError> for ScorecardError {
     fn from(error: ShapeAnalysisError) -> Self {
         Self::Shape(error)
+    }
+}
+
+impl From<SliceAnalysisError> for ScorecardError {
+    fn from(error: SliceAnalysisError) -> Self {
+        Self::Slices(error)
     }
 }
 
@@ -465,8 +490,15 @@ pub fn score_structure(
         ..config.entanglement.clone()
     };
 
-    let profile =
-        |assembly: &FiberAssembly| profile_structure(assembly, &shape, &neighbors, &entanglement);
+    let slices = SliceAnalysisConfig {
+        bin_count: 0,
+        maximum_radius: None,
+        ..config.slices.clone()
+    };
+
+    let profile = |assembly: &FiberAssembly| {
+        profile_structure(assembly, &shape, &neighbors, &entanglement, &slices)
+    };
     let reference_profile = profile(&reference_whole)?;
     let candidate_whole = crop_assembly(
         candidate,
@@ -542,6 +574,7 @@ pub fn score_structure(
         shape,
         neighbors,
         entanglement,
+        slices,
         rows,
         candidate: candidate_profile,
         reference: reference_profile,

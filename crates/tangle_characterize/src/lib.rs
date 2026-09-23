@@ -18,6 +18,7 @@ mod graph;
 mod neighbors;
 mod scorecard;
 mod shape;
+mod slices;
 
 pub use distribution::Distribution;
 pub use entanglement::{
@@ -36,6 +37,9 @@ pub use scorecard::{
 pub use shape::{
     analyze_shape, FiberShapeMetrics, ShapeAnalysisConfig, ShapeAnalysisError, ShapeMetrics,
     SHAPE_SCHEMA_VERSION,
+};
+pub use slices::{
+    analyze_slices, SliceAnalysisConfig, SliceAnalysisError, SliceMetrics, SLICE_SCHEMA_VERSION,
 };
 
 use tangle_core::{
