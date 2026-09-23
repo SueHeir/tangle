@@ -12,7 +12,7 @@ mod settings;
 
 use pyo3::prelude::*;
 
-use analysis::{PyAnalysisReport, PyPumaExportReport};
+use analysis::{PyAnalysisReport, PyNeighborReport, PyPumaExportReport};
 use checkpoint::PyCheckpointSettings;
 use collection::{PyAssembly, PyCell, PyFiberCollection, PyFiberSelection, PyMaterial};
 use compaction::{
@@ -39,6 +39,7 @@ fn _tangle(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("RecipeError", py.get_type::<RecipeError>())?;
 
     module.add_class::<PyAnalysisReport>()?;
+    module.add_class::<PyNeighborReport>()?;
     module.add_class::<PyPumaExportReport>()?;
 
     module.add_class::<PyCell>()?;

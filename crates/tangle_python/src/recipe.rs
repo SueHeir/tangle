@@ -20,7 +20,9 @@ use tangle_generate::{
 };
 use tangle_relax::{RelaxationPlugin, RelaxationState};
 
-use crate::analysis::{PyAnalysisReport, PyPumaExportReport};
+use crate::analysis::{
+    characterize_neighbors, PyAnalysisReport, PyNeighborReport, PyPumaExportReport,
+};
 use crate::checkpoint::PyCheckpointSettings;
 use crate::collection::{
     cell_lengths, AssemblyModel, PyAssembly, PyCell, PyFiberCollection, PyFiberSelection,
@@ -899,6 +901,28 @@ impl PyRunResult {
         PyAnalysisReport {
             inner: characterize_assembly(&self.assembly),
         }
+    }
+
+    /// Measures fiber-to-fiber contacts, neighbor persistence, and turnover.
+    #[pyo3(signature = (contact_gap, *, neighbor_gap=None, in_axis_angle_degrees=20.0, sample_spacing=None, max_lag=None, lag_count=24))]
+    fn characterize_neighbors(
+        &self,
+        contact_gap: f64,
+        neighbor_gap: Option<f64>,
+        in_axis_angle_degrees: f64,
+        sample_spacing: Option<f64>,
+        max_lag: Option<f64>,
+        lag_count: usize,
+    ) -> PyResult<PyNeighborReport> {
+        characterize_neighbors(
+            &self.assembly,
+            contact_gap,
+            neighbor_gap,
+            in_axis_angle_degrees,
+            sample_spacing,
+            max_lag,
+            lag_count,
+        )
     }
 
     #[getter]

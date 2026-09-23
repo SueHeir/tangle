@@ -113,6 +113,47 @@ class CollectionTests(unittest.TestCase):
             self.assertTrue(report.manifest_path.is_file())
             self.assertTrue(report.analysis_path.is_file())
 
+    def test_assembly_insert_adds_fibers_without_a_recipe(self):
+        material = tangle.Material("fiber", diameter=0.1)
+        collection = tangle.FiberCollection("scan")
+        collection.add_fiber([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], material)
+        assembly = tangle.Assembly(tangle.Cell([2.0, 2.0, 2.0]))
+        selection = assembly.insert(collection, translation=[0.5, 1.0, 1.0])
+        self.assertEqual(selection.name, "scan")
+        self.assertEqual(selection.fiber_ids, [1])
+        self.assertEqual(assembly.fiber_count, 1)
+        self.assertEqual(assembly.centerlines()[0][1], [1.5, 1.0, 1.0])
+        with self.assertRaises(ValueError):
+            assembly.insert(tangle.FiberCollection("empty"))
+
+    def test_neighbor_analysis_counts_crossing_contacts(self):
+        radius = 0.05
+        material = tangle.Material("fiber", diameter=2 * radius)
+        collection = tangle.FiberCollection.from_centerlines(
+            [
+                [[0.5, 1.0, 1.0], [1.5, 1.0, 1.0]],
+                [[1.0, 0.5, 1.0 + 2 * radius], [1.0, 1.5, 1.0 + 2 * radius]],
+            ],
+            material,
+        )
+        assembly = tangle.Assembly(tangle.Cell([2.0, 2.0, 2.0]))
+        assembly.insert(collection)
+
+        report = assembly.characterize_neighbors(0.01, sample_spacing=0.002)
+        self.assertEqual(report.contact_count, 2)
+        self.assertEqual(report.in_axis_contact_fraction, 0.0)
+        self.assertAlmostEqual(report.median_crossing_angle_degrees, 90.0)
+        self.assertAlmostEqual(report.median_excess_persistence, 1.0, delta=0.1)
+        self.assertEqual(len(report.crossing_angles_degrees), 2)
+        self.assertEqual(report.to_dict()["schema_version"], 1)
+        self.assertIn('"contacts": 2', report.to_json())
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nested" / "neighbors.json"
+            report.write_json(path)
+            self.assertTrue(path.is_file())
+        with self.assertRaises(ValueError):
+            assembly.characterize_neighbors(0.1, neighbor_gap=0.01)
+
 
 class CellTests(unittest.TestCase):
     def test_stack_axis_is_the_single_bounded_axis(self):

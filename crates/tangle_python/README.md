@@ -351,6 +351,44 @@ print(analysis.nominal_swept_volume_fraction)
 print(bundle.voxel_volume_fraction, bundle.ambiguous_voxels)
 ```
 
+### Contacts and neighbors
+
+`characterize_neighbors(contact_gap, ...)` on an `Assembly` or `RunResult`
+measures how fibers touch and travel together, which volume fraction and
+orientation tensors cannot show. It reports contacts per unit length and
+per fiber, the ratio to a random-placement baseline, the split between
+in-axis (side-by-side) and out-of-axis (crossing) contacts, how much longer
+contacts last than a straight crossing would ("excess persistence"), free
+lengths between contacts, neighbor counts, and how quickly each fiber's set
+of neighbors changes along its length:
+
+```python
+neighbors = result.characterize_neighbors(
+    contact_gap=0.3e-6,        # surface gap counted as touching
+    neighbor_gap=10e-6,        # surface gap counted as a neighbor
+    in_axis_angle_degrees=20,  # below this, fibers run side by side
+)
+print(neighbors.contacts_per_length, neighbors.contact_ratio_to_random)
+print(neighbors.in_axis_contact_fraction, neighbors.neighbor_correlation_length)
+neighbors.write_json("output/neighbors.json")
+```
+
+The analysis uses only centerlines and radii, so centerlines tracked from a
+CT scan can go through exactly the same call. `Assembly.insert()` adds a
+collection without a recipe or relaxation:
+
+```python
+fiber = tangle.Material("fiber", diameter=7e-6)
+scan = tangle.Assembly(tangle.Cell([1e-3, 1e-3, 1e-3]))
+scan.insert(tangle.FiberCollection.from_centerlines(tracked_centerlines, fiber))
+reference = scan.characterize_neighbors(contact_gap=1e-6)
+```
+
+CT segmentation cannot resolve gaps below about one voxel, so use a contact
+tolerance of that order on both sides of a comparison. See the
+[analysis guide](../../docs/puma_interoperability.md#contacts-and-neighbors)
+for definitions.
+
 PuMA is optional and is called directly in user Python code. The
 [`puma_cross_validation` example](python/examples/puma_cross_validation.py)
 and its matching notebook demonstrate configuration → native analysis → VTI

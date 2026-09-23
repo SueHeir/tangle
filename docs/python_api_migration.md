@@ -30,6 +30,7 @@ misuse. There are no deprecated aliases: old names raise `AttributeError` or
 | `Material(name, diameter, minimum_bend_radius=r)` | `Material(name, diameter, min_bend_radius=r)` |
 | `FiberCollection.layers()` | `FiberCollection.layer_ids()` |
 | `a.extend(b)` for a new collection | `a + b` (`extend` still mutates in place) |
+| `characterize_neighbors(maximum_lag=)` (added just before the cleanup) | `characterize_neighbors(max_lag=)` |
 | `AnalysisReport.maximum_curvature`, `maximum_curvature_ratio`, `bend_limit_violations` | `max_curvature`, `max_curvature_ratio`, `curvature_limit_violations` |
 
 ## Generation

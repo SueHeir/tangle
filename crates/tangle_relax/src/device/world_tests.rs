@@ -994,3 +994,61 @@ fn periodic_broad_phase_resolves_nonadjacent_self_image_contact() {
     let status = world.run_batch(&config, 999);
     assert!(status.max_penetration < 0.005, "{status:?}");
 }
+
+#[test]
+fn curvature_limit_reaches_vertices_packed_after_dormant_fibers() {
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([2.0; 3], [false; 3]));
+    let material = assembly.materials.add("fiber");
+    let section = assembly.sections.add(Section::Circular { radius: 0.01 });
+    // A dormant fiber packed first places every active vertex past the
+    // active-vertex count, so kernels sized by that count must not index
+    // vertices directly.
+    let dormant = (0..200)
+        .map(|index| [0.1 + 0.004 * index as f64, 0.2, 0.2])
+        .collect::<Vec<_>>();
+    assembly
+        .add_fiber(FiberId(1), material, section, &dormant, &dormant)
+        .unwrap();
+    assembly.set_fiber_formation_step(FiberId(1), 1).unwrap();
+    assembly
+        .add_fiber(
+            FiberId(2),
+            material,
+            section,
+            &[[-0.15, 0.0, 0.0], [0.0, 0.0, 0.0], [0.15, 0.0, 0.0]],
+            &[[0.8, 1.0, 1.0], [1.0, 1.15, 1.0], [1.2, 1.0, 1.0]],
+        )
+        .unwrap();
+    assembly
+        .set_fiber_bend_limit(
+            FiberId(2),
+            Some(FiberBendLimit {
+                minimum_bend_radius: 0.25,
+            }),
+        )
+        .unwrap();
+    let packed = PackedAssembly::from_assembly_with_options(&assembly, None, true).unwrap();
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed,
+        CellListConfig::default(),
+        0.02,
+    );
+    assert_eq!(world.activate_formation_step(0), (2, 3));
+    let config = RelaxationConfig {
+        penetration_tolerance: 1.0e-5,
+        correction_fraction: 0.8,
+        stretch_stiffness: 0.0,
+        bend_stiffness: 0.0,
+        curvature_limit_stiffness: 1.0,
+        curvature_ratio_tolerance: 1.0e-5,
+        constraint_iterations: 1,
+        max_step: 0.02,
+        max_iterations: 40,
+        iterations_per_batch: 40,
+        ..RelaxationConfig::default()
+    };
+    let status = world.run_batch(&config, 40);
+    assert!(status.converged, "{status:?}");
+    assert!(status.max_curvature_ratio <= 1.0 + 1.0e-5);
+}
