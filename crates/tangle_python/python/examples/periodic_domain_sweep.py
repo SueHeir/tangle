@@ -181,6 +181,31 @@ def compaction(config: SweepConfig) -> tangle.CompactionSettings:
     )
 
 
+def contact_stage(
+    recipe: tangle.Recipe,
+    config: SweepConfig,
+    name: str,
+    target: float,
+    budget: int,
+) -> None:
+    """Solve contacts toward ``target`` fiber diameters of penetration.
+
+    A policy finishes as soon as its max penetration holds, so the stage only
+    accepts its own target. Penetration is a soft limit: a stage that stalls
+    warns and continues, and the run summary records what was reached.
+    """
+    recipe.solve(
+        tangle.SolvePolicy(
+            name,
+            target_penetration=target * config.diameter,
+            hard_penetration=False,
+            max_iterations=budget,
+            on_budget_exhausted="continue_if_hard_ok",
+        ),
+        tangle.RelaxationOverrides.preset("contact_cleanup"),
+    )
+
+
 def build(
     side: float = 10.0, **changes
 ) -> tuple[tangle.Recipe, tangle.RelaxationSettings, SweepConfig]:
@@ -214,32 +239,10 @@ def build(
         placed += 1
     # Compaction first waits for a relaxed baseline; fixed-length deposition
     # relaxes do not guarantee one, and without it compaction stops at once.
-    recipe.solve(
-        tangle.SolvePolicy(
-            "baseline/contact",
-            target_penetration=FORMATION_TOLERANCE * config.diameter,
-            max_penetration=5 * CONTACT_TOLERANCE * config.diameter,
-            max_iterations=30_000,
-            on_budget_exhausted="continue_if_hard_ok",
-        )
-    )
+    contact_stage(recipe, config, "baseline/contact", FORMATION_TOLERANCE, 30_000)
     recipe.compact(compaction(config))
-    # Each stage tightens penetration but keeps going on a stalled budget as
-    # long as its hard limit holds; the summary records what was reached.
-    for name, target, limit, budget in [
-        ("final/contact", CONTACT_TOLERANCE, 5 * CONTACT_TOLERANCE, 60_000),
-        ("polish/dem-contact", DEM_CONTACT_TOLERANCE, CONTACT_TOLERANCE, 100_000),
-    ]:
-        recipe.solve(
-            tangle.SolvePolicy(
-                name,
-                target_penetration=target * config.diameter,
-                max_penetration=limit * config.diameter,
-                max_iterations=budget,
-                on_budget_exhausted="continue_if_hard_ok",
-            ),
-            tangle.RelaxationOverrides.preset("contact_cleanup"),
-        )
+    contact_stage(recipe, config, "final/contact", CONTACT_TOLERANCE, 60_000)
+    contact_stage(recipe, config, "polish/dem-contact", DEM_CONTACT_TOLERANCE, 100_000)
 
     settings = tangle.RelaxationSettings(
         constraint_iterations=8,
