@@ -631,13 +631,19 @@ pub fn crop_assembly(
 }
 
 /// Parametric range of segment `a → b` inside the box (Liang–Barsky).
+///
+/// The box is half-open: a segment lying in its upper face belongs to the
+/// neighboring box, so a fiber on a shared face is counted once, not twice.
 fn clip_segment(a: Vec3, b: Vec3, lower: Vec3, upper: Vec3) -> Option<(f64, f64)> {
     let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
     for axis in 0..3 {
         let d = b[axis] - a[axis];
-        for (p, q) in [(-d, a[axis] - lower[axis]), (d, upper[axis] - a[axis])] {
+        for (p, q, upper_face) in [
+            (-d, a[axis] - lower[axis], false),
+            (d, upper[axis] - a[axis], true),
+        ] {
             if p == 0.0 {
-                if q < 0.0 {
+                if q < 0.0 || (upper_face && q == 0.0) {
                     return None;
                 }
             } else {
@@ -732,24 +738,30 @@ fn is_orthorhombic(cell: &PeriodicCell) -> bool {
 }
 
 /// Subvolume boxes on a regular grid, at most `limit` of them, evenly strided.
+/// Only the chosen boxes are built, so a huge candidate costs nothing extra.
 fn tiles(origin: Vec3, size: Vec3, counts: [usize; 3], limit: usize) -> Vec<(Vec3, Vec3)> {
-    let mut boxes = Vec::new();
-    for i in 0..counts[0] {
-        for j in 0..counts[1] {
-            for k in 0..counts[2] {
-                let index = [i, j, k];
-                let lower: Vec3 =
-                    std::array::from_fn(|axis| origin[axis] + index[axis] as f64 * size[axis]);
-                let upper: Vec3 = std::array::from_fn(|axis| lower[axis] + size[axis]);
-                boxes.push((lower, upper));
-            }
-        }
-    }
-    if boxes.len() <= limit {
-        return boxes;
-    }
-    let total = boxes.len();
-    (0..limit).map(|n| boxes[n * total / limit]).collect()
+    let counts = counts.map(|count| count as u128);
+    let total: u128 = counts.iter().product();
+    let limit = limit as u128;
+    let chosen: Vec<u128> = if total <= limit {
+        (0..total).collect()
+    } else {
+        (0..limit).map(|n| n * total / limit).collect()
+    };
+    chosen
+        .into_iter()
+        .map(|flat| {
+            let index = [
+                flat / (counts[1] * counts[2]),
+                flat / counts[2] % counts[1],
+                flat % counts[2],
+            ];
+            let lower: Vec3 =
+                std::array::from_fn(|axis| origin[axis] + index[axis] as f64 * size[axis]);
+            let upper: Vec3 = std::array::from_fn(|axis| lower[axis] + size[axis]);
+            (lower, upper)
+        })
+        .collect()
 }
 
 fn largest_diameter(assembly: &FiberAssembly) -> f64 {
@@ -896,6 +908,26 @@ mod tests {
         // Pieces shorter than the minimum are dropped.
         let cropped = crop_assembly(&assembly, [0.0; 3], [1.0; 3], 0.6).unwrap();
         assert_eq!(cropped.topology.fibers.len(), 0);
+    }
+
+    #[test]
+    fn a_fiber_on_a_shared_face_belongs_to_one_box() {
+        let cell = PeriodicCell::orthorhombic([2.0, 2.0, 2.0], [false; 3]);
+        let fiber = vec![[0.2, 0.5, 1.0], [0.8, 0.5, 1.0]];
+        let assembly = assembly_with(cell, 0.01, &[fiber]);
+        let below = crop_assembly(&assembly, [0.0; 3], [1.0; 3], 0.0).unwrap();
+        let above = crop_assembly(&assembly, [0.0, 0.0, 1.0], [1.0, 1.0, 2.0], 0.0).unwrap();
+        assert_eq!(below.topology.fibers.len(), 0);
+        assert_eq!(above.topology.fibers.len(), 1);
+    }
+
+    #[test]
+    fn huge_candidate_grids_only_build_the_chosen_tiles() {
+        let boxes = tiles([0.0; 3], [1.0; 3], [1_000_000, 1_000_000, 1_000], 4);
+        assert_eq!(boxes.len(), 4);
+        assert_eq!(boxes[0], ([0.0; 3], [1.0; 3]));
+        // The second of four strided picks is a quarter of the way through.
+        assert_eq!(boxes[1].0, [250_000.0, 0.0, 0.0]);
     }
 
     #[test]
