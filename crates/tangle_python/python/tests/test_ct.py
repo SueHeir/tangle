@@ -278,6 +278,20 @@ class CtToolTests(unittest.TestCase):
         component = region_components(2, old_touch, touched_regions(redrawn + [bridge], cut.regions))
         self.assertEqual(component[0], component[1])
 
+    def test_redraw_failures_are_counted_per_region(self):
+        from tangle.ct._fit import _Fitter
+
+        failures = []
+        box = (np.zeros(3), np.full(3, 10.0))
+        far = (np.full(3, 50.0), np.full(3, 60.0))
+        _Fitter._record(failures, *far, False)
+        _Fitter._record(failures, *box, False)
+        _Fitter._record(failures, *box, False)  # the second record overlaps: counted twice
+        self.assertEqual(sorted(f[2] for f in failures), [1, 2])
+        _Fitter._record(failures, *box, True)  # kept: forgotten
+        self.assertEqual(len(failures), 1)
+        self.assertTrue(np.array_equal(failures[0][0], far[0]))
+
     def test_geometry_report_finds_overlaps_and_kinks(self):
         straight = np.stack([np.linspace(0, 40, 9), np.zeros(9), np.zeros(9)], axis=1)
         beside = straight + np.array([0.0, 3.0, 0.0])  # radii 2: 1 voxel deep, half a radius
