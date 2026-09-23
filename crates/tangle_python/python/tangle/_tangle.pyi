@@ -1,17 +1,47 @@
 from collections.abc import Mapping, Sequence
 from os import PathLike
+from types import TracebackType
 from typing import Any, Literal
 
 Point = Sequence[float]
 Centerline = Sequence[Point]
 Matrix3 = Sequence[Sequence[float]]
 Path = str | PathLike[str]
+
+Axis = Literal["x", "y", "z", 0, 1, 2]
+"""One Cartesian axis, by letter or index."""
+AxisSet = str | Sequence[bool] | Axis
+"""Several axes: letters such as ``"xy"``, one axis, or a bool triple."""
+Direction = Axis | Sequence[float]
+"""An axis, or an arbitrary nonzero 3-vector."""
+Range = float | tuple[float, float]
+"""A fixed value, or a ``(min, max)`` uniform range."""
+
+Backend = Literal["wgpu", "cpu"]
+MotionModel = Literal["flexible", "rigid_translation"]
+ContactAggregation = Literal["uniform_average", "penetration_weighted", "deepest_only"]
+OvitoColoring = Literal["fiber", "curvature_ratio", "refinement_level"]
 BpmExportMode = Literal[
-    "spheres-exact",
-    "spheres-dynamic",
-    "spherocylinders-exact",
-    "spherocylinders-constant",
+    "spheres_exact",
+    "spheres_dynamic",
+    "spherocylinders_exact",
+    "spherocylinders_constant",
 ]
+CompactionKinematics = Literal["rigid_fiber_centers", "moving_walls", "affine_vertices"]
+BudgetExhaustion = Literal["fail", "continue_if_hard_ok"]
+CenterlineShape = Literal["straight", "curved"]
+AdaptiveProfile = Literal["balanced", "fast", "strict"]
+OverridePreset = Literal["contact_first", "curvature_cleanup", "contact_cleanup"]
+
+class RecipeError(RuntimeError):
+    """A recipe operation failed while ``Recipe.run()`` executed it."""
+
+    operation_index: int
+    operation: str
+    iteration: int
+    reason: str
+
+# --- Results -----------------------------------------------------------------
 
 class AnalysisReport:
     @property
@@ -33,11 +63,11 @@ class AnalysisReport:
     @property
     def volume_weighted_orientation_tensor(self) -> list[list[float]]: ...
     @property
-    def maximum_curvature(self) -> float: ...
+    def max_curvature(self) -> float: ...
     @property
-    def maximum_curvature_ratio(self) -> float: ...
+    def max_curvature_ratio(self) -> float: ...
     @property
-    def bend_limit_violations(self) -> int: ...
+    def curvature_limit_violations(self) -> int: ...
     def to_json(self, pretty: bool = ...) -> str: ...
     def to_dict(self) -> dict[str, Any]: ...
     def write_json(self, path: Path) -> None: ...
@@ -125,12 +155,16 @@ class PumaExportReport:
     @property
     def analysis_path(self) -> Path: ...
 
+# --- Geometry ----------------------------------------------------------------
+
 class Cell:
     def __init__(
         self,
         lengths: Point,
-        periodic: Sequence[bool] = ...,
+        periodic: AxisSet = ...,
         origin: Point = ...,
+        *,
+        stack_axis: Axis | None = ...,
     ) -> None: ...
     @property
     def lengths(self) -> list[float]: ...
@@ -138,13 +172,15 @@ class Cell:
     def periodic(self) -> list[bool]: ...
     @property
     def origin(self) -> list[float]: ...
+    @property
+    def stack_axis(self) -> int: ...
 
 class Material:
     def __init__(
         self,
         name: str,
         diameter: float,
-        minimum_bend_radius: float | None = ...,
+        min_bend_radius: float | None = ...,
     ) -> None: ...
     @property
     def name(self) -> str: ...
@@ -153,7 +189,7 @@ class Material:
     @property
     def radius(self) -> float: ...
     @property
-    def minimum_bend_radius(self) -> float | None: ...
+    def min_bend_radius(self) -> float | None: ...
 
 class Assembly:
     def __init__(self, cell: Cell) -> None: ...
@@ -178,7 +214,7 @@ class Assembly:
         neighbor_gap: float | None = ...,
         in_axis_angle_degrees: float = ...,
         sample_spacing: float | None = ...,
-        maximum_lag: float | None = ...,
+        max_lag: float | None = ...,
         lag_count: int = ...,
     ) -> NeighborReport: ...
     def export_puma(
@@ -215,7 +251,8 @@ class FiberCollection:
     def centerlines(self) -> list[list[list[float]]]: ...
     def rest_centerlines(self) -> list[list[list[float]]]: ...
     def extend(self, other: FiberCollection) -> None: ...
-    def layers(self) -> list[int]: ...
+    def __add__(self, other: FiberCollection) -> FiberCollection: ...
+    def layer_ids(self) -> list[int]: ...
     def select_layer(
         self,
         layer: int,
@@ -225,108 +262,161 @@ class FiberCollection:
     ) -> FiberCollection: ...
     def __len__(self) -> int: ...
 
-class FiberPopulationSettings:
+# --- Generation --------------------------------------------------------------
+
+class IsotropicOrientation:
+    def __init__(self) -> None: ...
+
+class PlanarOrientation:
+    def __init__(self, *, normal: Direction | None = ..., max_tilt: float = ...) -> None: ...
+    @property
+    def normal(self) -> Direction | None: ...
+    @property
+    def max_tilt(self) -> float: ...
+
+class LayeredBiaxialOrientation:
+    def __init__(
+        self,
+        *,
+        normal: Direction | None = ...,
+        primary_fraction: float = ...,
+        cross_fraction: float = ...,
+        max_in_plane_deviation: float = ...,
+        max_tilt: float = ...,
+        seed: int = ...,
+    ) -> None: ...
+    @property
+    def normal(self) -> Direction | None: ...
+    @property
+    def primary_fraction(self) -> float: ...
+    @property
+    def cross_fraction(self) -> float: ...
+    @property
+    def max_in_plane_deviation(self) -> float: ...
+    @property
+    def max_tilt(self) -> float: ...
+    @property
+    def seed(self) -> int: ...
+
+class AlignedOrientation:
+    def __init__(self, axis: Direction, *, max_angle: float = ...) -> None: ...
+    @property
+    def axis(self) -> Direction: ...
+    @property
+    def max_angle(self) -> float: ...
+
+Orientation = (
+    IsotropicOrientation | PlanarOrientation | LayeredBiaxialOrientation | AlignedOrientation
+)
+
+class UniformPosition:
+    def __init__(self) -> None: ...
+
+class LayeredPosition:
+    def __init__(
+        self,
+        layer_count: int,
+        *,
+        axis: Axis | None = ...,
+        jitter_fraction: float = ...,
+    ) -> None: ...
+    @property
+    def layer_count(self) -> int: ...
+    @property
+    def axis(self) -> int | None: ...
+    @property
+    def jitter_fraction(self) -> float: ...
+
+class DensityGradientPosition:
+    def __init__(
+        self,
+        *,
+        axis: Axis | None = ...,
+        exponent: float = ...,
+        toward_high: bool = ...,
+    ) -> None: ...
+    @property
+    def axis(self) -> int | None: ...
+    @property
+    def exponent(self) -> float: ...
+    @property
+    def toward_high(self) -> bool: ...
+
+Position = UniformPosition | LayeredPosition | DensityGradientPosition
+
+class FiberPopulation:
+    material: Material
     count: int
     segments_per_fiber: int
     seed: int
-    length_minimum: float
-    length_maximum: float
+    length: Range
+    diameter: Range | None
+    curvature_amplitude: Range
     nominal_parent_length: float | None
-    radius_minimum: float
-    radius_maximum: float
-    curvature_amplitude_minimum: float
-    curvature_amplitude_maximum: float
-    orientation: str
-    orientation_axis: list[float]
-    maximum_angle: float
-    maximum_tilt: float
-    primary_fraction: float
-    cross_fraction: float
-    maximum_in_plane_deviation: float
-    layer_orientation_seed: int
-    position: str
-    position_axis: int
-    layers: int
-    jitter_fraction: float
-    density_exponent: float
-    density_toward_high: bool
-    minimum_bend_radius: float | None
+    orientation: Orientation
+    position: Position
     max_attempts_per_fiber: int
-    material_name: str
-    def __init__(self) -> None: ...
-    def copy(self) -> FiberPopulationSettings: ...
+    def __init__(
+        self,
+        *,
+        material: Material = ...,
+        count: int = ...,
+        segments_per_fiber: int = ...,
+        seed: int = ...,
+        length: Range = ...,
+        diameter: Range | None = ...,
+        curvature_amplitude: Range = ...,
+        nominal_parent_length: float | None = ...,
+        orientation: Orientation = ...,
+        position: Position = ...,
+        max_attempts_per_fiber: int = ...,
+    ) -> None: ...
+    def copy(self) -> FiberPopulation: ...
+    def replace(self, **changes: Any) -> FiberPopulation: ...
 
 def generate_point_crossing(
     cell: Cell,
     *,
+    material: Material | None = ...,
     count: int = ...,
     length: float = ...,
-    radius: float = ...,
-    material_name: str = ...,
     name: str = ...,
 ) -> FiberCollection: ...
 
 def generate_multisegment_crossing(
     cell: Cell,
     *,
+    material: Material | None = ...,
     count: int = ...,
     segments_per_fiber: int = ...,
     length: float = ...,
     placed_chord_fraction: float = ...,
-    radius: float = ...,
-    rest_shape: str = ...,
+    rest_shape: CenterlineShape = ...,
     rest_amplitude: float = ...,
-    placed_shape: str = ...,
+    placed_shape: CenterlineShape = ...,
     placed_amplitude: float = ...,
-    minimum_bend_radius: float | None = ...,
-    material_name: str = ...,
     name: str = ...,
 ) -> FiberCollection: ...
 
 def generate_fiber_pair_crossing(
     cell: Cell,
     *,
+    material: Material | None = ...,
     segments_per_fiber: int = ...,
     length: float = ...,
-    radius: float = ...,
     axis_separation: float = ...,
     crossing_angle_degrees: float = ...,
-    minimum_bend_radius: float | None = ...,
-    material_name: str = ...,
     name: str = ...,
 ) -> FiberCollection: ...
 
 def generate_fiber_population(
     cell: Cell,
-    settings: FiberPopulationSettings,
+    population: FiberPopulation,
     *,
     name: str = ...,
 ) -> FiberCollection: ...
 
-class FiberSelection:
-    @property
-    def name(self) -> str: ...
-    @property
-    def fiber_ids(self) -> list[int]: ...
-    @property
-    def formation_step(self) -> int: ...
-    def __len__(self) -> int: ...
-
-class JunctionPolicy:
-    name: str
-    law_name: str
-    parameter_set: int
-    maximum_surface_gap: float
-    minimum_crossing_angle: float
-    maximum_crossing_angle: float
-    probability: float
-    seed: int
-    material_pairs: list[tuple[str, str]]
-    maximum_per_fiber_pair: int
-    minimum_anchor_separation: float
-    candidate_capacity: int
-    def __init__(self, name: str = ..., law_name: str = ...) -> None: ...
-    def copy(self) -> JunctionPolicy: ...
+# --- Settings, policies, and overrides ---------------------------------------
 
 class CheckpointSettings:
     case_id: str
@@ -343,87 +433,171 @@ class CheckpointSettings:
         *,
         interval_iterations: int = ...,
         resume: bool = ...,
+        resume_path: Path | None = ...,
+        resume_case_id: str | None = ...,
+        fresh_formation_on_resume: bool = ...,
     ) -> None: ...
     def copy(self) -> CheckpointSettings: ...
-
-class CellListSettings:
-    cell_size_scale: float
-    neighbor_skin_scale: float
-    neighbor_capacity: int
-    def __init__(
-        self,
-        cell_size_scale: float | None = ...,
-        neighbor_skin_scale: float | None = ...,
-        neighbor_capacity: int | None = ...,
-    ) -> None: ...
-    def copy(self) -> CellListSettings: ...
-    def to_dict(self) -> dict[str, Any]: ...
+    def replace(self, **changes: Any) -> CheckpointSettings: ...
 
 class AdaptiveSegmentationSettings:
     contact_length_over_diameter: float
-    minimum_length_over_diameter: float
-    maximum_refinement_levels: int
+    min_length_over_diameter: float
+    max_refinement_levels: int
     refinement_interval: int
     refinement_persistence: int
     coarsening_persistence: int
     coarsening_error_over_diameter: float
     coarsening_curvature_ratio: float
-    def __init__(self) -> None: ...
+    def __init__(
+        self,
+        *,
+        contact_length_over_diameter: float = ...,
+        min_length_over_diameter: float = ...,
+        max_refinement_levels: int = ...,
+        refinement_interval: int = ...,
+        refinement_persistence: int = ...,
+        coarsening_persistence: int = ...,
+        coarsening_error_over_diameter: float = ...,
+        coarsening_curvature_ratio: float = ...,
+    ) -> None: ...
     @classmethod
-    def profile(cls, name: str) -> AdaptiveSegmentationSettings: ...
+    def profile(cls, name: AdaptiveProfile, **changes: Any) -> AdaptiveSegmentationSettings: ...
     def copy(self) -> AdaptiveSegmentationSettings: ...
+    def replace(self, **changes: Any) -> AdaptiveSegmentationSettings: ...
     def to_dict(self) -> dict[str, Any]: ...
 
+class VolumeFractionTarget:
+    def __init__(self, value: float) -> None: ...
+    @property
+    def value(self) -> float: ...
+
+class CellVolumeTarget:
+    def __init__(self, value: float) -> None: ...
+    @property
+    def value(self) -> float: ...
+
+class CellLengthsTarget:
+    def __init__(self, lengths: Point) -> None: ...
+    @property
+    def lengths(self) -> list[float]: ...
+
+class MeanPressureTarget:
+    def __init__(self, value: float) -> None: ...
+    @property
+    def value(self) -> float: ...
+
+class DirectionalPressureTarget:
+    def __init__(self, pressures: Point) -> None: ...
+    @property
+    def pressures(self) -> list[float]: ...
+
+class PenaltyEnergyTarget:
+    def __init__(self, value: float) -> None: ...
+    @property
+    def value(self) -> float: ...
+
+CompactionTarget = (
+    VolumeFractionTarget
+    | CellVolumeTarget
+    | CellLengthsTarget
+    | MeanPressureTarget
+    | DirectionalPressureTarget
+    | PenaltyEnergyTarget
+)
+
+class AxisWeightsPath:
+    def __init__(self, weights: AxisSet | Point | None = ...) -> None: ...
+    @property
+    def weights(self) -> list[float] | None: ...
+
+class EqualPressurePath:
+    def __init__(self, axes: AxisSet, *, pressure_floor: float = ...) -> None: ...
+    @property
+    def axes(self) -> list[bool]: ...
+    @property
+    def pressure_floor(self) -> float: ...
+
+class StressRatioPath:
+    def __init__(self, ratio: Point, *, pressure_floor: float = ...) -> None: ...
+    @property
+    def ratio(self) -> list[float]: ...
+    @property
+    def pressure_floor(self) -> float: ...
+
+class MinimumWorkPath:
+    def __init__(self, axes: AxisSet) -> None: ...
+    @property
+    def axes(self) -> list[bool]: ...
+
+CompactionPath = AxisWeightsPath | EqualPressurePath | StressRatioPath | MinimumWorkPath
+
 class CompactionSettings:
-    target_type: str
-    target_value: float
-    target_values: list[float]
-    path: str
-    axis_weights: list[float]
-    active_axes: list[bool]
-    stress_ratio: list[float]
-    pressure_floor: float
-    kinematics: str
+    target: CompactionTarget
+    path: CompactionPath
+    kinematics: CompactionKinematics
     cell_anchor: list[float]
     balance_opposing_faces: bool
     face_pressure_floor: float
     face_balance_strength: float
     initial_log_strain: float
-    minimum_log_strain: float
-    maximum_log_strain: float
+    min_log_strain: float
+    max_log_strain: float
     growth_factor: float
     shrink_factor: float
     relax_iterations: int
-    maximum_shortening_over_minimum_diameter: float
-    maximum_penetration: float
-    maximum_bend_ratio: float
-    maximum_pressure: float
-    maximum_penalty_energy: float
-    maximum_steps: int
-    maximum_relax_windows: int
+    max_shortening_over_min_diameter: float
+    max_penetration: float
+    max_curvature_ratio: float
+    max_pressure: float
+    max_penalty_energy: float
+    max_steps: int
+    max_relax_windows: int
     contact_energy_stiffness: float
     stretch_energy_stiffness: float
     bending_energy_stiffness: float
     target_tolerance: float
     def __init__(
         self,
-        target_volume_fraction: float = ...,
-        axis_weights: Sequence[float] = ...,
+        target: CompactionTarget | None = ...,
+        *,
+        path: CompactionPath = ...,
+        kinematics: CompactionKinematics = ...,
+        cell_anchor: Point = ...,
+        balance_opposing_faces: bool = ...,
+        face_pressure_floor: float = ...,
+        face_balance_strength: float = ...,
+        initial_log_strain: float = ...,
+        min_log_strain: float = ...,
+        max_log_strain: float = ...,
+        growth_factor: float = ...,
+        shrink_factor: float = ...,
+        relax_iterations: int = ...,
+        max_shortening_over_min_diameter: float = ...,
+        max_penetration: float = ...,
+        max_curvature_ratio: float = ...,
+        max_pressure: float = ...,
+        max_penalty_energy: float = ...,
+        max_steps: int = ...,
+        max_relax_windows: int = ...,
+        contact_energy_stiffness: float = ...,
+        stretch_energy_stiffness: float = ...,
+        bending_energy_stiffness: float = ...,
+        target_tolerance: float = ...,
     ) -> None: ...
     @classmethod
-    def volume_fraction(
-        cls, target: float, *, axis_weights: Sequence[float] = ...
-    ) -> CompactionSettings: ...
+    def volume_fraction(cls, target: float, **changes: Any) -> CompactionSettings: ...
     def copy(self) -> CompactionSettings: ...
+    def replace(self, **changes: Any) -> CompactionSettings: ...
 
 class RelaxationSettings:
-    backend: str
-    motion_model: str
+    backend: Backend
+    motion_model: MotionModel
     pin_fiber_ends: bool
     penetration_tolerance: float
     force_full_iterations: bool
     correction_fraction: float
-    contact_aggregation: str
+    contact_aggregation: ContactAggregation
     stretch_stiffness: float
     bend_stiffness: float
     curvature_limit_stiffness: float
@@ -436,55 +610,179 @@ class RelaxationSettings:
     iterations_per_batch: int
     debug_snapshot_interval: int | None
     save_assembled_reference: bool
-    cell_list: CellListSettings
     cell_size_scale: float
+    neighbor_skin_scale: float
+    neighbor_capacity: int
     adaptive_segmentation: AdaptiveSegmentationSettings | None
-    def __init__(self) -> None: ...
+    def __init__(
+        self,
+        *,
+        backend: Backend = ...,
+        motion_model: MotionModel = ...,
+        pin_fiber_ends: bool = ...,
+        penetration_tolerance: float = ...,
+        force_full_iterations: bool = ...,
+        correction_fraction: float = ...,
+        contact_aggregation: ContactAggregation = ...,
+        stretch_stiffness: float = ...,
+        bend_stiffness: float = ...,
+        curvature_limit_stiffness: float = ...,
+        curvature_limit_safety_margin: float = ...,
+        curvature_ratio_tolerance: float = ...,
+        constraint_iterations: int = ...,
+        curvature_cleanup_sweeps: int = ...,
+        max_step: float = ...,
+        max_iterations: int = ...,
+        iterations_per_batch: int = ...,
+        debug_snapshot_interval: int | None = ...,
+        save_assembled_reference: bool = ...,
+        cell_size_scale: float = ...,
+        neighbor_skin_scale: float = ...,
+        neighbor_capacity: int = ...,
+        adaptive_segmentation: AdaptiveSegmentationSettings | None = ...,
+    ) -> None: ...
     def enable_adaptive_segmentation(self) -> None: ...
     def disable_adaptive_segmentation(self) -> None: ...
     def copy(self) -> RelaxationSettings: ...
+    def replace(self, **changes: Any) -> RelaxationSettings: ...
     def to_dict(self) -> dict[str, Any]: ...
 
 class RelaxationOverrides:
-    motion_model: str | None
+    motion_model: MotionModel | None
     correction_fraction: float | None
-    contact_aggregation: str | None
+    contact_aggregation: ContactAggregation | None
     stretch_stiffness: float | None
     bend_stiffness: float | None
     curvature_limit_stiffness: float | None
     constraint_iterations: int | None
     curvature_cleanup_sweeps: int | None
-    def __init__(self) -> None: ...
+    def __init__(
+        self,
+        *,
+        motion_model: MotionModel | None = ...,
+        correction_fraction: float | None = ...,
+        contact_aggregation: ContactAggregation | None = ...,
+        stretch_stiffness: float | None = ...,
+        bend_stiffness: float | None = ...,
+        curvature_limit_stiffness: float | None = ...,
+        constraint_iterations: int | None = ...,
+        curvature_cleanup_sweeps: int | None = ...,
+    ) -> None: ...
+    @classmethod
+    def preset(cls, name: OverridePreset, **changes: Any) -> RelaxationOverrides: ...
     def copy(self) -> RelaxationOverrides: ...
+    def replace(self, **changes: Any) -> RelaxationOverrides: ...
 
 class SolvePolicy:
     name: str
-    solver_penetration: float
-    solver_curvature_ratio: float
-    acceptance_penetration: float
-    penetration_enforcement: str
-    acceptance_curvature_ratio: float
-    curvature_enforcement: str
-    maximum_iterations: int
-    on_exhaustion: str
+    target_penetration: float
+    target_curvature_ratio: float
+    max_penetration: float
+    max_curvature_ratio: float
+    hard_penetration: bool
+    hard_curvature: bool
+    max_iterations: int
+    on_budget_exhausted: BudgetExhaustion
     def __init__(
         self,
         name: str = ...,
         *,
-        solver_penetration: float = ...,
-        solver_curvature_ratio: float = ...,
-        acceptance_penetration: float = ...,
-        penetration_enforcement: str = ...,
-        acceptance_curvature_ratio: float = ...,
-        curvature_enforcement: str = ...,
-        maximum_iterations: int = ...,
-        on_exhaustion: str = ...,
+        target_penetration: float = ...,
+        target_curvature_ratio: float = ...,
+        max_penetration: float | None = ...,
+        max_curvature_ratio: float | None = ...,
+        hard_penetration: bool = ...,
+        hard_curvature: bool = ...,
+        max_iterations: int = ...,
+        on_budget_exhausted: BudgetExhaustion = ...,
     ) -> None: ...
     def copy(self) -> SolvePolicy: ...
+    def replace(self, **changes: Any) -> SolvePolicy: ...
+
+class JunctionPolicy:
+    name: str
+    law_name: str
+    parameter_set: int
+    max_surface_gap: float
+    min_crossing_angle: float
+    max_crossing_angle: float
+    probability: float
+    seed: int
+    material_pairs: list[tuple[str, str]]
+    max_per_fiber_pair: int
+    min_anchor_separation: float
+    candidate_capacity: int
+    def __init__(
+        self,
+        name: str = ...,
+        law_name: str = ...,
+        *,
+        parameter_set: int = ...,
+        max_surface_gap: float = ...,
+        min_crossing_angle: float = ...,
+        max_crossing_angle: float = ...,
+        probability: float = ...,
+        seed: int = ...,
+        material_pairs: Sequence[tuple[str, str]] = ...,
+        max_per_fiber_pair: int = ...,
+        min_anchor_separation: float = ...,
+        candidate_capacity: int = ...,
+    ) -> None: ...
+    def copy(self) -> JunctionPolicy: ...
+    def replace(self, **changes: Any) -> JunctionPolicy: ...
+
+# --- Recipes -----------------------------------------------------------------
+
+class FiberSelection:
+    @property
+    def name(self) -> str: ...
+    @property
+    def fiber_ids(self) -> list[int]: ...
+    @property
+    def formation_step(self) -> int: ...
+    def __len__(self) -> int: ...
+
+class CircularFootprint:
+    def __init__(self, center: Sequence[float], *, diameter: float) -> None: ...
+    @classmethod
+    def random(cls, *, diameter: float, seed: int) -> CircularFootprint: ...
+    @property
+    def center(self) -> list[float] | None: ...
+    @property
+    def diameter(self) -> float: ...
+    @property
+    def seed(self) -> int | None: ...
+
+class RandomFiberFraction:
+    def __init__(self, fraction: float, *, seed: int = ...) -> None: ...
+    @property
+    def fraction(self) -> float: ...
+    @property
+    def seed(self) -> int: ...
+
+NeedleFootprint = CircularFootprint | RandomFiberFraction
+
+class HeldTargets:
+    """Returned by operations that hold fibers on targets.
+
+    Use it as a context manager to release the targets when the block ends,
+    even if it raises, or ignore it and call the matching ``release_*`` method
+    yourself. Releasing layer placement releases every held layer, including
+    layers placed before the block.
+    """
+
+    def __enter__(self) -> Recipe: ...
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None = ...,
+        exc: BaseException | None = ...,
+        traceback: TracebackType | None = ...,
+    ) -> bool: ...
 
 class Recipe:
-    layer_axis: int
-    def __init__(self, cell: Cell | Assembly, *, layer_axis: int = ...) -> None: ...
+    @property
+    def stack_axis(self) -> int: ...
+    def __init__(self, cell: Cell | Assembly, *, stack_axis: Axis | None = ...) -> None: ...
     def insert(
         self,
         collection: FiberCollection,
@@ -493,64 +791,49 @@ class Recipe:
         translation: Point = ...,
         rotation: Matrix3 | None = ...,
     ) -> FiberSelection: ...
-    def relax(self, *, maximum_iterations: int = ...) -> None: ...
+    def relax_until_converged(self, *, max_iterations: int = ...) -> None: ...
     def relax_for(self, iterations: int) -> None: ...
-    def relax_with_policy(
+    def settle_targets(self, *, tolerance: float, max_iterations: int) -> None: ...
+    def solve(
         self,
         policy: SolvePolicy,
         overrides: RelaxationOverrides | None = ...,
     ) -> None: ...
-    def set_material_bend_radius(
-        self, material_name: str, minimum_bend_radius: float
+    def set_min_bend_radius(
+        self, material: Material | str, min_bend_radius: float
     ) -> None: ...
-    def relax_until_targets_reached(
-        self, tolerance: float, maximum_iterations: int
-    ) -> None: ...
-    def move_layers(
+    def scale_layer_spacing(
         self,
-        spacing_scale: float,
+        factor: float,
         *,
         stiffness: float = ...,
         max_translation: float = ...,
-    ) -> None: ...
+    ) -> HeldTargets: ...
     def place_layer_above(
         self,
         layer: int,
+        *,
         gap: float,
-        *,
         stiffness: float = ...,
         max_translation: float = ...,
-    ) -> None: ...
-    def release_layer_targets(self) -> None: ...
-    def needle_layer_circular(
+    ) -> HeldTargets: ...
+    def release_layer_placement(self) -> None: ...
+    def needle_layer(
         self,
         layer: int,
-        center: Sequence[float],
-        diameter: float,
-        depth: float,
         *,
-        minimum_fiber_diameter: float | None = ...,
+        footprint: NeedleFootprint,
+        depth: float,
+        min_fiber_diameter: float | None = ...,
         stiffness: float = ...,
         max_translation: float = ...,
-        maximum_translation_over_fiber_diameter: float = ...,
-    ) -> None: ...
-    def needle_layer_random(
-        self,
-        layer: int,
-        fraction: float,
-        depth: float,
-        *,
-        seed: int = ...,
-        minimum_fiber_diameter: float | None = ...,
-        stiffness: float = ...,
-        max_translation: float = ...,
-        maximum_translation_over_fiber_diameter: float = ...,
-    ) -> None: ...
+        max_translation_over_diameter: float = ...,
+    ) -> HeldTargets: ...
     def release_needles(self) -> None: ...
     def fit_cell_to_active_fibers(
         self,
         *,
-        axes: Sequence[bool] = ...,
+        axes: AxisSet | None = ...,
         padding: float = ...,
     ) -> None: ...
     def compact(
@@ -560,7 +843,7 @@ class Recipe:
     ) -> None: ...
     def capture_junctions(self, policy: JunctionPolicy) -> None: ...
     def relax_and_capture(
-        self, iterations: int, every: int, policy: JunctionPolicy
+        self, *, iterations: int, capture_every: int, policy: JunctionPolicy
     ) -> None: ...
     def operations(self) -> list[str]: ...
     def centerlines(self) -> list[list[list[float]]]: ...
@@ -572,7 +855,7 @@ class Recipe:
         debug_ovito_path: Path | None = ...,
         debug_ovito_view_script_path: Path | None = ...,
         debug_ovito_session_path: Path | None = ...,
-        debug_ovito_coloring: str = ...,
+        debug_ovito_coloring: OvitoColoring = ...,
     ) -> RunResult: ...
 
 class RunResult:
@@ -624,6 +907,8 @@ class RunResult:
     def debug_ovito_frames(self) -> int: ...
     @property
     def junction_count(self) -> int: ...
+    @property
+    def assembly(self) -> Assembly: ...
     def centerlines(self) -> list[list[list[float]]]: ...
     def characterize(self) -> AnalysisReport: ...
     def characterize_neighbors(
@@ -633,7 +918,7 @@ class RunResult:
         neighbor_gap: float | None = ...,
         in_axis_angle_degrees: float = ...,
         sample_spacing: float | None = ...,
-        maximum_lag: float | None = ...,
+        max_lag: float | None = ...,
         lag_count: int = ...,
     ) -> NeighborReport: ...
     def write_ovito(
@@ -642,7 +927,7 @@ class RunResult:
         *,
         view_script_path: Path | None = ...,
         session_path: Path | None = ...,
-        coloring: str = ...,
+        coloring: OvitoColoring = ...,
     ) -> None: ...
     def export_bpm(
         self,

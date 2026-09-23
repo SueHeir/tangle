@@ -1038,8 +1038,8 @@ mod tests {
     #[test]
     fn maps_tangle_materials_to_distinct_atom_types() {
         let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([2.0; 3], [false; 3]));
-        let thin = assembly.materials.add("7 um stiff fiber");
-        let thick = assembly.materials.add("19 um bendy fiber");
+        let thin = assembly.materials.add("fine_7um");
+        let thick = assembly.materials.add("coarse_19um");
         let section = assembly.sections.add(Section::Circular { radius: 0.1 });
         for (id, material, y) in [(1, thin, 0.5), (2, thick, 1.5)] {
             assembly
@@ -1079,8 +1079,8 @@ mod tests {
         let data = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
         assert!(data.contains("2 atom types"));
-        assert!(data.contains("# atom type 1 = TANGLE material 0 \"7 um stiff fiber\""));
-        assert!(data.contains("# atom type 2 = TANGLE material 1 \"19 um bendy fiber\""));
+        assert!(data.contains("# atom type 1 = TANGLE material 0 \"fine_7um\""));
+        assert!(data.contains("# atom type 2 = TANGLE material 1 \"coarse_19um\""));
         assert!(data.contains("1 1 1 "));
         assert!(data.contains("7 2 2 "));
     }

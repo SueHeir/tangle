@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use grass_app::prelude::*;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyType};
 use tangle_app::{TanglePreparedAssemblyPlugin, TangleStage, TangleWorkflowPlugin};
 use tangle_characterize::characterize_assembly;
 use tangle_checkpoint::{CheckpointConfig, CheckpointPlugin, CheckpointReport};
@@ -15,8 +15,8 @@ use tangle_export::{
     OvitoTrajectoryConfig, OvitoTrajectoryPlugin, OvitoTrajectoryReport, PumaVoxelExportConfig,
 };
 use tangle_generate::{
-    FormationOperation, FormationRecipeConfig, FormationRecipePlugin, FormationRecipeState,
-    NeedlingConfig, NeedlingSelection,
+    random_footprint_center, FormationOperation, FormationRecipeConfig, FormationRecipePlugin,
+    FormationRecipeState, NeedlingConfig, NeedlingSelection,
 };
 use tangle_relax::{RelaxationPlugin, RelaxationState};
 
@@ -24,45 +24,223 @@ use crate::analysis::{
     characterize_neighbors, PyAnalysisReport, PyNeighborReport, PyPumaExportReport,
 };
 use crate::checkpoint::PyCheckpointSettings;
-use crate::collection::{AssemblyModel, PyAssembly, PyCell, PyFiberCollection, PyFiberSelection};
+use crate::collection::{
+    cell_lengths, AssemblyModel, PyAssembly, PyCell, PyFiberCollection, PyFiberSelection,
+    PyMaterial,
+};
+use crate::common::{
+    axis_name, nonnegative_finite, parse_axis, parse_axis_mask, parse_choice, positive_finite,
+    unit_fraction,
+};
 use crate::compaction::PyCompactionSettings;
 use crate::junctions::PyJunctionPolicy;
 use crate::settings::{PyRelaxationOverrides, PyRelaxationSettings, PySolvePolicy};
 
+pyo3::create_exception!(
+    tangle,
+    RecipeError,
+    PyRuntimeError,
+    "A recipe operation failed while Recipe.run() executed it."
+);
+
+const OVITO_COLORINGS: &[(&str, OvitoColoring)] = &[
+    ("fiber", OvitoColoring::Fiber),
+    ("curvature_ratio", OvitoColoring::CurvatureRatio),
+    ("refinement_level", OvitoColoring::RefinementLevel),
+];
+const BPM_MODES: &[(&str, BpmExportMode)] = &[
+    ("spheres_exact", BpmExportMode::SpheresExact),
+    ("spheres_dynamic", BpmExportMode::SpheresDynamic),
+    ("spherocylinders_exact", BpmExportMode::SpherocylindersExact),
+    (
+        "spherocylinders_constant",
+        BpmExportMode::SpherocylindersConstant,
+    ),
+];
+
+// --- Needle footprints -------------------------------------------------------
+
+/// Pull fibers whose centerline crosses a circle in the layer plane.
+///
+/// `CircularFootprint(center, diameter=...)` places the circle explicitly;
+/// `CircularFootprint.random(diameter=..., seed=...)` picks a reproducible
+/// center per layer, uniform over the cell footprint.
+#[pyclass(name = "CircularFootprint", module = "tangle._tangle", frozen)]
+#[derive(Clone, Debug)]
+pub(crate) struct PyCircularFootprint {
+    #[pyo3(get)]
+    center: Option<[f64; 2]>,
+    #[pyo3(get)]
+    diameter: f64,
+    #[pyo3(get)]
+    seed: Option<u64>,
+}
+
+#[pymethods]
+impl PyCircularFootprint {
+    #[new]
+    #[pyo3(signature = (center, *, diameter))]
+    fn new(center: [f64; 2], diameter: f64) -> PyResult<Self> {
+        if center.iter().any(|value| !value.is_finite()) {
+            return Err(PyValueError::new_err("footprint center must be finite"));
+        }
+        positive_finite(diameter, "diameter")?;
+        Ok(Self {
+            center: Some(center),
+            diameter,
+            seed: None,
+        })
+    }
+
+    #[classmethod]
+    #[pyo3(signature = (*, diameter, seed))]
+    fn random(_class: &Bound<'_, PyType>, diameter: f64, seed: u64) -> PyResult<Self> {
+        positive_finite(diameter, "diameter")?;
+        Ok(Self {
+            center: None,
+            diameter,
+            seed: Some(seed),
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        match (self.center, self.seed) {
+            (Some(center), _) => {
+                format!("CircularFootprint({center:?}, diameter={})", self.diameter)
+            }
+            (None, seed) => format!(
+                "CircularFootprint.random(diameter={}, seed={})",
+                self.diameter,
+                seed.unwrap_or_default()
+            ),
+        }
+    }
+}
+
+/// Pull a seeded random `fraction` of the layer's fibers.
+#[pyclass(name = "RandomFiberFraction", module = "tangle._tangle", frozen)]
+#[derive(Clone, Debug)]
+pub(crate) struct PyRandomFiberFraction {
+    #[pyo3(get)]
+    fraction: f64,
+    #[pyo3(get)]
+    seed: u64,
+}
+
+#[pymethods]
+impl PyRandomFiberFraction {
+    #[new]
+    #[pyo3(signature = (fraction, *, seed=0))]
+    fn new(fraction: f64, seed: u64) -> PyResult<Self> {
+        unit_fraction(fraction, "fraction")?;
+        Ok(Self { fraction, seed })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("RandomFiberFraction({}, seed={})", self.fraction, self.seed)
+    }
+}
+
+// --- Held targets ------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+enum HeldKind {
+    LayerPlacement,
+    Needles,
+}
+
+/// Returned by operations that hold fibers on targets. Use it as a context
+/// manager to release the targets when the block ends, even if it raises, or
+/// ignore it and call the matching `release_*` method yourself. Releasing layer
+/// placement releases every held layer, including layers placed before the
+/// block.
+#[pyclass(name = "HeldTargets", module = "tangle._tangle")]
+pub(crate) struct PyHeldTargets {
+    recipe: Py<PyRecipe>,
+    kind: HeldKind,
+}
+
+#[pymethods]
+impl PyHeldTargets {
+    fn __enter__(&self, py: Python<'_>) -> Py<PyRecipe> {
+        self.recipe.clone_ref(py)
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc=None, _traceback=None))]
+    fn __exit__(
+        &self,
+        py: Python<'_>,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> bool {
+        let mut recipe = self.recipe.borrow_mut(py);
+        match self.kind {
+            HeldKind::LayerPlacement => recipe.release_layer_placement(),
+            HeldKind::Needles => recipe.release_needles(),
+        }
+        false
+    }
+
+    fn __repr__(&self) -> String {
+        match self.kind {
+            HeldKind::LayerPlacement => "HeldTargets(layer placement)".to_string(),
+            HeldKind::Needles => "HeldTargets(needles)".to_string(),
+        }
+    }
+}
+
+// --- Recipe ------------------------------------------------------------------
+
+/// An ordered list of formation operations, executed by `run()`.
+///
+/// `insert()` adds fibers to the starting assembly immediately; every other
+/// operation is recorded and runs later, in order, inside `run()`. `run()`
+/// leaves the starting assembly unchanged and returns the result, so running
+/// the same recipe twice starts from the same fibers both times.
 #[pyclass(name = "Recipe", module = "tangle._tangle")]
 pub(crate) struct PyRecipe {
     model: Arc<Mutex<AssemblyModel>>,
     operations: Vec<FormationOperation>,
     operation_descriptions: Vec<String>,
     next_formation_step: u32,
-    #[pyo3(get, set)]
-    layer_axis: usize,
+    stack_axis: usize,
 }
 
 #[pymethods]
 impl PyRecipe {
     #[new]
-    #[pyo3(signature = (cell, *, layer_axis=2))]
-    fn new(cell: &Bound<'_, PyAny>, layer_axis: usize) -> PyResult<Self> {
-        if layer_axis >= 3 {
-            return Err(PyValueError::new_err("layer_axis must be 0, 1, or 2"));
-        }
+    #[pyo3(signature = (cell, *, stack_axis=None))]
+    fn new(cell: &Bound<'_, PyAny>, stack_axis: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
         let model = if let Ok(cell) = cell.extract::<PyRef<'_, PyCell>>() {
-            Arc::new(Mutex::new(AssemblyModel::new(cell.inner)))
+            Arc::new(Mutex::new(AssemblyModel::new(&cell)))
         } else if let Ok(assembly) = cell.extract::<PyRef<'_, PyAssembly>>() {
             assembly.model.clone()
         } else {
-            return Err(PyValueError::new_err(
+            return Err(PyTypeError::new_err(
                 "Recipe expects a Cell or Assembly as its first argument",
             ));
+        };
+        let stack_axis = match stack_axis {
+            Some(value) => parse_axis(value, "stack_axis")?,
+            None => model.lock().expect("assembly lock poisoned").stack_axis,
         };
         Ok(Self {
             model,
             operations: Vec::new(),
             operation_descriptions: Vec::new(),
             next_formation_step: 0,
-            layer_axis,
+            stack_axis,
         })
+    }
+
+    /// The axis plies stack along (0, 1, or 2). Defaults to the cell's.
+    /// Fixed when the recipe is created, because recorded operations use it.
+    /// Generators follow the `Cell`, so set `Cell(..., stack_axis=)` when
+    /// generated populations should stack along the same axis.
+    #[getter]
+    fn stack_axis(&self) -> usize {
+        self.stack_axis
     }
 
     #[pyo3(signature = (collection, *, name=None, translation=[0.0, 0.0, 0.0], rotation=None))]
@@ -91,310 +269,316 @@ impl PyRecipe {
             translation,
             rotation.unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
         )?;
-        self.operations
-            .push(FormationOperation::ActivateFibersThrough(step));
-        self.operation_descriptions.push(format!(
-            "insert {:?} ({} fibers) through formation step {}",
-            selection_name,
-            selection.fiber_ids.len(),
-            step
-        ));
+        self.push(
+            FormationOperation::ActivateFibersThrough(step),
+            format!(
+                "insert {:?} ({} fibers) as formation step {}",
+                selection_name,
+                selection.fiber_ids.len(),
+                step
+            ),
+        );
         Ok(selection)
     }
 
-    #[pyo3(signature = (*, maximum_iterations=2000))]
-    fn relax(&mut self, maximum_iterations: usize) -> PyResult<()> {
-        if maximum_iterations == 0 {
-            return Err(PyValueError::new_err("maximum_iterations must be positive"));
+    /// Relaxes until the run's `RelaxationSettings` tolerances are met.
+    #[pyo3(signature = (*, max_iterations=2000))]
+    fn relax_until_converged(&mut self, max_iterations: usize) -> PyResult<()> {
+        if max_iterations == 0 {
+            return Err(PyValueError::new_err("max_iterations must be positive"));
         }
-        self.operations
-            .push(FormationOperation::RelaxUntilConverged { maximum_iterations });
-        self.operation_descriptions.push(format!(
-            "relax until converged (up to {maximum_iterations} iterations)"
-        ));
+        self.push(
+            FormationOperation::RelaxUntilConverged {
+                maximum_iterations: max_iterations,
+            },
+            format!("relax until converged (up to {max_iterations} iterations)"),
+        );
         Ok(())
     }
 
+    /// Relaxes for exactly `iterations` iterations.
     fn relax_for(&mut self, iterations: usize) -> PyResult<()> {
         if iterations == 0 {
             return Err(PyValueError::new_err("iterations must be positive"));
         }
-        self.operations
-            .push(FormationOperation::RelaxFor(iterations));
-        self.operation_descriptions
-            .push(format!("relax for exactly {iterations} iterations"));
+        self.push(
+            FormationOperation::RelaxFor(iterations),
+            format!("relax for exactly {iterations} iterations"),
+        );
         Ok(())
     }
 
+    /// Relaxes until held layers and needles are within `tolerance` of their
+    /// targets.
+    #[pyo3(signature = (*, tolerance, max_iterations))]
+    fn settle_targets(&mut self, tolerance: f64, max_iterations: usize) -> PyResult<()> {
+        nonnegative_finite(tolerance, "tolerance")?;
+        if max_iterations == 0 {
+            return Err(PyValueError::new_err("max_iterations must be positive"));
+        }
+        self.push(
+            FormationOperation::RelaxUntilTargetsReached {
+                tolerance: tolerance as f32,
+                maximum_iterations: max_iterations,
+            },
+            format!("settle held targets to tolerance {tolerance}"),
+        );
+        Ok(())
+    }
+
+    /// Relaxes under a `SolvePolicy`, optionally with temporary overrides.
     #[pyo3(signature = (policy, overrides=None))]
-    fn relax_with_policy(
+    fn solve(
         &mut self,
         policy: PyRef<'_, PySolvePolicy>,
         overrides: Option<PyRef<'_, PyRelaxationOverrides>>,
     ) -> PyResult<()> {
         let policy = policy.to_rust()?;
-        self.operation_descriptions
-            .push(format!("relax with policy {:?}", policy.name));
-        self.operations.push(if let Some(overrides) = overrides {
+        let description = format!("solve {:?}", policy.name);
+        let operation = if let Some(overrides) = overrides {
             FormationOperation::RelaxWithOverrides {
                 policy,
                 overrides: overrides.to_rust()?,
             }
         } else {
             FormationOperation::RelaxWithPolicy(policy)
-        });
+        };
+        self.push(operation, description);
         Ok(())
     }
 
-    fn set_material_bend_radius(
+    /// Sets the minimum bend radius of every fiber made of `material`.
+    fn set_min_bend_radius(
         &mut self,
-        material_name: String,
-        minimum_bend_radius: f64,
+        material: &Bound<'_, PyAny>,
+        min_bend_radius: f64,
     ) -> PyResult<()> {
+        let material_name = if let Ok(material) = material.extract::<PyRef<'_, PyMaterial>>() {
+            material.name.clone()
+        } else if let Ok(name) = material.extract::<String>() {
+            name
+        } else {
+            return Err(PyTypeError::new_err(
+                "material must be a Material or a material name",
+            ));
+        };
         if material_name.trim().is_empty() {
-            return Err(PyValueError::new_err("material_name must not be empty"));
+            return Err(PyValueError::new_err("material name must not be empty"));
         }
-        if !minimum_bend_radius.is_finite() || minimum_bend_radius <= 0.0 {
-            return Err(PyValueError::new_err(
-                "minimum_bend_radius must be positive and finite",
-            ));
-        }
-        self.operations
-            .push(FormationOperation::SetMaterialBendRadius {
+        positive_finite(min_bend_radius, "min_bend_radius")?;
+        self.push(
+            FormationOperation::SetMaterialBendRadius {
                 material_name: material_name.clone(),
-                minimum_bend_radius,
-            });
-        self.operation_descriptions.push(format!(
-            "set material {:?} minimum bend radius to {}",
-            material_name, minimum_bend_radius
-        ));
+                minimum_bend_radius: min_bend_radius,
+            },
+            format!("set {material_name:?} min bend radius to {min_bend_radius}"),
+        );
         Ok(())
     }
 
-    fn relax_until_targets_reached(
-        &mut self,
-        tolerance: f32,
-        maximum_iterations: usize,
-    ) -> PyResult<()> {
-        if !tolerance.is_finite() || tolerance < 0.0 {
-            return Err(PyValueError::new_err(
-                "target tolerance must be nonnegative and finite",
-            ));
-        }
-        if maximum_iterations == 0 {
-            return Err(PyValueError::new_err("maximum_iterations must be positive"));
-        }
-        self.operations
-            .push(FormationOperation::RelaxUntilTargetsReached {
-                tolerance,
-                maximum_iterations,
-            });
-        self.operation_descriptions.push(format!(
-            "relax active manufacturing targets to tolerance {tolerance}"
-        ));
-        Ok(())
-    }
-
-    #[pyo3(signature = (spacing_scale, *, stiffness=0.25, max_translation=1.0e-5))]
-    fn move_layers(
-        &mut self,
-        spacing_scale: f32,
-        stiffness: f32,
-        max_translation: f32,
-    ) -> PyResult<()> {
-        positive_finite(spacing_scale, "spacing_scale")?;
+    /// Moves every layer toward `factor` times its initial spacing from the
+    /// cell center. Returns a context manager that releases the layers.
+    #[pyo3(signature = (factor, *, stiffness=0.25, max_translation=1.0e-5))]
+    fn scale_layer_spacing(
+        slf: &Bound<'_, Self>,
+        factor: f64,
+        stiffness: f64,
+        max_translation: f64,
+    ) -> PyResult<PyHeldTargets> {
+        positive_finite(factor, "factor")?;
         unit_fraction(stiffness, "stiffness")?;
         positive_finite(max_translation, "max_translation")?;
-        self.operations.push(FormationOperation::MoveLayers {
-            spacing_scale,
-            stiffness,
-            max_translation,
-        });
-        self.operation_descriptions
-            .push(format!("move layers to spacing scale {spacing_scale}"));
-        Ok(())
+        slf.borrow_mut().push(
+            FormationOperation::MoveLayers {
+                spacing_scale: factor as f32,
+                stiffness: stiffness as f32,
+                max_translation: max_translation as f32,
+            },
+            format!("scale layer spacing by {factor}"),
+        );
+        Ok(held(slf, HeldKind::LayerPlacement))
     }
 
-    #[pyo3(signature = (layer, gap, *, stiffness=0.25, max_translation=1.0e-5))]
+    /// Holds the fibers tagged `formation_layer=layer` at `gap` above layer
+    /// `layer - 1`. Returns a context manager that releases the placement.
+    #[pyo3(signature = (layer, *, gap, stiffness=0.25, max_translation=1.0e-5))]
     fn place_layer_above(
-        &mut self,
+        slf: &Bound<'_, Self>,
         layer: u32,
-        gap: f32,
-        stiffness: f32,
-        max_translation: f32,
-    ) -> PyResult<()> {
+        gap: f64,
+        stiffness: f64,
+        max_translation: f64,
+    ) -> PyResult<PyHeldTargets> {
         if layer == 0 {
             return Err(PyValueError::new_err("layer must be greater than zero"));
         }
         positive_finite(gap, "gap")?;
         unit_fraction(stiffness, "stiffness")?;
         positive_finite(max_translation, "max_translation")?;
-        self.operations.push(FormationOperation::PlaceLayerAbove {
-            layer,
-            gap,
-            stiffness,
-            max_translation,
-        });
-        self.operation_descriptions
-            .push(format!("place layer {layer} above layer {}", layer - 1));
-        Ok(())
+        slf.borrow_mut().push(
+            FormationOperation::PlaceLayerAbove {
+                layer,
+                gap: gap as f32,
+                stiffness: stiffness as f32,
+                max_translation: max_translation as f32,
+            },
+            format!("place layer {layer} above layer {}", layer - 1),
+        );
+        Ok(held(slf, HeldKind::LayerPlacement))
     }
 
-    fn release_layer_targets(&mut self) {
-        self.operations
-            .push(FormationOperation::ReleaseLayerTargets);
-        self.operation_descriptions
-            .push("release layer targets".to_string());
+    /// Releases every layer held by `place_layer_above` or `scale_layer_spacing`.
+    fn release_layer_placement(&mut self) {
+        self.push(
+            FormationOperation::ReleaseLayerTargets,
+            "release layer placement".to_string(),
+        );
     }
 
-    #[pyo3(signature = (layer, center, diameter, depth, *, minimum_fiber_diameter=None, stiffness=0.25, max_translation=1.0e-5, maximum_translation_over_fiber_diameter=0.25))]
-    fn needle_layer_circular(
-        &mut self,
+    /// Pulls fibers tagged `formation_layer=layer` through the stack by
+    /// `depth`. Returns a context manager that releases the needles.
+    #[pyo3(signature = (
+        layer,
+        *,
+        footprint,
+        depth,
+        min_fiber_diameter=None,
+        stiffness=0.25,
+        max_translation=1.0e-5,
+        max_translation_over_diameter=0.25
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn needle_layer(
+        slf: &Bound<'_, Self>,
         layer: u32,
-        center: [f32; 2],
-        diameter: f32,
-        depth: f32,
-        minimum_fiber_diameter: Option<f32>,
-        stiffness: f32,
-        max_translation: f32,
-        maximum_translation_over_fiber_diameter: f32,
-    ) -> PyResult<()> {
-        if center.iter().any(|value| !value.is_finite()) {
-            return Err(PyValueError::new_err("needle center must be finite"));
+        footprint: &Bound<'_, PyAny>,
+        depth: f64,
+        min_fiber_diameter: Option<f64>,
+        stiffness: f64,
+        max_translation: f64,
+        max_translation_over_diameter: f64,
+    ) -> PyResult<PyHeldTargets> {
+        positive_finite(depth, "depth")?;
+        if let Some(value) = min_fiber_diameter {
+            positive_finite(value, "min_fiber_diameter")?;
         }
-        validate_needling(
-            diameter,
-            depth,
-            minimum_fiber_diameter,
-            stiffness,
-            max_translation,
-            maximum_translation_over_fiber_diameter,
+        unit_fraction(stiffness, "stiffness")?;
+        positive_finite(max_translation, "max_translation")?;
+        positive_finite(
+            max_translation_over_diameter,
+            "max_translation_over_diameter",
         )?;
-        self.operations
-            .push(FormationOperation::NeedleLayer(NeedlingConfig {
+        let (selection, description) = {
+            let recipe = slf.borrow();
+            recipe.needle_selection(layer, footprint)?
+        };
+        slf.borrow_mut().push(
+            FormationOperation::NeedleLayer(NeedlingConfig {
                 layer,
-                selection: NeedlingSelection::CircularFootprint { center, diameter },
-                minimum_fiber_diameter,
-                depth,
-                stiffness,
-                max_translation,
-                maximum_translation_over_fiber_diameter,
-            }));
-        self.operation_descriptions
-            .push(format!("needle layer {layer} through a circular footprint"));
-        Ok(())
+                selection,
+                minimum_fiber_diameter: min_fiber_diameter.map(|value| value as f32),
+                depth: depth as f32,
+                stiffness: stiffness as f32,
+                max_translation: max_translation as f32,
+                maximum_translation_over_fiber_diameter: max_translation_over_diameter as f32,
+            }),
+            format!("needle layer {layer} through {description}"),
+        );
+        Ok(held(slf, HeldKind::Needles))
     }
 
-    #[pyo3(signature = (layer, fraction, depth, *, seed=0, minimum_fiber_diameter=None, stiffness=0.25, max_translation=1.0e-5, maximum_translation_over_fiber_diameter=0.25))]
-    fn needle_layer_random(
-        &mut self,
-        layer: u32,
-        fraction: f32,
-        depth: f32,
-        seed: u64,
-        minimum_fiber_diameter: Option<f32>,
-        stiffness: f32,
-        max_translation: f32,
-        maximum_translation_over_fiber_diameter: f32,
-    ) -> PyResult<()> {
-        unit_fraction(fraction, "fraction")?;
-        validate_needling(
-            1.0,
-            depth,
-            minimum_fiber_diameter,
-            stiffness,
-            max_translation,
-            maximum_translation_over_fiber_diameter,
-        )?;
-        self.operations
-            .push(FormationOperation::NeedleLayer(NeedlingConfig {
-                layer,
-                selection: NeedlingSelection::RandomFiberFraction { fraction, seed },
-                minimum_fiber_diameter,
-                depth,
-                stiffness,
-                max_translation,
-                maximum_translation_over_fiber_diameter,
-            }));
-        self.operation_descriptions
-            .push(format!("needle a random fraction of layer {layer}"));
-        Ok(())
-    }
-
+    /// Releases every needle held by `needle_layer`.
     fn release_needles(&mut self) {
-        self.operations.push(FormationOperation::ReleaseNeedles);
-        self.operation_descriptions
-            .push("release needle targets".to_string());
+        self.push(
+            FormationOperation::ReleaseNeedles,
+            "release needles".to_string(),
+        );
     }
 
-    #[pyo3(signature = (*, axes=[false, false, true], padding=0.0))]
-    fn fit_cell_to_active_fibers(&mut self, axes: [bool; 3], padding: f32) -> PyResult<()> {
+    /// Shrinks or grows the cell along `axes` (default: the stack axis) to
+    /// fit the active fibers plus `padding`.
+    #[pyo3(signature = (*, axes=None, padding=0.0))]
+    fn fit_cell_to_active_fibers(
+        &mut self,
+        axes: Option<&Bound<'_, PyAny>>,
+        padding: f64,
+    ) -> PyResult<()> {
+        let axes = match axes {
+            Some(value) => parse_axis_mask(value, "axes")?,
+            None => {
+                let mut mask = [false; 3];
+                mask[self.stack_axis] = true;
+                mask
+            }
+        };
         if !axes.iter().any(|selected| *selected) {
             return Err(PyValueError::new_err(
                 "at least one cell-fit axis must be selected",
             ));
         }
-        if !padding.is_finite() || padding < 0.0 {
-            return Err(PyValueError::new_err(
-                "padding must be nonnegative and finite",
-            ));
-        }
-        self.operations
-            .push(FormationOperation::FitCellToActiveFibers { axes, padding });
-        self.operation_descriptions
-            .push(format!("fit cell axes {axes:?} to active fibers"));
+        nonnegative_finite(padding, "padding")?;
+        self.push(
+            FormationOperation::FitCellToActiveFibers {
+                axes,
+                padding: padding as f32,
+            },
+            format!("fit cell axes {} to active fibers", axes_label(axes)),
+        );
         Ok(())
     }
 
     #[pyo3(signature = (settings, overrides=None))]
     fn compact(
         &mut self,
+        py: Python<'_>,
         settings: PyRef<'_, PyCompactionSettings>,
         overrides: Option<PyRef<'_, PyRelaxationOverrides>>,
     ) -> PyResult<()> {
-        let config = settings.to_rust()?;
-        self.operation_descriptions
-            .push(format!("compact toward {} target", settings.target_type));
-        self.operations.push(if let Some(overrides) = overrides {
+        let config = settings.to_rust(self.stack_axis)?;
+        let description = format!("compact toward {}", settings.target_description(py)?);
+        let operation = if let Some(overrides) = overrides {
             FormationOperation::CompactWithOverrides {
                 config,
                 overrides: overrides.to_rust()?,
             }
         } else {
             FormationOperation::Compact(config)
-        });
+        };
+        self.push(operation, description);
         Ok(())
     }
 
     fn capture_junctions(&mut self, policy: PyRef<'_, PyJunctionPolicy>) -> PyResult<()> {
         let policy = policy.to_rust()?;
-        self.operation_descriptions
-            .push(format!("capture junctions using policy {:?}", policy.name));
-        self.operations
-            .push(FormationOperation::CaptureJunctions(policy));
+        let description = format!("capture junctions using policy {:?}", policy.name);
+        self.push(FormationOperation::CaptureJunctions(policy), description);
         Ok(())
     }
 
+    /// Relaxes for `iterations`, capturing junctions every `capture_every`.
+    #[pyo3(signature = (*, iterations, capture_every, policy))]
     fn relax_and_capture(
         &mut self,
         iterations: usize,
-        every: usize,
+        capture_every: usize,
         policy: PyRef<'_, PyJunctionPolicy>,
     ) -> PyResult<()> {
-        if iterations == 0 || every == 0 || every > iterations {
+        if iterations == 0 || capture_every == 0 || capture_every > iterations {
             return Err(PyValueError::new_err(
-                "iterations must be positive and every must lie within 1..=iterations",
+                "iterations must be positive and capture_every must lie within 1..=iterations",
             ));
         }
         let policy = policy.to_rust()?;
-        self.operation_descriptions.push(format!(
-            "relax for {iterations} iterations and capture junctions every {every}"
-        ));
-        self.operations.push(FormationOperation::RelaxAndCapture {
-            iterations,
-            every,
-            policy,
-        });
+        self.push(
+            FormationOperation::RelaxAndCapture {
+                iterations,
+                every: capture_every,
+                policy,
+            },
+            format!(
+                "relax for {iterations} iterations and capture junctions every {capture_every}"
+            ),
+        );
         Ok(())
     }
 
@@ -415,6 +599,7 @@ impl PyRecipe {
         debug_ovito_session_path=None,
         debug_ovito_coloring="curvature_ratio"
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn run(
         &self,
         py: Python<'_>,
@@ -442,6 +627,9 @@ impl PyRecipe {
                 .assembly
                 .validate()
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            // A recipe resuming from a checkpoint has no fibers here, so its
+            // material names are checked when the operation runs instead.
+            check_material_names(&model.assembly, &self.operations)?;
         }
         let mut settings = settings
             .map(|settings| settings.clone())
@@ -454,7 +642,11 @@ impl PyRecipe {
             settings.debug_snapshot_interval = Some(interval);
             let mut config = OvitoTrajectoryConfig::fiber_segments(path, interval)
                 .with_initial_frame(false)
-                .with_coloring(parse_ovito_coloring(debug_ovito_coloring)?);
+                .with_coloring(parse_choice(
+                    debug_ovito_coloring,
+                    "debug_ovito_coloring",
+                    OVITO_COLORINGS,
+                )?);
             config.view_script_path = debug_ovito_view_script_path;
             config.session_path = debug_ovito_session_path;
             Some(config)
@@ -470,33 +662,184 @@ impl PyRecipe {
         let assembly = model.assembly.clone();
         drop(model);
         let recipe = FormationRecipeConfig {
-            layer_axis: self.layer_axis,
+            layer_axis: self.stack_axis,
             operations: self.operations.clone(),
         };
-        let result = py
-            .detach(move || {
-                run_native_recipe(assembly, recipe, relaxation, checkpoint, debug_ovito)
-            })
-            .map_err(PyRuntimeError::new_err)?;
-        self.model.lock().expect("assembly lock poisoned").assembly = result.assembly.clone();
-        Ok(result)
+        let stack_axis = self.stack_axis;
+        let result = py.detach(move || {
+            run_native_recipe(
+                assembly,
+                recipe,
+                relaxation,
+                checkpoint,
+                debug_ovito,
+                stack_axis,
+            )
+        });
+        match result {
+            Ok(result) => Ok(result),
+            Err(RunFailure::Operation {
+                index,
+                iteration,
+                reason,
+            }) => Err(recipe_error(
+                py,
+                index,
+                self.operation_descriptions
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| format!("operation {index}")),
+                iteration,
+                reason,
+            )),
+            Err(RunFailure::Other(message)) => Err(PyRuntimeError::new_err(message)),
+        }
     }
 
     fn __repr__(&self) -> String {
         let model = self.model.lock().expect("assembly lock poisoned");
         format!(
-            "Recipe(fibers={}, operations={}, layer_axis={})",
+            "Recipe(fibers={}, operations={}, stack_axis={:?})",
             model.assembly.topology.fibers.len(),
             self.operations.len(),
-            self.layer_axis
+            axis_name(self.stack_axis)
         )
     }
 }
 
+impl PyRecipe {
+    fn push(&mut self, operation: FormationOperation, description: String) {
+        self.operations.push(operation);
+        self.operation_descriptions.push(description);
+    }
+
+    fn needle_selection(
+        &self,
+        layer: u32,
+        footprint: &Bound<'_, PyAny>,
+    ) -> PyResult<(NeedlingSelection, String)> {
+        if let Ok(fraction) = footprint.extract::<PyRef<'_, PyRandomFiberFraction>>() {
+            return Ok((
+                NeedlingSelection::RandomFiberFraction {
+                    fraction: fraction.fraction as f32,
+                    seed: fraction.seed,
+                },
+                format!("a random {} of its fibers", fraction.fraction),
+            ));
+        }
+        let circle = footprint
+            .extract::<PyRef<'_, PyCircularFootprint>>()
+            .map_err(|_| {
+                PyTypeError::new_err("footprint must be a CircularFootprint or RandomFiberFraction")
+            })?;
+        let center = match (circle.center, circle.seed) {
+            (Some(center), _) => center.map(|value| value as f32),
+            (None, seed) => {
+                let model = self.model.lock().expect("assembly lock poisoned");
+                let lengths = cell_lengths(&model.assembly.cell);
+                let origin = model.assembly.cell.origin;
+                let plane = (0..3)
+                    .filter(|axis| *axis != self.stack_axis)
+                    .collect::<Vec<_>>();
+                random_footprint_center(
+                    seed.unwrap_or_default(),
+                    layer,
+                    [origin[plane[0]] as f32, origin[plane[1]] as f32],
+                    [lengths[plane[0]] as f32, lengths[plane[1]] as f32],
+                )
+            }
+        };
+        Ok((
+            NeedlingSelection::CircularFootprint {
+                center,
+                diameter: circle.diameter as f32,
+            },
+            format!(
+                "a {:.3e} circle at [{:.3e}, {:.3e}]",
+                circle.diameter, center[0], center[1]
+            ),
+        ))
+    }
+}
+
+fn held(recipe: &Bound<'_, PyRecipe>, kind: HeldKind) -> PyHeldTargets {
+    PyHeldTargets {
+        recipe: recipe.clone().unbind(),
+        kind,
+    }
+}
+
+fn axes_label(axes: [bool; 3]) -> String {
+    (0..3)
+        .filter(|axis| axes[*axis])
+        .map(axis_name)
+        .collect::<String>()
+}
+
+fn recipe_error(
+    py: Python<'_>,
+    index: usize,
+    operation: String,
+    iteration: usize,
+    reason: String,
+) -> PyErr {
+    let error = RecipeError::new_err(format!(
+        "recipe operation {index} ({operation}) failed at iteration {iteration}: {reason}"
+    ));
+    let value = error.value(py);
+    for (name, item) in [
+        (
+            "operation_index",
+            index.into_pyobject(py).map(|v| v.into_any()),
+        ),
+        (
+            "operation",
+            operation.into_pyobject(py).map(|v| v.into_any()),
+        ),
+        (
+            "iteration",
+            iteration.into_pyobject(py).map(|v| v.into_any()),
+        ),
+        ("reason", reason.into_pyobject(py).map(|v| v.into_any())),
+    ] {
+        let Ok(item) = item;
+        let _ = value.setattr(name, item);
+    }
+    error
+}
+
+/// Rejects `set_min_bend_radius` names that match no inserted material.
+fn check_material_names(
+    assembly: &FiberAssembly,
+    operations: &[FormationOperation],
+) -> PyResult<()> {
+    let materials = &assembly.materials.entries;
+    for operation in operations {
+        let FormationOperation::SetMaterialBendRadius { material_name, .. } = operation else {
+            continue;
+        };
+        if !materials.iter().any(|entry| &entry.name == material_name) {
+            let known = materials
+                .iter()
+                .map(|entry| format!("{:?}", entry.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(PyValueError::new_err(format!(
+                "set_min_bend_radius names unknown material {material_name:?}; this recipe has {known}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+// --- Run result --------------------------------------------------------------
+
 #[pyclass(name = "RunResult", module = "tangle._tangle", frozen)]
 #[derive(Clone)]
 pub(crate) struct PyRunResult {
-    assembly: FiberAssembly,
+    /// Shared with the `Assembly` returned by `.assembly`, so edits to that
+    /// object show up in this result's exports.
+    model: Arc<Mutex<AssemblyModel>>,
     #[pyo3(get)]
     pub iterations: usize,
     #[pyo3(get)]
@@ -543,48 +886,63 @@ pub(crate) struct PyRunResult {
     pub debug_ovito_frames: usize,
 }
 
+impl PyRunResult {
+    fn model(&self) -> std::sync::MutexGuard<'_, AssemblyModel> {
+        self.model.lock().expect("assembly lock poisoned")
+    }
+}
+
 #[pymethods]
 impl PyRunResult {
     #[getter]
     fn fiber_count(&self) -> usize {
-        self.assembly.topology.fibers.len()
+        self.model().assembly.topology.fibers.len()
+    }
+
+    /// The final assembly, for inspection or as the start of another recipe.
+    /// Every access returns the same underlying assembly.
+    #[getter]
+    fn assembly(&self) -> PyAssembly {
+        PyAssembly {
+            model: Arc::clone(&self.model),
+        }
     }
 
     fn centerlines(&self) -> Vec<Vec<Vec3>> {
-        assembly_centerlines(&self.assembly)
+        assembly_centerlines(&self.model().assembly)
     }
 
     fn characterize(&self) -> PyAnalysisReport {
         PyAnalysisReport {
-            inner: characterize_assembly(&self.assembly),
+            inner: characterize_assembly(&self.model().assembly),
         }
     }
 
     /// Measures fiber-to-fiber contacts, neighbor persistence, and turnover.
-    #[pyo3(signature = (contact_gap, *, neighbor_gap=None, in_axis_angle_degrees=20.0, sample_spacing=None, maximum_lag=None, lag_count=24))]
+    #[pyo3(signature = (contact_gap, *, neighbor_gap=None, in_axis_angle_degrees=20.0, sample_spacing=None, max_lag=None, lag_count=24))]
     fn characterize_neighbors(
         &self,
         contact_gap: f64,
         neighbor_gap: Option<f64>,
         in_axis_angle_degrees: f64,
         sample_spacing: Option<f64>,
-        maximum_lag: Option<f64>,
+        max_lag: Option<f64>,
         lag_count: usize,
     ) -> PyResult<PyNeighborReport> {
         characterize_neighbors(
-            &self.assembly,
+            &self.model().assembly,
             contact_gap,
             neighbor_gap,
             in_axis_angle_degrees,
             sample_spacing,
-            maximum_lag,
+            max_lag,
             lag_count,
         )
     }
 
     #[getter]
     fn junction_count(&self) -> usize {
-        self.assembly.junctions.junctions.len()
+        self.model().assembly.junctions.junctions.len()
     }
 
     #[pyo3(signature = (path, *, view_script_path=None, session_path=None, coloring="fiber"))]
@@ -595,12 +953,12 @@ impl PyRunResult {
         session_path: Option<PathBuf>,
         coloring: &str,
     ) -> PyResult<()> {
-        let coloring = parse_ovito_coloring(coloring)?;
+        let coloring = parse_choice(coloring, "coloring", OVITO_COLORINGS)?;
         let mut config = OvitoTrajectoryConfig::fiber_segments(path, 1).with_coloring(coloring);
         config.representation = OvitoRepresentation::FiberSegments;
         config.view_script_path = view_script_path.clone();
         config.session_path = session_path;
-        write_ovito_assembly_frame(&self.assembly, &config, self.iterations, false)
+        write_ovito_assembly_frame(&self.model().assembly, &config, self.iterations, false)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         if let Some(script) = view_script_path {
             write_ovito_view_script(&config, &script)
@@ -609,7 +967,7 @@ impl PyRunResult {
         Ok(())
     }
 
-    #[pyo3(signature = (data_path, *, mode="spherocylinders-exact", sphere_spacing_over_radius=1.0 / 3.0, density=1.0, atom_type=1, bond_type=1))]
+    #[pyo3(signature = (data_path, *, mode="spherocylinders_exact", sphere_spacing_over_radius=1.0 / 3.0, density=1.0, atom_type=1, bond_type=1))]
     fn export_bpm(
         &self,
         data_path: PathBuf,
@@ -619,15 +977,17 @@ impl PyRunResult {
         atom_type: u32,
         bond_type: u32,
     ) -> PyResult<(usize, usize)> {
+        // Hyphenated spellings from earlier releases are still accepted.
+        let mode = mode.to_ascii_lowercase().replace('-', "_");
         let config = BpmExportConfig {
             data_path: data_path.clone(),
-            mode: parse_bpm_export_mode(mode)?,
+            mode: parse_choice(&mode, "BPM export mode", BPM_MODES)?,
             sphere_spacing_over_radius,
             density,
             atom_type,
             bond_type,
         };
-        let model = build_bpm_model(&self.assembly, &config)
+        let model = build_bpm_model(&self.model().assembly, &config)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         write_bpm_lammps_data(&model, &data_path)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
@@ -649,7 +1009,7 @@ impl PyRunResult {
         if let Some(tolerance) = ambiguity_tolerance {
             config = config.with_ambiguity_tolerance(tolerance);
         }
-        let report = write_puma_bundle(&self.assembly, &config)
+        let report = write_puma_bundle(&self.model().assembly, &config)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         Ok(PyPumaExportReport { inner: report })
     }
@@ -660,7 +1020,7 @@ impl PyRunResult {
                 "RunResult(fibers={}, iterations={}, converged={}, ",
                 "max_penetration={}, max_curvature_ratio={}, active_segments={})"
             ),
-            self.assembly.topology.fibers.len(),
+            self.model().assembly.topology.fibers.len(),
             self.iterations,
             self.converged,
             self.max_penetration,
@@ -670,13 +1030,23 @@ impl PyRunResult {
     }
 }
 
+enum RunFailure {
+    Operation {
+        index: usize,
+        iteration: usize,
+        reason: String,
+    },
+    Other(String),
+}
+
 fn run_native_recipe(
     assembly: FiberAssembly,
     recipe: FormationRecipeConfig,
     relaxation_config: tangle_relax::RelaxationConfig,
     checkpoint_config: Option<CheckpointConfig>,
     debug_ovito_config: Option<OvitoTrajectoryConfig>,
-) -> Result<PyRunResult, String> {
+    stack_axis: usize,
+) -> Result<PyRunResult, RunFailure> {
     let mut app = App::new();
     app.add_plugins(TangleWorkflowPlugin {
         initial: TangleStage::Relax,
@@ -694,23 +1064,25 @@ fn run_native_recipe(
     }
     app.start();
 
+    let missing = |what: &str| RunFailure::Other(format!("{what} was not installed"));
     let relaxation = app
         .get_resource_ref::<RelaxationState>()
-        .ok_or_else(|| "relaxation result was not installed".to_string())?
+        .ok_or_else(|| missing("relaxation result"))?
         .clone();
     let recipe_state = app
         .get_resource_ref::<FormationRecipeState>()
-        .ok_or_else(|| "recipe result was not installed".to_string())?
+        .ok_or_else(|| missing("recipe result"))?
         .clone();
     if let Some(failure) = &recipe_state.failure {
-        return Err(format!(
-            "recipe operation {} failed at iteration {}: {}",
-            failure.operation, failure.iteration, failure.reason
-        ));
+        return Err(RunFailure::Operation {
+            index: failure.operation,
+            iteration: failure.iteration,
+            reason: failure.reason.clone(),
+        });
     }
     let assembly = app
         .get_resource_ref::<FiberAssembly>()
-        .ok_or_else(|| "final fiber assembly was not installed".to_string())?
+        .ok_or_else(|| missing("final fiber assembly"))?
         .clone();
     let checkpoint = app
         .get_resource_ref::<CheckpointReport>()
@@ -720,7 +1092,9 @@ fn run_native_recipe(
         .get_resource_ref::<OvitoTrajectoryReport>()
         .map_or(0, |report| report.frames);
     Ok(PyRunResult {
-        assembly,
+        model: Arc::new(Mutex::new(AssemblyModel::from_assembly(
+            assembly, stack_axis,
+        ))),
         iterations: relaxation.iterations,
         converged: relaxation.converged,
         max_penetration: relaxation.max_penetration,
@@ -763,35 +1137,6 @@ fn run_native_recipe(
     })
 }
 
-fn parse_ovito_coloring(value: &str) -> PyResult<OvitoColoring> {
-    match value {
-        "fiber" => Ok(OvitoColoring::Fiber),
-        "curvature_ratio" => Ok(OvitoColoring::CurvatureRatio),
-        "refinement_level" => Ok(OvitoColoring::RefinementLevel),
-        other => Err(PyValueError::new_err(format!(
-            "unknown coloring {other:?}; expected 'fiber', 'curvature_ratio', or 'refinement_level'"
-        ))),
-    }
-}
-
-fn parse_bpm_export_mode(value: &str) -> PyResult<BpmExportMode> {
-    let normalized = value.to_ascii_lowercase().replace('_', "-");
-    match normalized.as_str() {
-        "spheres-exact" => Ok(BpmExportMode::SpheresExact),
-        "spheres-dynamic" => Ok(BpmExportMode::SpheresDynamic),
-        "spherocylinders-exact" | "sphero-cylinder-exact" => {
-            Ok(BpmExportMode::SpherocylindersExact)
-        }
-        "spherocylinders-constant" | "sphero-cylinder-constant" => {
-            Ok(BpmExportMode::SpherocylindersConstant)
-        }
-        other => Err(PyValueError::new_err(format!(
-            "unknown BPM mode {other:?}; expected 'spheres-exact', 'spheres-dynamic', \
-             'spherocylinders-exact', or 'spherocylinders-constant'"
-        ))),
-    }
-}
-
 fn assembly_centerlines(assembly: &FiberAssembly) -> Vec<Vec<Vec3>> {
     assembly
         .topology
@@ -803,44 +1148,4 @@ fn assembly_centerlines(assembly: &FiberAssembly) -> Vec<Vec<Vec3>> {
             assembly.geometry.placed.positions[start..end].to_vec()
         })
         .collect()
-}
-
-fn positive_finite(value: f32, name: &str) -> PyResult<()> {
-    if value.is_finite() && value > 0.0 {
-        Ok(())
-    } else {
-        Err(PyValueError::new_err(format!(
-            "{name} must be positive and finite"
-        )))
-    }
-}
-
-fn unit_fraction(value: f32, name: &str) -> PyResult<()> {
-    if value.is_finite() && value > 0.0 && value <= 1.0 {
-        Ok(())
-    } else {
-        Err(PyValueError::new_err(format!("{name} must be in (0, 1]")))
-    }
-}
-
-fn validate_needling(
-    diameter: f32,
-    depth: f32,
-    minimum_fiber_diameter: Option<f32>,
-    stiffness: f32,
-    max_translation: f32,
-    maximum_translation_over_fiber_diameter: f32,
-) -> PyResult<()> {
-    positive_finite(diameter, "diameter")?;
-    positive_finite(depth, "depth")?;
-    if let Some(value) = minimum_fiber_diameter {
-        positive_finite(value, "minimum_fiber_diameter")?;
-    }
-    unit_fraction(stiffness, "stiffness")?;
-    positive_finite(max_translation, "max_translation")?;
-    positive_finite(
-        maximum_translation_over_fiber_diameter,
-        "maximum_translation_over_fiber_diameter",
-    )?;
-    Ok(())
 }

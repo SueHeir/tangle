@@ -128,51 +128,62 @@ rest centerline, material, optional formation layer, and arbitrary string tags.
 ```python
 import tangle
 
-small = tangle.Material(
-    "small",
-    diameter=7e-6,
-    minimum_bend_radius=35e-6,
-)
+from tangle.units import mm, um
+
+small = tangle.Material("small", diameter=7 * um, min_bend_radius=35 * um)
 
 layer = tangle.FiberCollection("ply_01")
 layer.add_fiber(
-    [[-0.4e-3, 0, 0], [0.4e-3, 0, 0]],
+    [[-0.4 * mm, 0, 0], [0.4 * mm, 0, 0]],
     small,
     tags={"family": "machine_direction"},
     formation_layer=1,
 )
 
-assembly = tangle.Assembly(
-    tangle.Cell([1e-3, 1e-3, 2e-3], periodic=[True, True, False])
-)
-recipe = tangle.Recipe(assembly)
-ply = recipe.insert(layer, translation=[0.5e-3, 0.5e-3, 0.8e-3])
-recipe.relax()
+cell = tangle.Cell([1 * mm, 1 * mm, 2 * mm], periodic="xy")
+recipe = tangle.Recipe(cell)
+ply = recipe.insert(layer, translation=[0.5 * mm, 0.5 * mm, 0.8 * mm])
+recipe.relax_until_converged()
 ```
 
 `insert()` returns a stable `FiberSelection` containing the assigned fiber IDs
 and formation step. Every collection is packed once; recipe activation and
-relaxation then occur inside one Rust/CubeCL execution. `layer_axis=2` (the
-default) means layers stack along z; 0 and 1 select x and y. Recipe operations
-are ordered manufacturing instructions, not physical timesteps.
+relaxation then occur inside one Rust/CubeCL execution. Layers stack along the
+cell's `stack_axis`: z when z is bounded or every axis is periodic, otherwise
+the last bounded axis. Pass
+`stack_axis="x"` to `Cell` or `Recipe` to choose another. Generators,
+compaction and `fit_cell_to_active_fibers` default to the same axis. Recipe
+operations are ordered manufacturing instructions, not physical timesteps.
+
+`insert()` changes the recipe's starting assembly immediately; every other
+operation is recorded and runs inside `run()`. `run()` does not modify the
+input `Assembly`: read the result from `result.assembly`. A failed operation
+raises `tangle.RecipeError`, which carries `operation_index`, `operation`,
+`iteration` and `reason`.
 
 ## Defaults and overrides
 
-Calling a settings constructor with no arguments exposes the corresponding
-Rust defaults. Every field can be inspected or changed before the run:
+Configuration classes follow three naming conventions. `*Settings` are
+run-wide, a `*Policy` is a named rule applied at one recipe step, and
+`*Overrides` are temporary deltas for the step they are passed to.
+
+Calling a constructor with no arguments exposes the corresponding Rust
+defaults. Every field is also a keyword argument, can be inspected or changed
+before the run, and `replace(**changes)` returns a modified copy. An unknown
+keyword raises `TypeError`, and an unknown option string raises `ValueError`
+on the line that set it:
 
 ```python
-settings = tangle.RelaxationSettings()
+settings = tangle.RelaxationSettings(
+    penetration_tolerance=0.1e-6,
+    max_iterations=20_000,
+    cell_size_scale=1.25,
+    adaptive_segmentation=tangle.AdaptiveSegmentationSettings.profile(
+        "balanced", refinement_interval=4, coarsening_persistence=48
+    ),
+)
 print(settings.to_dict())
-
-settings.penetration_tolerance = 0.1e-6
-settings.max_iterations = 20_000
-settings.cell_size_scale = 1.25
-
-adaptation = tangle.AdaptiveSegmentationSettings.profile("balanced")
-adaptation.refinement_interval = 4
-adaptation.coarsening_persistence = 48
-settings.adaptive_segmentation = adaptation
+quick = settings.replace(max_iterations=2_000)
 ```
 
 WGPU remains the default backend. On a system without a usable GPU, select
@@ -180,16 +191,14 @@ CubeCL's native multithreaded CPU runtime; the recipe and numerical settings do
 not otherwise change:
 
 ```python
-settings = tangle.RelaxationSettings()
-settings.backend = "cpu"
-result = recipe.run(settings)
+result = recipe.run(settings.replace(backend="cpu"))
 ```
 
 The packaged extension includes both `wgpu` and `cpu`. Backend selection is
 explicit so a large run never silently falls back to a much slower device.
 
 Available adaptive profiles are `balanced`, `fast`, and `strict`. Profiles are
-ordinary mutable settings objects, not hidden solver modes. Assign `None` to
+ordinary settings objects, not hidden solver modes. Assign `None` to
 `settings.adaptive_segmentation` to disable refinement and coarsening.
 
 Recipe-stage controls use the same pattern. Compaction exposes its target,
@@ -198,16 +207,52 @@ and penalty-energy weights:
 
 ```python
 compaction = tangle.CompactionSettings.volume_fraction(
-    0.40,
-    axis_weights=[0.0, 0.0, 1.0],
+    0.40,  # compresses along the stack axis unless path= says otherwise
+    balance_opposing_faces=True,
+    max_penetration=0.1e-6,
 )
-compaction.balance_opposing_faces = True
-compaction.maximum_penetration = 0.1e-6
 recipe.compact(compaction)
+
+pressure = tangle.CompactionSettings(
+    tangle.MeanPressureTarget(1.0e3),
+    path=tangle.EqualPressurePath("xy"),
+)
 ```
 
-`SolvePolicy` and `RelaxationOverrides` expose hard/soft recipe gates and
-temporary contact-versus-bending emphasis. `JunctionPolicy` provides explicit,
+Targets (`VolumeFractionTarget`, `CellVolumeTarget`, `CellLengthsTarget`,
+`MeanPressureTarget`, `DirectionalPressureTarget`, `PenaltyEnergyTarget`) and
+paths (`AxisWeightsPath`, `EqualPressurePath`, `StressRatioPath`,
+`MinimumWorkPath`) are typed objects, so each carries only the fields it uses.
+
+`SolvePolicy` sets a step's convergence targets and hard/soft gates, and
+`RelaxationOverrides` temporarily shifts contact-versus-bending emphasis:
+
+```python
+recipe.solve(
+    tangle.SolvePolicy(
+        "cleanup/1-curvature-coarse",
+        target_penetration=2e-6,
+        target_curvature_ratio=1.25,  # max_* limits default to the targets
+        max_iterations=30_000,
+    ),
+    tangle.RelaxationOverrides.preset("curvature_cleanup"),
+)
+```
+
+Layer placement and needling hold fibers on targets until released. Use them
+as context managers to release at the end of the block:
+
+```python
+with recipe.needle_layer(
+    2,
+    footprint=tangle.CircularFootprint.random(diameter=150 * um, seed=7),
+    depth=350 * um,
+):
+    recipe.settle_targets(tolerance=0.5 * um, max_iterations=3_000)
+    recipe.relax_for(150)
+```
+
+`JunctionPolicy` provides explicit,
 deterministic contact-to-junction capture; contacts remain transient unless a
 recipe includes `capture_junctions()` or `relax_and_capture()`.
 Captured junctions are not mechanically enforced by subsequent relaxation.
@@ -221,13 +266,12 @@ checkpoint = tangle.CheckpointSettings(
     "three-ply-study",
     "output/three_ply.restart",
     interval_iterations=500,
-    resume=False,
 )
 result = recipe.run(settings, checkpoint=checkpoint)
 print(result.checkpoint_saves, result.last_checkpoint_iteration)
 ```
 
-Set `checkpoint.resume = True` to continue the saved recipe. A separate
+Use `checkpoint.replace(resume=True)` to continue the saved recipe. A separate
 `resume_path` and `resume_case_id` can be used to branch a run into a new
 checkpoint file.
 Cross-revision checkpoint compatibility is not guaranteed. Preserve the source
@@ -265,14 +309,14 @@ trajectories add device readbacks and can substantially slow a solve.
 ## BPM export
 
 `RunResult.export_bpm()` writes solver-neutral bonded-particle geometry. Choose
-`spheres-exact`, `spheres-dynamic`, `spherocylinders-exact`, or
-`spherocylinders-constant`. Sphere spacing is measured in fiber radii and may
+`spheres_exact`, `spheres_dynamic`, `spherocylinders_exact`, or
+`spherocylinders_constant`. Sphere spacing is measured in fiber radii and may
 range from `1/3` through `1`:
 
 ```python
 particles, bonds = result.export_bpm(
     "output/network.data",
-    mode="spheres-dynamic",
+    mode="spheres_dynamic",
     sphere_spacing_over_radius=1.0 / 3.0,
     density=1800.0,
 )

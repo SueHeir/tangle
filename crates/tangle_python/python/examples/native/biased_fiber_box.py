@@ -1,4 +1,8 @@
-"""The three biased-population cases and configurable stress-size variant."""
+"""The three biased-population cases and configurable stress-size variant.
+
+Python equivalent of ``examples/biased_fiber_box`` and its
+``biased_fiber_stress`` companion binary.
+"""
 
 import argparse
 import math
@@ -9,40 +13,39 @@ import tangle
 
 OUTPUT = Path(__file__).parent / "output" / "biased_fiber_box"
 CASES = ("isotropic_3d", "planar_layered", "aligned_x")
+# Each fiber draws its own diameter from the population's range.
+FIBER = tangle.Material("fiber", diameter=0.029, min_bend_radius=0.08)
 
 
-def population_settings(case_name: str, count: int = 160, segments: int = 8):
-    settings = tangle.FiberPopulationSettings()
-    settings.count = count
-    settings.segments_per_fiber = segments
-    settings.seed = 20_260_918
-    settings.length_minimum = 0.4
-    settings.length_maximum = 0.58
-    settings.radius_minimum = 0.012
-    settings.radius_maximum = 0.017
-    settings.curvature_amplitude_minimum = 0.0
-    settings.curvature_amplitude_maximum = 0.014
-    settings.minimum_bend_radius = 0.08
-    settings.max_attempts_per_fiber = 256
+def fiber_population(
+    case_name: str, count: int = 160, segments: int = 8
+) -> tangle.FiberPopulation:
+    population = tangle.FiberPopulation(
+        material=FIBER,
+        count=count,
+        segments_per_fiber=segments,
+        seed=20_260_918,
+        length=(0.4, 0.58),
+        diameter=(0.024, 0.034),
+        curvature_amplitude=(0.0, 0.014),
+        max_attempts_per_fiber=256,
+    )
     if case_name == "isotropic_3d":
-        settings.orientation = "isotropic_3d"
-        settings.position = "uniform"
-    elif case_name == "planar_layered":
-        settings.orientation = "planar"
-        settings.orientation_axis = [0.0, 0.0, 1.0]
-        settings.maximum_tilt = math.radians(10.0)
-        settings.position = "layered"
-        settings.position_axis = 2
-        settings.layers = 4
-        settings.jitter_fraction = 0.25
-    elif case_name == "aligned_x":
-        settings.orientation = "aligned"
-        settings.orientation_axis = [1.0, 0.0, 0.0]
-        settings.maximum_angle = math.radians(15.0)
-        settings.position = "uniform"
-    else:
-        raise ValueError(f"unknown case {case_name!r}")
-    return settings
+        return population.replace(
+            orientation=tangle.IsotropicOrientation(),
+            position=tangle.UniformPosition(),
+        )
+    if case_name == "planar_layered":
+        return population.replace(
+            orientation=tangle.PlanarOrientation(max_tilt=math.radians(10.0)),
+            position=tangle.LayeredPosition(4, jitter_fraction=0.25),
+        )
+    if case_name == "aligned_x":
+        return population.replace(
+            orientation=tangle.AlignedOrientation("x", max_angle=math.radians(15.0)),
+            position=tangle.UniformPosition(),
+        )
+    raise ValueError(f"unknown case {case_name!r}")
 
 
 def build(
@@ -59,7 +62,7 @@ def build(
 ) -> tuple[tangle.Recipe, tangle.RelaxationSettings]:
     cell = tangle.Cell([1.0, 1.0, 1.0])
     population = tangle.generate_fiber_population(
-        cell, population_settings(case_name, count, segments), name=case_name
+        cell, fiber_population(case_name, count, segments), name=case_name
     )
     recipe = tangle.Recipe(cell)
     recipe.insert(population)
@@ -67,13 +70,13 @@ def build(
         recipe.relax_for(initial_layer_iterations)
         for step in range(1, compaction_steps + 1):
             scale = 1.0 + (final_layer_spacing_scale - 1.0) * step / compaction_steps
-            recipe.move_layers(scale, stiffness=0.5, max_translation=0.01)
+            recipe.scale_layer_spacing(scale, stiffness=0.5, max_translation=0.01)
             recipe.relax_for(layer_iterations_per_step)
-        recipe.release_layer_targets()
-    recipe.relax(maximum_iterations=max_iterations)
-    settings = tangle.RelaxationSettings()
-    settings.max_iterations = max_iterations
-    settings.iterations_per_batch = batch_iterations
+        recipe.release_layer_placement()
+    recipe.relax_until_converged(max_iterations=max_iterations)
+    settings = tangle.RelaxationSettings(
+        max_iterations=max_iterations, iterations_per_batch=batch_iterations
+    )
     return recipe, settings
 
 

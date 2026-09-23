@@ -47,26 +47,27 @@ jupyter lab crates/tangle_python/python/tutorials
 
 ```python
 import tangle
+from tangle.units import mm, um
 
-fiber = tangle.Material("fiber", diameter=19e-6)
+fiber = tangle.Material("fiber", diameter=19 * um)
 layer = tangle.FiberCollection("first ply")
 layer.add_fiber(
-    [[-0.4e-3, 0, 0], [0.4e-3, 0, 0]],
+    [[-0.4 * mm, 0, 0], [0.4 * mm, 0, 0]],
     fiber,
     formation_layer=0,
 )
 
-assembly = tangle.Assembly(
-    tangle.Cell([1e-3, 1e-3, 2e-3], periodic=[True, True, False])
-)
-recipe = tangle.Recipe(assembly)
-recipe.insert(layer, translation=[0.5e-3, 0.5e-3, 0.5e-3])
-recipe.relax()
+# x and y are periodic, so z is the stacking axis.
+cell = tangle.Cell([1 * mm, 1 * mm, 2 * mm], periodic="xy")
+recipe = tangle.Recipe(cell)
+recipe.insert(layer, translation=[0.5 * mm, 0.5 * mm, 0.5 * mm])
+recipe.relax_until_converged()
 
-settings = tangle.RelaxationSettings()
-settings.penetration_tolerance = 0.1e-6
-settings.adaptive_segmentation = tangle.AdaptiveSegmentationSettings()
-# Use settings.backend = "cpu" on a system without a usable GPU.
+settings = tangle.RelaxationSettings(
+    penetration_tolerance=0.1 * um,
+    adaptive_segmentation=tangle.AdaptiveSegmentationSettings(),
+    # backend="cpu" on a system without a usable GPU.
+)
 result = recipe.run(settings)
 print(result.converged, result.max_penetration, result.max_curvature_ratio)
 analysis = result.characterize()
@@ -75,12 +76,13 @@ print(analysis.nominal_swept_volume_fraction)
 
 Select the **Python (TANGLE)** notebook kernel. The installation guide includes
 Windows and Miniforge alternatives. After rebuilding the extension, restart
-the kernel before using new API arguments. Lengths in this example are meters;
-TANGLE does not automatically convert units.
+the kernel before using new API arguments. Lengths are meters; `tangle.units`
+provides `um` and `mm` multipliers, and TANGLE does not otherwise convert units.
 
 All relaxation, cell-list, refinement, coarsening, compaction, checkpoint, and
-recipe-stage controls are inspectable Python attributes with Rust-backed
-defaults. Executable scripts and matching notebooks cover the
+recipe-stage controls are keyword arguments and inspectable Python attributes
+with Rust-backed defaults. The [migration guide](docs/python_api_migration.md)
+maps names from before the 0.1 API cleanup. Executable scripts and matching notebooks cover the
 [small Python workflows](crates/tangle_python/python/examples) and
 [the native Rust example configurations](crates/tangle_python/python/examples/native).
 The [topic notebook series](crates/tangle_python/python/tutorials) treats one
@@ -109,7 +111,7 @@ from twenty planar plies. Click either OVITO preview to play the construction.
 
 | Control | Needled |
 | --- | --- |
-| [![The unneedled twenty-ply fake felt construction](docs/media/felted-control.png)](docs/media/felted-control.mp4) | [![The twenty-ply needled fake felt construction](docs/media/felted-needled.png)](docs/media/felted-needled.mp4) |
+| [![The unneedled twenty-ply synthetic felt construction](docs/media/felted-control.png)](docs/media/felted-control.mp4) | [![The twenty-ply needled synthetic felt construction](docs/media/felted-needled.png)](docs/media/felted-needled.mp4) |
 
 Both populations contain 7 and 19 micrometer fibers, split 50:50 by nominal
 fiber volume rather than fiber count. The needled recipe deposits and relaxes
@@ -126,9 +128,9 @@ otherwise matched twenty-ply control and needled specimens in through-thickness
 tension. DIRT grips the upper and lower 15% of each specimen; engineering strain
 is referenced to the initial internal, non-gripped gauge length.
 
-![Interim DIRT through-thickness stress-strain comparison of unneedled and needled fake felt](docs/media/dirt-through-thickness-tension-interim.png)
+![Interim DIRT through-thickness stress-strain comparison of unneedled and needled synthetic felt](docs/media/dirt-through-thickness-tension-interim.png)
 
-[![Needled fake felt undergoing through-thickness tension in DIRT](docs/media/dirt-needled-tension.png)](docs/media/dirt-needled-tension.mp4)
+[![Needled synthetic felt undergoing through-thickness tension in DIRT](docs/media/dirt-needled-tension.png)](docs/media/dirt-needled-tension.mp4)
 
 The movie shows the needled specimen during the same DIRT through-thickness
 tension calculation. The two colors distinguish the 7 and 19 micrometer fiber

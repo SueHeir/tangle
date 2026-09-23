@@ -63,17 +63,18 @@ impl PyAnalysisReport {
     }
 
     #[getter]
-    fn maximum_curvature(&self) -> f64 {
+    fn max_curvature(&self) -> f64 {
         self.inner.maximum_curvature
     }
 
     #[getter]
-    fn maximum_curvature_ratio(&self) -> f64 {
+    fn max_curvature_ratio(&self) -> f64 {
         self.inner.maximum_curvature_ratio
     }
 
+    /// Vertices whose curvature exceeds their material's bend limit.
     #[getter]
-    fn bend_limit_violations(&self) -> usize {
+    fn curvature_limit_violations(&self) -> usize {
         self.inner.bend_limit_violations
     }
 
@@ -188,14 +189,14 @@ pub(crate) fn characterize_neighbors(
     neighbor_gap: Option<f64>,
     in_axis_angle_degrees: f64,
     sample_spacing: Option<f64>,
-    maximum_lag: Option<f64>,
+    max_lag: Option<f64>,
     lag_count: usize,
 ) -> PyResult<PyNeighborReport> {
     let mut config = NeighborAnalysisConfig::new(contact_gap);
     config.neighbor_gap = neighbor_gap;
     config.in_axis_angle = in_axis_angle_degrees.to_radians();
     config.sample_spacing = sample_spacing;
-    config.maximum_lag = maximum_lag;
+    config.maximum_lag = max_lag;
     config.lag_count = lag_count;
     analyze_neighbors(assembly, &config)
         .map(|inner| PyNeighborReport { inner })
