@@ -5,27 +5,28 @@ It uses the single-type synthetic scan of ``ct_fit_synthetic.py`` (40 fibers
 of 12 µm, bend radius 48 µm, 1.5 µm voxels), whose true fibers are known,
 and runs three experiments through ``tangle.ImageRelaxer``:
 
-1. **Geometry only.** Start from the CPU fit and relax with the image force
+1. **Geometry only.** Start from the NumPy-loop fit and relax with the image force
    off. Bend-limit violations and overlaps should go to about zero while
    the fibers barely move.
 2. **Damaged truth.** Take the true fibers, add sharp random kinks (well past
    the bend limit, with overlaps where fibers touch) and relax with the image
    force on. The fibers should come back to the truth: valid geometry and a
    small centerline error against the true fibers.
-3. **CPU fit, polished.** Start from the CPU fit and relax with the image
+3. **NumPy-loop fit, polished.** Start from the NumPy-loop fit and relax with the image
    force on. Geometry should become valid without the fit to the scan
    getting worse (recovery, voxel accuracy, centerline error).
 
 For each run it prints ``ct.geometry_report`` before and after (curvature
 ratio against the bend limit, deepest overlap, segment lengths) and writes
-before/after overlays. Fibers are resampled to segments at least one
+before/after overlays: PNG slices plus ``*_labels.tif`` and ``*_overlay.tif``
+stacks, next to ``scan.tif`` and the ``truth_*`` files. Fibers are resampled to segments at least one
 diameter long first: Tangle's contact treats non-adjacent segments of the
 same fiber as colliding, so shorter segments push a fiber apart by itself.
 Each fiber rests straight (see ``straightened``). Runs with the image on end
 with ``CHECK_SETTLE`` (default 200) iterations with it off.
 
 Usage: ``python ct_gpu_geometry_check.py [output_dir] [fit.json]``; without a
-fit.json the CPU fit is run first (about a minute). ``CT_TRUTH_DIR`` names the
+fit.json the NumPy-loop fit is run first (about a minute). ``CT_TRUTH_DIR`` names the
 folder holding ``ct_fit_synthetic.py``'s cached ``truth_centerlines.json``.
 Needs a Tangle build with ``ImageRelaxer`` and a working per-fiber curvature
 solve; without it the bend limit stalls just above 1 and experiment 1 fails
@@ -155,9 +156,16 @@ def show(title: str, report: dict) -> None:
     print(f"  {title:>7}: " + ", ".join(f"{k} {report[k]:.3g}" if isinstance(report[k], float) else f"{k} {report[k]}" for k in keys))
 
 
-def overlay(name: str, volume: np.ndarray, lines: list[np.ndarray], radii: np.ndarray) -> None:
-    labels, _, _ = rasterize(volume.shape, lines, radii, signed=True)
+def overlay(name: str, volume: np.ndarray, lines: list[np.ndarray] | None, radii: np.ndarray | None, labels=None) -> None:
+    """``<name>.png`` slices, plus ``<name>_labels.tif`` (fiber ids) and
+    ``<name>_overlay.tif`` (RGB) stacks for Fiji/Napari."""
+    from tangle.ct._fit import _write_stack
+
+    if labels is None:
+        labels, _, _ = rasterize(volume.shape, lines, radii, signed=True)
     ct.save_overlay_figure(OUTPUT / f"{name}.png", volume, labels, title=name.replace("_", " "))
+    _write_stack(OUTPUT / f"{name}_labels", labels.astype(np.uint16), VOXEL)
+    _write_stack(OUTPUT / f"{name}_overlay", ct.overlay_volume(volume, labels), VOXEL, rgb=True)
 
 
 def main() -> None:
@@ -190,8 +198,15 @@ def main() -> None:
         results[name] = entry
         return after_lines
 
+    from tangle.ct._fit import _write_stack
+
+    _write_stack(OUTPUT / "scan", scan.volume, VOXEL)
+    overlay("truth", scan.volume, None, None, labels=scan.labels)
+
     fit_lines = spaced(fit.centerlines)
-    run("1_geometry_only", fit_lines, fit.radii, 0.0)
+    overlay("1_geometry_only_before", scan.volume, fit_lines, fit.radii)
+    settled = run("1_geometry_only", fit_lines, fit.radii, 0.0)
+    overlay("1_geometry_only_after", scan.volume, settled, fit.radii)
 
     truth_lines = spaced(scan.centerlines)
     damaged = kinked(truth_lines)
@@ -199,16 +214,15 @@ def main() -> None:
     repaired = run("2_damaged_truth", damaged, scan.radii, IMAGE_RATE, reference=truth_lines)
     overlay("2_damaged_truth_after", scan.volume, repaired, scan.radii)
 
-    overlay("3_cpu_fit_before", scan.volume, fit_lines, fit.radii)
-    polished = run("3_cpu_fit_polished", fit_lines, fit.radii, IMAGE_RATE)
-    overlay("3_cpu_fit_after", scan.volume, polished, fit.radii)
+    overlay("3_numpy_fit_before", scan.volume, fit_lines, fit.radii)
+    polished = run("3_numpy_fit_polished", fit_lines, fit.radii, IMAGE_RATE)
+    overlay("3_numpy_fit_after", scan.volume, polished, fit.radii)
     for label, lines in (("before", fit_lines), ("after", polished)):
         report = ct.score(replace(fit, centerlines=lines, support=np.ones(len(lines))), scan)
-        results["3_cpu_fit_polished"][f"score_{label}"] = {
+        results["3_numpy_fit_polished"][f"score_{label}"] = {
             k: report[k] for k in ("recovered", "split", "missed", "voxel_label_accuracy", "centerline_error_voxels")
         }
-        print(f"  score {label}: {results['3_cpu_fit_polished'][f'score_{label}']}")
-    ct.save_overlay_figure(OUTPUT / "truth_overlay.png", scan.volume, scan.labels, title="ground truth")
+        print(f"  score {label}: {results['3_numpy_fit_polished'][f'score_{label}']}")
     (OUTPUT / "geometry_check.json").write_text(json.dumps(results, indent=1) + "\n")
 
 
