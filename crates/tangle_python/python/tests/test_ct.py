@@ -242,6 +242,42 @@ class CtToolTests(unittest.TestCase):
         self.assertTrue(flags[0])
         self.assertFalse(flags[-1])
 
+    def test_redraw_regions_are_kept_or_reverted_whole(self):
+        from tangle.ct._regrow import choose, cut_unsure, region_components, touched_regions
+
+        x = np.arange(8.0, 57.0, 4.0)
+
+        def along(y):
+            return np.stack([x, np.full_like(x, y), np.full_like(x, 20.0)], axis=1)
+
+        lines = [along(10.0), along(40.0)]  # two fibers 30 voxels apart
+        confidence = [np.where((x > 22) & (x < 42), 0.2, 0.9)] * 2
+        radii = np.array([4.0, 4.0])
+        cut = cut_unsure(lines, confidence, radii, threshold=0.5, spacing=4.0)
+        self.assertEqual(cut.removed_nodes, 10)
+        self.assertEqual(len(cut.regions), 2)  # one per fiber's unsure stretch
+        # A failed region is cut wider next time; one given up on is not cut.
+        first = (np.zeros(3), np.array([64.0, 20.0, 40.0]))
+        wider = cut_unsure(lines, confidence, radii, threshold=0.5, spacing=4.0, widen=[(*first, 8.0)])
+        self.assertGreater(wider.removed_nodes, cut.removed_nodes)
+        skipped = cut_unsure(lines, confidence, radii, threshold=0.5, spacing=4.0, skip=[first])
+        self.assertEqual((skipped.removed_nodes, len(skipped.regions)), (5, 1))
+
+        old_touch = touched_regions(lines, cut.regions)
+        self.assertEqual(old_touch, [{0}, {1}])
+        redrawn = [along(10.5), along(40.5)]
+        component = region_components(2, old_touch, touched_regions(redrawn, cut.regions))
+        self.assertNotEqual(component[0], component[1])
+        # Keep the first region's redraw, revert the second.
+        accepted = np.zeros(2, dtype=bool)
+        accepted[component[0]] = True
+        keep_old, keep_new = choose(old_touch, touched_regions(redrawn, cut.regions), component, accepted)
+        self.assertEqual((keep_old, keep_new), ([1], [0]))
+        # A redrawn fiber reaching both regions ties them together.
+        bridge = np.stack([np.full(8, 30.0), np.linspace(10.0, 40.0, 8), np.full(8, 20.0)], axis=1)
+        component = region_components(2, old_touch, touched_regions(redrawn + [bridge], cut.regions))
+        self.assertEqual(component[0], component[1])
+
     def test_geometry_report_finds_overlaps_and_kinks(self):
         straight = np.stack([np.linspace(0, 40, 9), np.zeros(9), np.zeros(9)], axis=1)
         beside = straight + np.array([0.0, 3.0, 0.0])  # radii 2: 1 voxel deep, half a radius

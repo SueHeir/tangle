@@ -88,9 +88,12 @@ class FitSettings:
     solver_reach_radii: float = 1.4
     # Redraw passes after the fit: cut out nodes whose confidence is below
     # ``confidence_threshold``, grow the sure pieces back into the gaps,
-    # re-solve with the sure pieces pinned, and keep the result only if more
-    # of the foreground is explained by sure fibers (see ``_regrow``).
-    redraw_passes: int = 2
+    # re-solve with the sure pieces pinned, and keep each region's redraw
+    # only if more of its foreground is explained by sure fibers (see
+    # ``_regrow``). A region whose redraw fails is cut wider next time and
+    # left alone after ``redraw_attempts`` failures.
+    redraw_passes: int = 5
+    redraw_attempts: int = 3
     confidence_threshold: float = 0.5
 
     def replace(self, **changes: Any) -> "FitSettings":
@@ -549,23 +552,11 @@ def fit_fibers(
         before = lines
         lines = fitter.solve(lines, radii, types)
         log("final solve", lines, types=fitter.counts(types))
-        confidence, summary = fitter.confidence(lines, radii, previous=before)
-        coverage = _confidence.sure_coverage(fitter.foreground, lines, radii, confidence)
+        confidence, settled, summary = fitter.scores(lines, radii, previous=before)
+        coverage = _confidence.sure_coverage(fitter.foreground, lines, radii, settled)
         log("confidence", lines, **summary, sure_coverage=round(coverage, 4))
-        for pass_index in range(settings.redraw_passes):
-            redrawn = fitter.redraw(lines, radii, types, confidence)
-            if redrawn is None:
-                break
-            new_lines, new_radii, new_types, new_confidence, counts = redrawn
-            new_coverage = _confidence.sure_coverage(fitter.foreground, new_lines, new_radii, new_confidence)
-            kept = new_coverage > coverage + 1e-3
-            log(
-                f"redraw {pass_index + 1}", new_lines, **counts, sure_coverage=round(new_coverage, 4),
-                kept=kept, types=fitter.counts(new_types),
-            )
-            if not kept:
-                break
-            lines, radii, types, confidence, coverage = new_lines, new_radii, new_types, new_confidence, new_coverage
+        if settings.redraw_passes > 0:
+            lines, radii, types, confidence = fitter.redraw_loop(lines, radii, types, confidence, settled)
 
     return FitResult(
         shape=tuple(int(n) for n in volume.shape),
@@ -757,20 +748,116 @@ class _Fitter:
             anchors=anchors, anchor_tolerance=0.3 * float(self.radius.min()),
         )
 
-    def redraw(
-        self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray, confidence: list[np.ndarray]
-    ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, list[np.ndarray], dict[str, Any]] | None:
-        """One redraw pass (see ``_regrow``); ``None`` when no node is unsure."""
+    def redraw_loop(
+        self,
+        lines: list[np.ndarray],
+        radii: np.ndarray,
+        types: np.ndarray,
+        confidence: list[np.ndarray],
+        settled: list[np.ndarray],
+    ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, list[np.ndarray]]:
+        """Redraw passes, each kept or reverted region by region (see ``_regrow``).
+
+        The first pass cuts on the full confidence; later ones on the
+        confidence without stability, so a stretch is not cut again just
+        because its redraw moved it. Keeping or reverting always uses the
+        latter.
+        """
+        s = self.settings
+        radii = np.asarray(radii, dtype=np.float64)
+        types = np.asarray(types, dtype=int)
+        failures: list[list] = []  # [low, high, count] per region that failed
+        step = 2.0 * float(self.radius.max())
+        for pass_index in range(s.redraw_passes):
+            widen = [(low, high, count * step) for low, high, count in failures if count < s.redraw_attempts]
+            given_up = [(low, high) for low, high, count in failures if count >= s.redraw_attempts]
+            cut = _regrow.cut_unsure(
+                lines, confidence if pass_index == 0 else settled, radii, threshold=s.confidence_threshold,
+                spacing=self.spacing, widen=widen, skip=given_up,
+            )
+            if cut is None or not lines:
+                break
+            new_lines, new_radii, new_types, info = self.redraw_candidate(cut, radii, types)
+            _, new_settled, _ = self.scores(new_lines, new_radii)
+            old_map = _confidence.coverage_map(self.foreground, lines, radii, settled)
+            new_map = _confidence.coverage_map(self.foreground, new_lines, new_radii, new_settled)
+            old_touch = _regrow.touched_regions(lines, cut.regions)
+            new_touch = _regrow.touched_regions(new_lines, cut.regions)
+            component = _regrow.region_components(len(cut.regions), old_touch, new_touch)
+            count = int(component.max()) + 1 if len(component) else 0
+            accepted = np.zeros(count, dtype=bool)
+            for c in range(count):
+                mask = self._box_mask([cut.regions[k] for k in np.flatnonzero(component == c)])
+                foreground = float(self.foreground[mask].sum())
+                gain = float(new_map[mask].sum(dtype=np.float64) - old_map[mask].sum(dtype=np.float64))
+                accepted[c] = gain > 1e-3 * max(foreground, 1.0)
+            keep_old, keep_new = _regrow.choose(old_touch, new_touch, component, accepted)
+            # An old fiber outside every region should be in the redraw too; if
+            # the redraw's topology step joined it into a reverted fiber, bring
+            # it back.
+            keep_old += _regrow.lost_fibers(
+                lines, [i for i, touch in enumerate(old_touch) if not touch],
+                [new_lines[i] for i in keep_new], radii,
+            )
+            merged = [new_lines[i] for i in keep_new] + [lines[i] for i in keep_old]
+            merged_radii = np.concatenate([new_radii[keep_new], radii[keep_old]]).astype(np.float64)
+            merged_types = np.concatenate([new_types[keep_new], types[keep_old]]).astype(int)
+            before_coverage = float(old_map.sum(dtype=np.float64)) / max(float(self.foreground.sum()), 1.0)
+            kept = bool(accepted.any()) and bool(merged)
+            if kept and keep_old:
+                # Old and new fibers meet at the edges of reverted regions:
+                # settle the merged fit (every node pinned for the image run,
+                # so only the unpinned settle acts).
+                merged = self.solve(merged, merged_radii, merged_types, anchors=merged)
+            coverage = before_coverage
+            if kept:
+                merged_confidence, merged_settled, summary = self.scores(merged, merged_radii, previous=None)
+                coverage = _confidence.sure_coverage(self.foreground, merged, merged_radii, merged_settled)
+                kept = coverage > before_coverage
+            for k, (low, high) in enumerate(cut.regions):
+                ok = kept and bool(accepted[component[k]])
+                self._record(failures, low, high, ok)
+            self.log(
+                f"redraw {pass_index + 1}", merged if kept else lines, **info, regions=len(cut.regions),
+                groups=count, groups_kept=int(accepted.sum()) if kept else 0,
+                regions_given_up=len(given_up), regions_widened=len(widen),
+                sure_coverage=round(coverage if kept else before_coverage, 4), kept=kept,
+            )
+            if kept:
+                lines, radii, types = merged, merged_radii, merged_types
+                confidence, settled = merged_confidence, merged_settled
+        return lines, radii, types, confidence
+
+    def _box_mask(self, boxes: list[_regrow.Box]) -> np.ndarray:
+        mask = np.zeros(self.image.shape, dtype=bool)
+        upper = np.array(self.image.shape[::-1])
+        for low, high in boxes:
+            a = np.clip(np.floor(low).astype(int), 0, upper)
+            b = np.clip(np.ceil(high).astype(int), 0, upper)
+            mask[a[2] : b[2], a[1] : b[1], a[0] : b[0]] = True
+        return mask
+
+    @staticmethod
+    def _record(failures: list[list], low: np.ndarray, high: np.ndarray, ok: bool) -> None:
+        """Forget failures overlapping a kept region; count one more for a failed one."""
+        overlapping = [f for f in failures if np.all(f[0] <= high) and np.all(low <= f[1])]
+        for f in overlapping:
+            failures.remove(f)
+        if not ok:
+            count = max((f[2] for f in overlapping), default=0) + 1
+            if overlapping:
+                low = np.minimum(low, np.min([f[0] for f in overlapping], axis=0))
+                high = np.maximum(high, np.max([f[1] for f in overlapping], axis=0))
+            failures.append([low, high, count])
+
+    def redraw_candidate(
+        self, cut: _regrow.Cut, radii: np.ndarray, types: np.ndarray
+    ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, dict[str, Any]]:
+        """Grow the cut's sure pieces back, trace the rest, and solve with the pieces pinned."""
         from ._trace import Tracer
 
         s = self.settings
-        types = np.asarray(types, dtype=int)
-        cut = _regrow.cut_unsure(
-            lines, confidence, np.asarray(radii), threshold=s.confidence_threshold, spacing=self.spacing
-        )
-        if cut is None:
-            return None
-        piece_types = types[cut.parent]
+        piece_types = np.asarray(types, dtype=int)[cut.parent]
         piece_radii = np.asarray(radii, dtype=np.float64)[cut.parent]
 
         def tracer_for(index: int, claimed: np.ndarray) -> Tracer:
@@ -797,12 +884,8 @@ class _Fitter:
             lines = self.solve(lines, radii, types, anchors=cut.anchors)
             radii, types = self.classify(lines)
             lines = _refine.respace(lines, self.spacing)
-        confidence: list[np.ndarray] = []
-        summary: dict[str, Any] = {}
         if lines:
-            before = lines
             lines = self.solve(lines, radii, types, anchors=cut.anchors)
-            confidence, summary = self.confidence(lines, radii, previous=before)
         info = {
             "unsure_nodes_cut": cut.removed_nodes,
             "fibers_removed": cut.removed_fibers,
@@ -810,22 +893,24 @@ class _Fitter:
             "grown_length_voxels": round(grown, 1),
             "born": len(born),
             "merges": counts.get("merges"),
-            "confidence_mean": summary.get("mean"),
         }
-        return lines, radii, types, confidence, info
+        return lines, np.asarray(radii, dtype=np.float64), np.asarray(types, dtype=int), info
 
-    def confidence(
+    def scores(
         self, lines: list[np.ndarray], radii: np.ndarray, *, previous: list[np.ndarray] | None = None
-    ) -> tuple[list[np.ndarray], dict[str, Any]]:
-        """Per-node confidence, and a summary for the history."""
+    ) -> tuple[list[np.ndarray], list[np.ndarray], dict[str, Any]]:
+        """Per-node confidence, the same without stability, and a summary for the history."""
+        if not lines:
+            return [], [], {}
         if previous is not None and len(previous) != len(lines):
             previous = None
         per_node, summary = _confidence.node_confidence(
             self.image, self.depth, lines, radii, spacing=self.spacing, margin=self.margin, previous=previous
         )
+        settled = summary.pop("without_stability")
         summary = {key: value for key, value in summary.items() if key not in ("fiber_mean", "fiber_min", "fibers")}
         summary["mean"] = round(float(summary.get("mean", 0.0)), 3)
-        return per_node, summary
+        return per_node, settled, summary
 
     def topology(
         self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray

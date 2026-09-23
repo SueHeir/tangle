@@ -106,6 +106,22 @@ def node_confidence(
         _to_nodes(line, points, value)
         for line, points, value in zip(lines, samples, per_sample)
     ]
+    # The same without stability: a stretch that was just redrawn moved in
+    # its solve because it was redrawn, not because it is wrong, so keeping
+    # or reverting a redraw is judged on this.
+    settled = [
+        _to_nodes(
+            line,
+            points,
+            _smooth(
+                np.prod(
+                    [parts[name][f] for name in COMPONENTS if name != "stability"],
+                    axis=0,
+                )
+            ),
+        )
+        for f, (line, points) in enumerate(zip(lines, samples))
+    ]
 
     fiber_mean = np.array(
         [float(value.mean()) if len(value) else 0.0 for value in per_sample]
@@ -123,6 +139,7 @@ def node_confidence(
         },
         "fiber_mean": fiber_mean,
         "fiber_min": fiber_min,
+        "without_stability": settled,
     }
     return per_node, summary
 
@@ -230,6 +247,33 @@ def _to_nodes(line: np.ndarray, points: np.ndarray, value: np.ndarray) -> np.nda
     return out
 
 
+def coverage_map(
+    foreground: np.ndarray,
+    lines: list[np.ndarray],
+    radii: np.ndarray,
+    confidence: list[np.ndarray],
+) -> np.ndarray:
+    """Per voxel: the confidence of the fit owning it, on the foreground (0 elsewhere).
+
+    Ownership is the nearest capsule surface; the confidence is the mean of
+    the owning segment's two nodes.
+    """
+    from ._geometry import rasterize
+
+    values = np.zeros(foreground.shape, dtype=np.float32)
+    if not lines:
+        return values
+    _, _, segments = rasterize(
+        foreground.shape, lines, np.asarray(radii, dtype=np.float64), signed=True
+    )
+    table = np.concatenate([0.5 * (c[:-1] + c[1:]) for c in confidence]).astype(
+        np.float32
+    )
+    owned = foreground & (segments >= 0)
+    values[owned] = table[segments[owned]]
+    return values
+
+
 def sure_coverage(
     foreground: np.ndarray,
     lines: list[np.ndarray],
@@ -243,16 +287,10 @@ def sure_coverage(
     fits and fits over void all lower it, so a redraw is kept only when it
     raises it.
     """
-    from ._geometry import rasterize
-
     total = float(foreground.sum())
     if not lines or total == 0.0:
         return 0.0
-    _, _, segments = rasterize(
-        foreground.shape, lines, np.asarray(radii, dtype=np.float64), signed=True
+    return (
+        float(coverage_map(foreground, lines, radii, confidence).sum(dtype=np.float64))
+        / total
     )
-    table = np.concatenate([0.5 * (c[:-1] + c[1:]) for c in confidence]).astype(
-        np.float64
-    )
-    owned = foreground & (segments >= 0)
-    return float(table[segments[owned]].sum()) / total

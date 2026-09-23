@@ -24,14 +24,17 @@ from ._confidence import _Segments
 from ._geometry import paint, polyline_length, resample, tangents
 
 
+Box = tuple[np.ndarray, np.ndarray]  # (low, high) corners, voxel coordinates (x, y, z)
+
+
 @dataclass
 class Cut:
     pieces: list[np.ndarray]
     parent: np.ndarray  # each piece's fiber index in the cut fit
-    cut_ends: list[
-        tuple[int, int]
-    ]  # (piece, 0 = start / -1 = end) where an unsure stretch was removed
+    # (piece, 0 = start / -1 = end) where an unsure stretch was removed
+    cut_ends: list[tuple[int, int]]
     anchors: list[np.ndarray]  # the sure pieces, less a free stretch at each cut end
+    regions: list[Box]  # one box around each cluster of removed stretches
     removed_nodes: int
     removed_fibers: int
 
@@ -45,14 +48,25 @@ def cut_unsure(
     spacing: float,
     min_piece_radii: float = 2.0,
     free_radii: float = 2.0,
+    widen: list[tuple[np.ndarray, np.ndarray, float]] | None = None,
+    skip: list[Box] | None = None,
 ) -> Cut | None:
-    """Split every fiber at its unsure stretches; ``None`` when nothing is unsure."""
-    if not any(bool((np.asarray(c) < threshold).any()) for c in confidence):
-        return None
+    """Split every fiber at its unsure stretches; ``None`` when nothing is unsure.
+
+    ``widen`` lists boxes ``(low, high, extra)``: an unsure node inside one
+    also removes the nodes within ``extra`` (arc length) of it, for a region
+    whose earlier redraw failed. Nodes inside a ``skip`` box (a region given
+    up on) are left as they are. The removed stretches are clustered (those
+    within two radii of each other) into ``regions``, each a box padded by
+    two radii.
+    """
+    radii = np.asarray(radii, dtype=np.float64)
+    pad = 2.0 * float(radii.max()) if len(radii) else 0.0
     pieces: list[np.ndarray] = []
     parent: list[int] = []
     cut_ends: list[tuple[int, int]] = []
     anchors: list[np.ndarray] = []
+    removed: list[np.ndarray] = []
     removed_nodes = 0
     removed_fibers = 0
     for f, (line, value) in enumerate(zip(lines, confidence)):
@@ -60,14 +74,22 @@ def cut_unsure(
         fine, fine_value = _refine_with_values(
             np.asarray(line, dtype=np.float64), np.asarray(value), spacing
         )
-        sure = fine_value >= threshold
-        removed_nodes += int((~sure).sum())
-        runs = _runs(sure)
+        unsure = fine_value < threshold
+        if widen and unsure.any():
+            unsure = _widen(fine, unsure, widen)
+        if skip and unsure.any():
+            unsure &= ~_inside_any(fine, skip)
+        kept_mask = np.zeros(len(fine), dtype=bool)
         kept = 0
-        for start, stop in runs:
+        for start, stop in _runs(~unsure):
             piece = fine[start:stop]
-            if polyline_length(piece) < min_piece_radii * r:
+            if (
+                len(fine)
+                and unsure.any()
+                and polyline_length(piece) < min_piece_radii * r
+            ):
                 continue
+            kept_mask[start:stop] = True
             index = len(pieces)
             pieces.append(piece)
             parent.append(f)
@@ -84,16 +106,166 @@ def cut_unsure(
             )
             if len(anchor) >= 2:
                 anchors.append(anchor)
+        removed_nodes += int((~kept_mask).sum())
+        for start, stop in _runs(~kept_mask):
+            removed.append(fine[start:stop])
         if kept == 0:
             removed_fibers += 1
+    if removed_nodes == 0:
+        return None
     return Cut(
         pieces,
         np.array(parent, dtype=int),
         cut_ends,
         anchors,
+        _cluster_boxes(removed, pad),
         removed_nodes,
         removed_fibers,
     )
+
+
+def touched_regions(lines: list[np.ndarray], regions: list[Box]) -> list[set[int]]:
+    """For every fiber, the regions its nodes enter."""
+    touched = []
+    for line in lines:
+        line = np.asarray(line, dtype=np.float64).reshape(-1, 3)
+        touched.append(
+            {
+                k
+                for k, (low, high) in enumerate(regions)
+                if np.any(np.all((line >= low) & (line <= high), axis=1))
+            }
+        )
+    return touched
+
+
+def region_components(region_count: int, *touch_lists: list[set[int]]) -> np.ndarray:
+    """Group regions that share a fiber (before or after the redraw); a component id per region.
+
+    A redraw is kept or reverted one component at a time, so a fiber is
+    never half kept.
+    """
+    root = list(range(region_count))
+
+    def find(k: int) -> int:
+        while root[k] != k:
+            root[k] = root[root[k]]
+            k = root[k]
+        return k
+
+    for touches in touch_lists:
+        for regions in touches:
+            regions = sorted(regions)
+            for other in regions[1:]:
+                root[find(other)] = find(regions[0])
+    labels = np.array([find(k) for k in range(region_count)], dtype=int)
+    _, component = np.unique(labels, return_inverse=True)
+    return component.astype(int)
+
+
+def choose(
+    old_touch: list[set[int]],
+    new_touch: list[set[int]],
+    component: np.ndarray,
+    accepted: np.ndarray,
+) -> tuple[list[int], list[int]]:
+    """Which old and which new fibers make up the merged fit.
+
+    New fibers are kept unless they are in a reverted component; old fibers
+    come back only for a reverted component.
+    """
+
+    def verdict(regions: set[int]) -> bool | None:
+        if not regions:
+            return None
+        return bool(accepted[component[next(iter(regions))]])
+
+    keep_new = [
+        i for i, regions in enumerate(new_touch) if verdict(regions) is not False
+    ]
+    keep_old = [i for i, regions in enumerate(old_touch) if verdict(regions) is False]
+    return keep_old, keep_new
+
+
+def lost_fibers(
+    lines: list[np.ndarray],
+    candidates: list[int],
+    kept: list[np.ndarray],
+    radii: np.ndarray,
+) -> list[int]:
+    """Of ``candidates`` (indices into ``lines``), those less than half followed by a ``kept`` fiber."""
+    if not candidates:
+        return []
+    if not kept:
+        return list(candidates)
+    segments = _Segments(kept, np.zeros(len(kept)))
+    lost = []
+    for i in candidates:
+        line = np.asarray(lines[i], dtype=np.float64).reshape(-1, 3)
+        if segments.covered(line, -1, extra=0.5 * float(radii[i])).mean() < 0.5:
+            lost.append(i)
+    return lost
+
+
+def _widen(
+    line: np.ndarray,
+    unsure: np.ndarray,
+    widen: list[tuple[np.ndarray, np.ndarray, float]],
+) -> np.ndarray:
+    arc = np.concatenate(
+        [[0.0], np.cumsum(np.linalg.norm(np.diff(line, axis=0), axis=1))]
+    )
+    out = unsure.copy()
+    for i in np.flatnonzero(unsure):
+        extra = max(
+            (
+                e
+                for low, high, e in widen
+                if np.all((line[i] >= low) & (line[i] <= high))
+            ),
+            default=0.0,
+        )
+        if extra > 0.0:
+            out |= np.abs(arc - arc[i]) <= extra
+    return out
+
+
+def _inside_any(points: np.ndarray, boxes: list[Box]) -> np.ndarray:
+    inside = np.zeros(len(points), dtype=bool)
+    for low, high in boxes:
+        inside |= np.all((points >= low) & (points <= high), axis=1)
+    return inside
+
+
+def _cluster_boxes(stretches: list[np.ndarray], pad: float) -> list[Box]:
+    """Boxes around clusters of stretches that come within ``pad`` of each other."""
+    from scipy.spatial import cKDTree
+
+    stretches = [s for s in stretches if len(s)]
+    if not stretches:
+        return []
+    points = np.concatenate(stretches)
+    owner = np.concatenate([np.full(len(s), k) for k, s in enumerate(stretches)])
+    root = list(range(len(stretches)))
+
+    def find(k: int) -> int:
+        while root[k] != k:
+            root[k] = root[root[k]]
+            k = root[k]
+        return k
+
+    for a, b in cKDTree(points).query_pairs(max(pad, 1e-6)):
+        ra, rb = find(int(owner[a])), find(int(owner[b]))
+        if ra != rb:
+            root[rb] = ra
+    groups: dict[int, list[int]] = {}
+    for k in range(len(stretches)):
+        groups.setdefault(find(k), []).append(k)
+    boxes = []
+    for members in groups.values():
+        cluster = np.concatenate([stretches[k] for k in members])
+        boxes.append((cluster.min(axis=0) - pad, cluster.max(axis=0) + pad))
+    return boxes
 
 
 def grow_cut_ends(

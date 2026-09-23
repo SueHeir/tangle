@@ -410,15 +410,20 @@ with a KD-tree over segment midpoints and exact point-to-segment
 distances. The history gets a `confidence` entry with the mean, the number
 of fibers whose lowest node is below 0.5, and the mean of each component.
 
-### 9b. Redraw passes (`_regrow`, `_Fitter.redraw`)
+### 9b. Redraw passes (`_regrow`, `_Fitter.redraw_loop`)
 
 After the final solve and its confidence, up to `redraw_passes` passes:
 
 1. `cut_unsure`: each fiber is resampled every `spacing` with its
-   confidence interpolated along it; runs of nodes at or above
-   `confidence_threshold` at least 2 r long are kept as pieces. A piece
-   end next to a removed stretch is a cut end. The anchors are the pieces
-   less 2 r at each cut end, so the join can bend.
+   confidence interpolated along it. The first pass cuts on the full
+   confidence, later passes on the confidence without stability. Nodes
+   below `confidence_threshold` are unsure; inside a failed region's box,
+   an unsure node also removes the nodes within `count · 2 r_max` of arc;
+   inside a given-up box nothing is removed. Runs of the rest at least
+   2 r long are kept as pieces; a piece end next to a removed stretch is a
+   cut end. The anchors are the pieces less 2 r at each cut end, so the
+   join can bend. Removed stretches within 2 r_max of each other form a
+   region, a box around them padded by 2 r_max.
 2. `grow_cut_ends`: longest pieces first, each cut end is extended with
    `Tracer.trace_one_way` from the tip along the end tangent (its own
    capsule is not avoided; the others are down-weighted as in tracing),
@@ -433,11 +438,21 @@ After the final solve and its confidence, up to `redraw_passes` passes:
    (`ImageRelaxer.set_pinned`; a build without it ignores the anchors and
    says so in the log). The image-off settle after it runs unpinned: two
    pinned stretches in contact could not otherwise be pushed apart, which
-   tripled the overlapping pairs. Then the confidence again.
-5. The pass is kept if `sure_coverage` rises by more than 0.001, where
-   `sure_coverage` = Σ over foreground voxels of the owning segment's
-   confidence (mean of its two nodes; 0 if unowned) / foreground voxels.
-   Otherwise the previous fit is kept and the passes stop.
+   tripled the overlapping pairs.
+5. Keep or revert, per group: regions are grouped when one fiber, before
+   or after the redraw, enters both (`region_components`). A group is kept
+   if its boxes' sum of `coverage_map` (per foreground voxel, the owning
+   segment's confidence without stability) rises by more than 0.001 per
+   foreground voxel. The merged fit takes the redraw's fibers except those
+   in reverted groups, and the old fibers of reverted groups, plus any old
+   fiber outside every region that no kept fiber follows any more (the
+   redraw may have joined it into a reverted one). When old and new fibers
+   are mixed, the merged fit gets one settle (every node pinned for the
+   image run, so only the unpinned settle acts). The pass is kept if the
+   merged fit's total sure coverage rose; otherwise everything is reverted.
+6. Failed regions are remembered as boxes with a failure count (a kept
+   region clears overlapping ones); at `redraw_attempts` failures the box
+   is given up. The passes end when nothing is left to cut.
 
 ## 10. Scoring against ground truth
 

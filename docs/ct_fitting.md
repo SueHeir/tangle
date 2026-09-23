@@ -223,11 +223,11 @@ is trusted when, where it sits:
 The confidence is the product of the five.
 
 The fit then uses it to **redraw the unsure parts**
-(`FitSettings.redraw_passes`, 2 by default). Each pass:
+(`FitSettings.redraw_passes`, 5 by default). Each pass:
 
 1. cuts every stretch whose confidence is below
    `FitSettings.confidence_threshold` (0.5) out of its fiber, keeping the
-   sure pieces;
+   sure pieces, and groups the cut stretches into regions;
 2. grows each cut end forward along its own direction into the gap, with
    the tracer: it follows the scan, keeps within the bend limit, keeps its
    direction through a crossing, and stops where it would run onto another
@@ -236,12 +236,18 @@ The fit then uses it to **redraw the unsure parts**
    unexplained, with the usual steps;
 4. re-solves with the sure pieces pinned, so they stay where they are and
    everything else fits around them; a short settle without the scan then
-   runs unpinned, so fibers that touch can still be pushed apart.
+   runs unpinned, so fibers that touch can still be pushed apart;
+5. keeps or reverts the redraw **region by region**: a region's redraw is
+   kept only if it raises that region's **sure coverage** (its foreground
+   explained by the fit, each voxel weighted by the confidence of the fit
+   that owns it). Regions joined by a fiber are decided together.
 
-A pass is kept only if it raises the **sure coverage**: the fraction of the
-foreground explained by the fit, each voxel weighted by the confidence of
-the fit that owns it. Missing fibers, unsure fits and fits over void all
-lower it. The history records every pass and whether it was kept.
+A region whose redraw failed is cut wider the next time, and left alone
+after `FitSettings.redraw_attempts` (3) failures, so every pass can only
+improve the fit and the passes end. Keeping or reverting uses the
+confidence without the stability check, since a redrawn stretch moves
+because it was redrawn. The history records every pass: regions, how many
+were kept, widened or given up, and the sure coverage.
 
 ## Examples
 
