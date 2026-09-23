@@ -1,3 +1,4 @@
+mod image_force;
 mod kernels;
 mod packed;
 mod plugin;
@@ -10,7 +11,7 @@ pub use plugin::{
 };
 pub use world::{
     BatchStatus, ContactCapture, DeviceFiberWorld, DeviceWorldCheckpoint, FormationTargetError,
-    LayerTargetCheckpoint, SegmentContactCandidate, VertexTargetCheckpoint,
+    ImageForceSettings, LayerTargetCheckpoint, SegmentContactCandidate, VertexTargetCheckpoint,
 };
 
 /// One explicitly requested host-visible debug snapshot.

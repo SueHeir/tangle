@@ -6,7 +6,8 @@ use tangle_core::FiberAssembly;
 use crate::{
     AdaptiveSegmentationConfig, BatchStatus, CellListConfig, CompactionEnergyModel,
     CompactionKinematics, CompactionMetrics, ContactCapture, DeviceFiberWorld,
-    DeviceWorldCheckpoint, FormationTargetError, PackedAssembly, PackingError, RelaxationSnapshot,
+    DeviceWorldCheckpoint, FormationTargetError, ImageForceSettings, PackedAssembly, PackingError,
+    RelaxationSnapshot,
 };
 
 /// CubeCL runtime selected for relaxation.
@@ -393,6 +394,75 @@ impl DeviceWorld {
             Self::Cuda(world) => world.run_batch(config, iterations),
             #[cfg(feature = "hip")]
             Self::Hip(world) => world.run_batch(config, iterations),
+        }
+    }
+
+    /// Uploads a packed assembly to the configured backend outside a GRASS
+    /// app, for callers that drive `run_batch` themselves.
+    pub fn new(config: &RelaxationConfig, packed: PackedAssembly) -> Self {
+        Self::upload(config, packed)
+    }
+
+    /// Uploads a normalized CT volume for the image force (initially off).
+    /// See [`DeviceFiberWorld::set_image`].
+    pub fn set_image(
+        &mut self,
+        image: &[f32],
+        shape_zyx: [usize; 3],
+        voxel_size: f32,
+        origin: [f32; 3],
+    ) {
+        match self {
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(world) => world.set_image(image, shape_zyx, voxel_size, origin),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.set_image(image, shape_zyx, voxel_size, origin),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(world) => world.set_image(image, shape_zyx, voxel_size, origin),
+            #[cfg(feature = "hip")]
+            Self::Hip(world) => world.set_image(image, shape_zyx, voxel_size, origin),
+        }
+    }
+
+    /// Sets the image-force parameters; a rate of zero disables the force.
+    pub fn set_image_force(&mut self, settings: ImageForceSettings) {
+        match self {
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(world) => world.set_image_force(settings),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.set_image_force(settings),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(world) => world.set_image_force(settings),
+            #[cfg(feature = "hip")]
+            Self::Hip(world) => world.set_image_force(settings),
+        }
+    }
+
+    /// Whether an image is resident and its force is enabled.
+    pub fn image_force_active(&self) -> bool {
+        match self {
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(world) => world.image_force_active(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.image_force_active(),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(world) => world.image_force_active(),
+            #[cfg(feature = "hip")]
+            Self::Hip(world) => world.image_force_active(),
+        }
+    }
+
+    /// Per-vertex `(owned mass in voxel², support)` at the current positions.
+    pub fn image_vertex_stats(&self) -> Vec<f32> {
+        match self {
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(world) => world.image_vertex_stats(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.image_vertex_stats(),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(world) => world.image_vertex_stats(),
+            #[cfg(feature = "hip")]
+            Self::Hip(world) => world.image_vertex_stats(),
         }
     }
 

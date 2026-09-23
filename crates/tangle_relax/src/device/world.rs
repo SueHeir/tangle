@@ -1,5 +1,8 @@
 mod cell_list;
+mod image_force;
 mod neighbor_list;
+
+pub use image_force::ImageForceSettings;
 
 use cubecl::prelude::*;
 use cubecl::server::Handle;
@@ -178,6 +181,7 @@ pub struct DeviceFiberWorld<R: Runtime> {
     active_layer_stiffness: f32,
     active_layer_max_translation: f32,
     active_vertex_targets: Option<ActiveVertexTargets>,
+    image_force: Option<image_force::ImageForce>,
     total_iterations: usize,
     cell_size: f32,
     cells_x: u32,
@@ -527,6 +531,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             active_layer_stiffness: 1.0,
             active_layer_max_translation: 1.0,
             active_vertex_targets: None,
+            image_force: None,
             total_iterations: 0,
             cell_size,
             cells_x,
@@ -1286,6 +1291,11 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                             targets.stiffness,
                             targets.max_translation,
                         );
+                    }
+                    // CT image attraction: one self-contained find/apply
+                    // launch pair, absent unless an image force is set.
+                    if let Some(image) = &self.image_force {
+                        self.launch_image_force(image, config.max_step);
                     }
                 }
             }
