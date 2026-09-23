@@ -21,7 +21,8 @@ ratio against the bend limit, deepest overlap, segment lengths) and writes
 before/after overlays. Fibers are resampled to segments at least one
 diameter long first: Tangle's contact treats non-adjacent segments of the
 same fiber as colliding, so shorter segments push a fiber apart by itself.
-Each fiber rests straight (see ``straightened``).
+Each fiber rests straight (see ``straightened``). Runs with the image on end
+with ``CHECK_SETTLE`` (default 200) iterations with it off.
 
 Usage: ``python ct_gpu_geometry_check.py [output_dir] [fit.json]``; without a
 fit.json the CPU fit is run first (about a minute). ``CT_TRUTH_DIR`` names the
@@ -63,6 +64,7 @@ BEND = synthetic.MIN_BEND_RADIUS / VOXEL  # voxels
 ITERATIONS = int(os.environ.get("CHECK_ITERATIONS", "2000"))
 IMAGE_RATE = float(os.environ.get("CHECK_IMAGE_RATE", "0.3"))
 KINK = 0.35  # random sideways kick per node, in radii
+SETTLE = int(os.environ.get("CHECK_SETTLE", "200"))  # image-off iterations at the end
 
 
 def relax(image: np.ndarray, lines: list[np.ndarray], radii: np.ndarray, rate: float) -> tuple[list[np.ndarray], float]:
@@ -94,6 +96,12 @@ def relax(image: np.ndarray, lines: list[np.ndarray], radii: np.ndarray, rate: f
     relaxer.set_image_force(rate=rate, reach_radii=1.4)
     status = relaxer.run(ITERATIONS)
     print(f"  solver: {status}")
+    if rate > 0 and SETTLE:
+        # The image step re-adds a little curvature each iteration before the
+        # solver removes it; a short settle without it ends on the geometry
+        # the constraints alone accept.
+        relaxer.set_image_force(0.0)
+        print(f"  settle: {relaxer.run(SETTLE)}")
     out = [np.asarray(line, dtype=np.float64) / h for line in relaxer.centerlines()]
     return out, time.perf_counter() - started
 
@@ -125,7 +133,9 @@ def kinked(lines: list[np.ndarray], seed: int = 1) -> list[np.ndarray]:
         line = line.copy()
         kick = rng.normal(0.0, KINK * RADIUS, size=line.shape)
         kick[[0, -1]] = 0.0
-        out.append(line + kick)
+        # Even spacing again, so the kicks bend the fiber without leaving
+        # segments shorter than a diameter (which self-contact would act on).
+        out.append(resample(line + kick, 2.5 * RADIUS))
     return out
 
 
