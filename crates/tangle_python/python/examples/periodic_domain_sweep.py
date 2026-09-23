@@ -1,7 +1,7 @@
 """Periodic domain-size sweep: layered stacks of one fiber type for DIRT.
 
-Every configuration stacks the same straight fibers (length 10, one material)
-in a cell that is periodic in x and y, then relaxes, compacts, and polishes it
+Every configuration stacks the same wavy fibers (length 10, one material) in
+a cell that is periodic in x and y, then relaxes, compacts, and polishes it
 for a DIRT through-thickness tension test. Only the in-plane side of the
 periodic cell changes, from 10 (one fiber length) down to 1 (a tenth of a
 fiber length). Areal fiber density, layer count, and final volume fraction are
@@ -19,11 +19,18 @@ smallest cell therefore refines to 40 segments per fiber. Segments must also
 be at least one diameter long: only adjacent segments of a fiber are excluded
 from contact, so shorter segments make every next-nearest pair overlap.
 
-A flat fiber that meets one of its own periodic images (every fiber on side
+Each fiber undulates out of plane (three waves along its length, 1.5
+diameters in amplitude, so about one layer spacing peak to peak) with a random
+phase, so neighboring layers nest into each other under compaction and carry
+load through the thickness. Straight in-plane layers only touch by friction
+and have almost no through-thickness strength.
+
+A fiber that meets one of its own periodic images (every fiber on side
 1, and fibers close to a lattice direction on the next few sides) would sit
 on itself in one plane and cannot relax apart. Each such fiber is deposited
-as a gentle ramp that rises a little more than one diameter between the two
-strands that would touch, so they start separated through the thickness.
+as a gentle straight ramp that rises a little more than one diameter between
+the two strands that would touch, so they start separated through the
+thickness; a ramp already crosses the layers, so it carries no wave.
 Lengths are unitless; scale every length setting together to change units.
 
 Each configuration writes ``side_XX/`` with the relaxed geometry (OVITO dump),
@@ -66,6 +73,9 @@ CONTACT_TOLERANCE = 0.01
 DEM_CONTACT_TOLERANCE = 0.002
 # Rise between self-touching strands of a ramped fiber, in diameters.
 RAMP_MARGIN = 1.2
+# Out-of-plane waviness: amplitude in diameters and full waves per fiber.
+WAVE_AMPLITUDE = 1.5
+WAVES_PER_FIBER = 3.0
 # In-plane distance, in diameters, below which two strands count as touching.
 SELF_CONTACT_CLEARANCE = 1.1
 DENSITY = 1_000.0
@@ -82,6 +92,8 @@ class SweepConfig:
     fibers_per_area: float = FIBERS_PER_AREA
     layer_count: int = LAYER_COUNT
     volume_fraction: float = VOLUME_FRACTION
+    wave_amplitude: float = WAVE_AMPLITUDE
+    waves_per_fiber: float = WAVES_PER_FIBER
     seed: int = SEED
 
     @property
@@ -134,6 +146,8 @@ class SweepConfig:
             raise ValueError("layer_count must be at least 1")
         if not 0.0 < self.volume_fraction < 1.0:
             raise ValueError("volume_fraction must lie between 0 and 1")
+        if self.wave_amplitude < 0.0 or self.waves_per_fiber < 0.0:
+            raise ValueError("wave_amplitude and waves_per_fiber must not be negative")
         self.segments_per_fiber
 
 
@@ -183,15 +197,29 @@ def ramp_slope(config: SweepConfig, angle: float) -> float:
 
 @dataclass(frozen=True)
 class FiberPlacement:
-    """In-plane pose and ramp of one straight fiber."""
+    """In-plane pose, ramp, and out-of-plane wave of one fiber."""
 
     angle: float
     center: tuple[float, float]
     slope: float
     tilt: float
+    amplitude: float = 0.0
+    phase: float = 0.0
 
     def rise(self, config: SweepConfig) -> float:
-        return config.fiber_length * self.slope / math.hypot(1.0, self.slope)
+        """Height between the lowest and highest point of the centerline."""
+        ramp = config.fiber_length * self.slope / math.hypot(1.0, self.slope)
+        return ramp + 2.0 * self.amplitude
+
+    def height(self, config: SweepConfig, x: float, span: float) -> float:
+        """Height above the layer base at in-plane distance ``x`` from the
+        start of a fiber that spans ``span`` in plane."""
+        wavenumber = 2.0 * math.pi * config.waves_per_fiber / config.fiber_length
+        return (
+            (x - 0.5 * span) * self.tilt
+            + x * self.slope
+            + self.amplitude * (1.0 + math.sin(wavenumber * x + self.phase))
+        )
 
 
 def sample_layers(config: SweepConfig, rng: random.Random) -> list[list[FiberPlacement]]:
@@ -205,8 +233,11 @@ def sample_layers(config: SweepConfig, rng: random.Random) -> list[list[FiberPla
             # A tiny tilt keeps crossings on flat fibers from sharing one
             # height exactly.
             tilt = rng.uniform(-0.01, 0.01) * config.diameter / config.fiber_length
+            phase = rng.uniform(0.0, 2.0 * math.pi)
+            slope = ramp_slope(config, angle)
+            amplitude = 0.0 if slope else config.wave_amplitude * config.diameter
             placements.append(
-                FiberPlacement(angle, center, ramp_slope(config, angle), tilt)
+                FiberPlacement(angle, center, slope, tilt, amplitude, phase)
             )
         layers.append(placements)
     return layers
@@ -216,34 +247,60 @@ def layer_rise(config: SweepConfig, placements: list[FiberPlacement]) -> float:
     return max(placement.rise(config) for placement in placements)
 
 
-def straight_layer_fibers(
+def profile(config: SweepConfig, placement: FiberPlacement) -> list[tuple[float, float]]:
+    """In-plane distance and height of every vertex, with every segment
+    exactly ``segment_length`` long so the fiber keeps its full length.
+
+    The span is not known before the walk, so the tilt is centered on the
+    straight-fiber span; the tilt only breaks exact height ties.
+    """
+    span = config.fiber_length / math.hypot(1.0, placement.slope + placement.tilt)
+    segment = config.segment_length
+    points = [(0.0, placement.height(config, 0.0, span))]
+    for _ in range(config.segments_per_fiber):
+        x0, z0 = points[-1]
+
+        def reach(x: float) -> float:
+            return math.hypot(x - x0, placement.height(config, x, span) - z0)
+
+        # The chord grows with the in-plane step for these gentle curves.
+        low, high = 0.0, segment
+        for _ in range(60):
+            middle = 0.5 * (low + high)
+            if reach(x0 + middle) < segment:
+                low = middle
+            else:
+                high = middle
+        x = x0 + 0.5 * (low + high)
+        points.append((x, placement.height(config, x, span)))
+    return points
+
+
+def layer_fibers(
     config: SweepConfig,
     layer: int,
     placements: list[FiberPlacement],
     z: float,
 ) -> tangle.FiberCollection:
-    """Straight fibers of one layer, starting at height ``z``.
+    """Fibers of one layer, lowest point near height ``z``.
 
     Fibers keep their full length even when it exceeds the cell; the
-    centerlines cross the periodic faces as many times as they need. Ramped
-    fibers keep that length along the ramp.
+    centerlines cross the periodic faces as many times as they need. Wavy
+    and ramped fibers keep that length along the curve.
     """
     fiber = material(config)
     collection = tangle.FiberCollection(f"layer {layer}")
     for placement in placements:
-        scale = 1.0 / math.hypot(1.0, placement.slope + placement.tilt)
-        step = config.segment_length * scale
-        start = -0.5 * config.fiber_length * scale
+        points = profile(config, placement)
+        middle = 0.5 * points[-1][0]
         direction = (math.cos(placement.angle), math.sin(placement.angle))
         centerline = [
             [
-                placement.center[0] + (start + index * step) * direction[0],
-                placement.center[1] + (start + index * step) * direction[1],
-                z
-                + (start + index * step) * placement.tilt
-                + index * step * placement.slope,
+                placement.center[0] + (x - middle) * direction[0],
+                placement.center[1] + (x - middle) * direction[1],
+                z + height,
             ]
-            for index in range(config.segments_per_fiber + 1)
+            for x, height in points
         ]
         collection.add_fiber(centerline, fiber, formation_layer=layer)
     return collection
@@ -318,7 +375,7 @@ def build(
     )
     recipe = tangle.Recipe(cell)
     for layer, placements in enumerate(layers):
-        recipe.insert(straight_layer_fibers(config, layer, placements, bases[layer]))
+        recipe.insert(layer_fibers(config, layer, placements, bases[layer]))
         recipe.relax_for(200)
         if layer == 0:
             continue
@@ -484,6 +541,13 @@ if __name__ == "__main__":
     parser.add_argument("--fibers-per-area", type=float, default=FIBERS_PER_AREA)
     parser.add_argument("--layers", type=int, default=LAYER_COUNT)
     parser.add_argument("--volume-fraction", type=float, default=VOLUME_FRACTION)
+    parser.add_argument(
+        "--wave-amplitude",
+        type=float,
+        default=WAVE_AMPLITUDE,
+        help="out-of-plane wave amplitude in diameters (0 for straight fibers)",
+    )
+    parser.add_argument("--waves-per-fiber", type=float, default=WAVES_PER_FIBER)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--backend", choices=("wgpu", "cpu"), default=None)
     parser.add_argument(
@@ -504,5 +568,7 @@ if __name__ == "__main__":
         fibers_per_area=args.fibers_per_area,
         layer_count=args.layers,
         volume_fraction=args.volume_fraction,
+        wave_amplitude=args.wave_amplitude,
+        waves_per_fiber=args.waves_per_fiber,
         seed=args.seed,
     )

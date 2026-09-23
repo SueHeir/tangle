@@ -33,7 +33,7 @@ class PeriodicDomainSweepTests(unittest.TestCase):
         for side in (1.0, 2.0):
             config = sweep.SweepConfig(side=side)
             layers = sweep.sample_layers(config, sweep.random.Random(1))
-            collection = sweep.straight_layer_fibers(config, 1, layers[1], z=1.0)
+            collection = sweep.layer_fibers(config, 1, layers[1], z=1.0)
             with self.subTest(side=side):
                 self.assertEqual(collection.layer_ids(), [1])
                 for centerline in collection.centerlines():
@@ -43,6 +43,36 @@ class PeriodicDomainSweepTests(unittest.TestCase):
                     )
                     # Centerlines are stored in single precision.
                     self.assertAlmostEqual(arc, config.fiber_length, places=4)
+
+    def test_wavy_fibers_undulate_through_about_one_layer(self):
+        config = sweep.SweepConfig(side=10.0)
+        layers = sweep.sample_layers(config, sweep.random.Random(2))
+        flat = [p for layer in layers for p in layer if not p.slope]
+        self.assertTrue(flat)
+        amplitude = config.wave_amplitude * config.diameter
+        collection = sweep.layer_fibers(config, 0, flat[:5], z=1.0)
+        for placement, centerline in zip(flat, collection.centerlines()):
+            heights = [point[2] for point in centerline]
+            with self.subTest(phase=placement.phase):
+                self.assertAlmostEqual(placement.amplitude, amplitude)
+                self.assertGreater(max(heights) - min(heights), 1.8 * amplitude)
+                self.assertLessEqual(
+                    max(heights) - min(heights), placement.rise(config) + 1e-4
+                )
+                self.assertGreaterEqual(min(heights), 1.0 - 1e-4)
+                for a, b in zip(centerline, centerline[1:]):
+                    self.assertAlmostEqual(
+                        math.dist(a, b), config.segment_length, places=4
+                    )
+
+    def test_straight_option_reproduces_flat_layers(self):
+        config = sweep.SweepConfig(side=10.0, wave_amplitude=0.0)
+        layers = sweep.sample_layers(config, sweep.random.Random(2))
+        (centerline,) = sweep.layer_fibers(
+            config, 0, [p for p in layers[0] if not p.slope][:1], z=1.0
+        ).centerlines()
+        heights = [point[2] for point in centerline]
+        self.assertLess(max(heights) - min(heights), 0.01 * config.diameter)
 
     def test_layer_counts_cover_every_fiber(self):
         for side in sweep.DOMAIN_SIDES:
@@ -69,7 +99,7 @@ class PeriodicDomainSweepTests(unittest.TestCase):
         config = sweep.SweepConfig(side=1.0)
         rng = sweep.random.Random(3)
         for layer in sweep.sample_layers(config, rng):
-            (centerline,) = sweep.straight_layer_fibers(
+            (centerline,) = sweep.layer_fibers(
                 config, 0, layer, z=1.0
             ).centerlines()
             points = []
