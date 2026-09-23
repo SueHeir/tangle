@@ -611,13 +611,16 @@ class _Fitter:
         self.set_image(image)
 
     def set_image(self, image: np.ndarray) -> None:
-        from scipy.ndimage import distance_transform_edt
+        from scipy.ndimage import distance_transform_edt, maximum_filter
 
         self.image = image
         self.foreground = image > 0.5
-        # Local thickness: distance to the nearest void voxel center. On a
-        # fiber axis it is the radius plus about half a voxel.
-        self.depth = distance_transform_edt(self.foreground).astype(np.float32)
+        # Local thickness: distance to the nearest void voxel center, taken
+        # as the maximum over the 3x3x3 neighborhood so a centerline between
+        # voxel centers reads the axis value rather than an interpolated,
+        # lower one. On a fiber axis it is about the radius: the foreground
+        # edge sits at the half-maximum, which is the fiber surface.
+        self.depth = maximum_filter(distance_transform_edt(self.foreground), size=3).astype(np.float32)
         self.hessians = {}
 
     def hessian(self, kind: int) -> HessianField:
@@ -672,9 +675,7 @@ class _Fitter:
         measured = np.empty(len(lines))
         for i, line in enumerate(lines):
             inner = line[1:-1] if len(line) > 2 else line
-            # On a fiber axis the distance to the nearest void voxel center is
-            # about the radius plus half a voxel.
-            measured[i] = max(float(np.median(sample_image(self.depth, inner))) - 0.5, 0.5)
+            measured[i] = max(float(np.median(sample_image(self.depth, inner))), 0.5)
         margin = self.settings.thickness_margin_voxels
         if margin is None:
             margin = 0.0
