@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +32,8 @@ class SyntheticScan:
     centerlines: list[np.ndarray]
     radii: np.ndarray
     voxel_size: float
+    # Cell period in voxels along each (x, y, z) axis; 0 where not periodic.
+    period: np.ndarray = field(default_factory=lambda: np.zeros(3))
 
     def crop(self, low: tuple[int, int, int], high: tuple[int, int, int]) -> "SyntheticScan":
         """The sub-volume ``[low, high)`` (voxel indices, ``(x, y, z)``).
@@ -39,8 +41,10 @@ class SyntheticScan:
         Cropping a scan of a larger cell gives fibers that run through the
         scan boundary, as in a real scan. Truth centerlines are clipped to the
         crop; a fiber that leaves and re-enters becomes several pieces, and
-        labels are renumbered to match the remaining pieces.
+        labels are renumbered to match the remaining pieces. In a periodic
+        cell, the periodic images of each centerline are clipped too.
         """
+        import itertools
         from ._geometry import resample
 
         low_a, high_a = np.asarray(low, dtype=int), np.asarray(high, dtype=int)
@@ -49,8 +53,13 @@ class SyntheticScan:
         old_labels = self.labels[window]
         extent = (high_a - low_a).astype(np.float64)
         lines, radii, origin = [], [], []
-        for index, line in enumerate(self.centerlines):
-            dense = resample(np.asarray(line, dtype=np.float64), 0.5) - low_a
+        shifts = [
+            np.array(combo) * self.period
+            for combo in itertools.product(*[(-1, 0, 1) if p > 0 else (0,) for p in self.period])
+        ]
+        copies = [(index, shift) for index in range(len(self.centerlines)) for shift in shifts]
+        for index, shift in copies:
+            dense = resample(np.asarray(self.centerlines[index], dtype=np.float64), 0.5) + shift - low_a
             inside = np.all((dense >= 0) & (dense < extent), axis=1)
             start = None
             for k, flag in enumerate(list(inside) + [False]):
@@ -121,7 +130,11 @@ def synthetic_ct(
     centerlines = [np.asarray(line) / voxel_size for line in source.centerlines()]
     # Export ids are one-based in source order for these single-material scans.
     radii = _radii(source, labels, centerlines, voxel_size)
-    return SyntheticScan(volume, labels, centerlines, radii, voxel_size)
+    period = np.zeros(3)
+    cell = getattr(source, "cell", None)
+    if cell is not None:
+        period = np.array([n / voxel_size if p else 0.0 for n, p in zip(cell.lengths, cell.periodic)])
+    return SyntheticScan(volume, labels, centerlines, radii, voxel_size, period)
 
 
 def _radii(source, labels, centerlines, voxel_size) -> np.ndarray:

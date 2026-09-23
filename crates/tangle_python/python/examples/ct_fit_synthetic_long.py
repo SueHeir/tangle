@@ -5,7 +5,9 @@ cross the scan boundary and fiber ends inside the scan are rare (PuMA's
 FiberForm crop is like this). This example imitates that:
 
 1. Generate and relax 154 wavy planar fibers of 12 µm diameter and 300-450 µm
-   length in a 480 µm cell.
+   length in a 480 µm cell, periodic in the fiber plane. Periodicity keeps
+   fiber ends spread uniformly; in a closed cell relaxation packs them
+   against the walls and the central crop would see almost none.
 2. Render the whole cell as a CT-like scan and crop the central 240 µm, so
    fibers run through the crop boundary.
 3. Fit it twice, without and with ``FiberSpec(length=...)``, score both
@@ -41,9 +43,9 @@ VOXEL = 1.5 * um
 
 def load_or_make_truth() -> tangle.Assembly:
     """Relaxing the truth is the slow step, so its centerlines are cached."""
-    cache = OUTPUT / "truth_centerlines.json"
+    cache = OUTPUT / "truth_centerlines_periodic.json"
     material = tangle.Material("synthetic fiber", diameter=DIAMETER, min_bend_radius=MIN_BEND_RADIUS)
-    cell = tangle.Cell([CELL] * 3)
+    cell = tangle.Cell([CELL] * 3, periodic="xy")
     if not cache.exists():
         population = tangle.FiberPopulation(
             material=material,
