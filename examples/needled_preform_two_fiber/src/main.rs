@@ -284,6 +284,7 @@ fn relax_until_formation_ready() -> FormationOperation {
             curvature_ratio: AcceptanceLimit::soft(FORMATION_BEND_ACCEPTANCE),
         },
         maximum_iterations: FORMATION_RELAXATION_BUDGET,
+        extra_iterations: SolvePolicy::default_extra_iterations(FORMATION_RELAXATION_BUDGET),
         on_exhaustion: SolveExhaustion::ContinueIfHardLimitsSatisfied,
     })
 }
@@ -297,6 +298,7 @@ fn relax_until_final_admissible() -> FormationOperation {
             curvature_ratio: AcceptanceLimit::hard(FINAL_BEND_ACCEPTANCE),
         },
         maximum_iterations: FINAL_RELAXATION_BUDGET,
+        extra_iterations: SolvePolicy::default_extra_iterations(FINAL_RELAXATION_BUDGET),
         on_exhaustion: SolveExhaustion::Reject,
     })
 }

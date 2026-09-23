@@ -682,6 +682,7 @@ class SolvePolicy:
     hard_penetration: bool
     hard_curvature: bool
     max_iterations: int
+    max_extra_iterations: int
     on_budget_exhausted: BudgetExhaustion
     def __init__(
         self,
@@ -694,6 +695,7 @@ class SolvePolicy:
         hard_penetration: bool = ...,
         hard_curvature: bool = ...,
         max_iterations: int = ...,
+        max_extra_iterations: int | None = ...,
         on_budget_exhausted: BudgetExhaustion = ...,
     ) -> None: ...
     def copy(self) -> SolvePolicy: ...
@@ -889,6 +891,10 @@ class RunResult:
     def cell_count(self) -> int: ...
     @property
     def events(self) -> list[str]: ...
+    @property
+    def extra_iterations(self) -> int: ...
+    @property
+    def post_recipe_iterations(self) -> int: ...
     @property
     def warnings(self) -> list[str]: ...
     @property

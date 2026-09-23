@@ -868,6 +868,14 @@ pub(crate) struct PyRunResult {
     pub cell_count: usize,
     #[pyo3(get)]
     pub events: Vec<String>,
+    /// Iterations solve steps spent past their `max_iterations` budgets.
+    #[pyo3(get)]
+    pub extra_iterations: usize,
+    /// Iterations run after the last recipe operation, while the plain
+    /// relaxation settles to its own convergence limits; zero when the recipe
+    /// stopped before its last operation.
+    #[pyo3(get)]
+    pub post_recipe_iterations: usize,
     #[pyo3(get)]
     pub warnings: Vec<String>,
     #[pyo3(get)]
@@ -1047,6 +1055,7 @@ fn run_native_recipe(
     debug_ovito_config: Option<OvitoTrajectoryConfig>,
     stack_axis: usize,
 ) -> Result<PyRunResult, RunFailure> {
+    let operation_count = recipe.operations.len();
     let mut app = App::new();
     app.add_plugins(TangleWorkflowPlugin {
         initial: TangleStage::Relax,
@@ -1113,6 +1122,23 @@ fn run_native_recipe(
             .iter()
             .map(|event| event.description.clone())
             .collect(),
+        extra_iterations: recipe_state
+            .events
+            .iter()
+            .map(|event| event.extra_iterations)
+            .sum(),
+        // Only a recipe that ran every operation has a post-recipe phase;
+        // otherwise the last event may belong to an unfinished operation.
+        post_recipe_iterations: if recipe_state.next_operation >= operation_count {
+            relaxation.iterations.saturating_sub(
+                recipe_state
+                    .events
+                    .last()
+                    .map_or(relaxation.iterations, |event| event.iteration),
+            )
+        } else {
+            0
+        },
         warnings: recipe_state
             .warnings
             .iter()

@@ -347,6 +347,7 @@ pub(super) fn accept_compaction_step(
                 active.steps,
                 readings.join("; ")
             ),
+            extra_iterations: 0,
         });
     }
 }

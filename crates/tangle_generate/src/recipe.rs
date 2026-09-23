@@ -413,8 +413,84 @@ pub struct SolvePolicy {
     pub acceptance: RelaxationAcceptance,
     /// Maximum GPU iterations spent at this gate.
     pub maximum_iterations: usize,
+    /// Iterations allowed past `maximum_iterations` while `on_exhaustion`
+    /// would still reject: solving continues until the hard limits hold (all
+    /// limits, for [`SolveExhaustion::Reject`]) or this extension is spent.
+    #[serde(default)]
+    pub extra_iterations: usize,
     /// Action taken if the budget ends before every acceptance limit passes.
     pub on_exhaustion: SolveExhaustion,
+}
+
+impl SolvePolicy {
+    /// Default [`extra_iterations`](Self::extra_iterations): half the main
+    /// budget.
+    pub fn default_extra_iterations(maximum_iterations: usize) -> usize {
+        maximum_iterations / 2
+    }
+}
+
+/// Outcome of a [`SolvePolicy`] gate after one relaxation batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PolicyGate {
+    /// Every acceptance limit passes.
+    Accept,
+    /// Keep solving for at most this many more iterations.
+    Solve { remaining: usize },
+    /// The budget is spent and only soft limits remain unmet.
+    ContinueWithWarning,
+    /// The budget and its extension are spent and the gate cannot pass.
+    Reject,
+}
+
+/// Decides a policy gate from the iterations completed at it, the relaxation
+/// state measured after the latest batch, and the iterations left before the
+/// run's overall [`RelaxationConfig::max_iterations`] cap.
+pub(crate) fn policy_gate(
+    policy: &SolvePolicy,
+    completed: usize,
+    measured_current_geometry: bool,
+    relaxation: &RelaxationState,
+    run_remaining: usize,
+) -> PolicyGate {
+    if measured_current_geometry && acceptance_satisfied(policy.acceptance, relaxation) {
+        return PolicyGate::Accept;
+    }
+    if completed < policy.maximum_iterations {
+        return PolicyGate::Solve {
+            remaining: policy.maximum_iterations - completed,
+        };
+    }
+    if policy.on_exhaustion == SolveExhaustion::ContinueIfHardLimitsSatisfied
+        && hard_acceptance_satisfied(policy.acceptance, relaxation)
+    {
+        return PolicyGate::ContinueWithWarning;
+    }
+    // The extension stops one iteration short of the run's overall cap, so
+    // it ends at a batch boundary where the recipe can still record the
+    // failure instead of the run stopping mid-operation.
+    let extended_budget = policy
+        .maximum_iterations
+        .saturating_add(policy.extra_iterations);
+    if completed < extended_budget && run_remaining > 1 {
+        return PolicyGate::Solve {
+            remaining: (extended_budget - completed).min(run_remaining - 1),
+        };
+    }
+    PolicyGate::Reject
+}
+
+/// Describes iterations spent past a policy's main budget, if any.
+fn extension_note(policy: &SolvePolicy, completed: usize) -> String {
+    let extra = completed.saturating_sub(policy.maximum_iterations);
+    if extra == 0 {
+        String::new()
+    } else {
+        format!(
+            ", {extra} of them past the {}-iteration budget",
+            policy.maximum_iterations
+        )
+    }
 }
 
 /// Nonterminal soft-limit violation recorded by a formation recipe.
@@ -547,6 +623,10 @@ pub struct FormationEvent {
     pub iteration: usize,
     /// Human-readable command summary for reports and educational examples.
     pub description: String,
+    /// Iterations a policy gate spent past its main budget
+    /// ([`SolvePolicy::extra_iterations`]); zero for every other command.
+    #[serde(default)]
+    pub extra_iterations: usize,
 }
 
 /// A formation operation that stopped without producing an admissible state.
@@ -1311,51 +1391,31 @@ fn control_formation_recipe(
                     .get_or_insert(relaxation.iterations);
                 let completed = relaxation.iterations.saturating_sub(started);
                 let measured_current_geometry = completed > 0 || relaxation.converged;
-                if measured_current_geometry && acceptance_satisfied(policy.acceptance, &relaxation)
-                {
-                    state.relaxation_started_at = None;
-                    clear_recipe_solver_targets(&mut workflow);
-                    finish_operation(
-                        &mut state,
-                        relaxation.iterations,
-                        format!(
-                            "{} accepted in {completed} iterations (penetration {:.3e}, curvature ratio {:.6})",
-                            policy.name,
-                            relaxation.max_penetration,
-                            relaxation.max_curvature_ratio
-                        ),
-                    );
-                    record_debug_snapshot(
-                        &relaxation_config,
-                        device.world.as_ref().unwrap(),
-                        &assembly,
-                        &mut relaxation,
-                    );
-                    continue;
-                }
-                if completed >= policy.maximum_iterations {
-                    let unmet = unmet_acceptance_limits(policy.acceptance, &relaxation);
-                    let hard_limits_satisfied =
-                        hard_acceptance_satisfied(policy.acceptance, &relaxation);
-                    if policy.on_exhaustion == SolveExhaustion::ContinueIfHardLimitsSatisfied
-                        && hard_limits_satisfied
-                    {
-                        let reason = format!(
-                            "{} exhausted {} iterations with deferred soft limits: {unmet}",
-                            policy.name, policy.maximum_iterations
-                        );
-                        let operation = state.next_operation;
-                        state.warnings.push(FormationWarning {
-                            operation,
-                            iteration: relaxation.iterations,
-                            reason: reason.clone(),
-                        });
+                let extra = completed.saturating_sub(policy.maximum_iterations);
+                let run_remaining = relaxation_config
+                    .max_iterations
+                    .saturating_sub(relaxation.iterations);
+                match policy_gate(
+                    policy,
+                    completed,
+                    measured_current_geometry,
+                    &relaxation,
+                    run_remaining,
+                ) {
+                    PolicyGate::Accept => {
                         state.relaxation_started_at = None;
                         clear_recipe_solver_targets(&mut workflow);
-                        finish_operation(
+                        finish_policy_operation(
                             &mut state,
                             relaxation.iterations,
-                            format!("continue after soft-limit warning: {reason}"),
+                            format!(
+                                "{} accepted in {completed} iterations{} (penetration {:.3e}, curvature ratio {:.6})",
+                                policy.name,
+                                extension_note(policy, completed),
+                                relaxation.max_penetration,
+                                relaxation.max_curvature_ratio
+                            ),
+                            extra,
                         );
                         record_debug_snapshot(
                             &relaxation_config,
@@ -1365,47 +1425,87 @@ fn control_formation_recipe(
                         );
                         continue;
                     }
-
-                    let reason = format!(
-                        "{} failed after {} iterations: {unmet}",
-                        policy.name, policy.maximum_iterations
-                    );
-                    state.failure = Some(FormationFailure {
-                        operation: state.next_operation,
-                        iteration: relaxation.iterations,
-                        reason,
-                    });
-                    state.released = true;
-                    *relaxation_overrides = RelaxationOverrides::default();
-                    state.relaxation_started_at = None;
-                    device
-                        .world
-                        .as_mut()
-                        .expect("formation recipe requires an uploaded CubeCL device world")
-                        .clear_layer_targets();
-                    device
-                        .world
-                        .as_mut()
-                        .expect("formation recipe requires an uploaded CubeCL device world")
-                        .clear_vertex_targets();
-                    record_debug_snapshot(
-                        &relaxation_config,
-                        device.world.as_ref().unwrap(),
-                        &assembly,
-                        &mut relaxation,
-                    );
-                    release_workflow(&mut workflow);
-                    next.set(TangleStage::Done);
-                    return;
+                    PolicyGate::ContinueWithWarning => {
+                        let unmet = unmet_acceptance_limits(policy.acceptance, &relaxation);
+                        let reason = if extra == 0 {
+                            format!(
+                                "{} exhausted {} iterations with deferred soft limits: {unmet}",
+                                policy.name, policy.maximum_iterations
+                            )
+                        } else {
+                            format!(
+                                "{} exhausted {} iterations with deferred soft limits (hard limits met {extra} iterations later): {unmet}",
+                                policy.name, policy.maximum_iterations
+                            )
+                        };
+                        let operation = state.next_operation;
+                        state.warnings.push(FormationWarning {
+                            operation,
+                            iteration: relaxation.iterations,
+                            reason: reason.clone(),
+                        });
+                        state.relaxation_started_at = None;
+                        clear_recipe_solver_targets(&mut workflow);
+                        finish_policy_operation(
+                            &mut state,
+                            relaxation.iterations,
+                            format!("continue after soft-limit warning: {reason}"),
+                            extra,
+                        );
+                        record_debug_snapshot(
+                            &relaxation_config,
+                            device.world.as_ref().unwrap(),
+                            &assembly,
+                            &mut relaxation,
+                        );
+                        continue;
+                    }
+                    PolicyGate::Reject => {
+                        let unmet = unmet_acceptance_limits(policy.acceptance, &relaxation);
+                        let reason = format!(
+                            "{} failed after {completed} iterations{}: {unmet}",
+                            policy.name,
+                            extension_note(policy, completed)
+                        );
+                        state.failure = Some(FormationFailure {
+                            operation: state.next_operation,
+                            iteration: relaxation.iterations,
+                            reason,
+                        });
+                        state.released = true;
+                        *relaxation_overrides = RelaxationOverrides::default();
+                        state.relaxation_started_at = None;
+                        device
+                            .world
+                            .as_mut()
+                            .expect("formation recipe requires an uploaded CubeCL device world")
+                            .clear_layer_targets();
+                        device
+                            .world
+                            .as_mut()
+                            .expect("formation recipe requires an uploaded CubeCL device world")
+                            .clear_vertex_targets();
+                        record_debug_snapshot(
+                            &relaxation_config,
+                            device.world.as_ref().unwrap(),
+                            &assembly,
+                            &mut relaxation,
+                        );
+                        release_workflow(&mut workflow);
+                        next.set(TangleStage::Done);
+                        return;
+                    }
+                    PolicyGate::Solve { remaining } => {
+                        workflow.hold_relax_stage = true;
+                        workflow.force_full_batch = false;
+                        workflow.batch_iteration_limit = Some(remaining.max(1));
+                        workflow.penetration_tolerance = Some(policy.solver_targets.penetration);
+                        workflow.maximum_curvature_ratio =
+                            Some(policy.solver_targets.curvature_ratio);
+                        relaxation.converged = false;
+                        return;
+                    }
                 }
-                workflow.hold_relax_stage = true;
-                workflow.force_full_batch = false;
-                workflow.batch_iteration_limit =
-                    Some(policy.maximum_iterations.saturating_sub(completed).max(1));
-                workflow.penetration_tolerance = Some(policy.solver_targets.penetration);
-                workflow.maximum_curvature_ratio = Some(policy.solver_targets.curvature_ratio);
-                relaxation.converged = false;
-                return;
             }
             FormationOperation::RelaxUntilTargetsReached {
                 tolerance,
@@ -1514,6 +1614,7 @@ fn control_formation_recipe(
                             "periodic capture created {} '{}' junctions from {} candidates",
                             report.created, report.policy_name, report.candidates
                         ),
+                        extra_iterations: 0,
                     });
                     state.junction_captures.push(report);
                     state.last_periodic_capture_iteration = Some(relaxation.iterations);
@@ -1789,10 +1890,20 @@ fn clear_recipe_solver_targets(workflow: &mut WorkflowControl) {
 }
 
 fn finish_operation(state: &mut FormationRecipeState, iteration: usize, description: String) {
+    finish_policy_operation(state, iteration, description, 0);
+}
+
+fn finish_policy_operation(
+    state: &mut FormationRecipeState,
+    iteration: usize,
+    description: String,
+    extra_iterations: usize,
+) {
     state.events.push(FormationEvent {
         operation: state.next_operation,
         iteration,
         description,
+        extra_iterations,
     });
     state.next_operation += 1;
 }
