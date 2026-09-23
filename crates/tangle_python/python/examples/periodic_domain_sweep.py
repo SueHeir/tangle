@@ -170,7 +170,7 @@ def compaction(config: SweepConfig) -> tangle.CompactionSettings:
         max_log_strain=0.05,
         growth_factor=1.2,
         shrink_factor=0.5,
-        relax_iterations=200,
+        relax_iterations=1_000,
         max_shortening_over_min_diameter=0.5,
         max_penetration=5 * CONTACT_TOLERANCE * config.diameter,
         max_curvature_ratio=1.0e6,
@@ -210,6 +210,9 @@ def build(
                 )
             recipe.relax_for(200)
         placed += 1
+    # Compaction first waits for a relaxed baseline; fixed-length deposition
+    # relaxes do not guarantee one, and without it compaction stops at once.
+    recipe.relax_until_converged(max_iterations=30_000)
     recipe.compact(compaction(config))
     recipe.solve(
         tangle.SolvePolicy(
@@ -269,6 +272,13 @@ def run(
     analysis = result.characterize()
     neighbors = result.characterize_neighbors(0.05 * config.diameter)
     cell = result.assembly.cell
+    compaction_event = next(
+        (event for event in result.events if event.startswith("compact in")), ""
+    )
+    compacted = "TargetReached" in compaction_event
+    if not compacted:
+        print(f"warning: {config.name} did not reach the target volume fraction: "
+              f"{compaction_event or 'no compaction event'}")
     summary = {
         **asdict(config),
         "name": config.name,
@@ -282,6 +292,8 @@ def run(
         "cell_lengths": cell.lengths,
         "thickness": cell.lengths[2],
         "nominal_volume_fraction": analysis.nominal_swept_volume_fraction,
+        "compacted_to_target": compacted,
+        "compaction": compaction_event,
         "contacts_per_length": neighbors.contacts_per_length,
         "contact_ratio_to_random": neighbors.contact_ratio_to_random,
         "bpm_mode": bpm_mode,
@@ -307,6 +319,7 @@ SUMMARY_COLUMNS = (
     "max_penetration",
     "thickness",
     "nominal_volume_fraction",
+    "compacted_to_target",
     "contacts_per_length",
     "contact_ratio_to_random",
     "bpm_particles",
