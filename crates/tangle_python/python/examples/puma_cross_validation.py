@@ -70,7 +70,10 @@ def run_puma(
         import numpy as np
         import pumapy as puma
     except ImportError:
-        print("PuMA comparison skipped: install pumapy and NumPy in this environment.")
+        print(
+            "PuMA comparison skipped: install PuMA from conda-forge "
+            "(conda create -n puma conda-forge::puma) and build TANGLE into that environment."
+        )
         return None
 
     workspace = puma.import_vti(str(export.domain_path), import_ws=True)

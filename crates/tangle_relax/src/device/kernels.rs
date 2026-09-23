@@ -1126,127 +1126,10 @@ pub(crate) fn find_internal_corrections(
     internal_corrections[3 * index + 2] = cz;
 }
 
-/// Computes one three-point bend-limit projection per internal vertex.
-///
-/// The nine outputs are corrections for the previous, center, and next
-/// vertices. Pinned vertices have zero inverse mass, so the remaining free
-/// vertices receive the complete projection.
-#[cube(launch_unchecked)]
-pub(crate) fn find_curvature_limit_corrections(
-    positions: &[f32],
-    segment_vertices: &[u32],
-    vertex_max_curvature: &[f32],
-    vertex_active: &[u32],
-    vertex_pinned: &[u32],
-    vertex_segments: &[u32],
-    control: &[u32],
-    bend_corrections: &mut [f32],
-    stiffness: f32,
-    safety_margin: f32,
-) {
-    let vertex = ABSOLUTE_POS;
-    if vertex >= vertex_active.len() || control[0] == 0 {
-        terminate!();
-    }
-    let center = vertex as usize;
-    for component in 0..9 {
-        bend_corrections[9 * center + component] = 0.0;
-    }
-    if vertex_active[center] == 0 {
-        terminate!();
-    }
-    let maximum_curvature = vertex_max_curvature[center] * (1.0 - safety_margin);
-    let previous_segment = vertex_segments[2 * center];
-    let next_segment = vertex_segments[2 * center + 1];
-    if maximum_curvature <= 0.0 || previous_segment == u32::MAX || next_segment == u32::MAX {
-        terminate!();
-    }
-
-    let previous_segment_index = previous_segment as usize;
-    let previous_a = segment_vertices[2 * previous_segment_index] as usize;
-    let previous_b = segment_vertices[2 * previous_segment_index + 1] as usize;
-    let previous = if previous_a == center {
-        previous_b
-    } else {
-        previous_a
-    };
-    let next_segment_index = next_segment as usize;
-    let next_a = segment_vertices[2 * next_segment_index] as usize;
-    let next_b = segment_vertices[2 * next_segment_index + 1] as usize;
-    let next = if next_a == center { next_b } else { next_a };
-
-    let ux = positions[3 * center] - positions[3 * previous];
-    let uy = positions[3 * center + 1] - positions[3 * previous + 1];
-    let uz = positions[3 * center + 2] - positions[3 * previous + 2];
-    let vx = positions[3 * next] - positions[3 * center];
-    let vy = positions[3 * next + 1] - positions[3 * center + 1];
-    let vz = positions[3 * next + 2] - positions[3 * center + 2];
-    let first_length = (ux * ux + uy * uy + uz * uz).sqrt();
-    let second_length = (vx * vx + vy * vy + vz * vz).sqrt();
-    if first_length <= 1.0e-7_f32 || second_length <= 1.0e-7_f32 {
-        terminate!();
-    }
-
-    let unx = ux / first_length;
-    let uny = uy / first_length;
-    let unz = uz / first_length;
-    let vnx = vx / second_length;
-    let vny = vy / second_length;
-    let vnz = vz / second_length;
-    let cosine = (unx * vnx + uny * vny + unz * vnz).clamp(-1.0, 1.0);
-    let sine_half = 0.25 * maximum_curvature * (first_length + second_length);
-    if sine_half >= 1.0 {
-        terminate!();
-    }
-    let minimum_cosine = 1.0 - 2.0 * sine_half * sine_half;
-    let violation = minimum_cosine - cosine;
-    if violation <= 0.0 {
-        terminate!();
-    }
-
-    // Derivatives of dot(normalize(u), normalize(v)) with respect to u and v.
-    let gux = (vnx - cosine * unx) / first_length;
-    let guy = (vny - cosine * uny) / first_length;
-    let guz = (vnz - cosine * unz) / first_length;
-    let gvx = (unx - cosine * vnx) / second_length;
-    let gvy = (uny - cosine * vny) / second_length;
-    let gvz = (unz - cosine * vnz) / second_length;
-    let center_gx = gux - gvx;
-    let center_gy = guy - gvy;
-    let center_gz = guz - gvz;
-    let mut previous_weight = 1.0_f32;
-    let mut center_weight = 1.0_f32;
-    let mut next_weight = 1.0_f32;
-    if vertex_pinned[previous] != 0 {
-        previous_weight = 0.0;
-    }
-    if vertex_pinned[center] != 0 {
-        center_weight = 0.0;
-    }
-    if vertex_pinned[next] != 0 {
-        next_weight = 0.0;
-    }
-    let denominator = previous_weight * (gux * gux + guy * guy + guz * guz)
-        + center_weight * (center_gx * center_gx + center_gy * center_gy + center_gz * center_gz)
-        + next_weight * (gvx * gvx + gvy * gvy + gvz * gvz);
-    if denominator <= 1.0e-12_f32 {
-        terminate!();
-    }
-    let scale = stiffness * violation / denominator;
-    bend_corrections[9 * center] = -previous_weight * scale * gux;
-    bend_corrections[9 * center + 1] = -previous_weight * scale * guy;
-    bend_corrections[9 * center + 2] = -previous_weight * scale * guz;
-    bend_corrections[9 * center + 3] = center_weight * scale * center_gx;
-    bend_corrections[9 * center + 4] = center_weight * scale * center_gy;
-    bend_corrections[9 * center + 5] = center_weight * scale * center_gz;
-    bend_corrections[9 * center + 6] = next_weight * scale * gvx;
-    bend_corrections[9 * center + 7] = next_weight * scale * gvy;
-    bend_corrections[9 * center + 8] = next_weight * scale * gvz;
-}
-
 #[cube]
 fn project_curvature_triplet_in_place(
     positions: &mut [f32],
+    wall_reactions: &mut [f32],
     vertex_max_curvature: &[f32],
     vertex_pinned: &[u32],
     cell_lower: &[f32],
@@ -1336,19 +1219,34 @@ fn project_curvature_triplet_in_place(
                             let previous_coordinate = 3 * previous + axis;
                             let center_coordinate = 3 * center + axis;
                             let next_coordinate = 3 * next + axis;
-                            let mut previous_value = positions[previous_coordinate]
+                            let moved_previous = positions[previous_coordinate]
                                 - previous_weight * scale * previous_gradient;
-                            let mut center_value = positions[center_coordinate]
+                            let moved_center = positions[center_coordinate]
                                 + center_weight * scale * center_gradient;
-                            let mut next_value =
+                            let moved_next =
                                 positions[next_coordinate] + next_weight * scale * next_gradient;
+                            let mut previous_value = moved_previous;
+                            let mut center_value = moved_center;
+                            let mut next_value = moved_next;
                             if cell_periodic[axis] == 0 {
-                                previous_value = previous_value
-                                    .clamp(cell_lower[axis] + radius, cell_upper[axis] - radius);
-                                center_value = center_value
-                                    .clamp(cell_lower[axis] + radius, cell_upper[axis] - radius);
-                                next_value = next_value
-                                    .clamp(cell_lower[axis] + radius, cell_upper[axis] - radius);
+                                // Clamp to the walls and record the reaction,
+                                // as the other position updates do.
+                                let lower = cell_lower[axis] + radius;
+                                let upper = cell_upper[axis] - radius;
+                                previous_value = moved_previous.clamp(lower, upper);
+                                center_value = moved_center.clamp(lower, upper);
+                                next_value = moved_next.clamp(lower, upper);
+                                if previous_weight > 0.0 {
+                                    wall_reactions[previous_coordinate] +=
+                                        moved_previous - previous_value;
+                                }
+                                if center_weight > 0.0 {
+                                    wall_reactions[center_coordinate] +=
+                                        moved_center - center_value;
+                                }
+                                if next_weight > 0.0 {
+                                    wall_reactions[next_coordinate] += moved_next - next_value;
+                                }
                             }
                             if previous_weight > 0.0 {
                                 positions[previous_coordinate] = previous_value;
@@ -1373,6 +1271,7 @@ fn project_curvature_triplet_in_place(
 #[cube(launch_unchecked)]
 pub(crate) fn project_fiber_curvature_in_place(
     positions: &mut [f32],
+    wall_reactions: &mut [f32],
     fiber_segment_spans: &[u32],
     fiber_vertex_spans: &[u32],
     segment_radii: &[f32],
@@ -1399,122 +1298,67 @@ pub(crate) fn project_fiber_curvature_in_place(
     }
     let segment_start = fiber_segment_spans[2 * fiber_index] as usize;
     let radius = segment_radii[segment_start];
+    // Plain counted loops over the span: CubeCL's SSA verifier rejects the
+    // equivalent early-exit `while` scans. Inactive (unrefined) midpoint slots
+    // are skipped, so each sweep visits the active chain in material order.
     for _ in 0..sweeps {
-        let mut previous = start;
-        let mut center = start + 1;
-        while center < start + count && vertex_active[center] == 0 {
-            center += 1;
+        let mut older = 0_u32;
+        let mut newer = 0_u32;
+        let mut seen = 0_u32;
+        for local in 0..count {
+            let vertex = (start + local) as u32;
+            if vertex_active[vertex as usize] != 0 {
+                if seen >= 2 {
+                    project_curvature_triplet_in_place(
+                        positions,
+                        wall_reactions,
+                        vertex_max_curvature,
+                        vertex_pinned,
+                        cell_lower,
+                        cell_upper,
+                        cell_periodic,
+                        older as usize,
+                        newer as usize,
+                        vertex as usize,
+                        radius,
+                        stiffness,
+                        safety_margin,
+                    );
+                }
+                older = newer;
+                newer = vertex;
+                seen += 1;
+            }
         }
-        while center < start + count {
-            let mut next = center + 1;
-            while next < start + count && vertex_active[next] == 0 {
-                next += 1;
+        let mut later = 0_u32;
+        let mut middle = 0_u32;
+        let mut seen_backward = 0_u32;
+        for local in 0..count {
+            let vertex = (start + count - 1 - local) as u32;
+            if vertex_active[vertex as usize] != 0 {
+                if seen_backward >= 2 {
+                    project_curvature_triplet_in_place(
+                        positions,
+                        wall_reactions,
+                        vertex_max_curvature,
+                        vertex_pinned,
+                        cell_lower,
+                        cell_upper,
+                        cell_periodic,
+                        vertex as usize,
+                        middle as usize,
+                        later as usize,
+                        radius,
+                        stiffness,
+                        safety_margin,
+                    );
+                }
+                later = middle;
+                middle = vertex;
+                seen_backward += 1;
             }
-            if next >= start + count {
-                break;
-            }
-            project_curvature_triplet_in_place(
-                positions,
-                vertex_max_curvature,
-                vertex_pinned,
-                cell_lower,
-                cell_upper,
-                cell_periodic,
-                previous,
-                center,
-                next,
-                radius,
-                stiffness,
-                safety_margin,
-            );
-            previous = center;
-            center = next;
-        }
-
-        let mut next = start + count - 1;
-        let mut center_index = next as i32 - 1;
-        while center_index >= start as i32 && vertex_active[center_index as usize] == 0 {
-            center_index -= 1;
-        }
-        while center_index >= start as i32 {
-            let center_vertex = center_index as usize;
-            let mut previous_index = center_index - 1;
-            while previous_index >= start as i32 && vertex_active[previous_index as usize] == 0 {
-                previous_index -= 1;
-            }
-            if previous_index < start as i32 {
-                break;
-            }
-            let previous_vertex = previous_index as usize;
-            project_curvature_triplet_in_place(
-                positions,
-                vertex_max_curvature,
-                vertex_pinned,
-                cell_lower,
-                cell_upper,
-                cell_periodic,
-                previous_vertex,
-                center_vertex,
-                next,
-                radius,
-                stiffness,
-                safety_margin,
-            );
-            next = center_vertex;
-            center_index = previous_index;
         }
     }
-}
-
-/// Gathers the at-most-three bend constraints incident to each vertex.
-#[cube(launch_unchecked)]
-pub(crate) fn gather_curvature_limit_corrections(
-    segment_vertices: &[u32],
-    vertex_active: &[u32],
-    vertex_pinned: &[u32],
-    vertex_segments: &[u32],
-    control: &[u32],
-    bend_corrections: &[f32],
-    vertex_corrections: &mut [f32],
-) {
-    let vertex = ABSOLUTE_POS;
-    if vertex >= vertex_active.len() || control[0] == 0 {
-        terminate!();
-    }
-    let index = vertex as usize;
-    if vertex_active[index] == 0 || vertex_pinned[index] != 0 {
-        vertex_corrections[3 * index] = 0.0;
-        vertex_corrections[3 * index + 1] = 0.0;
-        vertex_corrections[3 * index + 2] = 0.0;
-        terminate!();
-    }
-
-    let mut cx = bend_corrections[9 * index + 3];
-    let mut cy = bend_corrections[9 * index + 4];
-    let mut cz = bend_corrections[9 * index + 5];
-    let previous_segment = vertex_segments[2 * index];
-    if previous_segment != u32::MAX {
-        let segment = previous_segment as usize;
-        let first = segment_vertices[2 * segment] as usize;
-        let second = segment_vertices[2 * segment + 1] as usize;
-        let previous = if first == index { second } else { first };
-        cx += bend_corrections[9 * previous + 6];
-        cy += bend_corrections[9 * previous + 7];
-        cz += bend_corrections[9 * previous + 8];
-    }
-    let next_segment = vertex_segments[2 * index + 1];
-    if next_segment != u32::MAX {
-        let segment = next_segment as usize;
-        let first = segment_vertices[2 * segment] as usize;
-        let second = segment_vertices[2 * segment + 1] as usize;
-        let next = if first == index { second } else { first };
-        cx += bend_corrections[9 * next];
-        cy += bend_corrections[9 * next + 1];
-        cz += bend_corrections[9 * next + 2];
-    }
-    vertex_corrections[3 * index] = cx;
-    vertex_corrections[3 * index + 1] = cy;
-    vertex_corrections[3 * index + 2] = cz;
 }
 
 #[cube(launch_unchecked)]
