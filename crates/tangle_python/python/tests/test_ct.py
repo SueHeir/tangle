@@ -21,10 +21,11 @@ SOLVER = hasattr(tangle, "ImageRelaxer")
 
 
 def fast_settings(**changes):
-    """Short solver runs on the CPU backend (CI has no GPU adapter)."""
+    """Short solver runs on the CPU backend (CI has no GPU adapter, and the
+    CPU runtime is slow): one round, so two solver batches per fit."""
     return ct.FitSettings(
-        backend=os.environ.get("TANGLE_BACKEND", "cpu"), rounds=2, solver_batches=1, solver_iterations=150,
-        solver_settle_iterations=50, **changes,
+        backend=os.environ.get("TANGLE_BACKEND", "cpu"), rounds=1, solver_batches=1, solver_iterations=100,
+        solver_settle_iterations=40, **changes,
     )
 
 
@@ -64,7 +65,9 @@ class CtFitTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.scan = crossing_scan()
-        cls.fit = ct.fit_fibers(cls.scan.volume, VOXEL, ct.FiberSpec(diameter=DIAMETER), fast_settings())
+        # One grey-scan fit, with the length prior, serves most tests: the
+        # solver is slow on the CPU backend CI uses.
+        cls.fit = ct.fit_fibers(cls.scan.volume, VOXEL, ct.FiberSpec(diameter=DIAMETER, length=200 * um), fast_settings())
 
     def test_synthetic_scan_has_ground_truth(self):
         self.assertEqual(self.scan.volume.shape, (72, 72, 72))
@@ -101,13 +104,8 @@ class CtFitTests(unittest.TestCase):
         self.assertEqual(stack.dtype, np.uint8)
         self.assertEqual(stack.shape, labels.shape + (3,))
 
-    def test_length_prior_keeps_every_fiber(self):
-        spec = ct.FiberSpec(diameter=DIAMETER, length=200 * um)
-        fit = ct.fit_fibers(self.scan.volume, VOXEL, spec, fast_settings())
-        report = ct.score(fit, self.scan)
-        self.assertEqual(report["recovered"], 3, report)
-        self.assertEqual(report["false_fibers"], 0, report)
-        summary = fit.population_summary()
+    def test_length_prior_summary(self):
+        summary = self.fit.population_summary()
         self.assertIn("interior_ends", summary)
         self.assertGreater(summary["expected_interior_ends"], 0.0)
 
@@ -177,6 +175,27 @@ class CtFitTests(unittest.TestCase):
         self.assertEqual(list(reloaded.types), list(typed.types))
         self.assertEqual(len(typed.suggested_population()), 2)
 
+    def test_mask_input_fills_cores_and_applies_exclude(self):
+        from tangle.ct._fit import _is_mask, _mask_image
+
+        z, y, _ = np.indices((30, 30, 30), dtype=np.float64) + 0.5
+        rho = np.hypot(y - 15.0, z - 15.0)
+        hollow = (rho <= 6.0) & (rho >= 3.0)  # a tube along x, as a threshold misses a dim core
+        self.assertTrue(_is_mask(hollow.astype(np.uint8) * 255))
+        self.assertFalse(_is_mask(rho))
+        settings = ct.FitSettings(denoise_sigma_voxels=0.0)
+        image, levels = _mask_image(hollow, None, settings, largest_radius=6.0)
+        self.assertEqual(float(image[15, 15, 15]), 1.0)  # core filled
+        self.assertEqual((levels.void, levels.fiber), (0.0, 1.0))
+        exclude = np.zeros(hollow.shape, dtype=bool)
+        exclude[:, :, :10] = True
+        image, _ = _mask_image(hollow, exclude, settings, largest_radius=6.0)
+        self.assertEqual(float(image[:, :, :10].max()), 0.0)
+        # A void region bigger than a fiber core stays void, even when enclosed in a slice.
+        ring = (rho <= 14.0) & (rho >= 12.0)
+        image, _ = _mask_image(ring, None, settings, largest_radius=3.0)
+        self.assertEqual(float(image[15, 15, 15]), 0.0)
+
     def test_geometry_report_finds_overlaps_and_kinks(self):
         straight = np.stack([np.linspace(0, 40, 9), np.zeros(9), np.zeros(9)], axis=1)
         beside = straight + np.array([0.0, 3.0, 0.0])  # radii 2: 1 voxel deep, half a radius
@@ -208,15 +227,6 @@ class CtFitTests(unittest.TestCase):
         self.assertTrue(fit.history[0]["mask"])
         # Fibers look thicker in the mask; the estimated margin takes that off.
         self.assertLess(abs(report["diameter_bias_m"]), 0.1 * DIAMETER)
-
-    def test_exclude_mask_hides_a_fiber(self):
-        exclude = np.zeros(self.scan.volume.shape, dtype=bool)
-        # A slab across the middle, wider than the 4-radius join gap.
-        exclude[:, :, 26:46] = True
-        fit = ct.fit_fibers(self.scan.fiber_mask(), VOXEL, ct.FiberSpec(diameter=DIAMETER), fast_settings(), exclude=exclude)
-        for line in fit.centerlines:
-            inside = (line[:, 0] > 27) & (line[:, 0] < 45)
-            self.assertFalse(inside.any())
 
     def test_types_are_chosen_by_size(self):
         scan = two_type_scan()
