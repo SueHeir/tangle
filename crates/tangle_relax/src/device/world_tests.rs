@@ -1052,3 +1052,79 @@ fn curvature_limit_reaches_vertices_packed_after_dormant_fibers() {
     assert!(status.converged, "{status:?}");
     assert!(status.max_curvature_ratio <= 1.0 + 1.0e-5);
 }
+
+fn dense_crossed_mat() -> PackedAssembly {
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic(
+        [2.4, 2.4, 1.0],
+        [true, true, false],
+    ));
+    let material = assembly.materials.add("fiber");
+    let section = assembly.sections.add(Section::Circular { radius: 0.1 });
+    let mut id = 1;
+    for index in 0..12 {
+        let offset = 0.05 + 0.18 * index as f64;
+        let wobble = 0.03 * (index % 3) as f64;
+        let along_x = (0..=8)
+            .map(|point| [0.2 + 0.25 * point as f64, offset, 0.45 + wobble])
+            .collect::<Vec<_>>();
+        let along_y = (0..=8)
+            .map(|point| [offset + 0.07, 0.2 + 0.25 * point as f64, 0.55 - wobble])
+            .collect::<Vec<_>>();
+        for placed in [along_x, along_y] {
+            assembly
+                .add_fiber(FiberId(id), material, section, &placed, &placed)
+                .unwrap();
+            id += 1;
+        }
+    }
+    PackedAssembly::from_assembly_with_options(&assembly, None, false).unwrap()
+}
+
+fn relax_dense_mat(cell_list: CellListConfig) -> (Vec<f32>, u32) {
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        dense_crossed_mat(),
+        cell_list,
+        0.01,
+    );
+    let config = RelaxationConfig {
+        penetration_tolerance: 0.0,
+        force_full_iterations: true,
+        max_step: 0.01,
+        max_iterations: 40,
+        iterations_per_batch: 40,
+        ..RelaxationConfig::default()
+    };
+    let status = world.run_batch(&config, 40);
+    assert!(status.max_penetration.is_finite(), "{status:?}");
+    (world.download_positions(), world.neighbor_list_rebuilds())
+}
+
+#[test]
+fn neighbor_lists_match_rebuilding_every_iteration() {
+    let every_iteration = CellListConfig {
+        neighbor_skin_scale: 0.0,
+        ..CellListConfig::default()
+    };
+    let (reference, reference_rebuilds) = relax_dense_mat(every_iteration);
+    let (listed, listed_rebuilds) = relax_dense_mat(CellListConfig::default());
+    // One slot per segment forces the overflow path for every crowded segment.
+    let (overflowed, _) = relax_dense_mat(CellListConfig {
+        neighbor_capacity: 1,
+        ..CellListConfig::default()
+    });
+    // Atomic cell scatter makes the order of each correction sum, and so the
+    // last float bits, run-dependent; the contacts themselves are identical.
+    let largest_difference = |left: &[f32], right: &[f32]| {
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0_f32, f32::max)
+    };
+    assert!(largest_difference(&listed, &reference) < 1.0e-4);
+    assert!(largest_difference(&overflowed, &reference) < 1.0e-4);
+    assert!(
+        listed_rebuilds < reference_rebuilds,
+        "skin did not reuse lists: {listed_rebuilds} vs {reference_rebuilds}"
+    );
+}

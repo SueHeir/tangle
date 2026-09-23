@@ -63,6 +63,7 @@ impl PyCellListSettings {
         }
         Ok(CellListConfig {
             cell_size_scale: self.cell_size_scale,
+            ..CellListConfig::default()
         })
     }
 }
