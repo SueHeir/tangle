@@ -1,3 +1,4 @@
+import os
 import unittest
 
 import tangle
@@ -12,6 +13,7 @@ except ImportError:  # the image is built with NumPy
 VOXEL = 1.0 * um
 SIDE = 24
 RADIUS = 2.0 * um
+BACKEND = os.environ.get("TANGLE_BACKEND", "cpu")
 
 
 def tube_image(centers_yz_voxels, radius_voxels):
@@ -42,7 +44,8 @@ def straight_assembly(offsets_yz_voxels):
 class ImageRelaxerTests(unittest.TestCase):
     def relaxer(self, offsets, centers):
         image = tube_image(centers, RADIUS / VOXEL)
-        settings = tangle.RelaxationSettings(max_step=0.25 * VOXEL)
+        # CI has no GPU; set TANGLE_BACKEND=wgpu to run these on one.
+        settings = tangle.RelaxationSettings(backend=BACKEND, max_step=0.25 * VOXEL)
         return tangle.ImageRelaxer(
             straight_assembly(offsets), settings, image.tobytes(), image.shape, VOXEL
         )
