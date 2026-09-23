@@ -139,16 +139,12 @@ Every fit also reports its interior ends and the fiber length they imply,
 2Λ divided by the number of interior ends (`interior_ends` and
 `implied_mean_length` in the population summary, per round in the history).
 With `length` set it adds the count expected, and its Poisson spread. An
-implied length far below the true one means the fit is over-split. For
-example, the FiberForm fit without the prior has 603 interior ends and
-implies 134 µm fibers; 1 mm fibers would give about 81 ± 9 ends.
+implied length far below the true one means the fit is over-split.
 
 Ends are not perfectly uniform in real materials, for example in layered
 felts, so this is a soft cost rather than a hard count.
-[`ct_fit_synthetic_long.py`](../crates/tangle_python/python/examples/ct_fit_synthetic_long.py)
-tests it on a scan cropped from a larger cell, so fibers run through the
-scan boundary as in a real scan. It fits with and without the prior and
-scores both.
+The `long_fibers` example (below) tests it on a scan cropped from a larger
+cell, so fibers run through the scan boundary as in a real scan.
 
 ## Several fiber types
 
@@ -176,10 +172,10 @@ fit = ct.fit_fibers(mask, voxel_size=1.25 * um, spec=[fine, coarse])
   recovery for each type. `suggested_population()` returns one population
   per type.
 
-[`ct_fit_two_types.py`](../crates/tangle_python/python/examples/ct_fit_two_types.py)
-renders a scan of 7 µm solid fibers and 19 µm fibers with a bright rim and
-a dim core, thresholds a generous mask (the large fibers' cores come out as
-holes, which are filled) and fits both types from it.
+The `two_types` example (below) renders a scan of 7 µm solid fibers and
+19 µm fibers with a bright rim and a dim core, thresholds a generous mask
+(the large fibers' cores come out as holes, which are filled) and fits both
+types from it.
 
 ## Checking a fit against known answers
 
@@ -202,47 +198,46 @@ over-reaches, as a generous threshold does.
 - solid Dice;
 - the fraction of fiber voxels assigned to the correct fiber.
 
-[`ct_fit_synthetic.py`](../crates/tangle_python/python/examples/ct_fit_synthetic.py)
-runs a full check: 40 relaxed wavy planar fibers of 12 µm diameter, imaged at
-1.5 µm voxels (8 voxels across a fiber, noise σ = 12% of contrast, 160³
-voxels). Results on that scan with the earlier NumPy fitting loop (to be
-re-measured on the solver):
-
-| Measure | Result |
-| --- | --- |
-| Fibers recovered whole / split / missed | 34 / 4 / 2 of 40 |
-| False fits | 0 |
-| Mean centerline error | 0.41 voxel (0.6 µm) |
-| Diameter bias / RMS error | −0.05 µm / 0.16 µm |
-| Fiber voxels labeled with the right fiber | 95% |
-| Run time (one CPU core) | about 2.5 minutes |
-
-The unit tests use a small three-fiber case. It is recovered exactly: 0.2 voxel
-centerline error, and diameter within 1%.
+The unit tests use a small three-fiber case.
 
 `ct.geometry_report(centerlines, radii, min_bend_radius)` measures how far
 fibers are from valid Tangle fibers: the curvature ratio against the bend
 limit, the deepest overlap between two fibers and the shortest segment.
-[`ct_gpu_geometry_check.py`](../crates/tangle_python/python/examples/ct_gpu_geometry_check.py)
-uses it to check that Tangle's solver, run with the scan as an extra force,
-repairs true fibers damaged with sharp kinks.
-[`ct_fit_scenarios.py`](../crates/tangle_python/python/examples/ct_fit_scenarios.py)
-fits one small scan per fitting step (ends, gaps, crossings, touching
-fibers, a short piece, a bend near the limit) from a mask and from the grey
-scan.
 
-## Real data: PuMA FiberForm
+## Examples
 
-[`ct_fit_puma_fiberform.py`](../crates/tangle_python/python/examples/ct_fit_puma_fiberform.py)
-downloads PuMA's `200_fiberform.tif` and fits it. This is a real 200³
-micro-CT crop of FiberForm carbon felt at 1.3 µm voxels, distributed with
-PuMA under the NASA Open Source Agreement.
+[`ct_examples.py`](../crates/tangle_python/python/examples/ct_examples.py)
+holds every example, and every example is run the same way. A synthetic
+scan with known true fibers is thresholded into a generous mask, then
+fitted from the mask with Tangle's solver on the GPU. Each writes exactly
+these files to `<output>/<example>/`. The folder is emptied first, so there
+is only ever one result per example:
 
-There is no fiber-level ground truth for this scan, so judge the result from
-the overlay. FiberForm fibers have lobed, non-circular cross-sections and
-carbonized binder at many crossings. A circular fit is therefore an
-equal-area approximation, and binder blobs are left unexplained or become
-short fits.
+| File | Contents |
+| --- | --- |
+| `raw.tif` | the rendered scan |
+| `mask.tif` | the fiber mask the fit starts from |
+| `true.tif` | the true fibers, one color per fiber, over the scan (RGB) |
+| `segment.tif` | the fitted fibers, one color per fiber, over the scan (RGB) |
+| `fit.json` | the fit (`ct.load_fit`) |
+| `score.json` | score against the truth, geometry report, run time |
+
+`<output>/summary.md` has one row per example. The examples are
+`single_type` (40 wavy 12 µm fibers), `long_fibers` (long fibers cropped
+by the scan), `two_types` (7 µm and 19 µm fibers), and one `scenario_*` per
+fitting step: a straight fiber, interior ends, gaps of 2, 6 and 12 radii,
+crossings at 90° and 30°, touching parallel fibers, a piece below the
+minimum length and a bend near the limit.
+
+```
+python ct_examples.py --list
+python ct_examples.py                       # all, into $TANGLE_CT_OUTPUT or examples/output/ct
+python ct_examples.py two_types scenario_gap_6r --output ~/ct-results
+```
+
+A new example is a function returning an `Example` (scan, specs), added to
+`EXAMPLES`; the runner writes its files, so every example keeps the same
+layout.
 
 ## Limits and next steps
 

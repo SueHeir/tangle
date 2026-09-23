@@ -187,7 +187,7 @@ the state the solver converged to. Measure it with `geometry_report(...,
 spacing=1.25 * diameter)`: finer resampling puts nodes at the polyline's
 corners and roughly doubles the discrete curvature there.
 
-Checked with `examples/ct_gpu_geometry_check.py` on the single-type
+Checked with a since-removed `examples/ct_gpu_geometry_check.py` (see git history) on the single-type
 synthetic scan (Mac GPU): true fibers damaged with random kinks come back
 to within 0.25 voxels of the truth with no overlaps and the bend limit met.
 Before the fitter ran only on the solver, the same check took the NumPy
