@@ -13,10 +13,12 @@
 //! fiber contributes the center of an elongated one. Periodic in-plane axes
 //! use minimum-image distances. Along a non-periodic in-plane axis, sections
 //! near the edge have unseen neighbors, so two standard edge corrections are
-//! applied: a nearest-neighbor distance counts only when it is no larger
-//! than the section's distance to the edge (Hanisch), and `g(r)` is averaged
-//! only over sections at least `maximum_radius` from every edge
-//! (minus-sampling).
+//! applied. The Hanisch estimator keeps a nearest-neighbor distance `d` only
+//! when it is no larger than the section's distance to the edge, and weights
+//! it by `1 / ∏(L − 2d)` over the non-periodic in-plane axes, the inverse
+//! area in which such a distance could have been kept; without the weight
+//! long distances are under-counted. `g(r)` is averaged only over sections
+//! at least `maximum_radius` from every edge (minus-sampling).
 
 use std::fmt;
 
@@ -73,7 +75,7 @@ pub struct SliceMetrics {
     /// Mean number of sections per unit slice area.
     pub sections_per_area: Option<f64>,
     /// Center-to-center distance from each section to its nearest neighbor
-    /// in the same slice, edge-corrected.
+    /// in the same slice, edge-corrected with Hanisch weights.
     pub nearest_neighbor_distance: Option<Distribution>,
     /// Mean nearest-neighbor distance over its expectation for a Poisson
     /// arrangement of the same density, `0.5 / √λ` (Clark and Evans 1954):
@@ -253,7 +255,8 @@ pub fn analyze_slices(
     let mut expected_per_area = 0.0;
     let mut pair_correlation_sections = 0;
     let mut nearest = Vec::new();
-    let mut expected_nearest = 0.0;
+    let mut normalized_nearest = 0.0;
+    let mut nearest_weight = 0.0;
     for points in &slices {
         if points.len() < 2 {
             continue;
@@ -263,9 +266,11 @@ pub fn analyze_slices(
         for index in 0..points.len() {
             let edge = grid.edge_distance(points[index]);
             if let Some(distance) = grid.nearest(index) {
-                if distance <= edge {
-                    nearest.push(distance);
-                    expected_nearest += 0.5 / intensity.sqrt();
+                let weight = grid.hanisch_weight(distance);
+                if distance <= edge && weight.is_finite() && weight > 0.0 {
+                    nearest.push((distance, weight));
+                    normalized_nearest += weight * distance / (0.5 / intensity.sqrt());
+                    nearest_weight += weight;
                 }
             }
             if bin_count > 0 && edge >= maximum_radius {
@@ -290,8 +295,7 @@ pub fn analyze_slices(
             (expected_per_area > 0.0).then(|| pair_counts[k] / (expected_per_area * annulus))
         })
         .collect();
-    let clark_evans_ratio =
-        (expected_nearest > 0.0).then(|| nearest.iter().sum::<f64>() / expected_nearest);
+    let clark_evans_ratio = (nearest_weight > 0.0).then(|| normalized_nearest / nearest_weight);
 
     Ok(SliceMetrics {
         schema_version: SLICE_SCHEMA_VERSION,
@@ -300,7 +304,10 @@ pub fn analyze_slices(
         section_counts,
         slice_area,
         sections_per_area,
-        nearest_neighbor_distance: Distribution::from_values(nearest, config.quantile_count),
+        nearest_neighbor_distance: Distribution::from_weighted_values(
+            nearest,
+            config.quantile_count,
+        ),
         clark_evans_ratio,
         maximum_radius,
         pair_correlation_radii,
@@ -408,6 +415,22 @@ impl<'a> PlanarGrid<'a> {
             .filter(|k| !self.periodic[*k])
             .map(|k| point[k].min(self.lengths[k] - point[k]))
             .fold(f64::INFINITY, f64::min)
+    }
+
+    /// Hanisch weight of a nearest-neighbor distance: the inverse of the
+    /// window eroded by `distance` along the non-periodic axes (one when both
+    /// are periodic).
+    fn hanisch_weight(&self, distance: f64) -> f64 {
+        (0..2)
+            .filter(|k| !self.periodic[*k])
+            .map(|k| self.lengths[k] - 2.0 * distance)
+            .fold(1.0, |weight, length| {
+                if length > 0.0 {
+                    weight / length
+                } else {
+                    f64::INFINITY
+                }
+            })
     }
 
     /// Distinct bin indices along one axis at signed offsets `-ring..=ring`
@@ -609,6 +632,33 @@ mod tests {
         }
         assert!((metrics.clark_evans_ratio.unwrap() - 1.0).abs() < 0.05);
         assert_eq!(metrics.pair_correlation_sections, 4000);
+    }
+
+    #[test]
+    fn edge_corrected_clark_evans_ratio_is_one_for_random_sections_in_a_box() {
+        // A non-periodic 1×1 window with 30 random sections per slice and
+        // 200 independent slices: without the Hanisch weights the ratio reads
+        // about 0.87.
+        let mut state = 5;
+        let slices = 200;
+        let mut lines = Vec::new();
+        for slice in 0..slices {
+            for _ in 0..30 {
+                let (x, y) = (lcg(&mut state), lcg(&mut state));
+                let z = slice as f64;
+                lines.push(vec![[x, y, z + 0.1], [x, y, z + 0.9]]);
+            }
+        }
+        let cell = PeriodicCell::orthorhombic([1.0, 1.0, slices as f64], [false; 3]);
+        let config = SliceAnalysisConfig {
+            slice_count: slices,
+            bin_count: 0,
+            ..SliceAnalysisConfig::default()
+        };
+        let metrics =
+            analyze_slices(&assembly_from_centerlines(cell, &lines, 0.001), &config).unwrap();
+        let ratio = metrics.clark_evans_ratio.unwrap();
+        assert!((ratio - 1.0).abs() < 0.04, "{ratio}");
     }
 
     #[test]

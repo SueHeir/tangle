@@ -228,7 +228,8 @@ oblique fiber gives the center of an elongated one.
 Periodic in-plane axes use minimum-image distances. Along a non-periodic
 axis (a CT volume, a scorecard subvolume) sections near the edge have
 neighbors outside the view, so a nearest-neighbor distance only counts when it
-is no larger than the section's distance to the edge (Hanisch), and `g(r)` is
+is no larger than the section's distance to the edge and is weighted by the
+inverse of the window shrunk by that distance (Hanisch), and `g(r)` is
 averaged only over sections at least `max_radius` from every edge. That is
 why `max_radius` may be at most a quarter of a non-periodic in-plane length
 (half of a periodic one).

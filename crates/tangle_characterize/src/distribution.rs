@@ -49,6 +49,66 @@ impl Distribution {
         })
     }
 
+    /// Summarizes a weighted sample. Values with a non-finite value or a
+    /// non-positive or non-finite weight are ignored. The mean and standard
+    /// deviation are weighted; quantiles interpolate between values placed at
+    /// the midpoints of their cumulative weight, rescaled so the smallest
+    /// value is the minimum and the largest the maximum. With equal weights
+    /// this is exactly [`Distribution::from_values`].
+    pub fn from_weighted_values(
+        values: impl IntoIterator<Item = (f64, f64)>,
+        quantile_count: usize,
+    ) -> Option<Self> {
+        let mut pairs: Vec<(f64, f64)> = values
+            .into_iter()
+            .filter(|(v, w)| v.is_finite() && w.is_finite() && *w > 0.0)
+            .collect();
+        if pairs.is_empty() {
+            return None;
+        }
+        pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        let count = pairs.len();
+        let total: f64 = pairs.iter().map(|(_, w)| w).sum();
+        let mean = pairs.iter().map(|(v, w)| v * w).sum::<f64>() / total;
+        let variance = pairs
+            .iter()
+            .map(|(v, w)| w * (v - mean).powi(2))
+            .sum::<f64>()
+            / total;
+        let quantile_count = quantile_count.max(2);
+        let quantiles = if count == 1 {
+            vec![pairs[0].0; quantile_count]
+        } else {
+            let first = 0.5 * pairs[0].1;
+            let span = total - first - 0.5 * pairs[count - 1].1;
+            let mut positions = Vec::with_capacity(count);
+            let mut before = 0.0;
+            for (_, weight) in &pairs {
+                positions.push((before + 0.5 * weight - first) / span);
+                before += weight;
+            }
+            (0..quantile_count)
+                .map(|k| {
+                    let p = k as f64 / (quantile_count - 1) as f64;
+                    let upper = positions.partition_point(|t| *t < p).clamp(1, count - 1);
+                    let (t0, t1) = (positions[upper - 1], positions[upper]);
+                    let fraction = if t1 > t0 {
+                        ((p - t0) / (t1 - t0)).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    pairs[upper - 1].0 + fraction * (pairs[upper].0 - pairs[upper - 1].0)
+                })
+                .collect()
+        };
+        Some(Self {
+            count,
+            mean,
+            standard_deviation: variance.sqrt(),
+            quantiles,
+        })
+    }
+
     /// Value at probability `p` (clamped to `[0, 1]`), interpolated between the
     /// stored quantiles.
     pub fn quantile(&self, p: f64) -> f64 {
@@ -105,6 +165,31 @@ mod tests {
         }
         assert!((distribution.median() - 50.0).abs() < 1e-12);
         assert!((distribution.quantile(0.25) - 25.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn equal_weights_reproduce_the_unweighted_summary() {
+        let values = [3.0, 1.0, 4.0, 1.5, 9.0, 2.6];
+        let plain = Distribution::from_values(values, 11).unwrap();
+        let weighted =
+            Distribution::from_weighted_values(values.iter().map(|v| (*v, 2.0)), 11).unwrap();
+        assert_eq!(plain.count, weighted.count);
+        assert!((plain.mean - weighted.mean).abs() < 1e-12);
+        assert!((plain.standard_deviation - weighted.standard_deviation).abs() < 1e-12);
+        for (a, b) in plain.quantiles.iter().zip(&weighted.quantiles) {
+            assert!((a - b).abs() < 1e-12, "{a} {b}");
+        }
+    }
+
+    #[test]
+    fn weights_shift_the_mean_and_zero_weights_are_ignored() {
+        let weighted =
+            Distribution::from_weighted_values([(0.0, 1.0), (1.0, 3.0), (5.0, 0.0)], 5).unwrap();
+        assert_eq!(weighted.count, 2);
+        assert!((weighted.mean - 0.75).abs() < 1e-12);
+        assert_eq!(weighted.quantiles[0], 0.0);
+        assert_eq!(weighted.quantiles[4], 1.0);
+        assert!(Distribution::from_weighted_values([(1.0, 0.0)], 5).is_none());
     }
 
     #[test]
