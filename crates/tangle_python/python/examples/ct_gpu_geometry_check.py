@@ -2,19 +2,13 @@
 fitted fibers valid fibers? A check to run before trusting the GPU fitter.
 
 It uses the single-type synthetic scan of ``ct_fit_synthetic.py`` (40 fibers
-of 12 µm, bend radius 48 µm, 1.5 µm voxels), whose true fibers are known,
-and runs three experiments through ``tangle.ImageRelaxer``:
-
-1. **Geometry only.** Start from the NumPy-loop fit and relax with the image force
-   off. Bend-limit violations and overlaps should go to about zero while
-   the fibers barely move.
-2. **Damaged truth.** Take the true fibers, add sharp random kinks (well past
-   the bend limit, with overlaps where fibers touch) and relax with the image
-   force on. The fibers should come back to the truth: valid geometry and a
-   small centerline error against the true fibers.
-3. **NumPy-loop fit, polished.** Start from the NumPy-loop fit and relax with the image
-   force on. Geometry should become valid without the fit to the scan
-   getting worse (recovery, voxel accuracy, centerline error).
+of 12 µm, bend radius 48 µm, 1.5 µm voxels), whose true fibers are known.
+It takes the true fibers, adds sharp random kinks (well past the bend limit,
+with overlaps where fibers touch) and relaxes them through
+``tangle.ImageRelaxer`` with the image force on. The fibers should come back
+to the truth: valid geometry and a small centerline error against the true
+fibers. (Before the fitter ran on the solver, this script also relaxed and
+polished NumPy-loop fits; see the git history.)
 
 For each run it prints ``ct.geometry_report`` before and after (curvature
 ratio against the bend limit, deepest overlap, segment lengths) and writes
@@ -25,12 +19,10 @@ same fiber as colliding, so shorter segments push a fiber apart by itself.
 Each fiber rests straight (see ``straightened``). Runs with the image on end
 with ``CHECK_SETTLE`` (default 200) iterations with it off.
 
-Usage: ``python ct_gpu_geometry_check.py [output_dir] [fit.json]``; without a
-fit.json the NumPy-loop fit is run first (about a minute). ``CT_TRUTH_DIR`` names the
+Usage: ``python ct_gpu_geometry_check.py [output_dir]``. ``CT_TRUTH_DIR`` names the
 folder holding ``ct_fit_synthetic.py``'s cached ``truth_centerlines.json``.
 Needs a Tangle build with ``ImageRelaxer`` and a working per-fiber curvature
-solve; without it the bend limit stalls just above 1 and experiment 1 fails
-for a reason unrelated to the image force.
+solve; without it the bend limit stalls just above 1.
 """
 
 from __future__ import annotations
@@ -39,7 +31,6 @@ import json
 import os
 import sys
 import time
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -56,7 +47,6 @@ import ct_fit_synthetic as synthetic  # noqa: E402  (same scan, same cached trut
 # Where ct_fit_synthetic.py cached truth_centerlines.json.
 synthetic.OUTPUT = Path(os.environ.get("CT_TRUTH_DIR", HERE / "output" / "ct_fit_synthetic"))
 OUTPUT = Path(sys.argv[1] if len(sys.argv) > 1 else HERE / "output" / "ct_gpu_geometry_check")
-FIT_JSON = Path(sys.argv[2]) if len(sys.argv) > 2 else None
 BACKEND = os.environ.get("TANGLE_BACKEND", "wgpu")
 
 VOXEL = synthetic.VOXEL
@@ -173,12 +163,7 @@ def main() -> None:
     synthetic.OUTPUT.mkdir(parents=True, exist_ok=True)
     truth_assembly = synthetic.load_or_make_truth()
     scan = ct.synthetic_ct(truth_assembly, VOXEL, seed=7)
-    spec = ct.FiberSpec(diameter=synthetic.DIAMETER, min_bend_radius=synthetic.MIN_BEND_RADIUS)
-    if FIT_JSON and FIT_JSON.exists():
-        fit = ct.load_fit(FIT_JSON)
-    else:
-        fit = ct.fit_fibers(scan.volume, VOXEL, spec)
-    image, _ = normalize(scan.volume, denoise_sigma=0.7, levels=fit.levels)
+    image, _ = normalize(scan.volume, denoise_sigma=0.7)
     results: dict[str, dict] = {}
 
     def run(name: str, start: list[np.ndarray], radii: np.ndarray, rate: float, reference=None) -> list[np.ndarray]:
@@ -203,26 +188,12 @@ def main() -> None:
     _write_stack(OUTPUT / "scan", scan.volume, VOXEL)
     overlay("truth", scan.volume, None, None, labels=scan.labels)
 
-    fit_lines = spaced(fit.centerlines)
-    overlay("1_geometry_only_before", scan.volume, fit_lines, fit.radii)
-    settled = run("1_geometry_only", fit_lines, fit.radii, 0.0)
-    overlay("1_geometry_only_after", scan.volume, settled, fit.radii)
-
     truth_lines = spaced(scan.centerlines)
     damaged = kinked(truth_lines)
     overlay("2_damaged_truth_before", scan.volume, damaged, scan.radii)
     repaired = run("2_damaged_truth", damaged, scan.radii, IMAGE_RATE, reference=truth_lines)
     overlay("2_damaged_truth_after", scan.volume, repaired, scan.radii)
 
-    overlay("3_numpy_fit_before", scan.volume, fit_lines, fit.radii)
-    polished = run("3_numpy_fit_polished", fit_lines, fit.radii, IMAGE_RATE)
-    overlay("3_numpy_fit_after", scan.volume, polished, fit.radii)
-    for label, lines in (("before", fit_lines), ("after", polished)):
-        report = ct.score(replace(fit, centerlines=lines, support=np.ones(len(lines))), scan)
-        results["3_numpy_fit_polished"][f"score_{label}"] = {
-            k: report[k] for k in ("recovered", "split", "missed", "voxel_label_accuracy", "centerline_error_voxels")
-        }
-        print(f"  score {label}: {results['3_numpy_fit_polished'][f'score_{label}']}")
     (OUTPUT / "geometry_check.json").write_text(json.dumps(results, indent=1) + "\n")
 
 

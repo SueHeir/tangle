@@ -12,15 +12,26 @@ match the scan. It returns:
 - an overlay of the fibers on the raw scan, one color per fiber, as an RGB
   TIFF stack and a PNG with three orthogonal slices.
 
-The module is pure Python. It needs NumPy and SciPy. `tifffile` and
-`matplotlib` are optional and add the TIFF and PNG outputs.
+The fibers move in Tangle's own solver (`tangle.ImageRelaxer`), on the GPU
+by default, with the scan as an extra force. Contact, segment lengths and
+the bend limit hold throughout, so every fit comes out as round,
+non-overlapping tubes within the bend limit. The rest is Python and needs
+NumPy and SciPy. `tifffile` and `matplotlib` are optional and add the TIFF
+and PNG outputs.
+
+The input is a grey-level scan or, better, a **binary fiber mask** (a
+`bool` array, or any array with two values). A mask may over-reach: some
+background kept as fiber and fibers a little thicker than they are. Pass
+`exclude=` with a mask of voxels known not to be fiber to hide them from
+the fit.
 
 ```python
 import tangle.ct as ct
 from tangle.units import um
 
 spec = ct.FiberSpec(diameter=10 * um, min_bend_radius=40 * um)
-fit = ct.fit_fibers(volume, voxel_size=1.3 * um, spec=spec)   # volume: (z, y, x) array
+fit = ct.fit_fibers(mask, voxel_size=1.3 * um, spec=spec)   # mask: (z, y, x) array
+fit = ct.fit_fibers(mask, 1.3 * um, spec, exclude=not_fiber)  # optional: voxels known not to be fiber
 fit.write("fit_output", volume=volume)   # fit.json, labels.tif, overlay.tif, overlay.png
 assembly = fit.to_assembly()             # cell = scanned volume, not periodic
 population = fit.suggested_population()  # generate statistically similar structures
@@ -37,28 +48,24 @@ relaxed, run = fit.relax()               # optional: clean up remaining overlaps
 | `min_length` | Shorter fragments are dropped. Default 3 diameters. |
 | `max_length` | Optional. Fits longer than this are split where the scan gives them the least support. |
 | `length` | Optional typical fiber length. Turns on the fiber-length prior (below). A rough value is enough. |
-| `profile` | Brightness across the fiber, a `CrossSection`. Solid at brightness 1 by default (see Several fiber types). |
 
-`FitSettings` holds the numerical settings (rounds, rates, merge gap and so
-on). The defaults are meant to work without changes.
-
-`FitSettings(engine="tangle")` moves the fibers with Tangle's own relaxation
-(the GPU by default, `backend="cpu"` without one) and the scan as an extra
-force, instead of the NumPy loop in step 3 below. Contact, segment lengths
-and the bend limit then hold throughout, so every fit comes out as round,
-non-overlapping tubes within the bend limit. It needs a Tangle build with
-`tangle.ImageRelaxer`; see
-[ct_fitting_internals.md](ct_fitting_internals.md#8b-the-fit-on-tangles-solver-fitsettingsenginetangle).
+`FitSettings` holds the numerical settings (rounds, solver iterations,
+merge gap and so on). The defaults are meant to work without changes.
+`backend="cpu"` runs the solver where there is no GPU.
+`thickness_margin_voxels` says how much a generous mask over-reaches
+(voxels, in radius); by default it is estimated from the fits.
 
 ## How the fit works
 
 The method follows the literature review in the project files. In short
 (every step, threshold and function is in [ct_fitting_internals.md](ct_fitting_internals.md)):
 
-1. **Normalize.** A light Gaussian denoise, then Otsu's threshold, maps void
-   to 0 and fiber to 1. Once the first traces exist, the fiber level is reset
-   to the median intensity at the fiber cores. The Otsu class median sits
-   below the core, because blurred edge voxels are counted in the fiber class.
+1. **Input.** A mask is used as 0 (void) and 1 (fiber), with holes the size
+   of a fiber core filled (a threshold can miss a dim core) and a light
+   blur. A grey scan is denoised and mapped to 0…1 with Otsu's threshold,
+   then re-leveled on the traced fiber cores. Estimating grey levels fails
+   when fibers are a small part of the scan (the threshold then splits the
+   noise), which is why a mask is the better input.
 2. **Trace.** Seeds are points on the ridge of the foreground distance
    transform, deepest first. From each seed the trace:
    - steps along the local tube axis, taken from the Hessian at a scale of
@@ -70,16 +77,14 @@ The method follows the literature review in the project files. In short
    Voxels claimed by earlier traces count for less when re-centering, so a
    trace crosses another fiber instead of turning onto it. A trace that mostly
    follows an existing fit is discarded.
-3. **Fit.** This is an EM-style loop. In each iteration:
-   - every voxel near a fiber is assigned to the nearest capsule surface,
-     the same rule Tangle's voxel exporter uses;
-   - each centerline segment moves sideways toward the intensity centroid of
-     the voxels it owns;
-   - a bending step smooths each centerline;
-   - each radius moves toward the equivalent radius of the intensity it owns,
-     pulled toward the diameter you specified;
+3. **Fit.** A few solver batches per round. In each batch:
    - fiber ends grow or shrink to follow the scan;
-   - overlapping fibers are pushed apart.
+   - Tangle relaxes the fibers with the image force on: every vertex moves
+     sideways toward the centroid of the scan it owns (nearest capsule
+     surface, the rule Tangle's voxel exporter uses), while contact,
+     stretch, bending and the bend limit act as in any Tangle run;
+   - a short relaxation with the image off leaves the fibers admissible;
+   - each fiber's type and radius are read off its thickness (below).
 4. **Topology moves.** After each round of the fit:
    - fits are split at kinks the bend limit does not allow, and at
      `max_length`;
@@ -90,8 +95,8 @@ The method follows the literature review in the project files. In short
      create a kink;
    - new traces are started in foreground not yet explained by any fit.
 
-**One fiber or two?** If two fits land on the same fiber, the non-overlap
-step pushes them apart until each sits about a radius off the true axis. At
+**One fiber or two?** If two fits land on the same fiber, contact pushes
+them apart until each sits about a radius off the true axis. At
 that point they look like two touching fibers. To tell the cases apart, the
 fitter renders the neighborhood twice: once with both fibers, and once with a
 single fiber along their midline. It keeps whichever rendering leaves the
@@ -147,47 +152,34 @@ scores both.
 
 ## Several fiber types
 
-A scan can hold fiber types that differ in size and in brightness, and the
-brightest fibers are not necessarily the ones of interest. Describe each
-type's cross-section with a `CrossSection` and pass a list of specs:
+A scan can hold fiber types that differ in size. Pass a list of specs, and
+the fitter decides each fiber's type by its size:
 
 ```python
-small = ct.FiberSpec(diameter=7 * um, name="fine_7um")  # solid, brightest (1)
-large = ct.FiberSpec(
-    diameter=19 * um,
-    profile=ct.CrossSection(brightness=0.75, rim=2 * um, core=1 / 3),  # rim 0.75, core 0.25
-    name="coarse_19um",
-)
-fit = ct.fit_fibers(volume, voxel_size=1.25 * um, spec=[small, large])
+fine = ct.FiberSpec(diameter=7 * um, name="fine_7um")
+coarse = ct.FiberSpec(diameter=19 * um, name="coarse_19um")
+fit = ct.fit_fibers(mask, voxel_size=1.25 * um, spec=[fine, coarse])
 ```
 
-Brightness uses a scale where void is 0 and the brightest type is 1. How
-it works:
-
-- Void and the reference fiber level come from a multi-level threshold with
-  one class per brightness level (void, large-fiber core, rim, small-fiber
-  center), because a two-class one would split a dim type from the bright
-  one.
-- Types are fitted one after another, brightest first. A solid type that is
-  brighter than the rest sees only the brightness above them, so the 7 µm
-  fibers are fitted from the top grey level alone and the 19 µm rims don't
-  look like them. A rimmed type's image is smoothed at half its radius,
-  which fills the dim core, and rescaled so the type reads about 1 on its
-  axis.
-- Fibers already found are taken out of the image the later types see, and
-  they keep their voxels. A cluster of small bright fibers therefore can't
-  be traced as one large fiber.
-- A fit of a rimmed type is kept only if the scan shows its dim core inside
-  a brighter rim along it.
-- Radii are sized from the scan itself by inverting the type's profile. For
-  a rimmed type, the owned brightness isn't just π r².
+- A fiber's thickness is the foreground's depth (distance to the nearest
+  void voxel) along its centerline, less the margin by which the mask
+  over-reaches. Its type is the spec whose diameter is nearest in ratio,
+  and that type sets its radius prior, bend limit, minimum length and
+  length prior.
+- Types are re-chosen after every solver batch, so a fiber can change type
+  as its fit improves. Splits and joins happen within a type.
+- Tracing starts with the largest type, seeded only where the foreground is
+  thicker than the smaller types could make it.
+- The margin is estimated as the median excess of the fibers over their
+  nearest type, or set with `FitSettings(thickness_margin_voxels=...)`.
 - `fit.json` stores every spec and each fiber's type. `score()` reports
   recovery for each type. `suggested_population()` returns one population
   per type.
 
 [`ct_fit_two_types.py`](../crates/tangle_python/python/examples/ct_fit_two_types.py)
-renders and fits such a scan: 7 µm solid fibers and 19 µm fibers with a
-rim at 0.75 and a core at 0.25.
+renders a scan of 7 µm solid fibers and 19 µm fibers with a bright rim and
+a dim core, thresholds a generous mask (the large fibers' cores come out as
+holes, which are filled) and fits both types from it.
 
 ## Checking a fit against known answers
 
@@ -196,6 +188,10 @@ as a CT-like scan with known ground truth. It builds on `export_puma`: the
 smooth interface image gives partial-volume occupancy, and the exporter's
 fiber IDs give the true labels. On top of that it applies a Gaussian blur,
 void/fiber contrast, noise and a weak low-frequency drift.
+
+`scan.fiber_mask(level=0.5)` thresholds the scan into a binary mask,
+`level` of the way from the void to the fiber grey level; below 0.5 it
+over-reaches, as a generous threshold does.
 
 `ct.score(fit, scan)` reports:
 
@@ -209,7 +205,8 @@ void/fiber contrast, noise and a weak low-frequency drift.
 [`ct_fit_synthetic.py`](../crates/tangle_python/python/examples/ct_fit_synthetic.py)
 runs a full check: 40 relaxed wavy planar fibers of 12 µm diameter, imaged at
 1.5 µm voxels (8 voxels across a fiber, noise σ = 12% of contrast, 160³
-voxels). Current results on that scan:
+voxels). Results on that scan with the earlier NumPy fitting loop (to be
+re-measured on the solver):
 
 | Measure | Result |
 | --- | --- |
@@ -228,8 +225,11 @@ fibers are from valid Tangle fibers: the curvature ratio against the bend
 limit, the deepest overlap between two fibers and the shortest segment.
 [`ct_gpu_geometry_check.py`](../crates/tangle_python/python/examples/ct_gpu_geometry_check.py)
 uses it to check that Tangle's solver, run with the scan as an extra force,
-repairs fiber geometry: on the CPU fit with the image off, on true fibers
-damaged with sharp kinks, and on the CPU fit with the image on.
+repairs true fibers damaged with sharp kinks.
+[`ct_fit_scenarios.py`](../crates/tangle_python/python/examples/ct_fit_scenarios.py)
+fits one small scan per fitting step (ends, gaps, crossings, touching
+fibers, a short piece, a bend near the limit) from a mask and from the grey
+scan.
 
 ## Real data: PuMA FiberForm
 
@@ -251,11 +251,10 @@ short fits.
 - **No explicit PSF.** The data force is an intensity centroid rather than a
   full blurred forward model. It is unbiased for a symmetric point-spread
   function but ignores other artifacts, such as streaks or rings.
-- **Speed.** Outside `engine="tangle"` everything runs single-threaded in
-  Python/NumPy, and a 160³ scan with 40 fibers takes minutes. With the
-  solver, the continuous fit costs about 1.3 ms per iteration on an M-series
-  GPU even for 475 fibers; tracing and the one-fiber-or-two check are then
-  the slow steps.
+- **Speed.** The continuous fit costs about 1.3 ms per solver iteration on
+  an M-series GPU even for 475 fibers; tracing and the one-fiber-or-two
+  check, single-threaded Python, are the slow steps. The CPU backend is
+  much slower and meant for tests.
 - **Validation.** Next are benchmarks with real ground truth: the
   Math2Market FiberFind validation set and the DTU multimodal glass-fiber
   scans. See the project's dataset notes.

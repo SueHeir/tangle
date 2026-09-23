@@ -10,11 +10,12 @@ FiberForm crop is like this). This example imitates that:
    against the walls and the central crop would see almost none.
 2. Render the whole cell as a CT-like scan and crop the central 240 µm, so
    fibers run through the crop boundary.
-3. Fit it three times: without and with ``FiberSpec(length=...)`` on the
-   NumPy loop, and with the length prior on Tangle's own solver
-   (``FitSettings(engine="tangle")``, the GPU by default). Score each against
-   the ground truth, measure its geometry (bend limit, overlaps) and write
-   the fits.
+3. Fit it three times with the length prior (``FiberSpec(length=...)``) on
+   Tangle's solver (the GPU by default): from the grey-level scan, from a
+   binary mask thresholded halfway between void and fiber, and from a
+   generous mask (35% of the way) that makes fibers look thicker, as a
+   threshold that over-reaches does. Score each against the ground truth,
+   measure its geometry (bend limit, overlaps) and write the fits.
 
 Needs NumPy and SciPy; tifffile and matplotlib add TIFF and PNG outputs.
 """
@@ -87,26 +88,25 @@ def main() -> None:
     scan = full.crop((low,) * 3, (high,) * 3)
     print(f"scan: {scan.volume.shape} voxels cropped from {full.volume.shape}; {len(scan.centerlines)} true fiber pieces")
 
-    base = ct.FiberSpec(diameter=DIAMETER, min_bend_radius=MIN_BEND_RADIUS)
-    prior = base.replace(length=sum(LENGTH) / 2)
-    numpy_loop = ct.FitSettings()
+    spec = ct.FiberSpec(diameter=DIAMETER, min_bend_radius=MIN_BEND_RADIUS, length=sum(LENGTH) / 2)
+    settings = ct.FitSettings(backend=BACKEND)
     runs = {
-        "no_length_prior": (base, numpy_loop),
-        "length_prior": (prior, numpy_loop),
-        "length_prior_solver": (prior, ct.FitSettings(engine="tangle", backend=BACKEND)),
+        "grey": scan.volume,
+        "mask": scan.fiber_mask(),
+        "mask_generous": scan.fiber_mask(level=0.35),
     }
     geometry_keys = ("curvature_ratio_max", "fibers_over_bend_limit", "max_penetration_radii", "overlapping_pairs")
     keys = ("fitted_fibers", "recovered", "split", "missed", "stubs", "false_fibers", "merged_fibers",
             "interior_ends_fit", "interior_ends_truth", "implied_mean_length_fit_m",
-            "centerline_error_voxels", "voxel_label_accuracy")
+            "centerline_error_voxels", "diameter_bias_m", "voxel_label_accuracy")
     reports = {}
-    for name, (spec, settings) in runs.items():
+    for name, volume in runs.items():
         started = time.perf_counter()
-        fit = ct.fit_fibers(scan.volume, VOXEL, spec, settings, verbose=True)
+        fit = ct.fit_fibers(volume, VOXEL, spec, settings, verbose=True)
         elapsed = time.perf_counter() - started
         report = ct.score(fit, scan)
         report["seconds"] = elapsed
-        # Measured at the solver's segment length (1.25 diameters) for every fit.
+        # Measured at the solver's segment length (1.25 diameters).
         geometry = ct.geometry_report(
             fit.centerlines, fit.radii, MIN_BEND_RADIUS / VOXEL, spacing=1.25 * DIAMETER / VOXEL
         )

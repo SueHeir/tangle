@@ -2,12 +2,15 @@
 
 Each scenario is a handful of 12 µm fibers placed by hand in a 150 µm box,
 rendered with ``ct.synthetic_ct`` (1.5 µm voxels, 8 voxels across a fiber),
-and fitted three ways:
+and fitted three ways, all on Tangle's solver:
 
-* ``numpy``: the NumPy loop, no fiber-length prior;
-* ``numpy_prior``: the NumPy loop with ``FiberSpec(length=400 µm)``;
-* ``solver_prior``: Tangle's solver (``FitSettings(engine="tangle")``) with
-  the prior.
+* ``mask``: from a generous binary mask (``scan.fiber_mask(level=0.35)``,
+  thresholded 35% of the way from void to fiber, so fibers look thicker),
+  no fiber-length prior;
+* ``mask_prior``: the same mask with ``FiberSpec(length=400 µm)``;
+* ``grey_prior``: from the grey-level scan with the prior. Grey levels are
+  estimated from the histogram, which fails when fibers are a small part
+  of the scan (the sparse scenarios here).
 
 | scenario | step it exercises | right answer |
 |---|---|---|
@@ -33,9 +36,8 @@ to the nearest fit end, the splits, merges and births the fit made, and its
 geometry (overlapping pairs, fibers over the bend limit, measured at 1.25
 diameters). Overlays go to ``<output>/<scenario>/<fit>/``.
 
-Needs NumPy and SciPy; the solver fits need a Tangle build with
-``ImageRelaxer`` (skipped otherwise); tifffile and matplotlib add TIFF and PNG
-outputs.
+Needs NumPy, SciPy and a Tangle build with ``ImageRelaxer``; tifffile and
+matplotlib add TIFF and PNG outputs.
 """
 
 from __future__ import annotations
@@ -114,13 +116,14 @@ SCENARIOS = {
 }
 
 
-def fits() -> dict[str, tuple[ct.FiberSpec, ct.FitSettings]]:
+MASK_LEVEL = 0.35
+
+
+def fits(scan: ct.SyntheticScan) -> dict[str, tuple[np.ndarray, ct.FiberSpec]]:
     base = ct.FiberSpec(diameter=DIAMETER, min_bend_radius=MIN_BEND_RADIUS)
     prior = base.replace(length=LENGTH)
-    runs = {"numpy": (base, ct.FitSettings()), "numpy_prior": (prior, ct.FitSettings())}
-    if hasattr(tangle, "ImageRelaxer"):
-        runs["solver_prior"] = (prior, ct.FitSettings(engine="tangle", backend=BACKEND))
-    return runs
+    mask = scan.fiber_mask(level=MASK_LEVEL)
+    return {"mask": (mask, base), "mask_prior": (mask, prior), "grey_prior": (scan.volume, prior)}
 
 
 def scan_of(centerlines) -> ct.SyntheticScan:
@@ -162,9 +165,10 @@ def main() -> None:
         scan = scan_of(centerlines)
         (OUTPUT / name).mkdir(parents=True, exist_ok=True)
         ct.save_overlay_figure(OUTPUT / name / "truth_overlay.png", scan.volume, scan.labels, title=f"{name}: truth")
-        for label, (spec, settings) in fits().items():
+        settings = ct.FitSettings(backend=BACKEND)
+        for label, (volume, spec) in fits(scan).items():
             started = time.perf_counter()
-            fit = ct.fit_fibers(scan.volume, VOXEL, spec, settings)
+            fit = ct.fit_fibers(volume, VOXEL, spec, settings)
             seconds = time.perf_counter() - started
             report = ct.score(fit, scan)
             geometry = ct.geometry_report(
@@ -175,6 +179,7 @@ def main() -> None:
                 "scenario": name, "fit": label, "true": len(scan.centerlines), "fitted": fit.fiber_count,
                 "rec/split/miss/merged": f"{report['recovered']}/{report['split']}/{report['missed']}/{report['merged_fibers']}",
                 "line_err": report["centerline_error_voxels"],
+                "diam_bias_um": report["diameter_bias_m"] / um if report["diameter_bias_m"] is not None else None,
                 "end_err_max": max(ends) if ends else None,
                 **moves(fit),
                 "overlaps": geometry.get("overlapping_pairs"),

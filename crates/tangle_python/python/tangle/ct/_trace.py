@@ -151,12 +151,15 @@ def _drop_claimed(line: np.ndarray, claimed: np.ndarray, max_covered: float = 0.
     return line
 
 
-def ridge_seeds(foreground: np.ndarray, radius: float, *, exclude: np.ndarray | None = None) -> np.ndarray:
-    """Voxel coordinates of distance-transform ridge points, deepest first."""
+def ridge_seeds(
+    foreground: np.ndarray, radius: float, *, exclude: np.ndarray | None = None, min_depth_radii: float = 0.5
+) -> np.ndarray:
+    """Voxel coordinates of distance-transform ridge points at least
+    ``min_depth_radii`` radii deep, deepest first."""
     from scipy.ndimage import distance_transform_edt, maximum_filter
 
     depth = distance_transform_edt(foreground).astype(np.float32)
-    ridge = (depth >= max(0.5 * radius, 1.0)) & (depth >= maximum_filter(depth, size=3))
+    ridge = (depth >= max(min_depth_radii * radius, 1.0)) & (depth >= maximum_filter(depth, size=3))
     if exclude is not None:
         ridge &= exclude == 0
     z, y, x = np.nonzero(ridge)
@@ -176,8 +179,12 @@ def trace_fibers(
     foreground: np.ndarray | None = None,
     label_offset: int = 0,
     max_fibers: int | None = None,
+    seed_depth_radii: float = 0.5,
 ) -> list[np.ndarray]:
-    """Trace fibers from ridge seeds that are not yet explained by ``claimed``."""
+    """Trace fibers from ridge seeds that are not yet explained by ``claimed``.
+
+    Seeds must be at least ``seed_depth_radii`` radii from the void, so a
+    large fiber type is only seeded where the foreground is that thick."""
     if claimed is None:
         claimed = np.zeros(image.shape, dtype=np.int32)
     else:
@@ -194,7 +201,7 @@ def trace_fibers(
     )
     max_steps = int(4 * sum(image.shape) / tracer.step)
     fibers: list[np.ndarray] = []
-    for seed in ridge_seeds(foreground, radius, exclude=claimed):
+    for seed in ridge_seeds(foreground, radius, exclude=claimed, min_depth_radii=seed_depth_radii):
         index = tuple(np.floor(seed[::-1]).astype(int))
         if claimed[index] != 0:
             continue

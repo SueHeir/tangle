@@ -5,13 +5,18 @@ Grey levels as in the scans this imitates: on a scale where void is 0 and the
 7 µm fibers are 1, the 19 µm fibers' rims are about 0.75 and their cores about
 0.25, so a large fiber's core overlaps the bright end of the background and
 its rim overlaps the edges of the small fibers. No single threshold separates
-them.
+the types, so the fit works from a binary mask of all fibers and tells the
+types apart by size.
 
 1. Generate and relax 7 µm and 19 µm fibers (equal volume of each) in a cell
    periodic in the fiber plane.
 2. Render it with each type's brightness profile and crop the center.
-3. Fit both types together, score each type against the ground truth, and
-   write the fit, labels and overlay.
+3. Threshold a generous fiber mask (``scan.fiber_mask(level=0.35)``; large
+   fibers' dim cores come out as holes, which the fitter fills).
+4. Fit both types together from the mask: each fiber's type is the diameter
+   nearest its thickness in the mask. Score each type against the ground
+   truth, and write the fit, labels and overlay (on the grey scan) and the
+   mask.
 
 Needs NumPy and SciPy; tifffile and matplotlib add TIFF and PNG outputs.
 """
@@ -23,6 +28,8 @@ import os
 import sys
 import time
 from pathlib import Path
+
+import numpy as np
 
 import tangle
 import tangle.ct as ct
@@ -42,6 +49,7 @@ LARGE = dict(
     name="coarse_19um", diameter=19 * um, count=14,
     profile=ct.CrossSection(brightness=0.75, rim=2 * um, core=1 / 3),  # core ≈ 0.25
 )
+MASK_LEVEL = 0.35
 TYPES = [SMALL, LARGE]  # truth types and fit types use this order
 
 
@@ -98,12 +106,13 @@ def main() -> None:
     specs = [
         ct.FiberSpec(
             diameter=kind["diameter"], min_bend_radius=5 * kind["diameter"], length=sum(LENGTH) / 2,
-            profile=kind["profile"], name=kind["name"],
+            name=kind["name"],
         )
         for kind in TYPES
     ]
+    mask = scan.fiber_mask(level=MASK_LEVEL)
     started = time.perf_counter()
-    fit = ct.fit_fibers(scan.volume, VOXEL, specs, verbose=True)
+    fit = ct.fit_fibers(mask, VOXEL, specs, ct.FitSettings(backend=BACKEND), verbose=True)
     elapsed = time.perf_counter() - started
     report = ct.score(fit, scan)
     report["seconds"] = elapsed
@@ -113,6 +122,9 @@ def main() -> None:
     for kind, row in (report["per_type"] or {}).items():
         print(f"  {TYPES[kind]['name']}: {row}")
     fit.write(OUTPUT, volume=scan.volume)
+    from tangle.ct._fit import _write_stack
+
+    _write_stack(OUTPUT / "mask", mask.astype(np.uint8) * 255, VOXEL)
     (OUTPUT / "score.json").write_text(json.dumps(report, indent=1) + "\n")
     ct.save_overlay_figure(OUTPUT / "truth_overlay.png", scan.volume, scan.labels, title="ground truth")
 

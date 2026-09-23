@@ -16,18 +16,36 @@ is the user guide.
 - Nodes are kept about `r` apart (`FitSettings.node_spacing_radii = 1`), so
   each segment is roughly as long as it is thick.
 
-## 1. Normalize the scan
+## 1. Input: a mask or a grey scan
 
-`_image.normalize`
+`_fit._is_mask`, `_fit._mask_image`, `_image.normalize`
+
+A `bool` array, or one with only two values (the larger is fiber), is a
+**mask**:
+
+1. Holes in the mask no larger than a fiber core (area ≤ π (r_max + 1)²,
+   r_max the largest type's radius) are filled, slice by slice along each
+   axis (`_fit._core_holes`). A hollow fiber is a closed ring in the slices
+   across it but a tube open at both ends in 3D, so a 3D fill would miss
+   it; larger enclosed holes are void that crossing fibers happen to
+   surround in a slice, and stay. `FitSettings.fill_mask_holes` turns this
+   off.
+2. `exclude` voxels are set to void.
+3. The mask becomes a 0/1 image blurred with σ = 0.7 voxels, so the image
+   force sees a smooth edge. Levels are void 0, fiber 1.
+
+Anything else is a **grey scan**:
 
 1. Blur with a Gaussian of σ = 0.7 voxels to take the edge off the noise.
 2. Pick a threshold with Otsu's method on a subsample of slices. The void
    level and the fiber level are the medians of the voxels below and above it.
-3. Rescale the image so void ≈ 0 and fiber ≈ 1. Everything after this works
-   on this normalized image.
+3. Rescale the image so void ≈ 0 and fiber ≈ 1, and set `exclude` voxels
+   to 0. Everything after this works on this normalized image.
 
 The fiber level from step 2 is refined later (step 5), because blurred edge
-voxels pull the upper class median below the true fiber core.
+voxels pull the upper class median below the true fiber core. When fibers
+are a small part of the scan, Otsu splits the noise histogram instead and
+every noise blob is traced; a mask avoids estimating levels at all.
 
 ## 2. Local tube direction
 
@@ -90,7 +108,7 @@ Then:
 - **Rejected traces:** they are painted as "tried" within 0.75 r, so nearby
   seeds on the same blob are not traced again.
 
-## 5. Re-level
+## 5. Re-level (grey scans, one type)
 
 `_fit._relevel`
 
@@ -103,62 +121,71 @@ Once the traces exist, the levels are measured again:
 
 The image is rescaled to these levels. This fixed a +7% diameter bias.
 
-## 6. The fit: rounds of continuous refinement and topology moves
+## 6. The fit: rounds of solver batches and topology moves
 
-`_fit.fit_fibers`
+`_fit.fit_fibers`, `_fit._Fitter`
 
-There are `rounds` rounds (default 3). Each round runs 12 iterations of the
-continuous fit (6a), then the topology moves (6b). Every round except the
-last then starts new fibers (6c).
+There are `rounds` rounds (default 3). Each round runs `solver_batches` (3)
+batches of the continuous fit (6a), each followed by choosing every fiber's
+type and radius (7b), then the topology moves (6b). Every round except the
+last then starts new fibers (6c). After the last round one more batch makes
+the last splits and joins admissible (end of 6a).
 
-### 6a. Continuous fit, one iteration
+### 6a. Continuous fit on Tangle's solver, one batch
 
-`_refine`
+`_device.relax`, `tangle.ImageRelaxer` (kernels in
+`crates/tangle_relax/src/device/image_force.rs`)
 
-This is an EM-style loop. Ownership is the E-step; the moves are the M-step.
+The fibers move only in Tangle's own relaxation, the GPU by default
+(`FitSettings.backend`; `"cpu"` runs the same steps on the CPU).
 
-1. **Ownership and data force** (`data_step`).
-   - Every voxel within 1.6 r of any centerline is assigned to the one
-     segment whose capsule surface is nearest, that is, the smallest
-     (distance to the centerline − that fiber's radius). This is the rule
-     Tangle's voxel exporter uses. `_geometry.rasterize` does it per segment,
-     in a window around the segment.
-   - For each segment, take the centroid of its owned voxels, each weighted
-     by intensity clipped to [0, 1.5].
-   - Take the part of (centroid − segment midpoint) perpendicular to the
-     segment.
-   - Each node moves by 0.6 × the average of the shifts of its two
-     segments.
-
-   The force is lateral only; ends are handled in step 4.
-2. **Bending** (`bend_step`): each interior node moves 0.3 of the way to the
-   midpoint of its neighbors. This is a discrete Laplacian, which acts as
-   the fiber's stiffness.
-3. **Radius** (`radius_step`).
-   - The owned intensity mass is the sum over owned voxels of intensities
-     clipped to [−1.5, 1.5]. It is unclipped at 0, so zero-mean noise in
-     the void cancels out.
-   - Treating that mass as the volume of a capsule gives a measured radius,
-     √(mass / (π (L + 4r/3))). The 4r/3 accounts for the two hemispherical
-     caps.
-   - The radius is blended 50/50 with the nominal radius and clamped to
-     `diameter × (1 ± diameter_tolerance) / 2`.
-4. **Ends** (`end_step`): each end takes up to 3 moves.
-   - Probe the image at max(spacing, r/2) beyond the tip, along the tip's
-     tangent.
-   - If the probe reads above 0.55 and no other fiber owns that voxel, add a
-     node there.
-   - Otherwise, if the intensity at the tip is below 0.45, remove the tip
+1. **Ends** (`_refine.end_step`), on the host before the solve, so the
+   solver also cleans up what end growth does. Each end takes up to 3
+   moves:
+   - probe the image at max(spacing, r/2) beyond the tip, along the tip's
+     tangent;
+   - if the probe reads above 0.55 and no other fiber owns that voxel, add a
+     node there;
+   - otherwise, if the intensity at the tip is below 0.45, remove the tip
      node.
-5. **Non-overlap** (`separate_step`): any two nodes of different fibers
-   closer than the sum of their radii are pushed apart symmetrically by the
-   overlap, in 2 passes.
-6. **Respace** (`respace`): resample every centerline back to the node
-   spacing.
+2. **Upload.** Fibers are resampled to segments of 1.25 of their own
+   diameters (never shorter than one: Tangle's contact treats non-adjacent
+   segments of one fiber as colliding) and placed in a closed cell padded by
+   3 r_max around the scan. Each fiber gets a material with its radius and
+   its type's bend limit, and a straight rest shape with its own segment
+   lengths: bending then resists every curve, and a kinked fit does not
+   keep its kinks as its natural shape. `neighbor_capacity` is 192, because
+   overlapping starts overflow the default 48 slots into a slow fallback.
+3. **Relax with the image force** for `solver_iterations` (300). Every
+   iteration applies Tangle's contact, stretch, bending and bend-limit steps
+   and one image step: each vertex samples the normalized scan on a polar
+   grid across the fiber (4 rings × 12 spokes out to `solver_reach_radii` =
+   1.4 r, Gaussian σ = 0.8 r, area-weighted), keeps the samples nearer its
+   own capsule surface than any other fiber's (the rule Tangle's voxel
+   exporter uses), and moves sideways toward their brightness-weighted
+   centroid at `solver_image_rate` (0.3), scaled by the brightness of its
+   innermost ring and capped at the max step. An intensity centroid is
+   unbiased for a symmetric point-spread function, so no explicit blur
+   model is needed.
+4. **Settle** for `solver_settle_iterations` (100) with the image force
+   off. The image step re-adds a little curvature each iteration before the
+   solver removes it; the settle ends on geometry the constraints alone
+   accept (it converges in a few dozen iterations).
+5. Types and radii are chosen again (7b) and fibers are respaced to the
+   fitter's node spacing (r of the smallest type) for the topology moves.
 
-There is no explicit forward model of the scanner's blur in this loop. An
-intensity-weighted centroid is unbiased for a symmetric point-spread
-function, so it doesn't need one.
+The final batch's solver output is returned unchanged (segments of 1.25
+diameters, the radii and types it was solved with), so the fit is exactly
+the state the solver converged to. Measure it with `geometry_report(...,
+spacing=1.25 * diameter)`: finer resampling puts nodes at the polyline's
+corners and roughly doubles the discrete curvature there.
+
+Checked with `examples/ct_gpu_geometry_check.py` on the single-type
+synthetic scan (Mac GPU): true fibers damaged with random kinks come back
+to within 0.25 voxels of the truth with no overlaps and the bend limit met.
+Before the fitter ran only on the solver, the same check took the NumPy
+fitting loop's fits from 46 overlapping pairs and 3 fibers over the bend
+limit to 0 in 26 iterations.
 
 ### 6b. Topology moves, once per round
 
@@ -187,7 +214,7 @@ function, so it doesn't need one.
    - Keep whichever has the smaller sum of squared differences from the
      image.
 
-   This is needed because the non-overlap step pushes two fits on one fiber
+   This is needed because contact pushes two fits on one fiber
    about a radius apart each, where they look like two touching fibers.
 3. **Duplicates** (`trim_duplicates`), shortest fit first:
    - Nodes within 0.8 r of another fit's nodes are "covered". Two real
@@ -275,44 +302,35 @@ is given:
 They appear per round in `history`, in `population_summary()` and in the
 score.
 
-## 7b. Several fiber types
+## 7b. Fiber types and radii from thickness
 
-`_fit.fit_fibers`, `_fit._fit_type`, `_profile.CrossSection`
+`_fit._Fitter.classify`, `_fit._Fitter.trace`, `_fit._Fitter.topology`
 
-When `spec` is a list, or its profile isn't solid at brightness 1:
+`spec` may be a list of types that differ in diameter. With one type the
+same steps size the fibers.
 
-- **Levels:** `_fit._class_levels` splits the histogram into one class for
-  void plus one per distinct brightness level of the types (rim and core
-  count separately; 2 to 4 classes) by exhaustive multi-level Otsu. For 7 µm
-  solid plus 19 µm rim/core fibers that is 4 classes: void, large-fiber core,
-  large-fiber rim and small-fiber edge, small-fiber center. Void is the
-  darkest class median and brightness 1 the brightest class median. The
-  re-level step (5) is skipped.
-- **Order:** brightest type first (by `CrossSection.brightness`), larger
-  diameter first among equally bright types. Each type goes through sections
-  3–7 in full, on its own detection image (`_fit._detection_image`):
-  - A solid type brighter than every type fitted after it sees only the
-    brightness above those types' brightest level `b`:
-    `clip((image − b) / (brightness − b), 0)`. The 7 µm fibers are then the
-    only thing in their image; the 19 µm rims (0.75) read 0.
-  - A rimmed type sees the scan blurred with σ = r/2, divided by the blurred
-    profile's value on the axis (`CrossSection.center_response`).
-  - Any other solid type sees the scan divided by its brightness.
-- **Fitted types are removed:** voxels within r + 2 of every fiber already
-  fitted are set to void in the image the later types see (their detection
-  image and their mass image). The earlier fibers also stay frozen:
-  - they block tracing (their voxels within 1.2 r are pre-claimed);
-  - they own voxels in the data force (6a.1) and in end growth (6a.4);
-  - they push in the non-overlap step (6a.5) without moving.
-- **Rim/core check** (`_moves.remove_off_profile`, each round after 7.4, for
-  rimmed types): on the normalized scan, the median brightness on the fit's
-  axis must be below the midpoint of the rim and core levels, and the median
-  on a 12-spoke ring at r − rim/2 must exceed the axis by a quarter of the
-  rim-core contrast. A cluster of solid bright fibers fails the first test;
-  a fit running along one side of a rim fails the second.
-- **Radii:** the owned mass is summed over the image this type sees, not the
-  detection image, and converted to a radius by inverting the type's
-  integrated profile (`CrossSection.radius_from_area`).
+- **Thickness:** the distance transform of the foreground (image > 0.5),
+  sampled along each fiber's interior nodes; the median, less half a voxel
+  (the distance on an axis is to the nearest void voxel *center*), is its
+  measured radius m.
+- **Margin:** a generous mask makes every fiber look thicker by some δ.
+  With `FitSettings.thickness_margin_voxels` unset, δ is estimated: start
+  at 0, give each fiber the type nearest m − δ, set δ to the median of
+  m − r_type, repeat 3 times; δ is clamped to [−0.5, r_min]. It is logged
+  per round as `thickness_margin`.
+- **Type:** the spec whose radius is nearest m − δ in log scale (by ratio).
+  The type sets the fiber's radius prior, bend limit, minimum and maximum
+  length and length prior.
+- **Radius:** (m − δ + r_type) / 2, clamped to `diameter × (1 ±
+  diameter_tolerance) / 2` of the type.
+- Types are chosen after every solver batch and for new traces. Topology
+  moves (6b) run per type, with that type's parameters: splits and joins
+  never mix types.
+- **Tracing** runs type by type, largest first. A larger type is seeded only
+  where the foreground is at least 0.7 of its radius deep (the smallest type
+  uses 0.5), so it starts only where the foreground is thicker than smaller
+  fibers could make it. Each type traces with its own Hessian scale, and
+  traces of earlier types claim their voxels.
 
 ## 8. Where Tangle's own code comes in
 
@@ -323,11 +341,10 @@ When `spec` is a list, or its profile isn't solid at brightness 1:
   `FiberCollection` / `Assembly`. The cell is the scanned box, not periodic.
   There is one `Material` per fitted diameter, rounded to 10 nm, each with
   the spec's bend limit.
+- **The continuous fit** is Tangle's relaxation with the scan as an extra
+  force (6a).
 - **Relaxation after the fit:** the optional `FitResult.relax()` runs Tangle's
-  contact relaxation, on the default GPU backend, to remove leftover overlaps.
-  By default (`FitSettings.engine="numpy"`) Tangle's solver is not called
-  inside the fitting loop; the Python `separate_step` and `bend_step` stand
-  in for it. With `engine="tangle"` it is (section 8b).
+  plain contact relaxation (no image force) on the fitted assembly.
 - **Synthetic scans** (`_synthetic.synthetic_ct`): the ground truth is a
   Tangle structure.
   1. `export_puma(include_interface=True, include_fiber_ids=True)` gives
@@ -337,61 +354,6 @@ When `spec` is a list, or its profile isn't solid at brightness 1:
      cosine drift, scaled to uint16.
   3. `SyntheticScan.crop` cuts a window from a larger render, so fibers cross
      its boundary as in a real scan.
-
-## 8b. The fit on Tangle's solver (`FitSettings(engine="tangle")`)
-
-`_device.refine`, `tangle.ImageRelaxer` (kernels in
-`crates/tangle_relax/src/device/image_force.rs`)
-
-With `engine="tangle"`, each round's continuous fit (6a) is replaced by
-`solver_batches` (3) batches on Tangle's own relaxation, the GPU by default
-(`FitSettings.backend`). The topology moves (6b) and births stay as they
-are. One batch:
-
-1. **Ends** grow or trim on the host (6a.4), before the solve, so the solver
-   also cleans up what end growth does.
-2. **Upload.** Fibers are resampled to segments of 1.25 diameters (never
-   shorter than one: Tangle's contact treats non-adjacent segments of one
-   fiber as colliding) and placed in a closed cell padded by 3 r around the
-   scan. Each fiber gets a material with its fitted diameter and the spec's
-   bend limit, and a straight rest shape with its own segment lengths:
-   bending then resists every curve, and a kinked fit does not keep its
-   kinks as its natural shape. `neighbor_capacity` is 192, because
-   overlapping starts overflow the default 48 slots into a slow fallback.
-3. **Relax with the image force** for `solver_iterations` (300). Every
-   iteration applies Tangle's contact, stretch, bending and bend-limit steps
-   and one image step: each vertex samples the normalized scan on a polar
-   grid across the fiber (4 rings × 12 spokes out to `solver_reach_radii` =
-   1.4 r, Gaussian σ = 0.8 r, area-weighted), keeps the samples nearer its
-   own capsule surface than any other fiber's, and moves sideways toward
-   their brightness-weighted centroid at `solver_image_rate` (0.3), scaled
-   by the brightness of its innermost ring and capped at the max step.
-4. **Read the owned intensity** of every vertex (`vertex_image_stats`: area
-   in voxels² of owned brightness). The mean over interior vertices is each
-   fiber's cross-section area, turned into a radius for the next batch as in
-   6a.3 (profile inversion for non-solid types), blended with the spec
-   radius and clamped to the tolerance.
-5. **Settle** for `solver_settle_iterations` (100) with the image force
-   off. The image step re-adds a little curvature each iteration before the
-   solver removes it; the settle ends on geometry the constraints alone
-   accept (it converges in a few dozen iterations).
-6. Fibers are respaced to the fitter's node spacing for the topology moves.
-
-After the last round, one more batch makes the last splits and joins
-admissible, and its solver output is returned unchanged (segments of 1.25
-diameters, the radii it was solved with), so the fit is exactly the state
-the solver converged to. Measure it with `geometry_report(...,
-spacing=1.25 * diameter)`: finer resampling puts nodes at the polyline's
-corners and roughly doubles the discrete curvature there. A type fitted after another (several fiber types) still uses
-the NumPy loop, since its frozen predecessors would have to stay fixed in
-the solver.
-
-Checked with `examples/ct_gpu_geometry_check.py` on the single-type
-synthetic scan (Mac GPU): from the NumPy fit with the image off, 46
-overlapping pairs and 3 fibers over the bend limit go to 0 in 26
-iterations; true fibers damaged with random kinks come back to within 0.25
-voxels of the truth with no overlaps and the bend limit met; polishing the
-NumPy fit keeps its score (35 of 40 recovered).
 
 ## 9. Outputs
 

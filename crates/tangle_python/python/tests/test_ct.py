@@ -17,6 +17,15 @@ except ImportError:  # the CT fitter needs NumPy and SciPy
 
 DIAMETER = 10 * um
 VOXEL = 1.25 * um
+SOLVER = hasattr(tangle, "ImageRelaxer")
+
+
+def fast_settings(**changes):
+    """Short solver runs on the CPU backend (CI has no GPU adapter)."""
+    return ct.FitSettings(
+        backend=os.environ.get("TANGLE_BACKEND", "cpu"), rounds=2, solver_batches=1, solver_iterations=150,
+        solver_settle_iterations=50, **changes,
+    )
 
 
 def crossing_scan():
@@ -35,12 +44,27 @@ def crossing_scan():
     return ct.synthetic_ct(assembly, VOXEL, seed=3)
 
 
+def two_type_scan():
+    """Two 10 µm fibers and one 20 µm fiber, apart from each other."""
+    small = tangle.Material("small", diameter=DIAMETER)
+    large = tangle.Material("large", diameter=2 * DIAMETER)
+    fibers = tangle.FiberCollection("two types")
+    fibers.add_fiber([[8 * um, 25 * um, 30 * um], [82 * um, 28 * um, 30 * um]], small)
+    fibers.add_fiber([[8 * um, 65 * um, 60 * um], [82 * um, 62 * um, 60 * um]], small)
+    fibers.add_fiber([[45 * um, 8 * um, 62 * um], [47 * um, 82 * um, 20 * um]], large)
+    assembly = tangle.Assembly(tangle.Cell([90 * um] * 3))
+    assembly.insert(fibers)
+    profiles = [(DIAMETER, ct.CrossSection()), (2 * DIAMETER, ct.CrossSection())]
+    return ct.synthetic_ct(assembly, VOXEL, seed=4, profiles=profiles)
+
+
 @unittest.skipIf(ct is None, "tangle.ct needs NumPy and SciPy")
+@unittest.skipUnless(SOLVER, "tangle.ct needs a Tangle build with ImageRelaxer")
 class CtFitTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.scan = crossing_scan()
-        cls.fit = ct.fit_fibers(cls.scan.volume, VOXEL, ct.FiberSpec(diameter=DIAMETER))
+        cls.fit = ct.fit_fibers(cls.scan.volume, VOXEL, ct.FiberSpec(diameter=DIAMETER), fast_settings())
 
     def test_synthetic_scan_has_ground_truth(self):
         self.assertEqual(self.scan.volume.shape, (72, 72, 72))
@@ -79,7 +103,7 @@ class CtFitTests(unittest.TestCase):
 
     def test_length_prior_keeps_every_fiber(self):
         spec = ct.FiberSpec(diameter=DIAMETER, length=200 * um)
-        fit = ct.fit_fibers(self.scan.volume, VOXEL, spec)
+        fit = ct.fit_fibers(self.scan.volume, VOXEL, spec, fast_settings())
         report = ct.score(fit, self.scan)
         self.assertEqual(report["recovered"], 3, report)
         self.assertEqual(report["false_fibers"], 0, report)
@@ -141,7 +165,7 @@ class CtFitTests(unittest.TestCase):
 
     def test_fit_json_keeps_fiber_types(self):
         small = ct.FiberSpec(diameter=DIAMETER, name="small")
-        large = ct.FiberSpec(diameter=2 * DIAMETER, profile=ct.CrossSection(brightness=0.75, rim=2 * um, core=0.3), name="large")
+        large = ct.FiberSpec(diameter=2 * DIAMETER, min_bend_radius=30 * DIAMETER, name="large")
         typed = ct.FitResult(
             shape=self.fit.shape, voxel_size=VOXEL, spec=large, centerlines=self.fit.centerlines,
             radii=self.fit.radii, support=self.fit.support, levels=self.fit.levels,
@@ -149,37 +173,9 @@ class CtFitTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             reloaded = ct.load_fit(typed.write(tmp)["config"])
-        self.assertEqual(reloaded.specs[1].profile.core, 0.3)
+        self.assertEqual(reloaded.specs[1].min_bend_radius, 30 * DIAMETER)
         self.assertEqual(list(reloaded.types), list(typed.types))
         self.assertEqual(len(typed.suggested_population()), 2)
-
-    def test_class_levels_find_void_and_the_brightest_type(self):
-        from tangle.ct._fit import _class_levels
-
-        rng = np.random.default_rng(0)
-        # void, a large fiber's core, its rim, a small fiber: four grey levels
-        values = rng.choice([0.0, 0.25, 0.75, 1.0], p=[0.55, 0.1, 0.15, 0.2], size=(32, 32, 32))
-        volume = (100 + 400 * (values + rng.normal(0.0, 0.03, values.shape))).astype(np.float32)
-        levels = _class_levels(volume, ct.FitSettings(denoise_sigma_voxels=0.0), classes=4)
-        self.assertAlmostEqual((levels.void - 100) / 400, 0.0, delta=0.03)
-        self.assertAlmostEqual((levels.fiber - 100) / 400, 1.0, delta=0.03)
-
-    def test_rim_core_check_rejects_solid_fibers_and_rim_tracks(self):
-        from tangle.ct._moves import remove_off_profile
-
-        profile = ct.CrossSection(brightness=0.75, rim=2 * VOXEL, core=1 / 3)
-        z, y, _ = np.indices((40, 40, 40), dtype=np.float64) + 0.5
-        rho = np.hypot(y - 20.0, z - 20.0)
-        rimmed = profile.level(rho, 8.0, VOXEL).astype(np.float32)
-        solid = (rho <= 3.0).astype(np.float32)
-        axis = np.stack([np.linspace(4, 36, 17), np.full(17, 20.0), np.full(17, 20.0)], axis=1)
-        along_rim = axis + np.array([0.0, 7.0, 0.0])
-        radii = np.array([8.0, 8.0])
-        kept, _, removed = remove_off_profile(rimmed, [axis, along_rim], radii, profile, VOXEL)
-        self.assertEqual(removed, 1)
-        np.testing.assert_allclose(kept[0], axis)
-        _, _, removed = remove_off_profile(solid, [axis], radii[:1], profile, VOXEL)
-        self.assertEqual(removed, 1)
 
     def test_geometry_report_finds_overlaps_and_kinks(self):
         straight = np.stack([np.linspace(0, 40, 9), np.zeros(9), np.zeros(9)], axis=1)
@@ -195,19 +191,43 @@ class CtFitTests(unittest.TestCase):
         self.assertEqual(report["overlapping_pairs"], 0)
         self.assertAlmostEqual(report["min_segment_diameters"], 1.25, places=6)
 
-    @unittest.skipUnless(hasattr(tangle, "ImageRelaxer"), "needs a Tangle build with ImageRelaxer")
-    def test_fit_on_tangle_solver_recovers_valid_fibers(self):
-        settings = ct.FitSettings(
-            engine="tangle", backend=os.environ.get("TANGLE_BACKEND", "cpu"), rounds=2, solver_batches=1,
-            solver_iterations=150, solver_settle_iterations=50,
+    def test_fit_is_valid_tangle_geometry(self):
+        geometry = ct.geometry_report(
+            self.fit.centerlines, self.fit.radii, 5 * DIAMETER / VOXEL, spacing=1.25 * DIAMETER / VOXEL
         )
-        fit = ct.fit_fibers(self.scan.volume, VOXEL, ct.FiberSpec(diameter=DIAMETER), settings)
-        report = ct.score(fit, self.scan)
-        self.assertEqual(report["recovered"], 3, report)
-        geometry = ct.geometry_report(fit.centerlines, fit.radii, 5 * DIAMETER / VOXEL)
         self.assertEqual(geometry["overlapping_pairs"], 0, geometry)
         self.assertEqual(geometry["fibers_over_bend_limit"], 0, geometry)
-        self.assertTrue(any(entry["stage"] == "solver" for entry in fit.history))
+        self.assertTrue(any(entry["stage"] == "solver" for entry in self.fit.history))
+
+    def test_fit_from_a_generous_mask(self):
+        mask = self.scan.fiber_mask(level=0.35)  # over-reaches, like a generous threshold
+        fit = ct.fit_fibers(mask, VOXEL, ct.FiberSpec(diameter=DIAMETER), fast_settings())
+        report = ct.score(fit, self.scan)
+        self.assertEqual(report["recovered"], 3, report)
+        self.assertEqual(report["false_fibers"], 0, report)
+        self.assertTrue(fit.history[0]["mask"])
+        # Fibers look thicker in the mask; the estimated margin takes that off.
+        self.assertLess(abs(report["diameter_bias_m"]), 0.1 * DIAMETER)
+
+    def test_exclude_mask_hides_a_fiber(self):
+        exclude = np.zeros(self.scan.volume.shape, dtype=bool)
+        # A slab across the middle, wider than the 4-radius join gap.
+        exclude[:, :, 26:46] = True
+        fit = ct.fit_fibers(self.scan.fiber_mask(), VOXEL, ct.FiberSpec(diameter=DIAMETER), fast_settings(), exclude=exclude)
+        for line in fit.centerlines:
+            inside = (line[:, 0] > 27) & (line[:, 0] < 45)
+            self.assertFalse(inside.any())
+
+    def test_types_are_chosen_by_size(self):
+        scan = two_type_scan()
+        specs = [ct.FiberSpec(diameter=DIAMETER, name="small"), ct.FiberSpec(diameter=2 * DIAMETER, name="large")]
+        fit = ct.fit_fibers(scan.fiber_mask(level=0.35), VOXEL, specs, fast_settings())
+        report = ct.score(fit, scan)
+        self.assertEqual(report["recovered"], 3, report)
+        for kind in (0, 1):
+            self.assertEqual(report["per_type"][kind]["fitted_as_this_type"], report["per_type"][kind]["fitted"], report["per_type"])
+        geometry = ct.geometry_report(fit.centerlines, fit.radii, 5 * DIAMETER / VOXEL, spacing=1.25 * DIAMETER / VOXEL)
+        self.assertEqual(geometry["overlapping_pairs"], 0, geometry)
 
     def test_thin_fibers_are_rejected(self):
         with self.assertRaises(ValueError):

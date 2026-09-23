@@ -1,18 +1,15 @@
-"""Continuous fit on Tangle's own solver (the GPU by default).
+"""The fit's continuous part, on Tangle's own solver (the GPU by default).
 
-The NumPy loop in ``_refine`` imitates a fiber solver: a Laplacian bending
-step and a pairwise push-apart. Here Tangle's relaxation does that part for
-real (contact, stretch, bending and the bend limit, through CubeCL), with the
-scan as one more force: every vertex moves sideways toward the intensity
-centroid of the cross-section samples it owns under the
-nearest-capsule-surface rule (``tangle.ImageRelaxer``).
+Tangle's relaxation moves the fibers (contact, stretch, bending and the bend
+limit, through CubeCL), with the scan as one more force: every vertex moves
+sideways toward the intensity centroid of the cross-section samples it owns
+under the nearest-capsule-surface rule (``tangle.ImageRelaxer``).
 
-One batch is: grow or trim the fiber ends on the host, upload the fibers,
-relax with the image force, read back each vertex's owned intensity (for the
-radii of the next batch), then relax a little more without the image so the
-fibers come back admissible. Ends change before the solve, so the solver
-also cleans up what end growth did; every batch uploads again. Topology
-moves (splits, joins, births) still happen once per round in ``_fit``.
+One batch (:func:`relax`) is: grow or trim the fiber ends on the host,
+upload the fibers, relax with the image force, then relax a little more
+without it so the fibers come back admissible. Ends change before the
+solve, so the solver also cleans up what end growth did. Topology moves
+(splits, joins, births) and fiber types happen between batches in ``_fit``.
 """
 
 from __future__ import annotations
@@ -48,19 +45,21 @@ def _straight(line: np.ndarray) -> np.ndarray:
     return line[0] + np.concatenate([[0.0], np.cumsum(lengths)])[:, None] * direction
 
 
-def _relaxer(image, payload, lines, radii, *, voxel_size, bend, pad, settings) -> Any:
+def _relaxer(image, payload, lines, radii, bends, *, voxel_size, pad, settings) -> Any:
     import tangle
 
     h = voxel_size
     cell = tangle.Cell([(n + 2.0 * pad) * h for n in image.shape[::-1]])
-    materials: dict[int, Any] = {}
+    materials: dict[tuple[int, int], Any] = {}
     collection = tangle.FiberCollection("ct fit")
-    for line, radius in zip(lines, radii):
-        key = int(round(2.0 * float(radius) * h / 1e-9))
+    for line, radius, bend in zip(lines, radii, bends):
+        key = (int(round(2.0 * float(radius) * h / 1e-9)), int(round(float(bend) * h / 1e-9)))
         if key not in materials:
-            materials[key] = tangle.Material(f"ct {key}nm", diameter=key * 1e-9, min_bend_radius=bend * h)
+            materials[key] = tangle.Material(f"ct {key[0]}nm", diameter=key[0] * 1e-9, min_bend_radius=key[1] * 1e-9)
         shifted = line + pad
-        collection.add_fiber((shifted * h).tolist(), materials[key], rest_centerline=(_straight(shifted) * h).tolist())
+        collection.add_fiber(
+            (shifted * h).tolist(), materials[key], rest_centerline=(_straight(shifted) * h).tolist()
+        )
     assembly = tangle.Assembly(cell)
     assembly.insert(collection, name="ct fit")
     return tangle.ImageRelaxer(
@@ -68,46 +67,42 @@ def _relaxer(image, payload, lines, radii, *, voxel_size, bend, pad, settings) -
     )
 
 
-def refine(
+def relax(
     image: np.ndarray,
     lines: list[np.ndarray],
     radii: np.ndarray,
+    bends: np.ndarray,
     *,
     voxel_size: float,
-    radius: float,
-    tolerance: float,
-    prior_weight: float,
-    bend: float,
     spacing: float,
     rate: float,
     reach_radii: float,
-    batches: int,
     iterations: int,
     settle: int,
     backend: str | None,
-    profile=None,
     log=None,
-    final: bool = False,
-) -> tuple[list[np.ndarray], np.ndarray]:
-    """``batches`` rounds of (ends → solver with the image force → radii).
+) -> list[np.ndarray]:
+    """One batch: ends, then the solver with the image force, then a settle.
 
-    ``lines`` are in voxels. On the device, fibers use segments of 1.25
-    diameters, because Tangle's contact treats non-adjacent segments of one
-    fiber as colliding. The result is respaced to the fitter's node
-    ``spacing`` for the topology moves, except with ``final``: then the last
-    batch's solver output is returned as it is, with the radii it was solved
-    with, so the fit is exactly the admissible state the solver reached.
+    ``lines``, ``radii`` and ``bends`` (each fiber's bend limit) are in
+    voxels. On the device, fibers use segments of 1.25 diameters, because
+    Tangle's contact treats non-adjacent segments of one fiber as colliding.
+    The solver's centerlines come back as they are (voxels), so the caller
+    gets exactly the admissible state the solver reached.
     """
     import tangle
 
+    if not lines:
+        return []
     h = voxel_size
-    payload = np.ascontiguousarray(image, dtype="<f4").tobytes()
-    device_spacing = max(2.5 * radius, spacing)
-    pad = 3.0 * radius  # room around the scan so fibers that leave it are not squeezed by walls
+    radii = np.asarray(radii, dtype=np.float64)
+    bends = np.asarray(bends, dtype=np.float64)
+    smallest, largest = float(radii.min()), float(radii.max())
+    pad = 3.0 * largest  # room around the scan so fibers that leave it are not squeezed by walls
     options: dict[str, Any] = {
         "max_iterations": iterations,
-        "max_step": 0.25 * radius * h,
-        "penetration_tolerance": 0.02 * radius * h,
+        "max_step": 0.25 * smallest * h,
+        "penetration_tolerance": 0.02 * smallest * h,
         # Fits start overlapping; the default 48 neighbor slots overflow
         # into a much slower fallback.
         "neighbor_capacity": 192,
@@ -115,38 +110,18 @@ def refine(
     if backend:
         options["backend"] = backend
     settings = tangle.RelaxationSettings(**options)
-    radii = np.asarray(radii, dtype=np.float64)
-    for batch in range(batches):
-        if not lines:
-            break
-        lines = _refine.respace(lines, spacing)
-        occupied, _, _ = rasterize(image.shape, lines, radii, signed=True)
-        lines = _refine.end_step(image, lines, radii, step=spacing, occupied=occupied)
-        coarse = [resample(line, device_spacing) for line in lines]
-        relaxer = _relaxer(image, payload, coarse, radii, voxel_size=h, bend=bend, pad=pad, settings=settings)
-        relaxer.set_image_force(rate, reach_radii=reach_radii)
-        status = relaxer.run(iterations)
-        stats = relaxer.vertex_image_stats()
-        if settle:
-            relaxer.set_image_force(0.0)
-            status = relaxer.run(settle)
-        if log is not None:
-            log("solver", coarse, **{k: status[k] for k in ("converged", "max_curvature_ratio") if k in status})
-        lines = [np.asarray(line, dtype=np.float64) / h - pad for line in relaxer.centerlines()]
-        if final and batch + 1 == batches:
-            return lines, radii
 
-        # Owned intensity per vertex is area-weighted over its cross-section
-        # (voxels²); ends only own half a disc, so interior vertices size the fiber.
-        area = np.array([
-            np.mean([mass for mass, _ in fiber[1:-1]] if len(fiber) > 2 else [mass for mass, _ in fiber])
-            if fiber else 0.0
-            for fiber in stats
-        ])
-        if profile is None:
-            measured = np.sqrt(np.maximum(area, 0.0) / np.pi)
-        else:
-            measured = profile.radius_from_area(area, h, 0.25 * radius, 2.0 * radius)
-        blended = (measured + prior_weight * radius) / (1.0 + prior_weight)
-        radii = np.clip(blended, radius * (1 - tolerance), radius * (1 + tolerance))
-    return _refine.respace(lines, spacing), radii
+    lines = _refine.respace(lines, spacing)
+    occupied, _, _ = rasterize(image.shape, lines, radii, signed=True)
+    lines = _refine.end_step(image, lines, radii, step=spacing, occupied=occupied)
+    coarse = [resample(line, max(2.5 * float(r), spacing)) for line, r in zip(lines, radii)]
+    payload = np.ascontiguousarray(image, dtype="<f4").tobytes()
+    relaxer = _relaxer(image, payload, coarse, radii, bends, voxel_size=h, pad=pad, settings=settings)
+    relaxer.set_image_force(rate, reach_radii=reach_radii)
+    status = relaxer.run(iterations)
+    if settle:
+        relaxer.set_image_force(0.0)
+        status = relaxer.run(settle)
+    if log is not None:
+        log("solver", coarse, **{k: status[k] for k in ("converged", "max_curvature_ratio") if k in status})
+    return [np.asarray(line, dtype=np.float64) / h - pad for line in relaxer.centerlines()]

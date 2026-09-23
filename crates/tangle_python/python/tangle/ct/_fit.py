@@ -13,7 +13,6 @@ from . import _moves, _refine
 from ._ends import end_cost, end_statistics, evidence_scale
 from ._geometry import polyline_length, rasterize, tangents
 from ._image import HessianField, Levels, normalize
-from ._profile import CrossSection
 from ._trace import trace_fibers
 
 
@@ -39,10 +38,6 @@ class FiberSpec:
         ``ln(length / diameter)`` nats. Splits, joins and the one-or-two-fiber
         decision then weigh the scan against that cost, and joins across
         longer gaps become possible. A rough value is enough.
-    ``profile``
-        Brightness across the fiber (:class:`CrossSection`): solid by default;
-        set ``brightness`` for a type dimmer than the brightest one, and
-        ``rim``/``core`` for fibers with a bright rim and a dimmer core.
     ``name``
         Material name used in the exported Tangle configuration; also names
         the type when several are fitted together.
@@ -54,7 +49,6 @@ class FiberSpec:
     min_length: float | None = None
     max_length: float | None = None
     length: float | None = None
-    profile: CrossSection = CrossSection()
     name: str = "ct fiber"
 
     def replace(self, **changes: Any) -> "FiberSpec":
@@ -65,28 +59,27 @@ class FiberSpec:
 class FitSettings:
     """Numerical settings; the defaults are meant to work unchanged.
 
-    Lengths here are in voxels or in fiber radii, as named.
+    Lengths here are in voxels or in fiber radii, as named. Fibers move only
+    through Tangle's own relaxation with the scan as an extra force
+    (``tangle.ImageRelaxer``); ``backend`` picks where it runs (``"wgpu"``,
+    the GPU, by default; ``"cpu"`` where there is none).
     """
 
     denoise_sigma_voxels: float = 0.7
+    fill_mask_holes: bool = True
+    # How much thicker (voxels, in radius) the foreground makes every fiber
+    # look, as a generous mask threshold does. None estimates it from the
+    # fits; it is taken off before each fiber's type and radius are chosen.
+    thickness_margin_voxels: float | None = None
     rounds: int = 3
-    iterations_per_round: int = 12
-    data_rate: float = 0.6
-    bend_rate: float = 0.3
     radius_prior_weight: float = 1.0
     node_spacing_radii: float = 1.0
-    ownership_reach_radii: float = 1.6
     merge_gap_radii: float = 4.0
     prior_merge_gap_radii: float = 16.0
     prior_merge_angle_degrees: float = 45.0
     kink_threshold: float = 2.0
     min_support: float = 0.5
-    separate_fibers: bool = True
     levels: Levels | None = None
-    # "numpy" moves fibers with the NumPy loop in _refine; "tangle" runs
-    # Tangle's own relaxation with the scan as an extra force (tangle.ImageRelaxer,
-    # the GPU by default), so contact, stretch and the bend limit hold throughout.
-    engine: str = "numpy"
     backend: str | None = None
     solver_batches: int = 3
     solver_iterations: int = 300
@@ -405,7 +398,7 @@ def load_fit(path: str | Path) -> FitResult:
 
     def spec_from(values: dict[str, Any]) -> FiberSpec:
         values = dict(values)
-        values["profile"] = CrossSection(**values.get("profile") or {})
+        values.pop("profile", None)  # fits written before types were chosen by size
         return FiberSpec(**values)
 
     specs = [spec_from(item) for item in data["specs"]] if data.get("specs") else None
@@ -429,35 +422,34 @@ def fit_fibers(
     spec: FiberSpec | Sequence[FiberSpec],
     settings: FitSettings | None = None,
     *,
+    exclude: np.ndarray | None = None,
     verbose: bool = False,
 ) -> FitResult:
     """Find the fibers in ``volume`` (a ``(z, y, x)`` array) that match ``spec``.
 
-    Stages: normalize intensities; trace initial centerlines from
-    distance-transform ridge seeds along the Hessian tube direction; then
-    ``settings.rounds`` rounds of (continuous fit → remove duplicates and
-    unsupported fibers → merge fragments → trace new fibers in what is still
-    unexplained).
+    ``volume`` is a grey-level scan or a binary fiber mask (``bool``, or any
+    array with two values; the larger one is fiber). A mask may include some
+    background mistaken for fiber. ``exclude`` optionally marks voxels known
+    not to be fiber; they are treated as void.
 
-    ``spec`` may be a list of fiber types. Grey levels then come from a
-    multi-class threshold with one class per brightness level of the types.
-    Types are fitted one after another, brightest first (larger diameter
-    first among equally bright types), each on a detection image matched to
-    its own brightness profile (``FiberSpec.profile``). A solid type sees
-    only the brightness above the brightest level of the types fitted after
-    it, so dimmer fibers' rims do not look like it. Each fitted type is then
-    removed from the image the later types see, and it keeps owning its
-    voxels, so a later type cannot be traced over it. Fits of a rimmed type
-    must show its dim core (see ``_moves.remove_off_profile``).
+    Stages: trace initial centerlines from distance-transform ridge seeds
+    along the Hessian tube direction; then ``settings.rounds`` rounds of
+    (Tangle's relaxation with the scan as an extra force → split kinks,
+    resolve side-by-side fits, remove duplicates and unsupported fibers,
+    join fragments → trace new fibers in what is still unexplained), and a
+    final relaxation. See ``docs/ct_fitting_internals.md``.
+
+    ``spec`` may be a list of fiber types that differ in diameter. They are
+    traced largest first, and every fiber's type is then decided by its
+    size: the local thickness of the foreground along it picks the nearest
+    diameter, after every solver batch, and sets its radius prior, bend
+    limit and length prior.
     """
-    settings = settings or FitSettings()
-    if settings.engine not in ("numpy", "tangle"):
-        raise ValueError(f"engine must be 'numpy' or 'tangle', not {settings.engine!r}")
-    if settings.engine == "tangle":
-        from . import _device
+    from . import _device
 
-        if not _device.available():
-            raise ValueError("engine='tangle' needs a Tangle build with ImageRelaxer")
+    settings = settings or FitSettings()
+    if not _device.available():
+        raise RuntimeError("tangle.ct needs a Tangle build with tangle.ImageRelaxer")
     volume = np.asarray(volume)
     if volume.ndim != 3:
         raise ValueError("volume must be a 3D (z, y, x) array")
@@ -469,15 +461,8 @@ def fit_fibers(
             raise ValueError(
                 f"fibers are only {item.diameter / voxel_size:.1f} voxels across; at least 2 are needed"
             )
-    single = len(specs) == 1 and specs[0].profile.solid and specs[0].profile.brightness == 1.0
-
-    if single or settings.levels is not None:
-        image, levels = normalize(volume, denoise_sigma=settings.denoise_sigma_voxels, levels=settings.levels)
-    else:
-        classes = 1 + len(_brightness_levels(specs))
-        image, levels = normalize(
-            volume, denoise_sigma=settings.denoise_sigma_voxels, levels=_class_levels(volume, settings, classes)
-        )
+    if exclude is not None and np.shape(exclude) != volume.shape:
+        raise ValueError("exclude must have the same shape as volume")
 
     history: list[dict[str, Any]] = []
 
@@ -487,34 +472,53 @@ def fit_fibers(
         if verbose:
             print(entry)
 
-    order = sorted(range(len(specs)), key=lambda k: (-specs[k].profile.brightness, -specs[k].diameter))
-    lines: list[np.ndarray] = []
-    radii = np.zeros(0)
-    types = np.zeros(0, dtype=int)
-    remaining = image  # the scan with the types fitted so far removed
-    for position, kind in enumerate(order):
-        item = specs[kind]
-        if single:
-            detect = image
-        else:
-            dimmer = [specs[k].profile.brightness for k in order[position + 1 :]]
-            floor = max(dimmer, default=0.0)
-            detect = _detection_image(remaining, item, voxel_size, floor=floor)
-            log(f"type {item.name}", lines, diameter=item.diameter, floor=floor)
-        found, found_radii, detect, levels = _fit_type(
-            detect, None if single else remaining, item, settings, voxel_size, levels,
-            frozen=lines, frozen_radii=radii, relevel=single, log=log,
-            profile_image=None if single else image,
+    binary = _is_mask(volume)
+    if binary:
+        largest = max(0.5 * item.diameter for item in specs) / voxel_size
+        image, levels = _mask_image(volume, exclude, settings, largest)
+    else:
+        image, levels = normalize(volume, denoise_sigma=settings.denoise_sigma_voxels, levels=settings.levels)
+        if exclude is not None:
+            image = np.where(np.asarray(exclude, dtype=bool), np.float32(0.0), image)
+    log("input", [], mask=binary)
+
+    fitter = _Fitter(image, specs, settings, voxel_size, log)
+    lines = fitter.trace([], np.zeros(0))
+    radii, types = fitter.classify(lines)
+    log("trace", lines, types=fitter.counts(types), thickness_margin=round(fitter.margin, 2))
+    if not binary and len(specs) == 1 and settings.levels is None and lines:
+        # Otsu class medians put the fiber level below the fiber core (blurred
+        # edge voxels are in the fiber class); re-level on the traced cores.
+        image, levels = _relevel(image, levels, lines, float(fitter.radius[0]))
+        fitter.set_image(image)
+        radii, types = fitter.classify(lines)
+        log("relevel", lines, void=levels.void, fiber=levels.fiber)
+
+    for round_index in range(settings.rounds):
+        for _ in range(settings.solver_batches):
+            if not lines:
+                break
+            lines = fitter.solve(lines, radii, types)
+            radii, types = fitter.classify(lines)
+            lines = _refine.respace(lines, fitter.spacing)
+        lines, radii, types, counts = fitter.topology(lines, radii, types)
+        log(
+            f"round {round_index + 1}", lines, **counts, thickness_margin=round(fitter.margin, 2),
+            **fitter.end_summary(lines, radii, types),
         )
-        if single:
-            image = detect
-        elif found and position + 1 < len(order):
-            # Later types see void where this type's fibers (and their blur) are.
-            covered, _, _ = rasterize(image.shape, found, found_radii, reach=found_radii + 2.0)
-            remaining = np.where(covered > 0, np.float32(0.0), remaining)
-        lines = lines + found
-        radii = np.concatenate([radii, found_radii])
-        types = np.concatenate([types, np.full(len(found), kind, dtype=int)])
+        if round_index + 1 < settings.rounds:
+            born = fitter.trace(lines, radii)
+            born_radii, born_types = fitter.classify(born)
+            lines = lines + born
+            radii = np.concatenate([radii, born_radii])
+            types = np.concatenate([types, born_types])
+            log(f"births {round_index + 1}", lines, born=len(born), types=fitter.counts(types))
+    if lines:
+        # The last round's splits and joins are not yet admissible fibers. The
+        # fit is returned exactly as the solver leaves it, with the radii and
+        # types (so bend limits) it was solved with.
+        lines = fitter.solve(lines, radii, types)
+        log("final solve", lines, types=fitter.counts(types))
 
     return FitResult(
         shape=tuple(int(n) for n in volume.shape),
@@ -526,243 +530,240 @@ def fit_fibers(
         levels=levels,
         history=history,
         specs=None if len(specs) == 1 else specs,
-        types=None if len(specs) == 1 else types,
+        types=None if len(specs) == 1 else np.asarray(types, dtype=int),
     )
 
 
-def _brightness_levels(specs: Sequence[FiberSpec]) -> set[float]:
-    """The distinct brightness levels of the fiber types (rim and core)."""
-    values = set()
-    for item in specs:
-        values.add(round(item.profile.brightness, 2))
-        if not item.profile.solid:
-            values.add(round(item.profile.brightness * item.profile.core, 2))
-    return values
+def _is_mask(volume: np.ndarray) -> bool:
+    if volume.dtype == bool:
+        return True
+    if np.unique(volume.ravel()[::97]).size > 2:
+        return False
+    return np.unique(volume).size <= 2
 
 
-def _class_levels(volume: np.ndarray, settings: FitSettings, classes: int) -> Levels:
-    """Void and reference-fiber levels for a scan with several fiber types.
-
-    A two-class threshold would split a dim fiber type from the bright one.
-    The histogram is split into ``classes`` classes (void plus one per
-    brightness level of the types, at most 4) by exhaustive multi-level Otsu;
-    void is the darkest class median and the reference fiber level
-    (brightness 1) the brightest.
-    """
-    import itertools
-
+def _mask_image(
+    volume: np.ndarray, exclude: np.ndarray | None, settings: FitSettings, largest_radius: float
+) -> tuple[np.ndarray, Levels]:
+    """A binary fiber mask as a 0/1 image, with fiber cores filled (a
+    threshold can miss a dim core) and a light blur, so the image force sees
+    a smooth edge."""
     from scipy.ndimage import gaussian_filter
 
-    classes = int(min(max(classes, 2), 4))
-    image = np.asarray(volume, dtype=np.float32)
+    if volume.dtype == bool:
+        mask = volume.copy()
+    else:
+        values = np.unique(volume)
+        mask = volume == values[-1] if values.size == 2 else np.zeros(volume.shape, dtype=bool)
+    if settings.fill_mask_holes:
+        mask |= _core_holes(mask, np.pi * (largest_radius + 1.0) ** 2)
+    if exclude is not None:
+        mask &= ~np.asarray(exclude, dtype=bool)
+    image = mask.astype(np.float32)
     if settings.denoise_sigma_voxels > 0:
         image = gaussian_filter(image, settings.denoise_sigma_voxels)
-    sample = image[:: max(1, image.shape[0] // 64)].ravel()
-    low, high = np.percentile(sample, [0.1, 99.9])
-    bins = 128 if classes <= 3 else 64
-    histogram, edges = np.histogram(np.clip(sample, low, high), bins=bins, range=(low, high))
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    weight = np.concatenate([[0.0], np.cumsum(histogram)])
-    moment = np.concatenate([[0.0], np.cumsum(histogram * centers)])
-
-    def term(a, b):
-        w = weight[b] - weight[a]
-        m = moment[b] - moment[a]
-        return np.where(w > 0, m * m / np.maximum(w, 1e-12), -np.inf)
-
-    best, split = -np.inf, tuple(range(1, classes))
-    last = np.arange(1, bins)
-    # All but the last threshold are enumerated; the last is vectorized.
-    for head in itertools.combinations(range(1, bins), classes - 2):
-        bounds = (0,) + head
-        fixed = sum(term(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)) if head else 0.0
-        if not np.isfinite(fixed):
-            continue
-        tail = last[last > (head[-1] if head else 0)]
-        if tail.size == 0:
-            continue
-        between = fixed + term(bounds[-1], tail) + term(tail, bins)
-        k = int(np.argmax(between))
-        if between[k] > best:
-            best, split = float(between[k]), head + (int(tail[k]),)
-    t_low, t_high = edges[split[0]], edges[split[-1]]
-    void = float(np.median(sample[sample < t_low]))
-    fiber = float(np.median(sample[sample >= t_high]))
-    return Levels(void=void, fiber=fiber, threshold=float(t_low))
+    return image, Levels(void=0.0, fiber=1.0, threshold=0.5)
 
 
-def _detection_image(image: np.ndarray, spec: FiberSpec, voxel_size: float, floor: float = 0.0) -> np.ndarray:
-    """The scan as this fiber type sees it: about 1 on its axis, 0 in void.
+def _core_holes(mask: np.ndarray, max_area: float) -> np.ndarray:
+    """Enclosed holes no larger than a fiber's cross-section, slice by slice
+    along each axis. A hollow fiber is a closed ring in the slices across
+    it (in 3D it is a tube open at both ends, so a 3D fill misses it); larger
+    holes are void between fibers that happen to enclose it in a slice."""
+    from scipy.ndimage import binary_fill_holes, label
 
-    A solid type brighter than ``floor`` (the brightest level of the types
-    fitted after it) sees only the brightness above ``floor``, rescaled so its
-    own level reads 1. A rimmed type is smoothed at half its radius, which
-    fills its dim core; the result is divided by the level such a fiber
-    reaches on its axis.
-    """
-    from scipy.ndimage import gaussian_filter
+    holes = np.zeros(mask.shape, dtype=bool)
+    for axis in range(3):
+        planes = np.moveaxis(mask, axis, 0)
+        found = np.moveaxis(holes, axis, 0)  # a view: writes land in ``holes``
+        for k, plane in enumerate(planes):
+            enclosed = binary_fill_holes(plane) & ~plane
+            if not enclosed.any():
+                continue
+            ids, count = label(enclosed)
+            sizes = np.bincount(ids.ravel(), minlength=count + 1)
+            small = sizes <= max_area
+            small[0] = False
+            found[k] |= small[ids]
+    return holes
 
-    brightness = spec.profile.brightness
-    if spec.profile.solid and 0.0 < floor < brightness:
-        return np.clip((image - floor) / (brightness - floor), 0.0, None).astype(np.float32)
-    radius = 0.5 * spec.diameter / voxel_size
-    sigma = 0.0 if spec.profile.solid else 0.5 * radius
-    smoothed = gaussian_filter(image, sigma) if sigma > 0 else image
-    return (smoothed / max(spec.profile.center_response(radius, voxel_size, sigma), 1e-3)).astype(np.float32)
 
+class _Fitter:
+    """Per-type parameters and the steps of :func:`fit_fibers`."""
 
-def _fit_type(
-    image: np.ndarray,
-    mass_image: np.ndarray | None,
-    spec: FiberSpec,
-    settings: FitSettings,
-    voxel_size: float,
-    levels: Levels,
-    *,
-    frozen: list[np.ndarray],
-    frozen_radii: np.ndarray,
-    relevel: bool,
-    log,
-    profile_image: np.ndarray | None = None,
-) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, Levels]:
-    """Fit one fiber type; ``frozen`` fibers (earlier types) stay fixed but
-    own their voxels and block tracing. ``profile_image`` is the normalized
-    scan that a rimmed type's fits are checked against."""
-    radius = 0.5 * spec.diameter / voxel_size
-    bend = (spec.min_bend_radius or 5.0 * spec.diameter) / voxel_size
-    min_length = (spec.min_length or 3.0 * spec.diameter) / voxel_size
-    max_length = spec.max_length / voxel_size if spec.max_length else None
-    length = spec.length / voxel_size if spec.length else None
-    spacing = settings.node_spacing_radii * radius
-    cost = end_cost(spec.length, spec.diameter)
-    profile = None if spec.profile.solid and spec.profile.brightness == 1.0 else spec.profile
-    frozen_count = len(frozen)
+    def __init__(self, image: np.ndarray, specs: list[FiberSpec], settings: FitSettings, voxel_size: float, log) -> None:
+        self.specs = specs
+        self.settings = settings
+        self.h = voxel_size
+        self.log = log
+        h = voxel_size
+        self.radius = np.array([0.5 * item.diameter / h for item in specs])
+        self.bend = np.array([(item.min_bend_radius or 5.0 * item.diameter) / h for item in specs])
+        self.min_length = np.array([(item.min_length or 3.0 * item.diameter) / h for item in specs])
+        self.max_length = [item.max_length / h if item.max_length else None for item in specs]
+        self.length = [item.length / h if item.length else None for item in specs]
+        self.cost = np.array([end_cost(item.length, item.diameter) for item in specs])
+        self.tolerance = np.array([item.diameter_tolerance for item in specs])
+        self.spacing = settings.node_spacing_radii * float(self.radius.min())
+        self.order = [int(k) for k in np.argsort(-self.radius, kind="stable")]  # largest first
+        self.hessians: dict[int, HessianField] = {}
+        self.margin = settings.thickness_margin_voxels or 0.0
+        self.set_image(image)
 
-    hessian = HessianField(image, sigma=max(0.6 * radius, 1.0))
-    foreground = image > 0.5
-    frozen_claim = None
-    if frozen_count:
-        frozen_claim, _, _ = rasterize(image.shape, frozen, frozen_radii, reach=1.2 * frozen_radii)
-        frozen_claim = np.where(frozen_claim > 0, -1, 0).astype(np.int32)
+    def set_image(self, image: np.ndarray) -> None:
+        from scipy.ndimage import distance_transform_edt
 
-    def claim(lines: list[np.ndarray], radii: np.ndarray) -> np.ndarray | None:
+        self.image = image
+        self.foreground = image > 0.5
+        # Local thickness: distance to the nearest void voxel center. On a
+        # fiber axis it is the radius plus about half a voxel.
+        self.depth = distance_transform_edt(self.foreground).astype(np.float32)
+        self.hessians = {}
+
+    def hessian(self, kind: int) -> HessianField:
+        if kind not in self.hessians:
+            self.hessians[kind] = HessianField(self.image, sigma=max(0.6 * float(self.radius[kind]), 1.0))
+        return self.hessians[kind]
+
+    def counts(self, types: np.ndarray) -> dict[str, int] | None:
+        if len(self.specs) == 1:
+            return None
+        return {item.name: int((np.asarray(types) == k).sum()) for k, item in enumerate(self.specs)}
+
+    def claim(self, lines: list[np.ndarray], radii: np.ndarray) -> np.ndarray | None:
         if not lines:
-            return frozen_claim.copy() if frozen_claim is not None else None
-        claimed, _, _ = rasterize(image.shape, lines, radii, reach=1.2 * radii)
-        if frozen_claim is not None:
-            claimed = np.where(claimed > 0, claimed, frozen_claim)
+            return None
+        claimed, _, _ = rasterize(self.image.shape, lines, np.asarray(radii), reach=1.2 * np.asarray(radii))
         return claimed
 
-    lines = trace_fibers(
-        image, hessian, radius=radius, min_bend_radius=bend, min_length=min_length, node_spacing=spacing,
-        foreground=foreground, claimed=frozen_claim,
-    )
-    radii = np.full(len(lines), radius)
-    log("trace", lines)
-    if relevel and settings.levels is None and lines:
-        # Otsu class medians put the fiber level below the fiber core (blurred
-        # edge voxels are in the fiber class); re-level on the traced cores.
-        image, levels = _relevel(image, levels, lines, radius)
-        foreground = image > 0.5
-        log("relevel", lines, void=levels.void, fiber=levels.fiber)
+    def trace(self, lines: list[np.ndarray], radii: np.ndarray) -> list[np.ndarray]:
+        """New traces where the foreground is not yet claimed, largest type first."""
+        found: list[np.ndarray] = []
+        found_radii: list[float] = []
+        smallest = float(self.radius.min())
+        for kind in self.order:
+            r = float(self.radius[kind])
+            known = lines + found
+            claimed = self.claim(known, np.concatenate([np.asarray(radii, dtype=np.float64), found_radii]))
+            new = trace_fibers(
+                self.image, self.hessian(kind), radius=r, min_bend_radius=float(self.bend[kind]),
+                min_length=float(self.min_length[kind]), node_spacing=self.spacing, claimed=claimed,
+                foreground=self.foreground, label_offset=len(known),
+                # A larger type is only seeded where the foreground is thicker
+                # than the smaller types could make it.
+                seed_depth_radii=0.7 if r > smallest else 0.5,
+            )
+            found += new
+            found_radii += [r] * len(new)
+        return found
 
-    # The solver path covers one type on its own scan; types fitted after
-    # another (frozen fibers, a separate mass image) use the NumPy loop.
-    use_solver = settings.engine == "tangle" and not frozen_count and mass_image is None
-    if settings.engine == "tangle" and not use_solver:
-        log("engine", lines, note="numpy loop for a type fitted after another")
+    def classify(self, lines: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+        """Each fiber's type (the diameter nearest its local thickness) and radius.
 
-    def solve(
-        lines: list[np.ndarray], radii: np.ndarray, batches: int, final: bool = False
-    ) -> tuple[list[np.ndarray], np.ndarray]:
+        The thickness is the foreground's depth along the centerline, less
+        the margin by which the foreground over-reaches (see
+        ``FitSettings.thickness_margin_voxels``); estimated, the margin is
+        the median excess of the fibers over their nearest type.
+        """
+        from ._geometry import sample_image
+
+        if not lines:
+            return np.zeros(0), np.zeros(0, dtype=int)
+        measured = np.empty(len(lines))
+        for i, line in enumerate(lines):
+            inner = line[1:-1] if len(line) > 2 else line
+            # On a fiber axis the distance to the nearest void voxel center is
+            # about the radius plus half a voxel.
+            measured[i] = max(float(np.median(sample_image(self.depth, inner))) - 0.5, 0.5)
+        margin = self.settings.thickness_margin_voxels
+        if margin is None:
+            margin = 0.0
+            for _ in range(3):
+                types = self._nearest(measured - margin)
+                margin = float(np.clip(np.median(measured - self.radius[types]), -0.5, float(self.radius.min())))
+            self.margin = margin
+        types = self._nearest(measured - margin)
+        prior = self.radius[types]
+        w = self.settings.radius_prior_weight
+        blended = (np.maximum(measured - margin, 0.5) + w * prior) / (1.0 + w)
+        tolerance = self.tolerance[types]
+        radii = np.clip(blended, prior * (1 - tolerance), prior * (1 + tolerance))
+        return radii, types
+
+    def _nearest(self, radius: np.ndarray) -> np.ndarray:
+        radius = np.maximum(radius, 0.25)
+        return np.argmin(np.abs(np.log(radius[:, None]) - np.log(self.radius[None, :])), axis=1).astype(int)
+
+    def solve(self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray) -> list[np.ndarray]:
         from . import _device
 
-        return _device.refine(
-            image, lines, radii, voxel_size=voxel_size, radius=radius, tolerance=spec.diameter_tolerance,
-            prior_weight=settings.radius_prior_weight, bend=bend, spacing=spacing,
-            rate=settings.solver_image_rate, reach_radii=settings.solver_reach_radii, batches=batches,
-            iterations=settings.solver_iterations, settle=settings.solver_settle_iterations,
-            backend=settings.backend, profile=profile, log=log, final=final,
+        s = self.settings
+        return _device.relax(
+            self.image, lines, radii, self.bend[np.asarray(types, dtype=int)], voxel_size=self.h,
+            spacing=self.spacing, rate=s.solver_image_rate, reach_radii=s.solver_reach_radii,
+            iterations=s.solver_iterations, settle=s.solver_settle_iterations, backend=s.backend, log=self.log,
         )
 
-    for round_index in range(settings.rounds):
-        if use_solver and lines:
-            lines, radii = solve(lines, radii, settings.solver_batches)
-        for _ in range(0 if use_solver else settings.iterations_per_round):
-            if not lines:
-                break
-            if frozen_count:
-                # Earlier types own their voxels; only this type's fibers move.
-                moved, mass = _refine.data_step(
-                    image, frozen + lines, np.concatenate([frozen_radii, radii]),
-                    reach_factor=settings.ownership_reach_radii, rate=settings.data_rate, mass_image=mass_image,
-                )
-                lines, mass = moved[frozen_count:], mass[frozen_count:]
-            else:
-                lines, mass = _refine.data_step(
-                    image, lines, radii, reach_factor=settings.ownership_reach_radii, rate=settings.data_rate,
-                    mass_image=mass_image,
-                )
-            lines = _refine.bend_step(lines, settings.bend_rate)
-            radii = _refine.radius_step(
-                lines, radii, mass, prior_radius=radius, tolerance=spec.diameter_tolerance,
-                prior_weight=settings.radius_prior_weight, profile=profile, voxel_size=voxel_size,
+    def topology(
+        self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray
+    ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, dict[str, Any]]:
+        """Splits, side-by-side, duplicates, unsupported fibers and joins, one type at a time."""
+        s = self.settings
+        out_lines: list[np.ndarray] = []
+        out_radii: list[np.ndarray] = []
+        out_types: list[np.ndarray] = []
+        counts = {"splits": 0, "duplicates": 0, "merges": 0}
+        for kind in range(len(self.specs)):
+            pick = np.flatnonzero(np.asarray(types) == kind)
+            if pick.size == 0:
+                continue
+            group = [lines[i] for i in pick]
+            group_radii = np.asarray(radii)[pick]
+            r, bend, min_length = float(self.radius[kind]), float(self.bend[kind]), float(self.min_length[kind])
+            cost = float(self.cost[kind])
+            scale = evidence_scale(self.image, group, group_radii, r) if cost > 0 else 1.0
+            group, group_radii, splits = _moves.split_kinks(
+                group, group_radii, min_bend_radius=bend, min_length=min_length, max_length=self.max_length[kind],
+                threshold=s.kink_threshold, image=self.image, end_cost=cost, scale=scale,
             )
-            occupied, _, _ = rasterize(image.shape, frozen + lines, np.concatenate([frozen_radii, radii]), signed=True)
-            if frozen_count:
-                occupied = np.where(occupied > frozen_count, occupied - frozen_count, np.where(occupied > 0, -1, 0))
-            lines = _refine.end_step(image, lines, radii, step=spacing, occupied=occupied)
-            if settings.separate_fibers:
-                separated = _refine.separate_step(frozen + lines, np.concatenate([frozen_radii, radii]))
-                lines = separated[frozen_count:]
-            lines = _refine.respace(lines, spacing)
-        scale = evidence_scale(image, lines, radii, radius) if cost > 0 else 1.0
-        lines, radii, splits = _moves.split_kinks(
-            lines, radii, min_bend_radius=bend, min_length=min_length, max_length=max_length,
-            threshold=settings.kink_threshold, image=image, end_cost=cost, scale=scale,
-        )
-        lines, radii, duplicates = _moves.resolve_side_by_side(
-            image, lines, radii, min_length=min_length, end_cost=cost, scale=scale
-        )
-        lines, radii = _moves.trim_duplicates(lines, radii, min_length=min_length)
-        lines, radii = _moves.remove_unsupported(image, lines, radii, min_length=min_length, min_support=settings.min_support)
-        off_profile = 0
-        if profile_image is not None and not spec.profile.solid:
-            lines, radii, off_profile = _moves.remove_off_profile(profile_image, lines, radii, spec.profile, voxel_size)
-        lines, radii, merges = _moves.merge_fragments(
-            image, lines, radii, max_gap=settings.merge_gap_radii * radius,
-            min_bend_radius=bend, kink_threshold=settings.kink_threshold,
-            end_cost=cost, scale=scale, max_prior_gap=settings.prior_merge_gap_radii * radius,
-            max_prior_angle_degrees=settings.prior_merge_angle_degrees,
-        )
-        lines = _refine.respace(lines, spacing)
-        explained = _explained_fraction(foreground, lines, radii)
-        ends = end_statistics(lines, radii, image.shape, length=length)
-        extra = {"interior_ends": ends["interior_ends"]}
-        if off_profile:
-            extra["off_profile"] = off_profile
+            group, group_radii, duplicates = _moves.resolve_side_by_side(
+                self.image, group, group_radii, min_length=min_length, end_cost=cost, scale=scale
+            )
+            group, group_radii = _moves.trim_duplicates(group, group_radii, min_length=min_length)
+            group, group_radii = _moves.remove_unsupported(
+                self.image, group, group_radii, min_length=min_length, min_support=s.min_support
+            )
+            group, group_radii, merges = _moves.merge_fragments(
+                self.image, group, group_radii, max_gap=s.merge_gap_radii * r,
+                min_bend_radius=bend, kink_threshold=s.kink_threshold,
+                end_cost=cost, scale=scale, max_prior_gap=s.prior_merge_gap_radii * r,
+                max_prior_angle_degrees=s.prior_merge_angle_degrees,
+            )
+            counts["splits"] += splits
+            counts["duplicates"] += duplicates
+            counts["merges"] += merges
+            out_lines += group
+            out_radii.append(np.asarray(group_radii, dtype=np.float64))
+            out_types.append(np.full(len(group), kind, dtype=int))
+        lines = _refine.respace(out_lines, self.spacing)
+        radii = np.concatenate(out_radii) if out_radii else np.zeros(0)
+        types = np.concatenate(out_types) if out_types else np.zeros(0, dtype=int)
+        counts["explained"] = _explained_fraction(self.foreground, lines, radii)
+        counts["types"] = self.counts(types)
+        return lines, radii, types, counts
+
+    def end_summary(self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray) -> dict[str, Any]:
+        ends = end_statistics(lines, radii, self.image.shape)
+        extra: dict[str, Any] = {"interior_ends": ends["interior_ends"]}
         if ends["implied_length"]:
-            extra["implied_length_m"] = ends["implied_length"] * voxel_size
-        if length:
-            extra["expected_interior_ends"] = round(ends["expected_interior_ends"], 1)
-        log(
-            f"round {round_index + 1}", lines, splits=splits, duplicates=duplicates, merges=merges,
-            explained=explained, **extra,
-        )
-        if round_index + 1 < settings.rounds:
-            born = trace_fibers(
-                image, hessian, radius=radius, min_bend_radius=bend, min_length=min_length,
-                node_spacing=spacing, claimed=claim(lines, radii), foreground=foreground, label_offset=len(lines),
-            )
-            lines = lines + born
-            radii = np.concatenate([radii, np.full(len(born), radius)])
-            log(f"births {round_index + 1}", lines, born=len(born))
-    if use_solver and lines:
-        # The last round's splits and joins are not yet admissible fibers; the
-        # fit is returned exactly as the solver leaves it.
-        lines, radii = solve(lines, radii, 1, final=True)
-        log("final solve", lines)
-    return lines, np.asarray(radii, dtype=np.float64), image, levels
+            extra["implied_length_m"] = ends["implied_length"] * self.h
+        if all(self.length):
+            expected = 0.0
+            for kind, length in enumerate(self.length):
+                group = [line for line, t in zip(lines, types) if t == kind]
+                expected += 2.0 * sum(polyline_length(line) for line in group) / length
+            extra["expected_interior_ends"] = round(expected, 1)
+        return extra
 
 
 def _relevel(image: np.ndarray, levels: Levels, lines: list[np.ndarray], radius: float) -> tuple[np.ndarray, Levels]:

@@ -38,6 +38,21 @@ class SyntheticScan:
     # rendered with), or None for a single-type scan.
     types: np.ndarray | None = None
 
+    def fiber_mask(self, level: float = 0.5, *, sigma: float = 0.7) -> np.ndarray:
+        """A binary fiber mask, as a grey-level threshold of the scan gives.
+
+        The scan is smoothed by ``sigma`` voxels and thresholded at ``level``
+        of the way from the void to the fiber grey level (both read off the
+        true labels). A ``level`` below 0.5 over-reaches: fibers come out
+        thicker and more background is kept, as with a generous threshold.
+        """
+        from scipy.ndimage import gaussian_filter
+
+        smooth = gaussian_filter(self.volume.astype(np.float32), sigma) if sigma > 0 else self.volume.astype(np.float32)
+        void = float(np.median(smooth[self.labels == 0]))
+        fiber = float(np.median(smooth[self.labels > 0]))
+        return smooth >= void + level * (fiber - void)
+
     def crop(self, low: tuple[int, int, int], high: tuple[int, int, int]) -> "SyntheticScan":
         """The sub-volume ``[low, high)`` (voxel indices, ``(x, y, z)``).
 
