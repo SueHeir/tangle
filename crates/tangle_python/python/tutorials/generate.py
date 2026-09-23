@@ -208,6 +208,7 @@ SOLVE_POLICY_FIELDS = [
     ("hard_penetration", "Whether a penetration miss fails the stage (`True`) or is only reported.", "boolean"),
     ("hard_curvature", "Whether a curvature miss fails the stage (`True`) or is only reported.", "boolean"),
     ("max_iterations", "Stage-specific iteration budget.", "count"),
+    ("max_extra_iterations", "Extra iterations allowed after the budget while the stage would still fail; stops as soon as it can pass. Defaults to half of `max_iterations`.", "count"),
     ("on_budget_exhausted", "Behavior when the budget runs out before the targets are met.", "`\"fail\"` or `\"continue_if_hard_ok\"`"),
 ]
 

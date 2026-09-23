@@ -868,6 +868,13 @@ pub(crate) struct PyRunResult {
     pub cell_count: usize,
     #[pyo3(get)]
     pub events: Vec<String>,
+    /// Iterations solve steps spent past their `max_iterations` budgets.
+    #[pyo3(get)]
+    pub extra_iterations: usize,
+    /// Iterations run after the last recipe operation, while the plain
+    /// relaxation settles to its own convergence limits.
+    #[pyo3(get)]
+    pub post_recipe_iterations: usize,
     #[pyo3(get)]
     pub warnings: Vec<String>,
     #[pyo3(get)]
@@ -1113,6 +1120,17 @@ fn run_native_recipe(
             .iter()
             .map(|event| event.description.clone())
             .collect(),
+        extra_iterations: recipe_state
+            .events
+            .iter()
+            .map(|event| event.extra_iterations)
+            .sum(),
+        post_recipe_iterations: relaxation.iterations.saturating_sub(
+            recipe_state
+                .events
+                .last()
+                .map_or(relaxation.iterations, |event| event.iteration),
+        ),
         warnings: recipe_state
             .warnings
             .iter()

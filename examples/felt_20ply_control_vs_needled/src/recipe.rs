@@ -139,6 +139,7 @@ pub(super) fn mechanics_recovery() -> FormationOperation {
                 curvature_ratio: AcceptanceLimit::soft(2.7),
             },
             maximum_iterations: 20_000,
+            extra_iterations: SolvePolicy::default_extra_iterations(20_000),
             on_exhaustion: SolveExhaustion::ContinueIfHardLimitsSatisfied,
         },
         overrides: RelaxationOverrides {
@@ -167,6 +168,7 @@ pub(super) fn contact_first_cleanup() -> FormationOperation {
                 curvature_ratio: AcceptanceLimit::soft(5.0),
             },
             maximum_iterations: 15_000,
+            extra_iterations: SolvePolicy::default_extra_iterations(15_000),
             on_exhaustion: SolveExhaustion::ContinueIfHardLimitsSatisfied,
         },
         overrides: RelaxationOverrides {
@@ -201,6 +203,7 @@ pub(super) fn curvature_cleanup(
                 curvature_ratio: AcceptanceLimit::hard(bend_ratio),
             },
             maximum_iterations,
+            extra_iterations: SolvePolicy::default_extra_iterations(maximum_iterations),
             on_exhaustion: SolveExhaustion::Reject,
         },
         overrides: RelaxationOverrides {
@@ -234,6 +237,7 @@ pub(super) fn flexible_contact_cleanup(
                 curvature_ratio: AcceptanceLimit::hard(bend_ratio),
             },
             maximum_iterations,
+            extra_iterations: SolvePolicy::default_extra_iterations(maximum_iterations),
             on_exhaustion: SolveExhaustion::Reject,
         },
         overrides: RelaxationOverrides {
@@ -314,6 +318,7 @@ pub(super) fn final_relaxation() -> FormationOperation {
             curvature_ratio: AcceptanceLimit::hard(FINAL_BEND_RATIO),
         },
         maximum_iterations: 100_000,
+        extra_iterations: SolvePolicy::default_extra_iterations(100_000),
         on_exhaustion: SolveExhaustion::Reject,
     })
 }

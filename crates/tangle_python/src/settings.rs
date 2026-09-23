@@ -738,6 +738,10 @@ impl PyRelaxationOverrides {
 ///
 /// `max_penetration` and `max_curvature_ratio` default to their targets.
 /// A `hard_*` limit must hold for the step to pass; a soft one only warns.
+///
+/// When `max_iterations` runs out and the step would fail, solving continues
+/// for up to `max_extra_iterations` more (default: half of `max_iterations`)
+/// and stops as soon as the step can pass.
 #[pyclass(name = "SolvePolicy", module = "tangle._tangle")]
 #[derive(Clone, Debug)]
 pub(crate) struct PySolvePolicy {
@@ -755,6 +759,7 @@ pub(crate) struct PySolvePolicy {
     pub hard_curvature: bool,
     #[pyo3(get, set)]
     pub max_iterations: usize,
+    max_extra_iterations: Option<usize>,
     on_budget_exhausted: SolveExhaustion,
 }
 
@@ -772,6 +777,7 @@ impl PySolvePolicy {
             hard_penetration: true,
             hard_curvature: true,
             max_iterations: 2000,
+            max_extra_iterations: None,
             on_budget_exhausted: SolveExhaustion::Reject,
         };
         let policy = with_kwargs(py, policy, kwargs, "SolvePolicy")?;
@@ -801,6 +807,17 @@ impl PySolvePolicy {
     }
 
     #[getter]
+    fn max_extra_iterations(&self) -> usize {
+        self.max_extra_iterations
+            .unwrap_or(SolvePolicy::default_extra_iterations(self.max_iterations))
+    }
+
+    #[setter]
+    fn set_max_extra_iterations(&mut self, value: Option<usize>) {
+        self.max_extra_iterations = value;
+    }
+
+    #[getter]
     fn on_budget_exhausted(&self) -> &'static str {
         choice_name(self.on_budget_exhausted, BUDGET_EXHAUSTION)
     }
@@ -826,7 +843,8 @@ impl PySolvePolicy {
         format!(
             concat!(
                 "SolvePolicy({:?}, target_penetration={}, max_penetration={}, ",
-                "target_curvature_ratio={}, max_curvature_ratio={}, max_iterations={})"
+                "target_curvature_ratio={}, max_curvature_ratio={}, max_iterations={}, ",
+                "max_extra_iterations={})"
             ),
             self.name,
             self.target_penetration,
@@ -834,6 +852,7 @@ impl PySolvePolicy {
             self.target_curvature_ratio,
             self.max_curvature_ratio(),
             self.max_iterations,
+            self.max_extra_iterations(),
         )
     }
 }
@@ -894,6 +913,7 @@ impl PySolvePolicy {
                 },
             },
             maximum_iterations: self.max_iterations,
+            extra_iterations: self.max_extra_iterations(),
             on_exhaustion: self.on_budget_exhausted,
         })
     }
