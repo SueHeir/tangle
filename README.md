@@ -197,6 +197,9 @@ See [solver and architecture notes](docs/architecture.md) for details.
 - **Cross-sections:** nearest-neighbor distances, the Clark-Evans ratio and
   the pair correlation g(r) of fiber sections in slice planes, from
   `characterize_slices()`, the way a CT slice is read.
+- **Pores and solid:** exact overlap-free solid fraction, solid and void
+  chord-length distributions, two-point correlation and a through-thickness
+  profile from test lines, with `characterize_phases()`; no voxel size needed.
 - **Scorecard against a scan:** `tangle.score_structure(candidate, reference,
   contact_gap)` scores every shape, contact and orientation metric by its
   distance to the reference divided by the reference's own

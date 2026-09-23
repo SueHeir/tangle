@@ -218,6 +218,35 @@ class CollectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             assembly.characterize_slices(axis=3)
 
+    def test_phase_analysis_measures_a_rod_exactly(self):
+        radius = 0.2
+        material = tangle.Material("fiber", diameter=2 * radius)
+        collection = tangle.FiberCollection.from_centerlines(
+            [[[0.5, 0.5, 0.0], [0.5, 0.5, 1.0]]], material
+        )
+        assembly = tangle.Assembly(tangle.Cell([1.0, 1.0, 1.0], periodic="xy"))
+        assembly.insert(collection)
+
+        report = assembly.characterize_phases(line_count=64, lag_count=4)
+        self.assertIsInstance(report, tangle.PhaseReport)
+        area = math.pi * radius * radius
+        self.assertAlmostEqual(report.solid_fraction_by_axis[0], area, delta=5e-3)
+        self.assertAlmostEqual(report.solid_fraction_by_axis[1], area, delta=5e-3)
+        solid_x = report.solid_chord_length[0]
+        self.assertAlmostEqual(solid_x["quantiles"][-1], 2 * radius, delta=1e-3)
+        self.assertAlmostEqual(solid_x["mean"], math.pi * radius / 2, delta=5e-3)
+        void_x = report.void_chord_length[0]
+        self.assertAlmostEqual(void_x["quantiles"][0], 1 - 2 * radius, delta=1e-3)
+        self.assertEqual(len(report.correlation_lags), 5)
+        self.assertEqual(len(report.two_point_correlation), 3)
+        self.assertAlmostEqual(
+            report.two_point_correlation[0][0], report.solid_fraction_by_axis[0]
+        )
+        self.assertEqual(len(report.solid_fraction_profile), 64)
+        self.assertEqual(report.to_dict()["schema_version"], 1)
+        with self.assertRaises(ValueError):
+            assembly.characterize_phases(line_count=0)
+
     def test_shape_analysis_measures_a_helix(self):
         a, c = 1.0, 0.5
         helix = [

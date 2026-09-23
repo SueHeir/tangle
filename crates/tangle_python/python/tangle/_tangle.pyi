@@ -261,6 +261,33 @@ class ShapeReport:
     def to_dict(self) -> dict[str, Any]: ...
     def write_json(self, path: Path) -> None: ...
 
+class PhaseReport:
+    @property
+    def schema_version(self) -> int: ...
+    @property
+    def line_count(self) -> int: ...
+    @property
+    def solid_fraction(self) -> float: ...
+    @property
+    def solid_fraction_by_axis(self) -> list[float]: ...
+    @property
+    def solid_chord_length(self) -> list[ShapeDistribution | None]: ...
+    @property
+    def void_chord_length(self) -> list[ShapeDistribution | None]: ...
+    @property
+    def correlation_lags(self) -> list[float]: ...
+    @property
+    def two_point_correlation(self) -> list[list[float]]: ...
+    @property
+    def profile_axis(self) -> int: ...
+    @property
+    def profile_positions(self) -> list[float]: ...
+    @property
+    def solid_fraction_profile(self) -> list[float]: ...
+    def to_json(self, pretty: bool = ...) -> str: ...
+    def to_dict(self) -> dict[str, Any]: ...
+    def write_json(self, path: Path) -> None: ...
+
 class PumaExportReport:
     @property
     def output_directory(self) -> Path: ...
@@ -375,6 +402,15 @@ class Assembly:
         bin_count: int = ...,
         quantile_count: int = ...,
     ) -> SliceReport: ...
+    def characterize_phases(
+        self,
+        *,
+        line_count: int = ...,
+        max_lag: float | None = ...,
+        lag_count: int = ...,
+        profile_axis: int = ...,
+        quantile_count: int = ...,
+    ) -> PhaseReport: ...
     def export_puma(
         self,
         output_directory: Path,
@@ -593,6 +629,7 @@ def score_structure(
     linking_window: float | None = ...,
     slice_axis: int = ...,
     slice_count: int = ...,
+    line_count: int = ...,
 ) -> Scorecard: ...
 
 # --- Settings, policies, and overrides ---------------------------------------
@@ -1134,6 +1171,15 @@ class RunResult:
         bin_count: int = ...,
         quantile_count: int = ...,
     ) -> SliceReport: ...
+    def characterize_phases(
+        self,
+        *,
+        line_count: int = ...,
+        max_lag: float | None = ...,
+        lag_count: int = ...,
+        profile_axis: int = ...,
+        quantile_count: int = ...,
+    ) -> PhaseReport: ...
     def write_ovito(
         self,
         path: Path,

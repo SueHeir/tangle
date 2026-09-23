@@ -10,9 +10,9 @@ use tangle_core::{FiberAssembly, FiberBendLimit, FiberId, PeriodicCell, Section,
 use tangle_export::{write_puma_bundle, PumaVoxelExportConfig};
 
 use crate::analysis::{
-    characterize_entanglement, characterize_neighbors, characterize_shape, characterize_slices,
-    PyAnalysisReport, PyEntanglementReport, PyNeighborReport, PyPumaExportReport, PyShapeReport,
-    PySliceReport,
+    characterize_entanglement, characterize_neighbors, characterize_phases, characterize_shape,
+    characterize_slices, PyAnalysisReport, PyEntanglementReport, PyNeighborReport, PyPhaseReport,
+    PyPumaExportReport, PyShapeReport, PySliceReport,
 };
 use crate::common::{axis_name, parse_axis, parse_axis_mask, DEFAULT_STACK_AXIS};
 
@@ -556,6 +556,29 @@ impl PyAssembly {
             slice_count,
             max_radius,
             bin_count,
+            quantile_count,
+        )
+    }
+
+    /// Casts test lines through the fiber capsules and measures the exact
+    /// solid fraction, solid and void chord lengths, two-point correlation
+    /// and solid-fraction profile.
+    #[pyo3(signature = (*, line_count=64, max_lag=None, lag_count=32, profile_axis=2, quantile_count=101))]
+    fn characterize_phases(
+        &self,
+        line_count: usize,
+        max_lag: Option<f64>,
+        lag_count: usize,
+        profile_axis: usize,
+        quantile_count: usize,
+    ) -> PyResult<PyPhaseReport> {
+        let model = self.model.lock().expect("assembly lock poisoned");
+        characterize_phases(
+            &model.assembly,
+            line_count,
+            max_lag,
+            lag_count,
+            profile_axis,
             quantile_count,
         )
     }

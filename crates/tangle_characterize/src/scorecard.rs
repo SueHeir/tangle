@@ -30,10 +30,10 @@ use tangle_core::{FiberAssembly, FiberId, PeriodicCell, Vec3};
 use crate::distribution::Distribution;
 use crate::neighbors::{add, norm, scale, sub};
 use crate::{
-    analyze_contact_graph, analyze_entanglement, analyze_neighbors, analyze_shape, analyze_slices,
-    characterize_assembly, EntanglementConfig, EntanglementError, NeighborAnalysisConfig,
-    NeighborAnalysisError, ShapeAnalysisConfig, ShapeAnalysisError, SliceAnalysisConfig,
-    SliceAnalysisError,
+    analyze_contact_graph, analyze_entanglement, analyze_neighbors, analyze_phases, analyze_shape,
+    analyze_slices, characterize_assembly, EntanglementConfig, EntanglementError,
+    NeighborAnalysisConfig, NeighborAnalysisError, PhaseAnalysisConfig, PhaseAnalysisError,
+    ShapeAnalysisConfig, ShapeAnalysisError, SliceAnalysisConfig, SliceAnalysisError,
 };
 
 /// Schema version of [`Scorecard`] and [`StructureProfile`].
@@ -65,18 +65,21 @@ pub struct StructureProfile {
 /// and from the contact graph `contact_degree_per_length`,
 /// `contact_clustering`, `repeated_contact_fraction` and
 /// `largest_component_length_fraction`, and from the slices
-/// `sections_per_area` and `clark_evans_ratio`.
+/// `sections_per_area` and `clark_evans_ratio`, and from the test lines
+/// `solid_fraction`.
 ///
 /// Distributions: `curvature`, `absolute_torsion`, `curl_index`,
 /// `axis_cosine`, `fiber_length`, `crossing_angle` (radians), `free_length`,
 /// `excess_persistence`, `absolute_writhe_per_length`,
-/// `absolute_contact_linking`, `section_nearest_neighbor_distance`.
+/// `absolute_contact_linking`, `section_nearest_neighbor_distance`,
+/// `solid_chord_length_x`/`_y`/`_z` and `void_chord_length_x`/`_y`/`_z`.
 pub fn profile_structure(
     assembly: &FiberAssembly,
     shape: &ShapeAnalysisConfig,
     neighbors: &NeighborAnalysisConfig,
     entanglement: &EntanglementConfig,
     slices: &SliceAnalysisConfig,
+    phases: &PhaseAnalysisConfig,
 ) -> Result<StructureProfile, ScorecardError> {
     let basic = characterize_assembly(assembly);
     let shape_metrics = analyze_shape(assembly, shape)?;
@@ -84,6 +87,7 @@ pub fn profile_structure(
     let graph = analyze_contact_graph(&neighbor_metrics);
     let entanglement_metrics = analyze_entanglement(assembly, &neighbor_metrics, entanglement)?;
     let slice_metrics = analyze_slices(assembly, slices)?;
+    let phase_metrics = analyze_phases(assembly, phases)?;
     let quantiles = shape.quantile_count;
     let volume = basic.cell.volume;
     let has_length = neighbor_metrics.total_length > 0.0;
@@ -139,6 +143,7 @@ pub fn profile_structure(
         ),
         ("sections_per_area", slice_metrics.sections_per_area),
         ("clark_evans_ratio", slice_metrics.clark_evans_ratio),
+        ("solid_fraction", Some(phase_metrics.solid_fraction)),
     ]
     .into_iter()
     .map(|(name, value)| (name.to_owned(), value))
@@ -184,6 +189,22 @@ pub fn profile_structure(
     ]
     .into_iter()
     .map(|(name, value)| (name.to_owned(), value))
+    .chain(
+        ["x", "y", "z"]
+            .into_iter()
+            .zip(
+                phase_metrics
+                    .solid_chord_length
+                    .into_iter()
+                    .zip(phase_metrics.void_chord_length),
+            )
+            .flat_map(|(axis, (solid, void))| {
+                [
+                    (format!("solid_chord_length_{axis}"), solid),
+                    (format!("void_chord_length_{axis}"), void),
+                ]
+            }),
+    )
     .collect();
 
     Ok(StructureProfile {
@@ -228,6 +249,9 @@ pub struct ScorecardConfig {
     /// Cross-section settings. `g(r)` is not scored, so its bins are
     /// skipped.
     pub slices: SliceAnalysisConfig,
+    /// Test-line settings for solid fraction and chord lengths. `S₂` is not
+    /// scored, so its lags are skipped.
+    pub phases: PhaseAnalysisConfig,
 }
 
 impl ScorecardConfig {
@@ -244,6 +268,7 @@ impl ScorecardConfig {
             neighbors: NeighborAnalysisConfig::new(contact_gap),
             entanglement: EntanglementConfig::default(),
             slices: SliceAnalysisConfig::default(),
+            phases: PhaseAnalysisConfig::default(),
         }
     }
 }
@@ -292,6 +317,8 @@ pub struct Scorecard {
     pub entanglement: EntanglementConfig,
     /// Cross-section settings actually used.
     pub slices: SliceAnalysisConfig,
+    /// Test-line settings actually used.
+    pub phases: PhaseAnalysisConfig,
     /// One row per metric, scalars first, in name order.
     pub rows: Vec<ScoreRow>,
     /// Metrics of the whole candidate region.
@@ -311,6 +338,8 @@ pub enum ScorecardError {
     Entanglement(EntanglementError),
     /// The cross-section settings were invalid.
     Slices(SliceAnalysisError),
+    /// The test-line settings were invalid.
+    Phases(PhaseAnalysisError),
     /// A subdivision count was zero, or the total was below two.
     InvalidSubdivisions([usize; 3]),
     /// A region had a non-positive or non-finite extent.
@@ -343,6 +372,7 @@ impl fmt::Display for ScorecardError {
             Self::Neighbors(error) => write!(formatter, "{error}"),
             Self::Entanglement(error) => write!(formatter, "{error}"),
             Self::Slices(error) => write!(formatter, "{error}"),
+            Self::Phases(error) => write!(formatter, "{error}"),
             Self::InvalidSubdivisions(counts) => write!(
                 formatter,
                 "subdivisions must be positive and give at least two subvolumes, got {counts:?}"
@@ -376,6 +406,12 @@ impl Error for ScorecardError {}
 impl From<ShapeAnalysisError> for ScorecardError {
     fn from(error: ShapeAnalysisError) -> Self {
         Self::Shape(error)
+    }
+}
+
+impl From<PhaseAnalysisError> for ScorecardError {
+    fn from(error: PhaseAnalysisError) -> Self {
+        Self::Phases(error)
     }
 }
 
@@ -495,9 +531,21 @@ pub fn score_structure(
         maximum_radius: None,
         ..config.slices.clone()
     };
+    let phases = PhaseAnalysisConfig {
+        lag_count: 0,
+        maximum_lag: None,
+        ..config.phases.clone()
+    };
 
     let profile = |assembly: &FiberAssembly| {
-        profile_structure(assembly, &shape, &neighbors, &entanglement, &slices)
+        profile_structure(
+            assembly,
+            &shape,
+            &neighbors,
+            &entanglement,
+            &slices,
+            &phases,
+        )
     };
     let reference_profile = profile(&reference_whole)?;
     let candidate_whole = crop_assembly(
@@ -575,6 +623,7 @@ pub fn score_structure(
         neighbors,
         entanglement,
         slices,
+        phases,
         rows,
         candidate: candidate_profile,
         reference: reference_profile,

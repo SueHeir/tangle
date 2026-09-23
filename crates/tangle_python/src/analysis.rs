@@ -3,10 +3,11 @@ use std::path::PathBuf;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use tangle_characterize::{
-    analyze_contact_graph, analyze_entanglement, analyze_neighbors, analyze_shape, analyze_slices,
-    score_structure, write_analysis_json, AssemblyMetrics, Distribution, EntanglementConfig,
-    EntanglementMetrics, NeighborAnalysisConfig, NeighborMetrics, Scorecard, ScorecardConfig,
-    ShapeAnalysisConfig, ShapeMetrics, SliceAnalysisConfig, SliceMetrics,
+    analyze_contact_graph, analyze_entanglement, analyze_neighbors, analyze_phases, analyze_shape,
+    analyze_slices, score_structure, write_analysis_json, AssemblyMetrics, Distribution,
+    EntanglementConfig, EntanglementMetrics, NeighborAnalysisConfig, NeighborMetrics,
+    PhaseAnalysisConfig, PhaseMetrics, Scorecard, ScorecardConfig, ShapeAnalysisConfig,
+    ShapeMetrics, SliceAnalysisConfig, SliceMetrics,
 };
 use tangle_core::FiberAssembly;
 use tangle_export::PumaExportReport;
@@ -626,7 +627,7 @@ impl PyShapeReport {
 
 /// Scores a candidate structure against a reference, metric by metric.
 #[pyfunction]
-#[pyo3(name = "score_structure", signature = (candidate, reference, contact_gap, *, subdivisions=[2, 2, 2], candidate_region=None, reference_region=None, max_candidate_subvolumes=64, min_piece_length=None, sample_spacing=None, neighbor_sample_spacing=None, neighbor_gap=None, in_axis_angle_degrees=20.0, orientation_axis=[0.0, 0.0, 1.0], quantile_count=101, linking_window=None, slice_axis=2, slice_count=16))]
+#[pyo3(name = "score_structure", signature = (candidate, reference, contact_gap, *, subdivisions=[2, 2, 2], candidate_region=None, reference_region=None, max_candidate_subvolumes=64, min_piece_length=None, sample_spacing=None, neighbor_sample_spacing=None, neighbor_gap=None, in_axis_angle_degrees=20.0, orientation_axis=[0.0, 0.0, 1.0], quantile_count=101, linking_window=None, slice_axis=2, slice_count=16, line_count=64))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn score_structure_py(
     candidate: PyRef<'_, PyAssembly>,
@@ -646,6 +647,7 @@ pub(crate) fn score_structure_py(
     linking_window: Option<f64>,
     slice_axis: usize,
     slice_count: usize,
+    line_count: usize,
 ) -> PyResult<PyScorecard> {
     // Copy each assembly out of its lock in turn, so passing the same
     // assembly twice cannot deadlock.
@@ -678,6 +680,8 @@ pub(crate) fn score_structure_py(
     config.slices.axis = slice_axis;
     config.slices.slice_count = slice_count;
     config.slices.quantile_count = quantile_count;
+    config.phases.line_count = line_count;
+    config.phases.quantile_count = quantile_count;
     score_structure(&candidate, &reference, &config)
         .map(|inner| PyScorecard { inner })
         .map_err(|error| PyValueError::new_err(error.to_string()))
@@ -1089,6 +1093,140 @@ impl PySliceReport {
             self.inner.slice_positions.len(),
             format(self.inner.sections_per_area),
             format(self.inner.clark_evans_ratio),
+        )
+    }
+}
+
+/// Casts test lines through the fiber capsules and measures solid and void
+/// statistics.
+pub(crate) fn characterize_phases(
+    assembly: &FiberAssembly,
+    line_count: usize,
+    max_lag: Option<f64>,
+    lag_count: usize,
+    profile_axis: usize,
+    quantile_count: usize,
+) -> PyResult<PyPhaseReport> {
+    let config = PhaseAnalysisConfig {
+        line_count,
+        maximum_lag: max_lag,
+        lag_count,
+        profile_axis,
+        quantile_count,
+    };
+    analyze_phases(assembly, &config)
+        .map(|inner| PyPhaseReport { inner })
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyclass(name = "PhaseReport", module = "tangle._tangle", frozen)]
+#[derive(Clone)]
+pub(crate) struct PyPhaseReport {
+    pub(crate) inner: PhaseMetrics,
+}
+
+#[pymethods]
+impl PyPhaseReport {
+    #[getter]
+    fn schema_version(&self) -> u32 {
+        self.inner.schema_version
+    }
+
+    #[getter]
+    fn line_count(&self) -> usize {
+        self.inner.line_count
+    }
+
+    #[getter]
+    fn solid_fraction(&self) -> f64 {
+        self.inner.solid_fraction
+    }
+
+    #[getter]
+    fn solid_fraction_by_axis(&self) -> Vec<f64> {
+        self.inner.solid_fraction_by_axis.clone()
+    }
+
+    /// Solid chord lengths along x, y and z, each ``None`` or a
+    /// distribution dict.
+    #[getter]
+    fn solid_chord_length(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(py, serde_json::to_string(&self.inner.solid_chord_length))
+    }
+
+    /// Void chord (intercept) lengths along x, y and z.
+    #[getter]
+    fn void_chord_length(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(py, serde_json::to_string(&self.inner.void_chord_length))
+    }
+
+    #[getter]
+    fn correlation_lags(&self) -> Vec<f64> {
+        self.inner.correlation_lags.clone()
+    }
+
+    /// Two-point correlation along x, y and z at each lag.
+    #[getter]
+    fn two_point_correlation(&self) -> Vec<Vec<f64>> {
+        self.inner.two_point_correlation.clone()
+    }
+
+    #[getter]
+    fn profile_axis(&self) -> usize {
+        self.inner.profile_axis
+    }
+
+    #[getter]
+    fn profile_positions(&self) -> Vec<f64> {
+        self.inner.profile_positions.clone()
+    }
+
+    #[getter]
+    fn solid_fraction_profile(&self) -> Vec<f64> {
+        self.inner.solid_fraction_profile.clone()
+    }
+
+    #[pyo3(signature = (pretty=true))]
+    fn to_json(&self, pretty: bool) -> PyResult<String> {
+        if pretty {
+            serde_json::to_string_pretty(&self.inner)
+        } else {
+            serde_json::to_string(&self.inner)
+        }
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(py, serde_json::to_string(&self.inner))
+    }
+
+    fn write_json(&self, path: PathBuf) -> PyResult<()> {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        }
+        let encoded = serde_json::to_string_pretty(&self.inner)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        std::fs::write(path, encoded).map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    fn __repr__(&self) -> String {
+        let mean_void = self
+            .inner
+            .void_chord_length
+            .iter()
+            .map(|d| {
+                d.as_ref()
+                    .map_or("None".to_owned(), |d| format!("{:.4}", d.mean))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "PhaseReport(solid_fraction={:.4}, mean_void_chord_xyz=[{mean_void}])",
+            self.inner.solid_fraction,
         )
     }
 }

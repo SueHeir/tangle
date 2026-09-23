@@ -54,7 +54,7 @@ and can be compared byte-for-byte with the Python fixture's VTI/native JSON.
 | Orientation | Length- and volume-weighted centerline tensors | Accumulation of exported tangents, or independent image-based orientation |
 | Fiber statistics | Per-fiber length, equivalent diameter, stretch, maximum curvature, bend utilization; counts and material summaries | No individual-fiber reconstruction in this workflow |
 | Surface area | Nominal lateral area derived from radius and length in the section report | Marching-cubes surface area |
-| Void intercept lengths/connectivity | No native counterpart yet | PuMA mean intercept length and pore labeling |
+| Void intercept lengths/connectivity | `characterize_phases()`: exact solid and void chord-length distributions per axis, two-point correlation, solid-fraction profile; no pore labeling | PuMA mean intercept length and pore labeling |
 | Transport/continuum mechanics | No native characterization solver | PuMA conductivity, diffusivity/tortuosity, permeability, radiation, elasticity |
 | Contacts and neighbors | `characterize_neighbors()`: contact events, crossing angles, in-axis/out-of-axis split, excess persistence, free lengths, neighbor counts, neighbor turnover | No counterpart; voxel connectivity is not contact |
 | Fiber shape | `characterize_shape()`: curvature and torsion distributions, tangent correlation and persistence length, curl index, Schladitz β orientation fit | No individual-fiber reconstruction in this workflow |
@@ -233,6 +233,29 @@ averaged only over sections at least `max_radius` from every edge. That is
 why `max_radius` may be at most a quarter of a non-periodic in-plane length
 (half of a periodic one).
 
+## Solid and pore statistics
+
+`characterize_phases()` computes pore-space statistics without voxelizing. It
+casts a `line_count × line_count` grid of straight test lines along each axis
+and intersects them exactly with the fiber capsules (each segment swept by its
+radius), so overlapping fibers count once and nothing depends on a voxel size.
+
+- **Solid fraction:** covered length over line length, averaged over all
+  lines, also reported per axis. Unlike `nominal_swept_volume_fraction` it
+  does not double-count overlaps; at fine resolution it is what PuMA's voxel
+  fraction converges to.
+- **Chord lengths:** lengths of the solid and void intervals along x, y and z.
+  The mean void chord is PuMA's mean intercept length; the distributions add
+  its spread and the anisotropy between in-plane and through-thickness
+  directions. Chords cut by a non-periodic face are dropped because their true
+  length is unknown.
+- **Two-point correlation `S₂(r)`:** probability that two points `r` apart
+  along an axis are both solid, at `lag_count` lags up to `max_lag` (default
+  half the smallest cell length). It starts at the solid fraction and levels
+  at its square once solid positions decorrelate.
+- **Solid-fraction profile:** solid fraction at `line_count` positions along
+  `profile_axis` (default z, through the thickness).
+
 ## Scoring against a scan
 
 `tangle.score_structure(candidate, reference, contact_gap)` compares a
@@ -260,8 +283,8 @@ first.
 
 | Kind | Metrics |
 | --- | --- |
-| Scalars | `volume_fraction`, `length_density`, `mean_squared_axis_cosine`, `log_schladitz_beta`, `persistence_length`, `tangent_correlation_length`, `contacts_per_length`, `contact_ratio_to_random`, `in_axis_contact_fraction`, `mean_neighbors`, `neighbor_correlation_length`, `contact_degree_per_length`, `contact_clustering`, `repeated_contact_fraction`, `largest_component_length_fraction`, `sections_per_area`, `clark_evans_ratio` |
-| Distributions | `curvature`, `absolute_torsion`, `curl_index`, `axis_cosine`, `fiber_length`, `crossing_angle`, `free_length`, `excess_persistence`, `absolute_writhe_per_length`, `absolute_contact_linking`, `section_nearest_neighbor_distance` |
+| Scalars | `volume_fraction`, `length_density`, `mean_squared_axis_cosine`, `log_schladitz_beta`, `persistence_length`, `tangent_correlation_length`, `contacts_per_length`, `contact_ratio_to_random`, `in_axis_contact_fraction`, `mean_neighbors`, `neighbor_correlation_length`, `contact_degree_per_length`, `contact_clustering`, `repeated_contact_fraction`, `largest_component_length_fraction`, `sections_per_area`, `clark_evans_ratio`, `solid_fraction` |
+| Distributions | `curvature`, `absolute_torsion`, `curl_index`, `axis_cosine`, `fiber_length`, `crossing_angle`, `free_length`, `excess_persistence`, `absolute_writhe_per_length`, `absolute_contact_linking`, `section_nearest_neighbor_distance`, `solid_chord_length_x`/`_y`/`_z`, `void_chord_length_x`/`_y`/`_z` |
 
 - **Same settings on both sides.** Sample spacings, the neighbor gap, lag
   ranges and the torsion threshold are resolved once from the whole reference
@@ -269,7 +292,8 @@ first.
   report's `shape`, `neighbors` and `entanglement` settings. The linking
   window defaults to 20 shape sample spacings (`linking_window`). Sections are
   taken in `slice_count` planes normal to `slice_axis` in every subvolume;
-  `g(r)` is not scored.
+  `g(r)` is not scored. Chords come from `line_count²` test lines per axis
+  in every subvolume; `S₂` is not scored.
 - **Cropping.** Each subvolume is analyzed as a non-periodic box. Fibers are
   clipped at its faces (periodic images included), and pieces shorter than
   `min_piece_length` (default the largest reference fiber diameter) are

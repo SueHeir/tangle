@@ -16,6 +16,7 @@ mod distribution;
 mod entanglement;
 mod graph;
 mod neighbors;
+mod phases;
 mod scorecard;
 mod shape;
 mod slices;
@@ -29,6 +30,9 @@ pub use graph::{analyze_contact_graph, ContactGraphMetrics, CONTACT_GRAPH_SCHEMA
 pub use neighbors::{
     analyze_neighbors, ContactEvent, FiberNeighborMetrics, NeighborAnalysisConfig,
     NeighborAnalysisError, NeighborMetrics, NEIGHBOR_SCHEMA_VERSION,
+};
+pub use phases::{
+    analyze_phases, PhaseAnalysisConfig, PhaseAnalysisError, PhaseMetrics, PHASE_SCHEMA_VERSION,
 };
 pub use scorecard::{
     crop_assembly, profile_structure, score_structure, ScoreRow, Scorecard, ScorecardConfig,
