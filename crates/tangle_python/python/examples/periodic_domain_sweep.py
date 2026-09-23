@@ -19,12 +19,12 @@ smallest cell therefore refines to 40 segments per fiber. Segments must also
 be at least one diameter long: only adjacent segments of a fiber are excluded
 from contact, so shorter segments make every next-nearest pair overlap.
 
-A flat fiber whose footprint (length times diameter) exceeds the cell area
-overlaps itself along its whole length and cannot relax apart. On such cells
-(only side 1 by default) each fiber is deposited as a gentle ramp that rises
-a little more than one diameter per wrap of the cell, so its strands start
-separated through the thickness. Lengths are unitless; scale every length
-setting together to change units.
+A flat fiber that meets one of its own periodic images (every fiber on side
+1, and fibers close to a lattice direction on the next few sides) would sit
+on itself in one plane and cannot relax apart. Each such fiber is deposited
+as a gentle ramp that rises a little more than one diameter between the two
+strands that would touch, so they start separated through the thickness.
+Lengths are unitless; scale every length setting together to change units.
 
 Each configuration writes ``side_XX/`` with the relaxed geometry (OVITO dump),
 multi-material spherocylinder and bond data for DIRT
@@ -54,16 +54,20 @@ LAYER_COUNT = 5
 VOLUME_FRACTION = 0.20
 DOMAIN_SIDES = tuple(range(10, 0, -1))
 SEED = 20_260_923
-# In fiber diameters: starting spacing of the deposited layers, the gap each
-# layer is lowered to, the convergence tolerance used during deposition and
-# compaction, and the final and DEM-handoff penetration targets.
+# In fiber diameters: the clearance between staged layers, the gap between
+# the top of one deposited layer and the bottom of the next (a flat layer of
+# crossing fibers is about two diameters thick), the convergence tolerance
+# used during deposition and compaction, and the final and DEM-handoff
+# penetration targets.
 STAGING_SPACING = 4.0
-LAYER_GAP = 0.5
+LAYER_GAP = 2.0
 FORMATION_TOLERANCE = 0.02
 CONTACT_TOLERANCE = 0.01
 DEM_CONTACT_TOLERANCE = 0.002
-# Rise per wrap of a ramped fiber, in diameters.
+# Rise between self-touching strands of a ramped fiber, in diameters.
 RAMP_MARGIN = 1.2
+# In-plane distance, in diameters, below which two strands count as touching.
+SELF_CONTACT_CLEARANCE = 1.1
 DENSITY = 1_000.0
 
 
@@ -91,6 +95,10 @@ class SweepConfig:
         allowed = min(
             self.max_segment_length, IMAGE_CLEARANCE * self.side - self.diameter
         )
+        if allowed <= 0.0:
+            raise ValueError(
+                f"diameter {self.diameter:g} is too large for cell side {self.side:g}"
+            )
         segments = math.ceil(self.fiber_length / allowed - 1.0e-9)
         if self.fiber_length / segments < self.diameter * (1.0 - 1.0e-9):
             raise ValueError(
@@ -114,33 +122,14 @@ class SweepConfig:
         return fiber_volume / (self.volume_fraction * self.side**2)
 
     @property
-    def ramp_slope(self) -> float:
-        """Rise per unit fiber length, or 0 when a flat fiber fits the cell.
-
-        Strands of one straight fiber that overlap in plane are at least
-        ``side - diameter`` apart along it, so this slope lifts them past one
-        another by a margin over one diameter.
-        """
-        if self.fiber_length * self.diameter <= self.side**2:
-            return 0.0
-        return RAMP_MARGIN * self.diameter / (self.side - self.diameter)
-
-    @property
-    def staging_thickness(self) -> float:
-        ramps = self.layer_count * self.ramp_slope * self.fiber_length
-        return (
-            (self.layer_count + 1) * STAGING_SPACING * self.diameter
-            + self.target_thickness
-            + ramps
-        )
-
-    @property
     def name(self) -> str:
         return f"side_{self.side:05.2f}".replace(".", "p").replace("p00", "")
 
     def validate(self) -> None:
-        if min(self.side, self.fiber_length, self.diameter) <= 0.0:
-            raise ValueError("side, fiber length, and diameter must be positive")
+        if min(self.side, self.fiber_length, self.diameter, self.max_segment_length) <= 0.0:
+            raise ValueError(
+                "side, fiber length, diameter, and max segment length must be positive"
+            )
         if self.layer_count < 1:
             raise ValueError("layer_count must be at least 1")
         if not 0.0 < self.volume_fraction < 1.0:
@@ -152,41 +141,107 @@ def material(config: SweepConfig) -> tangle.Material:
     return tangle.Material("fiber", diameter=config.diameter)
 
 
-def layer_assignment(config: SweepConfig, rng: random.Random) -> list[int]:
-    """Spread fibers over the layers as evenly as the count allows."""
-    layers = [index % config.layer_count for index in range(config.fiber_count)]
-    rng.shuffle(layers)
+def layer_counts(config: SweepConfig) -> list[int]:
+    """Fibers per layer, spread as evenly as the count allows.
+
+    Cells with fewer fibers than layers get one fiber per layer.
+    """
+    layers = min(config.layer_count, config.fiber_count)
+    base, extra = divmod(config.fiber_count, layers)
+    return [base + (layer < extra) for layer in range(layers)]
+
+
+def self_contact_arc(config: SweepConfig, angle: float) -> float | None:
+    """Shortest distance along a flat fiber to a point touching its own image.
+
+    A straight fiber in direction ``u`` meets its periodic image shifted by
+    lattice vector ``n * side`` where the in-plane distance
+    ``|n * side x u|`` drops below the contact clearance, at arc length
+    ``n * side . u``. Returns ``None`` when no such point lies on the fiber.
+    """
+    ux, uy = math.cos(angle), math.sin(angle)
+    reach = config.fiber_length + config.diameter
+    limit = math.ceil(reach / config.side)
+    clearance = SELF_CONTACT_CLEARANCE * config.diameter
+    shortest = None
+    for nx in range(-limit, limit + 1):
+        for ny in range(-limit, limit + 1):
+            if nx == ny == 0:
+                continue
+            arc = config.side * (nx * ux + ny * uy)
+            offset = config.side * abs(nx * uy - ny * ux)
+            if 0.0 < arc <= config.fiber_length and offset < clearance:
+                shortest = arc if shortest is None else min(shortest, arc)
+    return shortest
+
+
+def ramp_slope(config: SweepConfig, angle: float) -> float:
+    """Rise per unit in-plane length, or 0 when a flat fiber clears itself."""
+    arc = self_contact_arc(config, angle)
+    return 0.0 if arc is None else RAMP_MARGIN * config.diameter / arc
+
+
+@dataclass(frozen=True)
+class FiberPlacement:
+    """In-plane pose and ramp of one straight fiber."""
+
+    angle: float
+    center: tuple[float, float]
+    slope: float
+    tilt: float
+
+    def rise(self, config: SweepConfig) -> float:
+        return config.fiber_length * self.slope / math.hypot(1.0, self.slope)
+
+
+def sample_layers(config: SweepConfig, rng: random.Random) -> list[list[FiberPlacement]]:
+    """Random in-plane angle and position for every fiber, grouped by layer."""
+    layers = []
+    for count in layer_counts(config):
+        placements = []
+        for _ in range(count):
+            angle = rng.uniform(0.0, math.pi)
+            center = (rng.uniform(0.0, config.side), rng.uniform(0.0, config.side))
+            # A tiny tilt keeps crossings on flat fibers from sharing one
+            # height exactly.
+            tilt = rng.uniform(-0.01, 0.01) * config.diameter / config.fiber_length
+            placements.append(
+                FiberPlacement(angle, center, ramp_slope(config, angle), tilt)
+            )
+        layers.append(placements)
     return layers
 
 
+def layer_rise(config: SweepConfig, placements: list[FiberPlacement]) -> float:
+    return max(placement.rise(config) for placement in placements)
+
+
 def straight_layer_fibers(
-    config: SweepConfig, layer: int, count: int, rng: random.Random
+    config: SweepConfig,
+    layer: int,
+    placements: list[FiberPlacement],
+    z: float,
 ) -> tangle.FiberCollection:
-    """Straight fibers at random in-plane angle and position in one layer.
+    """Straight fibers of one layer, starting at height ``z``.
 
     Fibers keep their full length even when it exceeds the cell; the
-    centerlines cross the periodic faces as many times as they need. They lie
-    flat unless the cell is too small for that (see ``ramp_slope``).
+    centerlines cross the periodic faces as many times as they need. Ramped
+    fibers keep that length along the ramp.
     """
     fiber = material(config)
     collection = tangle.FiberCollection(f"layer {layer}")
-    z = (layer + 1) * STAGING_SPACING * config.diameter
-    step = config.segment_length
-    for _ in range(count):
-        angle = rng.uniform(0.0, math.pi)
-        direction = (math.cos(angle), math.sin(angle))
-        center = (rng.uniform(0.0, config.side), rng.uniform(0.0, config.side))
-        # A tiny tilt keeps self-crossings on the smallest cells from sharing
-        # one height exactly.
-        tilt = rng.uniform(-0.01, 0.01) * config.diameter / config.fiber_length
-        start = -0.5 * config.fiber_length
+    for placement in placements:
+        scale = 1.0 / math.hypot(1.0, placement.slope + placement.tilt)
+        step = config.segment_length * scale
+        start = -0.5 * config.fiber_length * scale
+        direction = (math.cos(placement.angle), math.sin(placement.angle))
         centerline = [
             [
-                center[0] + (start + index * step) * direction[0],
-                center[1] + (start + index * step) * direction[1],
+                placement.center[0] + (start + index * step) * direction[0],
+                placement.center[1] + (start + index * step) * direction[1],
                 z
-                + (start + index * step) * tilt
-                + index * step * config.ramp_slope,
+                + (start + index * step) * placement.tilt
+                + index * step * placement.slope,
             ]
             for index in range(config.segments_per_fiber + 1)
         ]
@@ -244,31 +299,36 @@ def build(
     """Recipe, settings, and configuration for one cell side."""
     config = SweepConfig(side=side, **changes)
     config.validate()
-    rng = random.Random(config.seed * 1_000 + round(100 * side))
+    rng = random.Random(f"{config.seed}:{config.side!r}")
+    layers = sample_layers(config, rng)
+    rises = [layer_rise(config, placements) for placements in layers]
+    spacing = STAGING_SPACING * config.diameter
+    bases = []
+    top = 0.0
+    for rise in rises:
+        bases.append(top + spacing)
+        top = bases[-1] + rise
     cell = tangle.Cell(
-        [config.side, config.side, config.staging_thickness], periodic="xy"
+        [config.side, config.side, top + spacing + config.target_thickness],
+        periodic="xy",
     )
     recipe = tangle.Recipe(cell)
-    layers = layer_assignment(config, rng)
-    placed = 0
-    for layer in range(config.layer_count):
-        count = layers.count(layer)
-        if count == 0:
-            continue
-        recipe.insert(straight_layer_fibers(config, layer, count, rng))
+    for layer, placements in enumerate(layers):
+        recipe.insert(straight_layer_fibers(config, layer, placements, bases[layer]))
         recipe.relax_for(200)
-        if placed > 0:
-            with recipe.place_layer_above(
-                layer,
-                gap=LAYER_GAP * config.diameter,
-                stiffness=1.0,
-                max_translation=0.05 * config.diameter,
-            ):
-                recipe.settle_targets(
-                    tolerance=0.05 * config.diameter, max_iterations=6_000
-                )
-            recipe.relax_for(200)
-        placed += 1
+        if layer == 0:
+            continue
+        # The gap is between layer center planes; ramped layers are centered
+        # half their rise above their base.
+        gap = LAYER_GAP * config.diameter + 0.5 * (rises[layer - 1] + rises[layer])
+        with recipe.place_layer_above(
+            layer,
+            gap=gap,
+            stiffness=1.0,
+            max_translation=0.05 * config.diameter,
+        ):
+            recipe.settle_targets(tolerance=0.05 * config.diameter, max_iterations=6_000)
+        recipe.relax_for(200)
     # Compaction first waits for a relaxed baseline; fixed-length deposition
     # relaxes do not guarantee one, and without it compaction stops at once.
     contact_stage(recipe, config, "baseline/contact", FORMATION_TOLERANCE, 30_000)

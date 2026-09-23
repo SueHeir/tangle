@@ -1,5 +1,6 @@
 """Configuration checks for the periodic domain-size sweep example."""
 
+import math
 from pathlib import Path
 import sys
 import unittest
@@ -29,36 +30,64 @@ class PeriodicDomainSweepTests(unittest.TestCase):
                 self.assertTrue(recipe.operations()[0].startswith("insert"))
 
     def test_fiber_length_and_layers_are_preserved(self):
-        config = sweep.SweepConfig(side=2.0)
-        collection = sweep.straight_layer_fibers(
-            config, layer=1, count=3, rng=sweep.random.Random(1)
-        )
-        self.assertEqual(collection.layer_ids(), [1])
-        for centerline in collection.centerlines():
-            self.assertEqual(len(centerline), config.segments_per_fiber + 1)
-            chord = sum(
-                (a - b) ** 2 for a, b in zip(centerline[-1], centerline[0])
-            ) ** 0.5
-            self.assertAlmostEqual(chord, config.fiber_length, places=6)
+        for side in (1.0, 2.0):
+            config = sweep.SweepConfig(side=side)
+            layers = sweep.sample_layers(config, sweep.random.Random(1))
+            collection = sweep.straight_layer_fibers(config, 1, layers[1], z=1.0)
+            with self.subTest(side=side):
+                self.assertEqual(collection.layer_ids(), [1])
+                for centerline in collection.centerlines():
+                    self.assertEqual(len(centerline), config.segments_per_fiber + 1)
+                    arc = sum(
+                        math.dist(a, b) for a, b in zip(centerline, centerline[1:])
+                    )
+                    # Centerlines are stored in single precision.
+                    self.assertAlmostEqual(arc, config.fiber_length, places=4)
 
-    def test_only_cells_smaller_than_a_flat_fiber_ramp(self):
+    def test_layer_counts_cover_every_fiber(self):
         for side in sweep.DOMAIN_SIDES:
             config = sweep.SweepConfig(side=side)
-            flat_fits = config.fiber_length * config.diameter <= side**2
+            counts = sweep.layer_counts(config)
             with self.subTest(side=side):
-                self.assertEqual(config.ramp_slope == 0.0, flat_fits)
+                self.assertEqual(sum(counts), config.fiber_count)
+                self.assertLessEqual(max(counts) - min(counts), 1)
+                self.assertGreaterEqual(min(counts), 1)
+
+    def test_only_self_touching_fibers_ramp(self):
+        side_one = sweep.SweepConfig(side=1.0)
+        side_ten = sweep.SweepConfig(side=10.0)
+        for angle in (0.1, 0.5, 1.0, 1.4, 2.5):
+            with self.subTest(angle=angle):
+                self.assertGreater(sweep.ramp_slope(side_one, angle), 0.0)
+                self.assertEqual(sweep.ramp_slope(side_ten, angle), 0.0)
+        # Along a lattice direction a length-10 fiber meets its image on a
+        # side-2 cell after one wrap.
+        side_two = sweep.SweepConfig(side=2.0)
+        self.assertAlmostEqual(sweep.self_contact_arc(side_two, 0.0), 2.0)
+
+    def test_ramped_strands_clear_each_other(self):
         config = sweep.SweepConfig(side=1.0)
-        (centerline,) = sweep.straight_layer_fibers(
-            config, layer=0, count=1, rng=sweep.random.Random(2)
-        ).centerlines()
-        # Strands one wrap apart along the fiber clear each other in z.
-        wrap = round((config.side - config.diameter) / config.segment_length)
-        rise = centerline[wrap][2] - centerline[0][2]
-        self.assertGreater(rise, config.diameter)
-        self.assertGreater(
-            config.staging_thickness,
-            config.layer_count * config.ramp_slope * config.fiber_length,
-        )
+        rng = sweep.random.Random(3)
+        for layer in sweep.sample_layers(config, rng):
+            (centerline,) = sweep.straight_layer_fibers(
+                config, 0, layer, z=1.0
+            ).centerlines()
+            points = []
+            for a, b in zip(centerline, centerline[1:]):
+                for fraction in (0.0, 0.25, 0.5, 0.75):
+                    points.append([a[k] + fraction * (b[k] - a[k]) for k in range(3)])
+            spacing = config.segment_length / 4
+            closest = math.inf
+            for i, p in enumerate(points):
+                for j in range(i + 1, len(points)):
+                    if (j - i) * spacing < 2.0 * config.diameter:
+                        continue
+                    q = points[j]
+                    delta = [p[k] - q[k] for k in range(3)]
+                    for k in range(2):
+                        delta[k] -= round(delta[k] / config.side) * config.side
+                    closest = min(closest, math.hypot(*delta))
+            self.assertGreater(closest, config.diameter)
 
     def test_cells_too_small_for_the_diameter_are_rejected(self):
         with self.assertRaises(ValueError):
