@@ -43,6 +43,18 @@ pub(crate) fn finish_adaptation_epoch(count: &mut [Atomic<u32>]) {
     }
 }
 
+/// Marks contact neighbor lists stale when the adaptation epoch that just
+/// finished split or merged any segment.
+#[cube(launch_unchecked)]
+pub(crate) fn request_neighbor_list_rebuild_after_adaptation(
+    refinement_count: &[u32],
+    neighbor_state: &mut [u32],
+) {
+    if ABSOLUTE_POS == 0 && (refinement_count[1] != 0 || refinement_count[4] != 0) {
+        neighbor_state[0] = 1;
+    }
+}
+
 #[cube(launch_unchecked)]
 pub(crate) fn clear_active_index_counts(counts: &mut [Atomic<u32>]) {
     if ABSOLUTE_POS == 0 {

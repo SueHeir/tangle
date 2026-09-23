@@ -98,6 +98,8 @@ RELAXATION_FIELDS = [
     ("debug_snapshot_interval", "Periodic OVITO cadence; `None` keeps only keyframes when run() receives a debug path.", "iterations or `None`"),
     ("save_assembled_reference", "Stores the converged geometry as an assembled reference.", "boolean"),
     ("cell_size_scale", "Broad-phase cell size relative to the smallest admissible cell.", "at least 1"),
+    ("neighbor_skin_scale", "Extra Verlet neighbor-list search distance, as a multiple of the largest fiber radius.", "finite, at least 0"),
+    ("neighbor_capacity", "Neighbor-list length per segment; overflowing segments fall back to scanning cells.", "count, at least 1"),
     ("adaptive_segmentation", "Optional adaptive refinement configuration.", "`AdaptiveSegmentationSettings` or `None`"),
 ]
 
@@ -1294,14 +1296,25 @@ NOTEBOOKS: dict[str, list[dict]] = {
         md("""
         ## Cell-list broad phase
 
-        `cell_size_scale` is the only exposed cell-list setting. A value of 1
+        `cell_size_scale` sets the broad-phase cell size. A value of 1
         uses the minimum admissible cell size; larger cells reduce cell count
         but increase candidates per cell. It must be at least 1.
+
+        Each segment also keeps a Verlet neighbor list built from the cells.
+        `neighbor_skin_scale` is the extra search distance, as a multiple of
+        the largest fiber radius. Lists are rebuilt only after some vertex
+        moves more than half the skin, so a larger skin means fewer rebuilds
+        but longer lists. `neighbor_capacity` is the list length per segment;
+        a segment with more neighbors falls back to scanning its cells, so the
+        result is the same, only slower. The skin must be finite and at least 0,
+        and the capacity at least 1.
         """),
         code("""
         # Broad-phase cells must be at least one contact diameter wide. Larger
         # values trade fewer cells for more candidate capsule pairs per cell.
-        coarse_cells = settings.replace(cell_size_scale=1.5)
+        coarse_cells = settings.replace(
+            cell_size_scale=1.5, neighbor_skin_scale=2.0, neighbor_capacity=48
+        )
         coarse_cells.to_dict()
         """),
         md("""

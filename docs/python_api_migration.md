@@ -58,7 +58,7 @@ The generator functions take `material=Material(...)` in place of
 
 | Old | New |
 |---|---|
-| `CellListSettings`, `RelaxationSettings.cell_list` | `RelaxationSettings.cell_size_scale` |
+| `CellListSettings(cell_size_scale, neighbor_skin_scale, neighbor_capacity)`, `RelaxationSettings.cell_list` | `RelaxationSettings.cell_size_scale`, `neighbor_skin_scale`, `neighbor_capacity` |
 | `AdaptiveSegmentationSettings.minimum_length_over_diameter`, `maximum_refinement_levels` | `min_length_over_diameter`, `max_refinement_levels` |
 | hand-written cleanup overrides | `RelaxationOverrides.preset("contact_first" \| "curvature_cleanup" \| "contact_cleanup", **changes)` |
 | `SolvePolicy.solver_penetration`, `solver_curvature_ratio` | `target_penetration`, `target_curvature_ratio` |

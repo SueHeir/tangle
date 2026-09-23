@@ -286,6 +286,10 @@ pub(crate) struct PyRelaxationSettings {
     #[pyo3(get, set)]
     pub cell_size_scale: f64,
     #[pyo3(get, set)]
+    pub neighbor_skin_scale: f64,
+    #[pyo3(get, set)]
+    pub neighbor_capacity: u32,
+    #[pyo3(get, set)]
     pub adaptive_segmentation: Option<PyAdaptiveSegmentationSettings>,
 }
 
@@ -313,6 +317,8 @@ impl Default for PyRelaxationSettings {
             debug_snapshot_interval: config.debug_snapshot_interval,
             save_assembled_reference: config.save_assembled_reference,
             cell_size_scale: widen(config.cell_list.cell_size_scale),
+            neighbor_skin_scale: widen(config.cell_list.neighbor_skin_scale),
+            neighbor_capacity: config.cell_list.neighbor_capacity,
             adaptive_segmentation: config
                 .adaptive_segmentation
                 .map(PyAdaptiveSegmentationSettings::from_rust),
@@ -426,6 +432,8 @@ impl PyRelaxationSettings {
         output.set_item("max_iterations", self.max_iterations)?;
         output.set_item("iterations_per_batch", self.iterations_per_batch)?;
         output.set_item("cell_size_scale", self.cell_size_scale)?;
+        output.set_item("neighbor_skin_scale", self.neighbor_skin_scale)?;
+        output.set_item("neighbor_capacity", self.neighbor_capacity)?;
         output.set_item(
             "adaptive_segmentation",
             self.adaptive_segmentation
@@ -492,6 +500,16 @@ impl PyRelaxationSettings {
                 "cell_size_scale must be finite and at least 1",
             ));
         }
+        if !self.neighbor_skin_scale.is_finite() || self.neighbor_skin_scale < 0.0 {
+            return Err(PyValueError::new_err(
+                "neighbor_skin_scale must be finite and non-negative",
+            ));
+        }
+        if self.neighbor_capacity == 0 {
+            return Err(PyValueError::new_err(
+                "neighbor_capacity must be at least 1",
+            ));
+        }
         if self.debug_snapshot_interval == Some(0) {
             return Err(PyValueError::new_err(
                 "debug_snapshot_interval must be positive when supplied",
@@ -528,6 +546,8 @@ impl PyRelaxationSettings {
             iterations_per_batch: self.iterations_per_batch,
             cell_list: CellListConfig {
                 cell_size_scale: self.cell_size_scale as f32,
+                neighbor_skin_scale: self.neighbor_skin_scale as f32,
+                neighbor_capacity: self.neighbor_capacity,
             },
             debug_snapshot_interval: self.debug_snapshot_interval,
             save_assembled_reference: self.save_assembled_reference,

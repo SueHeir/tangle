@@ -611,6 +611,8 @@ class RelaxationSettings:
     debug_snapshot_interval: int | None
     save_assembled_reference: bool
     cell_size_scale: float
+    neighbor_skin_scale: float
+    neighbor_capacity: int
     adaptive_segmentation: AdaptiveSegmentationSettings | None
     def __init__(
         self,
@@ -635,6 +637,8 @@ class RelaxationSettings:
         debug_snapshot_interval: int | None = ...,
         save_assembled_reference: bool = ...,
         cell_size_scale: float = ...,
+        neighbor_skin_scale: float = ...,
+        neighbor_capacity: int = ...,
         adaptive_segmentation: AdaptiveSegmentationSettings | None = ...,
     ) -> None: ...
     def enable_adaptive_segmentation(self) -> None: ...

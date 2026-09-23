@@ -190,6 +190,15 @@ class SettingsTests(unittest.TestCase):
         settings.adaptive_segmentation = tangle.AdaptiveSegmentationSettings.profile("fast")
         self.assertEqual(settings.adaptive_segmentation.refinement_interval, 16)
 
+    def test_neighbor_list_settings_round_trip(self):
+        settings = tangle.RelaxationSettings()
+        self.assertEqual(settings.neighbor_skin_scale, 2.0)
+        tuned = settings.replace(neighbor_skin_scale=0.5, neighbor_capacity=16)
+        self.assertEqual(tuned.to_dict()["neighbor_capacity"], 16)
+        self.assertEqual(tuned.neighbor_skin_scale, 0.5)
+        with self.assertRaises(ValueError):
+            settings.replace(neighbor_capacity=0)
+
     def test_keyword_constructors_and_replace(self):
         settings = tangle.RelaxationSettings(backend="cpu", max_iterations=50)
         self.assertEqual(settings.to_dict()["backend"], "cpu")

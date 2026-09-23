@@ -43,8 +43,11 @@ passing a soft stage is not final mechanical acceptance.
 ## Device world and adaptation
 
 CubeCL kernels run via WGPU or the explicit native CPU backend. A compact
-count/scan/scatter cell list supplies candidates; exact capsule checks resolve
-contacts. Orthorhombic periodic axes use wrapped neighborhoods/minimum-image
+count/scan/scatter cell list builds per-segment Verlet neighbor lists holding
+every capsule within a skin of touching; exact capsule checks resolve contacts
+from those lists. Lists are rebuilt on the device once any vertex has moved
+half the skin (`CellListConfig::neighbor_skin_scale`, a multiple of the largest
+radius), or after activation, refinement, or compaction changes the geometry. Orthorhombic periodic axes use wrapped neighborhoods/minimum-image
 contacts; bounded axes have planar walls. Normal batches read scalar status;
 debug trajectories and checkpoints explicitly read geometry.
 
