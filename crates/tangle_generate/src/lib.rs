@@ -31,7 +31,7 @@ pub use recipe::{
     FormationWarning, LayerStagedFiberPopulationGeneratorPlugin, LimitEnforcement,
     MixedLayerStagedFiberPopulationGeneratorPlugin, NeedlingConfig, NeedlingReport,
     NeedlingSelection, RelaxationAcceptance, RelaxationTargets, SolveExhaustion, SolvePolicy,
-    StagedFiberPopulationGeneratorPlugin,
+    StagedFiberPopulationGeneratorPlugin, random_footprint_center,
 };
 
 use std::error::Error;

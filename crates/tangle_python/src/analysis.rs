@@ -59,17 +59,18 @@ impl PyAnalysisReport {
     }
 
     #[getter]
-    fn maximum_curvature(&self) -> f64 {
+    fn max_curvature(&self) -> f64 {
         self.inner.maximum_curvature
     }
 
     #[getter]
-    fn maximum_curvature_ratio(&self) -> f64 {
+    fn max_curvature_ratio(&self) -> f64 {
         self.inner.maximum_curvature_ratio
     }
 
+    /// Vertices whose curvature exceeds their material's bend limit.
     #[getter]
-    fn bend_limit_violations(&self) -> usize {
+    fn curvature_limit_violations(&self) -> usize {
         self.inner.bend_limit_violations
     }
 

@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use tangle_checkpoint::CheckpointConfig;
+
+use crate::common::with_kwargs;
 
 /// Periodic restart checkpoint and optional resume settings.
 #[pyclass(name = "CheckpointSettings", module = "tangle._tangle")]
@@ -27,21 +30,36 @@ pub(crate) struct PyCheckpointSettings {
 #[pymethods]
 impl PyCheckpointSettings {
     #[new]
-    #[pyo3(signature = (case_id, path, *, interval_iterations=500, resume=false))]
-    fn new(case_id: String, path: PathBuf, interval_iterations: usize, resume: bool) -> Self {
-        Self {
+    #[pyo3(signature = (case_id, path, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        case_id: String,
+        path: PathBuf,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let settings = Self {
             case_id,
             path,
-            interval_iterations,
-            resume,
+            interval_iterations: 500,
+            resume: false,
             resume_path: None,
             resume_case_id: None,
             fresh_formation_on_resume: false,
-        }
+        };
+        let settings = with_kwargs(py, settings, kwargs, "CheckpointSettings")?;
+        settings.to_rust()?;
+        Ok(settings)
     }
 
     fn copy(&self) -> Self {
         self.clone()
+    }
+
+    #[pyo3(signature = (**changes))]
+    fn replace(&self, py: Python<'_>, changes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let settings = with_kwargs(py, self.clone(), changes, "replace")?;
+        settings.to_rust()?;
+        Ok(settings)
     }
 
     fn __repr__(&self) -> String {

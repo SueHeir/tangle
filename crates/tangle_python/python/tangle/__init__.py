@@ -1,54 +1,113 @@
-"""Python interface to TANGLE fiber assembly and CubeCL formation recipes."""
+"""Python interface to TANGLE fiber assembly and CubeCL formation recipes.
+
+Configuration objects follow three naming conventions:
+
+``*Settings``
+    Run-wide configuration that applies to every step of a recipe, such as
+    ``RelaxationSettings`` or ``CheckpointSettings``.
+``*Policy``
+    A named rule that one recipe step follows, such as the convergence
+    targets in ``SolvePolicy`` or the capture rule in ``JunctionPolicy``.
+``*Overrides``
+    Temporary deltas that apply only to the step they are passed to, such as
+    ``RelaxationOverrides.preset("curvature_cleanup")``.
+
+Every configuration class accepts keyword arguments in its constructor and
+has a ``replace(**changes)`` method that returns a modified copy. Lengths are
+in meters; ``tangle.units`` has ``um`` and ``mm`` helpers.
+"""
 
 __version__ = "0.1.0"
 
+from . import units
 from ._tangle import (
     AdaptiveSegmentationSettings,
+    AlignedOrientation,
     AnalysisReport,
     Assembly,
+    AxisWeightsPath,
     Cell,
-    CellListSettings,
+    CellLengthsTarget,
+    CellVolumeTarget,
     CheckpointSettings,
+    CircularFootprint,
     CompactionSettings,
+    DensityGradientPosition,
+    DirectionalPressureTarget,
+    EqualPressurePath,
     FiberCollection,
-    FiberPopulationSettings,
+    FiberPopulation,
     FiberSelection,
+    HeldTargets,
+    IsotropicOrientation,
     JunctionPolicy,
+    LayeredBiaxialOrientation,
+    LayeredPosition,
     Material,
+    MeanPressureTarget,
+    MinimumWorkPath,
+    PenaltyEnergyTarget,
+    PlanarOrientation,
     PumaExportReport,
+    RandomFiberFraction,
     Recipe,
+    RecipeError,
     RelaxationOverrides,
     RelaxationSettings,
     RunResult,
     SolvePolicy,
-    py_generate_fiber_pair_crossing as generate_fiber_pair_crossing,
-    py_generate_fiber_population as generate_fiber_population,
-    py_generate_multisegment_crossing as generate_multisegment_crossing,
-    py_generate_point_crossing as generate_point_crossing,
+    StressRatioPath,
+    UniformPosition,
+    VolumeFractionTarget,
+    generate_fiber_pair_crossing,
+    generate_fiber_population,
+    generate_multisegment_crossing,
+    generate_point_crossing,
 )
 
 __all__ = [
     "AdaptiveSegmentationSettings",
+    "AlignedOrientation",
     "AnalysisReport",
     "Assembly",
+    "AxisWeightsPath",
     "Cell",
-    "CellListSettings",
+    "CellLengthsTarget",
+    "CellVolumeTarget",
     "CheckpointSettings",
+    "CircularFootprint",
     "CompactionSettings",
+    "DensityGradientPosition",
+    "DirectionalPressureTarget",
+    "EqualPressurePath",
     "FiberCollection",
-    "FiberPopulationSettings",
+    "FiberPopulation",
     "FiberSelection",
+    "HeldTargets",
+    "IsotropicOrientation",
     "JunctionPolicy",
+    "LayeredBiaxialOrientation",
+    "LayeredPosition",
     "Material",
+    "MeanPressureTarget",
+    "MinimumWorkPath",
+    "PenaltyEnergyTarget",
+    "PlanarOrientation",
     "PumaExportReport",
+    "RandomFiberFraction",
     "Recipe",
+    "RecipeError",
     "RelaxationOverrides",
     "RelaxationSettings",
     "RunResult",
     "SolvePolicy",
+    "StressRatioPath",
+    "UniformPosition",
+    "VolumeFractionTarget",
     "generate_fiber_pair_crossing",
     "generate_fiber_population",
     "generate_multisegment_crossing",
     "generate_point_crossing",
+    "units",
     "__version__",
 ]

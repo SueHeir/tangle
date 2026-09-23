@@ -1,300 +1,600 @@
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyType};
 use tangle_generate::{
     AdaptiveCompactionIncrement, CompactionConfig, CompactionGuards, CompactionPath,
     CompactionTarget,
 };
 use tangle_relax::{CompactionEnergyModel, CompactionKinematics};
 
-/// Fully editable closed-loop compaction configuration.
+use crate::common::{
+    choice_name, parse_axis_mask, parse_choice, positive_finite, unit_vector, widen, with_kwargs,
+};
+
+const KINEMATICS: &[(&str, CompactionKinematics)] = &[
+    ("rigid_fiber_centers", CompactionKinematics::RigidFiberCenters),
+    ("moving_walls", CompactionKinematics::MovingWalls),
+    ("affine_vertices", CompactionKinematics::AffineVertices),
+];
+
+// --- Targets -----------------------------------------------------------------
+
+macro_rules! scalar_target {
+    ($rust:ident, $python:literal, $doc:literal) => {
+        #[doc = $doc]
+        #[pyclass(name = $python, module = "tangle._tangle", frozen)]
+        #[derive(Clone, Debug)]
+        pub(crate) struct $rust {
+            #[pyo3(get)]
+            value: f64,
+        }
+
+        #[pymethods]
+        impl $rust {
+            #[new]
+            fn new(value: f64) -> PyResult<Self> {
+                positive_finite(value, "value")?;
+                Ok(Self { value })
+            }
+
+            fn __repr__(&self) -> String {
+                format!("{}({})", $python, self.value)
+            }
+        }
+    };
+}
+
+scalar_target!(
+    PyVolumeFractionTarget,
+    "VolumeFractionTarget",
+    "Stop when nominal fiber volume over cell volume reaches `value` (< 1)."
+);
+scalar_target!(
+    PyCellVolumeTarget,
+    "CellVolumeTarget",
+    "Stop when the cell volume reaches `value`."
+);
+scalar_target!(
+    PyMeanPressureTarget,
+    "MeanPressureTarget",
+    "Stop when the mean of the three directional penalty pressures reaches `value`."
+);
+scalar_target!(
+    PyPenaltyEnergyTarget,
+    "PenaltyEnergyTarget",
+    "Stop when total contact, stretch, and excess-bending penalty energy reaches `value`."
+);
+
+/// Stop when the three cell edge lengths reach `lengths`.
+#[pyclass(name = "CellLengthsTarget", module = "tangle._tangle", frozen)]
+#[derive(Clone, Debug)]
+pub(crate) struct PyCellLengthsTarget {
+    #[pyo3(get)]
+    lengths: [f64; 3],
+}
+
+#[pymethods]
+impl PyCellLengthsTarget {
+    #[new]
+    fn new(lengths: [f64; 3]) -> PyResult<Self> {
+        for value in lengths {
+            positive_finite(value, "lengths")?;
+        }
+        Ok(Self { lengths })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("CellLengthsTarget({:?})", self.lengths)
+    }
+}
+
+/// Stop when each axis's penalty pressure reaches `pressures`; zero disables
+/// an axis.
+#[pyclass(name = "DirectionalPressureTarget", module = "tangle._tangle", frozen)]
+#[derive(Clone, Debug)]
+pub(crate) struct PyDirectionalPressureTarget {
+    #[pyo3(get)]
+    pressures: [f64; 3],
+}
+
+#[pymethods]
+impl PyDirectionalPressureTarget {
+    #[new]
+    fn new(pressures: [f64; 3]) -> PyResult<Self> {
+        validate_nonnegative_active(pressures, "pressures")?;
+        Ok(Self { pressures })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("DirectionalPressureTarget({:?})", self.pressures)
+    }
+}
+
+fn target_from_py(value: &Bound<'_, PyAny>) -> PyResult<CompactionTarget> {
+    if let Ok(target) = value.extract::<PyRef<'_, PyVolumeFractionTarget>>() {
+        if target.value >= 1.0 {
+            return Err(PyValueError::new_err(
+                "volume fraction target must be less than 1",
+            ));
+        }
+        Ok(CompactionTarget::NominalVolumeFraction(target.value))
+    } else if let Ok(target) = value.extract::<PyRef<'_, PyCellVolumeTarget>>() {
+        Ok(CompactionTarget::CellVolume(target.value))
+    } else if let Ok(target) = value.extract::<PyRef<'_, PyCellLengthsTarget>>() {
+        Ok(CompactionTarget::CellLengths(target.lengths))
+    } else if let Ok(target) = value.extract::<PyRef<'_, PyMeanPressureTarget>>() {
+        Ok(CompactionTarget::MeanPressure(target.value as f32))
+    } else if let Ok(target) = value.extract::<PyRef<'_, PyDirectionalPressureTarget>>() {
+        Ok(CompactionTarget::DirectionalPressure(
+            target.pressures.map(|value| value as f32),
+        ))
+    } else if let Ok(target) = value.extract::<PyRef<'_, PyPenaltyEnergyTarget>>() {
+        Ok(CompactionTarget::PenaltyEnergy(target.value as f32))
+    } else {
+        Err(PyTypeError::new_err(
+            "target must be a VolumeFractionTarget, CellVolumeTarget, CellLengthsTarget, MeanPressureTarget, DirectionalPressureTarget, or PenaltyEnergyTarget",
+        ))
+    }
+}
+
+fn target_to_py(py: Python<'_>, target: CompactionTarget) -> PyResult<Py<PyAny>> {
+    Ok(match target {
+        CompactionTarget::NominalVolumeFraction(value) => {
+            Py::new(py, PyVolumeFractionTarget { value })?.into_any()
+        }
+        CompactionTarget::CellVolume(value) => Py::new(py, PyCellVolumeTarget { value })?.into_any(),
+        CompactionTarget::CellLengths(lengths) => {
+            Py::new(py, PyCellLengthsTarget { lengths })?.into_any()
+        }
+        CompactionTarget::MeanPressure(value) => Py::new(
+            py,
+            PyMeanPressureTarget {
+                value: widen(value),
+            },
+        )?
+        .into_any(),
+        CompactionTarget::DirectionalPressure(pressures) => Py::new(
+            py,
+            PyDirectionalPressureTarget {
+                pressures: pressures.map(widen),
+            },
+        )?
+        .into_any(),
+        CompactionTarget::PenaltyEnergy(value) => Py::new(
+            py,
+            PyPenaltyEnergyTarget {
+                value: widen(value),
+            },
+        )?
+        .into_any(),
+    })
+}
+
+// --- Paths -------------------------------------------------------------------
+
+/// Split each strain increment among axes with fixed weights. Accepts axis
+/// letters (`"z"`, `"xy"`) or three weights; `None` compresses along the
+/// recipe's stack axis.
+#[pyclass(name = "AxisWeightsPath", module = "tangle._tangle", frozen)]
+#[derive(Clone, Debug)]
+pub(crate) struct PyAxisWeightsPath {
+    #[pyo3(get)]
+    weights: Option<[f64; 3]>,
+}
+
+#[pymethods]
+impl PyAxisWeightsPath {
+    #[new]
+    #[pyo3(signature = (weights=None))]
+    fn new(weights: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let weights = weights
+            .map(|value| -> PyResult<[f64; 3]> {
+                if let Ok(weights) = value.extract::<[f64; 3]>() {
+                    validate_nonnegative_active(weights, "weights")?;
+                    Ok(weights)
+                } else {
+                    Ok(parse_axis_mask(value, "weights")?
+                        .map(|active| if active { 1.0 } else { 0.0 }))
+                }
+            })
+            .transpose()?;
+        if let Some(weights) = weights {
+            validate_nonnegative_active(weights, "weights")?;
+        }
+        Ok(Self { weights })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("AxisWeightsPath({:?})", self.weights)
+    }
+}
+
+/// Adapt strain rates so the selected axes approach equal pressure.
+#[pyclass(name = "EqualPressurePath", module = "tangle._tangle", frozen)]
+#[derive(Clone, Debug)]
+pub(crate) struct PyEqualPressurePath {
+    #[pyo3(get)]
+    axes: [bool; 3],
+    #[pyo3(get)]
+    pressure_floor: f64,
+}
+
+#[pymethods]
+impl PyEqualPressurePath {
+    #[new]
+    #[pyo3(signature = (axes, *, pressure_floor=1.0e-12))]
+    fn new(axes: &Bound<'_, PyAny>, pressure_floor: f64) -> PyResult<Self> {
+        let axes = parse_axis_mask(axes, "axes")?;
+        require_active_axes(axes)?;
+        positive_finite(pressure_floor, "pressure_floor")?;
+        Ok(Self {
+            axes,
+            pressure_floor,
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "EqualPressurePath({:?}, pressure_floor={})",
+            self.axes, self.pressure_floor
+        )
+    }
+}
+
+/// Adapt strain rates toward a directional pressure ratio; zero disables an
+/// axis.
+#[pyclass(name = "StressRatioPath", module = "tangle._tangle", frozen)]
+#[derive(Clone, Debug)]
+pub(crate) struct PyStressRatioPath {
+    #[pyo3(get)]
+    ratio: [f64; 3],
+    #[pyo3(get)]
+    pressure_floor: f64,
+}
+
+#[pymethods]
+impl PyStressRatioPath {
+    #[new]
+    #[pyo3(signature = (ratio, *, pressure_floor=1.0e-12))]
+    fn new(ratio: [f64; 3], pressure_floor: f64) -> PyResult<Self> {
+        validate_nonnegative_active(ratio, "ratio")?;
+        positive_finite(pressure_floor, "pressure_floor")?;
+        Ok(Self {
+            ratio,
+            pressure_floor,
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "StressRatioPath({:?}, pressure_floor={})",
+            self.ratio, self.pressure_floor
+        )
+    }
+}
+
+/// Put each increment on the currently least expensive selected axis.
+#[pyclass(name = "MinimumWorkPath", module = "tangle._tangle", frozen)]
+#[derive(Clone, Debug)]
+pub(crate) struct PyMinimumWorkPath {
+    #[pyo3(get)]
+    axes: [bool; 3],
+}
+
+#[pymethods]
+impl PyMinimumWorkPath {
+    #[new]
+    fn new(axes: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let axes = parse_axis_mask(axes, "axes")?;
+        require_active_axes(axes)?;
+        Ok(Self { axes })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("MinimumWorkPath({:?})", self.axes)
+    }
+}
+
+#[derive(Clone, Debug)]
+enum Path {
+    AxisWeights(Option<[f64; 3]>),
+    Rust(CompactionPath),
+}
+
+impl Path {
+    fn from_py(value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if let Ok(path) = value.extract::<PyRef<'_, PyAxisWeightsPath>>() {
+            Ok(Self::AxisWeights(path.weights))
+        } else if let Ok(path) = value.extract::<PyRef<'_, PyEqualPressurePath>>() {
+            Ok(Self::Rust(CompactionPath::EqualPressure {
+                active_axes: path.axes,
+                pressure_floor: path.pressure_floor as f32,
+            }))
+        } else if let Ok(path) = value.extract::<PyRef<'_, PyStressRatioPath>>() {
+            Ok(Self::Rust(CompactionPath::StressRatio {
+                ratio: path.ratio.map(|value| value as f32),
+                pressure_floor: path.pressure_floor as f32,
+            }))
+        } else if let Ok(path) = value.extract::<PyRef<'_, PyMinimumWorkPath>>() {
+            Ok(Self::Rust(CompactionPath::MinimumIncrementalWork {
+                active_axes: path.axes,
+            }))
+        } else {
+            Err(PyTypeError::new_err(
+                "path must be an AxisWeightsPath, EqualPressurePath, StressRatioPath, or MinimumWorkPath",
+            ))
+        }
+    }
+
+    fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(match *self {
+            Self::AxisWeights(weights) => Py::new(py, PyAxisWeightsPath { weights })?.into_any(),
+            Self::Rust(CompactionPath::AxisWeights(weights)) => Py::new(
+                py,
+                PyAxisWeightsPath {
+                    weights: Some(weights.map(widen)),
+                },
+            )?
+            .into_any(),
+            Self::Rust(CompactionPath::EqualPressure {
+                active_axes,
+                pressure_floor,
+            }) => Py::new(
+                py,
+                PyEqualPressurePath {
+                    axes: active_axes,
+                    pressure_floor: widen(pressure_floor),
+                },
+            )?
+            .into_any(),
+            Self::Rust(CompactionPath::StressRatio {
+                ratio,
+                pressure_floor,
+            }) => Py::new(
+                py,
+                PyStressRatioPath {
+                    ratio: ratio.map(widen),
+                    pressure_floor: widen(pressure_floor),
+                },
+            )?
+            .into_any(),
+            Self::Rust(CompactionPath::MinimumIncrementalWork { active_axes }) => {
+                Py::new(py, PyMinimumWorkPath { axes: active_axes })?.into_any()
+            }
+        })
+    }
+
+    fn to_rust(&self, stack_axis: usize) -> CompactionPath {
+        match *self {
+            Self::AxisWeights(weights) => CompactionPath::AxisWeights(
+                weights
+                    .unwrap_or_else(|| unit_vector(stack_axis))
+                    .map(|value| value as f32),
+            ),
+            Self::Rust(path) => path,
+        }
+    }
+}
+
+// --- Compaction settings -----------------------------------------------------
+
+/// Closed-loop compaction: shrink the cell toward `target` along `path`,
+/// relaxing between increments.
 #[pyclass(name = "CompactionSettings", module = "tangle._tangle")]
 #[derive(Clone, Debug)]
 pub(crate) struct PyCompactionSettings {
+    target: CompactionTarget,
+    path: Path,
+    kinematics: CompactionKinematics,
     #[pyo3(get, set)]
-    pub target_type: String,
-    #[pyo3(get, set)]
-    pub target_value: f64,
-    #[pyo3(get, set)]
-    pub target_values: [f64; 3],
-    #[pyo3(get, set)]
-    pub path: String,
-    #[pyo3(get, set)]
-    pub axis_weights: [f32; 3],
-    #[pyo3(get, set)]
-    pub active_axes: [bool; 3],
-    #[pyo3(get, set)]
-    pub stress_ratio: [f32; 3],
-    #[pyo3(get, set)]
-    pub pressure_floor: f32,
-    #[pyo3(get, set)]
-    pub kinematics: String,
-    #[pyo3(get, set)]
-    pub cell_anchor: [f32; 3],
+    pub cell_anchor: [f64; 3],
     #[pyo3(get, set)]
     pub balance_opposing_faces: bool,
     #[pyo3(get, set)]
-    pub face_pressure_floor: f32,
+    pub face_pressure_floor: f64,
     #[pyo3(get, set)]
-    pub face_balance_strength: f32,
+    pub face_balance_strength: f64,
     #[pyo3(get, set)]
-    pub initial_log_strain: f32,
+    pub initial_log_strain: f64,
     #[pyo3(get, set)]
-    pub minimum_log_strain: f32,
+    pub min_log_strain: f64,
     #[pyo3(get, set)]
-    pub maximum_log_strain: f32,
+    pub max_log_strain: f64,
     #[pyo3(get, set)]
-    pub growth_factor: f32,
+    pub growth_factor: f64,
     #[pyo3(get, set)]
-    pub shrink_factor: f32,
+    pub shrink_factor: f64,
     #[pyo3(get, set)]
     pub relax_iterations: usize,
     #[pyo3(get, set)]
-    pub maximum_shortening_over_minimum_diameter: f32,
+    pub max_shortening_over_min_diameter: f64,
     #[pyo3(get, set)]
-    pub maximum_penetration: f32,
+    pub max_penetration: f64,
     #[pyo3(get, set)]
-    pub maximum_bend_ratio: f32,
+    pub max_curvature_ratio: f64,
     #[pyo3(get, set)]
-    pub maximum_pressure: f32,
+    pub max_pressure: f64,
     #[pyo3(get, set)]
-    pub maximum_penalty_energy: f32,
+    pub max_penalty_energy: f64,
     #[pyo3(get, set)]
-    pub maximum_steps: usize,
+    pub max_steps: usize,
     #[pyo3(get, set)]
-    pub maximum_relax_windows: usize,
+    pub max_relax_windows: usize,
     #[pyo3(get, set)]
-    pub contact_energy_stiffness: f32,
+    pub contact_energy_stiffness: f64,
     #[pyo3(get, set)]
-    pub stretch_energy_stiffness: f32,
+    pub stretch_energy_stiffness: f64,
     #[pyo3(get, set)]
-    pub bending_energy_stiffness: f32,
+    pub bending_energy_stiffness: f64,
     #[pyo3(get, set)]
-    pub target_tolerance: f32,
+    pub target_tolerance: f64,
 }
 
 #[pymethods]
 impl PyCompactionSettings {
     #[new]
-    #[pyo3(signature = (target_volume_fraction=0.3, axis_weights=[0.0, 0.0, 1.0]))]
-    fn new(target_volume_fraction: f64, axis_weights: [f32; 3]) -> Self {
-        Self::from_rust(CompactionConfig::volume_fraction(
-            target_volume_fraction,
-            axis_weights,
-        ))
+    #[pyo3(signature = (target=None, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        target: Option<&Bound<'_, PyAny>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let mut settings = Self::default_for(CompactionTarget::NominalVolumeFraction(0.3));
+        if let Some(target) = target {
+            settings.target = target_from_py(target)?;
+        }
+        let settings = with_kwargs(py, settings, kwargs, "CompactionSettings")?;
+        settings.validate()?;
+        Ok(settings)
     }
 
+    /// Shortcut for `CompactionSettings(VolumeFractionTarget(target), **changes)`.
     #[classmethod]
-    #[pyo3(signature = (target, *, axis_weights=[0.0, 0.0, 1.0]))]
+    #[pyo3(signature = (target, **changes))]
     fn volume_fraction(
-        _class: &Bound<'_, pyo3::types::PyType>,
+        _class: &Bound<'_, PyType>,
+        py: Python<'_>,
         target: f64,
-        axis_weights: [f32; 3],
-    ) -> Self {
-        Self::from_rust(CompactionConfig::volume_fraction(target, axis_weights))
+        changes: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        positive_finite(target, "target")?;
+        if target >= 1.0 {
+            return Err(PyValueError::new_err(
+                "volume fraction target must be less than 1",
+            ));
+        }
+        let settings = Self::default_for(CompactionTarget::NominalVolumeFraction(target));
+        let settings = with_kwargs(py, settings, changes, "volume_fraction")?;
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    #[getter]
+    fn target(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        target_to_py(py, self.target)
+    }
+
+    #[setter]
+    fn set_target(&mut self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.target = target_from_py(value)?;
+        Ok(())
+    }
+
+    #[getter]
+    fn path(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.path.to_py(py)
+    }
+
+    #[setter]
+    fn set_path(&mut self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.path = Path::from_py(value)?;
+        Ok(())
+    }
+
+    #[getter]
+    fn kinematics(&self) -> &'static str {
+        choice_name(self.kinematics, KINEMATICS)
+    }
+
+    #[setter]
+    fn set_kinematics(&mut self, value: &str) -> PyResult<()> {
+        self.kinematics = parse_choice(value, "kinematics", KINEMATICS)?;
+        Ok(())
     }
 
     fn copy(&self) -> Self {
         self.clone()
     }
 
+    #[pyo3(signature = (**changes))]
+    fn replace(&self, py: Python<'_>, changes: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let settings = with_kwargs(py, self.clone(), changes, "replace")?;
+        settings.validate()?;
+        Ok(settings)
+    }
+
     fn __repr__(&self) -> String {
         format!(
-            "CompactionSettings(target_type={:?}, target_value={}, path={:?}, kinematics={:?})",
-            self.target_type, self.target_value, self.path, self.kinematics
+            "CompactionSettings(target={:?}, path={:?}, kinematics={:?})",
+            self.target,
+            self.path,
+            self.kinematics()
         )
     }
 }
 
 impl PyCompactionSettings {
-    fn from_rust(config: CompactionConfig) -> Self {
-        let (target_type, target_value, target_values) = match config.target {
-            CompactionTarget::NominalVolumeFraction(value) => ("volume_fraction", value, [0.0; 3]),
-            CompactionTarget::CellVolume(value) => ("cell_volume", value, [0.0; 3]),
-            CompactionTarget::CellLengths(values) => ("cell_lengths", 0.0, values),
-            CompactionTarget::MeanPressure(value) => ("mean_pressure", value as f64, [0.0; 3]),
-            CompactionTarget::DirectionalPressure(values) => {
-                ("directional_pressure", 0.0, values.map(f64::from))
-            }
-            CompactionTarget::PenaltyEnergy(value) => ("penalty_energy", value as f64, [0.0; 3]),
-        };
-        let (path, axis_weights, active_axes, stress_ratio, pressure_floor) = match config.path {
-            CompactionPath::AxisWeights(values) => {
-                ("axis_weights", values, [false; 3], [0.0; 3], 1.0e-12)
-            }
-            CompactionPath::EqualPressure {
-                active_axes,
-                pressure_floor,
-            } => (
-                "equal_pressure",
-                [0.0; 3],
-                active_axes,
-                [0.0; 3],
-                pressure_floor,
-            ),
-            CompactionPath::StressRatio {
-                ratio,
-                pressure_floor,
-            } => ("stress_ratio", [0.0; 3], [false; 3], ratio, pressure_floor),
-            CompactionPath::MinimumIncrementalWork { active_axes } => (
-                "minimum_incremental_work",
-                [0.0; 3],
-                active_axes,
-                [0.0; 3],
-                1.0e-12,
-            ),
-        };
+    fn default_for(target: CompactionTarget) -> Self {
+        let config = CompactionConfig::volume_fraction(0.3, [0.0, 0.0, 1.0]);
         Self {
-            target_type: target_type.to_string(),
-            target_value,
-            target_values,
-            path: path.to_string(),
-            axis_weights,
-            active_axes,
-            stress_ratio,
-            pressure_floor,
-            kinematics: match config.kinematics {
-                CompactionKinematics::RigidFiberCenters => "rigid_fiber_centers",
-                CompactionKinematics::MovingWalls => "moving_walls",
-                CompactionKinematics::AffineVertices => "affine_vertices",
-            }
-            .to_string(),
-            cell_anchor: config.cell_anchor,
+            target,
+            path: Path::AxisWeights(None),
+            kinematics: config.kinematics,
+            cell_anchor: config.cell_anchor.map(widen),
             balance_opposing_faces: config.balance_opposing_faces,
-            face_pressure_floor: config.face_pressure_floor,
-            face_balance_strength: config.face_balance_strength,
-            initial_log_strain: config.increment.initial_log_strain,
-            minimum_log_strain: config.increment.minimum_log_strain,
-            maximum_log_strain: config.increment.maximum_log_strain,
-            growth_factor: config.increment.growth_factor,
-            shrink_factor: config.increment.shrink_factor,
+            face_pressure_floor: widen(config.face_pressure_floor),
+            face_balance_strength: widen(config.face_balance_strength),
+            initial_log_strain: widen(config.increment.initial_log_strain),
+            min_log_strain: widen(config.increment.minimum_log_strain),
+            max_log_strain: widen(config.increment.maximum_log_strain),
+            growth_factor: widen(config.increment.growth_factor),
+            shrink_factor: widen(config.increment.shrink_factor),
             relax_iterations: config.increment.relax_iterations,
-            maximum_shortening_over_minimum_diameter: config
-                .increment
-                .maximum_shortening_over_minimum_diameter,
-            maximum_penetration: config.guards.maximum_penetration,
-            maximum_bend_ratio: config.guards.maximum_bend_ratio,
-            maximum_pressure: config.guards.maximum_pressure,
-            maximum_penalty_energy: config.guards.maximum_penalty_energy,
-            maximum_steps: config.guards.maximum_steps,
-            maximum_relax_windows: config.guards.maximum_relax_windows,
-            contact_energy_stiffness: config.energy_model.contact_stiffness,
-            stretch_energy_stiffness: config.energy_model.stretch_stiffness,
-            bending_energy_stiffness: config.energy_model.bending_stiffness,
-            target_tolerance: config.target_tolerance,
+            max_shortening_over_min_diameter: widen(
+                config.increment.maximum_shortening_over_minimum_diameter,
+            ),
+            max_penetration: widen(config.guards.maximum_penetration),
+            max_curvature_ratio: widen(config.guards.maximum_bend_ratio),
+            max_pressure: widen(config.guards.maximum_pressure),
+            max_penalty_energy: widen(config.guards.maximum_penalty_energy),
+            max_steps: config.guards.maximum_steps,
+            max_relax_windows: config.guards.maximum_relax_windows,
+            contact_energy_stiffness: widen(config.energy_model.contact_stiffness),
+            stretch_energy_stiffness: widen(config.energy_model.stretch_stiffness),
+            bending_energy_stiffness: widen(config.energy_model.bending_stiffness),
+            target_tolerance: widen(config.target_tolerance),
         }
     }
 
-    pub(crate) fn to_rust(&self) -> PyResult<CompactionConfig> {
-        let target = match self.target_type.as_str() {
-            "volume_fraction" => {
-                positive_f64(self.target_value, "target_value")?;
-                if self.target_value >= 1.0 {
-                    return Err(PyValueError::new_err(
-                        "volume fraction target must be less than 1",
-                    ));
-                }
-                CompactionTarget::NominalVolumeFraction(self.target_value)
-            }
-            "cell_volume" => {
-                CompactionTarget::CellVolume(positive_f64(self.target_value, "target_value")?)
-            }
-            "cell_lengths" => {
-                validate_positive_f64s(self.target_values, "target_values")?;
-                CompactionTarget::CellLengths(self.target_values)
-            }
-            "mean_pressure" => CompactionTarget::MeanPressure(positive_f64(
-                self.target_value,
-                "target_value",
-            )? as f32),
-            "directional_pressure" => {
-                let values = self.target_values.map(|value| value as f32);
-                validate_nonnegative_active(values, "target_values")?;
-                CompactionTarget::DirectionalPressure(values)
-            }
-            "penalty_energy" => CompactionTarget::PenaltyEnergy(positive_f64(
-                self.target_value,
-                "target_value",
-            )? as f32),
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "unknown compaction target_type {other:?}"
-                )))
-            }
-        };
-        let path = match self.path.as_str() {
-            "axis_weights" => {
-                validate_nonnegative_active(self.axis_weights, "axis_weights")?;
-                CompactionPath::AxisWeights(self.axis_weights)
-            }
-            "equal_pressure" => {
-                require_active_axes(self.active_axes)?;
-                CompactionPath::EqualPressure {
-                    active_axes: self.active_axes,
-                    pressure_floor: positive_f32(self.pressure_floor, "pressure_floor")?,
-                }
-            }
-            "stress_ratio" => {
-                validate_nonnegative_active(self.stress_ratio, "stress_ratio")?;
-                CompactionPath::StressRatio {
-                    ratio: self.stress_ratio,
-                    pressure_floor: positive_f32(self.pressure_floor, "pressure_floor")?,
-                }
-            }
-            "minimum_incremental_work" => {
-                require_active_axes(self.active_axes)?;
-                CompactionPath::MinimumIncrementalWork {
-                    active_axes: self.active_axes,
-                }
-            }
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "unknown compaction path {other:?}"
-                )))
-            }
-        };
-        let kinematics = match self.kinematics.as_str() {
-            "rigid_fiber_centers" => CompactionKinematics::RigidFiberCenters,
-            "moving_walls" => CompactionKinematics::MovingWalls,
-            "affine_vertices" => CompactionKinematics::AffineVertices,
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "unknown compaction kinematics {other:?}"
-                )))
-            }
-        };
+    /// Describes the target for `Recipe.operations()`.
+    pub(crate) fn target_description(&self) -> String {
+        format!("{:?}", self.target)
+    }
+
+    pub(crate) fn to_rust(&self, stack_axis: usize) -> PyResult<CompactionConfig> {
         self.validate()?;
         Ok(CompactionConfig {
-            target,
-            path,
-            kinematics,
-            cell_anchor: self.cell_anchor,
+            target: self.target,
+            path: self.path.to_rust(stack_axis),
+            kinematics: self.kinematics,
+            cell_anchor: self.cell_anchor.map(|value| value as f32),
             balance_opposing_faces: self.balance_opposing_faces,
-            face_pressure_floor: self.face_pressure_floor,
-            face_balance_strength: self.face_balance_strength,
+            face_pressure_floor: self.face_pressure_floor as f32,
+            face_balance_strength: self.face_balance_strength as f32,
             increment: AdaptiveCompactionIncrement {
-                initial_log_strain: self.initial_log_strain,
-                minimum_log_strain: self.minimum_log_strain,
-                maximum_log_strain: self.maximum_log_strain,
-                growth_factor: self.growth_factor,
-                shrink_factor: self.shrink_factor,
+                initial_log_strain: self.initial_log_strain as f32,
+                minimum_log_strain: self.min_log_strain as f32,
+                maximum_log_strain: self.max_log_strain as f32,
+                growth_factor: self.growth_factor as f32,
+                shrink_factor: self.shrink_factor as f32,
                 relax_iterations: self.relax_iterations,
-                maximum_shortening_over_minimum_diameter: self
-                    .maximum_shortening_over_minimum_diameter,
+                maximum_shortening_over_minimum_diameter: self.max_shortening_over_min_diameter
+                    as f32,
             },
             guards: CompactionGuards {
-                maximum_penetration: self.maximum_penetration,
-                maximum_bend_ratio: self.maximum_bend_ratio,
-                maximum_pressure: self.maximum_pressure,
-                maximum_penalty_energy: self.maximum_penalty_energy,
-                maximum_steps: self.maximum_steps,
-                maximum_relax_windows: self.maximum_relax_windows,
+                maximum_penetration: self.max_penetration as f32,
+                maximum_bend_ratio: self.max_curvature_ratio as f32,
+                maximum_pressure: self.max_pressure as f32,
+                maximum_penalty_energy: self.max_penalty_energy as f32,
+                maximum_steps: self.max_steps,
+                maximum_relax_windows: self.max_relax_windows,
             },
             energy_model: CompactionEnergyModel {
-                contact_stiffness: self.contact_energy_stiffness,
-                stretch_stiffness: self.stretch_energy_stiffness,
-                bending_stiffness: self.bending_energy_stiffness,
+                contact_stiffness: self.contact_energy_stiffness as f32,
+                stretch_stiffness: self.stretch_energy_stiffness as f32,
+                bending_stiffness: self.bending_energy_stiffness as f32,
             },
-            target_tolerance: self.target_tolerance,
+            target_tolerance: self.target_tolerance as f32,
         })
     }
 
@@ -308,7 +608,7 @@ impl PyCompactionSettings {
                 "cell_anchor values must be in [0, 1]",
             ));
         }
-        positive_f32(self.face_pressure_floor, "face_pressure_floor")?;
+        positive_finite(self.face_pressure_floor, "face_pressure_floor")?;
         if !self.face_balance_strength.is_finite()
             || !(0.0..=1.0).contains(&self.face_balance_strength)
         {
@@ -318,39 +618,38 @@ impl PyCompactionSettings {
         }
         for (name, value) in [
             ("initial_log_strain", self.initial_log_strain),
-            ("minimum_log_strain", self.minimum_log_strain),
-            ("maximum_log_strain", self.maximum_log_strain),
+            ("min_log_strain", self.min_log_strain),
+            ("max_log_strain", self.max_log_strain),
             ("growth_factor", self.growth_factor),
             ("shrink_factor", self.shrink_factor),
             (
-                "maximum_shortening_over_minimum_diameter",
-                self.maximum_shortening_over_minimum_diameter,
+                "max_shortening_over_min_diameter",
+                self.max_shortening_over_min_diameter,
             ),
-            ("maximum_penetration", self.maximum_penetration),
-            ("maximum_bend_ratio", self.maximum_bend_ratio),
+            ("max_penetration", self.max_penetration),
+            ("max_curvature_ratio", self.max_curvature_ratio),
             ("contact_energy_stiffness", self.contact_energy_stiffness),
             ("stretch_energy_stiffness", self.stretch_energy_stiffness),
             ("bending_energy_stiffness", self.bending_energy_stiffness),
             ("target_tolerance", self.target_tolerance),
         ] {
-            positive_f32(value, name)?;
+            positive_finite(value, name)?;
         }
-        if self.minimum_log_strain > self.initial_log_strain
-            || self.initial_log_strain > self.maximum_log_strain
+        if self.min_log_strain > self.initial_log_strain
+            || self.initial_log_strain > self.max_log_strain
         {
             return Err(PyValueError::new_err(
-                "log strain increments must satisfy minimum <= initial <= maximum",
+                "log strain increments must satisfy min <= initial <= max",
             ));
         }
-        if self.relax_iterations == 0 || self.maximum_steps == 0 || self.maximum_relax_windows == 0
-        {
+        if self.relax_iterations == 0 || self.max_steps == 0 || self.max_relax_windows == 0 {
             return Err(PyValueError::new_err(
                 "compaction iteration and step counts must be positive",
             ));
         }
         for (name, value) in [
-            ("maximum_pressure", self.maximum_pressure),
-            ("maximum_penalty_energy", self.maximum_penalty_energy),
+            ("max_pressure", self.max_pressure),
+            ("max_penalty_energy", self.max_penalty_energy),
         ] {
             if value.is_nan() || value <= 0.0 {
                 return Err(PyValueError::new_err(format!(
@@ -362,31 +661,7 @@ impl PyCompactionSettings {
     }
 }
 
-fn positive_f32(value: f32, name: &str) -> PyResult<f32> {
-    if value.is_finite() && value > 0.0 {
-        Ok(value)
-    } else {
-        Err(PyValueError::new_err(format!(
-            "{name} must be positive and finite"
-        )))
-    }
-}
-fn positive_f64(value: f64, name: &str) -> PyResult<f64> {
-    if value.is_finite() && value > 0.0 {
-        Ok(value)
-    } else {
-        Err(PyValueError::new_err(format!(
-            "{name} must be positive and finite"
-        )))
-    }
-}
-fn validate_positive_f64s(values: [f64; 3], name: &str) -> PyResult<()> {
-    for value in values {
-        positive_f64(value, name)?;
-    }
-    Ok(())
-}
-fn validate_nonnegative_active(values: [f32; 3], name: &str) -> PyResult<()> {
+fn validate_nonnegative_active(values: [f64; 3], name: &str) -> PyResult<()> {
     if values.iter().any(|v| !v.is_finite() || *v < 0.0) || !values.iter().any(|v| *v > 0.0) {
         Err(PyValueError::new_err(format!(
             "{name} must be nonnegative with at least one positive axis"
@@ -395,6 +670,7 @@ fn validate_nonnegative_active(values: [f32; 3], name: &str) -> PyResult<()> {
         Ok(())
     }
 }
+
 fn require_active_axes(axes: [bool; 3]) -> PyResult<()> {
     if axes.iter().any(|v| *v) {
         Ok(())

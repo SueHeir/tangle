@@ -10,18 +10,27 @@ use tangle_core::{FiberAssembly, FiberBendLimit, FiberId, PeriodicCell, Section,
 use tangle_export::{write_puma_bundle, PumaVoxelExportConfig};
 
 use crate::analysis::{PyAnalysisReport, PyPumaExportReport};
+use crate::common::{axis_name, parse_axis, parse_axis_mask, DEFAULT_STACK_AXIS};
 
+/// Orthorhombic simulation cell. `stack_axis` is the direction plies stack
+/// along; recipes, generators, and compaction default to it.
 #[pyclass(name = "Cell", module = "tangle._tangle", frozen)]
 #[derive(Clone)]
 pub(crate) struct PyCell {
     pub(crate) inner: PeriodicCell,
+    pub(crate) stack_axis: usize,
 }
 
 #[pymethods]
 impl PyCell {
     #[new]
-    #[pyo3(signature = (lengths, periodic=[false, false, false], origin=[0.0, 0.0, 0.0]))]
-    fn new(lengths: [f64; 3], periodic: [bool; 3], origin: [f64; 3]) -> PyResult<Self> {
+    #[pyo3(signature = (lengths, periodic=None, origin=[0.0, 0.0, 0.0], *, stack_axis=None))]
+    fn new(
+        lengths: [f64; 3],
+        periodic: Option<&Bound<'_, PyAny>>,
+        origin: [f64; 3],
+        stack_axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
         if lengths
             .iter()
             .any(|value| !value.is_finite() || *value <= 0.0)
@@ -33,18 +42,25 @@ impl PyCell {
         if origin.iter().any(|value| !value.is_finite()) {
             return Err(PyValueError::new_err("cell origin must be finite"));
         }
+        let periodic = periodic
+            .map(|value| parse_axis_mask(value, "periodic"))
+            .transpose()?
+            .unwrap_or([false; 3]);
+        let stack_axis = match stack_axis {
+            Some(value) => parse_axis(value, "stack_axis")?,
+            None => infer_stack_axis(periodic),
+        };
         let mut cell = PeriodicCell::orthorhombic(lengths, periodic);
         cell.origin = origin;
-        Ok(Self { inner: cell })
+        Ok(Self {
+            inner: cell,
+            stack_axis,
+        })
     }
 
     #[getter]
     fn lengths(&self) -> [f64; 3] {
-        [
-            self.inner.basis[0][0],
-            self.inner.basis[1][1],
-            self.inner.basis[2][2],
-        ]
+        cell_lengths(&self.inner)
     }
 
     #[getter]
@@ -57,14 +73,34 @@ impl PyCell {
         self.inner.periodic
     }
 
+    #[getter]
+    fn stack_axis(&self) -> usize {
+        self.stack_axis
+    }
+
     fn __repr__(&self) -> String {
         format!(
-            "Cell(lengths={:?}, periodic={:?}, origin={:?})",
+            "Cell(lengths={:?}, periodic={:?}, origin={:?}, stack_axis={:?})",
             self.lengths(),
             self.inner.periodic,
-            self.inner.origin
+            self.inner.origin,
+            axis_name(self.stack_axis)
         )
     }
+}
+
+/// The single non-periodic axis when there is exactly one, otherwise z.
+fn infer_stack_axis(periodic: [bool; 3]) -> usize {
+    let open = (0..3).filter(|axis| !periodic[*axis]).collect::<Vec<_>>();
+    if open.len() == 1 {
+        open[0]
+    } else {
+        DEFAULT_STACK_AXIS
+    }
+}
+
+pub(crate) fn cell_lengths(cell: &PeriodicCell) -> [f64; 3] {
+    [cell.basis[0][0], cell.basis[1][1], cell.basis[2][2]]
 }
 
 #[pyclass(name = "Material", module = "tangle._tangle", frozen)]
@@ -75,14 +111,14 @@ pub(crate) struct PyMaterial {
     #[pyo3(get)]
     pub(crate) diameter: f64,
     #[pyo3(get)]
-    pub(crate) minimum_bend_radius: Option<f64>,
+    pub(crate) min_bend_radius: Option<f64>,
 }
 
 #[pymethods]
 impl PyMaterial {
     #[new]
-    #[pyo3(signature = (name, diameter, minimum_bend_radius=None))]
-    fn new(name: String, diameter: f64, minimum_bend_radius: Option<f64>) -> PyResult<Self> {
+    #[pyo3(signature = (name, diameter, min_bend_radius=None))]
+    fn new(name: String, diameter: f64, min_bend_radius: Option<f64>) -> PyResult<Self> {
         if name.trim().is_empty() {
             return Err(PyValueError::new_err("material name must not be empty"));
         }
@@ -91,15 +127,15 @@ impl PyMaterial {
                 "material diameter must be positive and finite",
             ));
         }
-        if minimum_bend_radius.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+        if min_bend_radius.is_some_and(|value| !value.is_finite() || value <= 0.0) {
             return Err(PyValueError::new_err(
-                "minimum_bend_radius must be positive and finite",
+                "min_bend_radius must be positive and finite",
             ));
         }
         Ok(Self {
             name,
             diameter,
-            minimum_bend_radius,
+            min_bend_radius,
         })
     }
 
@@ -109,9 +145,9 @@ impl PyMaterial {
     }
 
     fn __repr__(&self) -> String {
-        match self.minimum_bend_radius {
+        match self.min_bend_radius {
             Some(radius) => format!(
-                "Material(name={:?}, diameter={}, minimum_bend_radius={})",
+                "Material(name={:?}, diameter={}, min_bend_radius={})",
                 self.name, self.diameter, radius
             ),
             None => format!("Material(name={:?}, diameter={})", self.name, self.diameter),
@@ -219,8 +255,16 @@ impl PyFiberCollection {
         self.fibers.extend(other.fibers.iter().cloned());
     }
 
-    /// Returns the sorted deposition-layer labels present in this collection.
-    fn layers(&self) -> Vec<u32> {
+    /// Returns a new collection holding this collection's fibers followed by
+    /// `other`'s. The result keeps this collection's name.
+    fn __add__(&self, other: PyRef<'_, PyFiberCollection>) -> Self {
+        let mut combined = self.clone();
+        combined.fibers.extend(other.fibers.iter().cloned());
+        combined
+    }
+
+    /// Returns the sorted `formation_layer` labels present in this collection.
+    fn layer_ids(&self) -> Vec<u32> {
         let mut layers = self
             .fibers
             .iter()
@@ -287,7 +331,7 @@ impl PyFiberCollection {
                 material: PyMaterial {
                     name: material_name,
                     diameter,
-                    minimum_bend_radius: assembly.admissibility.bend_limits[index]
+                    min_bend_radius: assembly.admissibility.bend_limits[index]
                         .map(|limit| limit.minimum_bend_radius),
                 },
                 tags: BTreeMap::new(),
@@ -328,6 +372,7 @@ impl PyFiberSelection {
 #[derive(Clone, Debug)]
 pub(crate) struct AssemblyModel {
     pub(crate) assembly: FiberAssembly,
+    pub(crate) stack_axis: usize,
     pub(crate) tags: Vec<BTreeMap<String, String>>,
     next_fiber_id: u32,
 }
@@ -343,7 +388,7 @@ impl PyAssembly {
     #[new]
     fn new(cell: PyRef<'_, PyCell>) -> Self {
         Self {
-            model: Arc::new(Mutex::new(AssemblyModel::new(cell.inner))),
+            model: Arc::new(Mutex::new(AssemblyModel::new(&cell))),
         }
     }
 
@@ -363,6 +408,7 @@ impl PyAssembly {
         let model = self.model.lock().expect("assembly lock poisoned");
         PyCell {
             inner: model.assembly.cell,
+            stack_axis: model.stack_axis,
         }
     }
 
@@ -425,11 +471,30 @@ impl PyAssembly {
 }
 
 impl AssemblyModel {
-    pub(crate) fn new(cell: PeriodicCell) -> Self {
+    pub(crate) fn new(cell: &PyCell) -> Self {
         Self {
-            assembly: FiberAssembly::new(cell),
+            assembly: FiberAssembly::new(cell.inner),
+            stack_axis: cell.stack_axis,
             tags: Vec::new(),
             next_fiber_id: 1,
+        }
+    }
+
+    /// Wraps a finished assembly, for example a recipe result.
+    pub(crate) fn from_assembly(assembly: FiberAssembly, stack_axis: usize) -> Self {
+        let next_fiber_id = assembly
+            .topology
+            .fibers
+            .iter()
+            .map(|fiber| fiber.id.0)
+            .max()
+            .map_or(1, |id| id + 1);
+        let tags = vec![BTreeMap::new(); assembly.topology.fibers.len()];
+        Self {
+            assembly,
+            stack_axis,
+            tags,
+            next_fiber_id,
         }
     }
 
@@ -475,7 +540,7 @@ impl AssemblyModel {
             self.assembly
                 .set_fiber_formation_layer(id, input.formation_layer)
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
-            if let Some(minimum_bend_radius) = input.material.minimum_bend_radius {
+            if let Some(minimum_bend_radius) = input.material.min_bend_radius {
                 self.assembly
                     .set_fiber_bend_limit(
                         id,

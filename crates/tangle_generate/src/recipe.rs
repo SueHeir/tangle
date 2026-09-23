@@ -227,6 +227,19 @@ fn generate_layer_staged_population(
     next.set(TangleStage::Relax);
 }
 
+/// Deterministic pseudo-random center for a circular needle footprint in
+/// `layer`, uniform over `origin + [0, extent)` in the two coordinates
+/// orthogonal to the layer axis.
+pub fn random_footprint_center(seed: u64, layer: u32, origin: [f32; 2], extent: [f32; 2]) -> [f32; 2] {
+    let unit = |bits: u64| (((bits >> 40) as f64) * (1.0 / ((1_u64 << 24) as f64))) as f32;
+    let first = splitmix64(seed ^ (2 * layer) as u64);
+    let second = splitmix64(seed ^ (2 * layer + 1) as u64);
+    [
+        origin[0] + extent[0] * unit(first),
+        origin[1] + extent[1] * unit(second),
+    ]
+}
+
 /// Rule used to select at most one pulled vertex from each layer fiber.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum NeedlingSelection {
@@ -845,25 +858,54 @@ fn control_formation_recipe(
                     .materials
                     .entries
                     .iter()
-                    .position(|entry| entry.name == *material_name)
-                    .unwrap_or_else(|| panic!("unknown material {material_name:?}"));
+                    .position(|entry| entry.name == *material_name);
+                let matching_fibers = material
+                    .map(|material| {
+                        assembly
+                            .topology
+                            .fibers
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, fiber)| {
+                                (fiber.material.0 as usize == material).then_some(index)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if matching_fibers.is_empty() {
+                    let reason = if material.is_some() {
+                        format!("material {material_name:?} has no fibers")
+                    } else {
+                        let known = assembly
+                            .materials
+                            .entries
+                            .iter()
+                            .map(|entry| format!("{:?}", entry.name))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("unknown material {material_name:?}; known materials: {known}")
+                    };
+                    state.failure = Some(FormationFailure {
+                        operation: state.next_operation,
+                        iteration: relaxation.iterations,
+                        reason,
+                    });
+                    state.released = true;
+                    if let Some(world) = device.world.as_mut() {
+                        world.clear_layer_targets();
+                        world.clear_vertex_targets();
+                    }
+                    release_workflow(&mut workflow);
+                    next.set(TangleStage::Done);
+                    return;
+                }
                 let limit = FiberBendLimit {
                     minimum_bend_radius: *minimum_bend_radius,
                 };
-                let matching_fibers = assembly
-                    .topology
-                    .fibers
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, fiber)| {
-                        (fiber.material.0 as usize == material).then_some(index)
-                    })
-                    .collect::<Vec<_>>();
                 let changed = matching_fibers.len();
                 for index in matching_fibers {
                     assembly.admissibility.bend_limits[index] = Some(limit);
                 }
-                assert!(changed > 0, "material {material_name:?} has no fibers");
                 let maximum_curvatures = assembly
                     .admissibility
                     .bend_limits
