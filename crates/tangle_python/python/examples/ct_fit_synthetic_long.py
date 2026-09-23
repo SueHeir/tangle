@@ -86,7 +86,7 @@ def main() -> None:
 
     base = ct.FiberSpec(diameter=DIAMETER, min_bend_radius=MIN_BEND_RADIUS)
     specs = {"no_length_prior": base, "length_prior": base.replace(length=sum(LENGTH) / 2)}
-    keys = ("fitted_fibers", "recovered", "split", "missed", "false_fibers", "merged_fibers",
+    keys = ("fitted_fibers", "recovered", "split", "missed", "stubs", "false_fibers", "merged_fibers",
             "interior_ends_fit", "interior_ends_truth", "implied_mean_length_fit_m",
             "centerline_error_voxels", "voxel_label_accuracy")
     reports = {}

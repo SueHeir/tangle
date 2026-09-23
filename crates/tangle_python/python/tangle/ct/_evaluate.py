@@ -22,7 +22,7 @@ def _voxel(points: np.ndarray, shape) -> tuple[np.ndarray, ...]:
     return index[:, 2], index[:, 1], index[:, 0]
 
 
-def score(fit, truth, *, coverage_threshold: float = 0.8) -> dict[str, Any]:
+def score(fit, truth, *, coverage_threshold: float = 0.8, min_length: float | None = None) -> dict[str, Any]:
     """Fiber-level and voxel-level agreement between ``fit`` and ``truth``.
 
     ``truth`` needs ``labels`` (one-based ids, ``(z, y, x)``), ``centerlines``
@@ -33,6 +33,10 @@ def score(fit, truth, *, coverage_threshold: float = 0.8) -> dict[str, Any]:
       when that needs several fitted fibers, **missed** otherwise.
     * A fitted fiber is **false** when most of it lies in void, and **merged**
       when less than 80% of it follows a single true fiber.
+    * True pieces shorter in the volume than ``min_length`` (meters; default
+      the fit's own minimum length, 3 diameters unless set) are stubs where a
+      fiber clips a corner of the scan. The fitter drops fits that short, so
+      stubs are counted separately and left out of recall.
     """
     from scipy.spatial import cKDTree
 
@@ -56,11 +60,18 @@ def score(fit, truth, *, coverage_threshold: float = 0.8) -> dict[str, Any]:
     purity = np.array(purity)
     trees = [cKDTree(s) if len(s) else None for s in fit_samples]
 
-    recovered = split = missed = 0
+    if min_length is None:
+        min_length = fit.spec.min_length or 3.0 * fit.spec.diameter
+    shortest = min_length / fit.voxel_size
+    recovered = split = missed = stubs = 0
     per_truth = []
     for g in range(1, count + 1):
         samples = _samples_inside(truth.centerlines[g - 1], shape)
         if len(samples) == 0:
+            continue
+        if 0.5 * len(samples) < shortest:  # samples are 0.5 voxel apart
+            stubs += 1
+            per_truth.append({"id": g, "state": "stub", "coverage": None, "union_coverage": None, "fitted": 0})
             continue
         radius = float(truth.radii[g - 1])
         mapped = [f for f in np.flatnonzero(owner == g) if trees[f] is not None]
@@ -116,6 +127,7 @@ def score(fit, truth, *, coverage_threshold: float = 0.8) -> dict[str, Any]:
         "recovered": recovered,
         "split": split,
         "missed": missed,
+        "stubs": stubs,
         "false_fibers": false_positive,
         "merged_fibers": merged,
         "recall": recall,
