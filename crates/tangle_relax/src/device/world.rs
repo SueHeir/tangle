@@ -673,11 +673,15 @@ impl<R: Runtime> DeviceFiberWorld<R> {
     fn launch_curvature_cleanup(&self, config: &RelaxationConfig) {
         let cube_dim = CubeDim::new_1d(64);
         let vertex_cubes = CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1);
+        // These two kernels index vertices directly rather than through the
+        // active list, so they must be launched over every packed vertex.
+        let all_vertex_cubes =
+            CubeCount::Static(self.packed.vertex_count().div_ceil(64) as u32, 1, 1);
         for _ in 0..config.curvature_cleanup_sweeps {
             unsafe {
                 find_curvature_limit_corrections::launch_unchecked::<R>(
                     &self.client,
-                    vertex_cubes.clone(),
+                    all_vertex_cubes.clone(),
                     cube_dim.clone(),
                     BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                     BufferArg::from_raw_parts(
@@ -710,7 +714,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 );
                 gather_curvature_limit_corrections::launch_unchecked::<R>(
                     &self.client,
-                    vertex_cubes.clone(),
+                    all_vertex_cubes.clone(),
                     cube_dim.clone(),
                     BufferArg::from_raw_parts(
                         self.segment_vertices.clone(),
@@ -2028,22 +2032,17 @@ impl<R: Runtime> DeviceFiberWorld<R> {
 
     /// Downloads scalar convergence state without downloading geometry.
     pub fn read_status(&self, config: &RelaxationConfig) -> BatchStatus {
-        let control_bytes = self
-            .client
-            .read_one(self.control.clone())
-            .expect("CubeCL control readback failed");
-        let metric_bytes = self
-            .client
-            .read_one(self.metrics.clone())
-            .expect("CubeCL metric readback failed");
-        let overflow_bytes = self
-            .client
-            .read_one(self.cell_overflow.clone())
-            .expect("CubeCL cell-overflow readback failed");
-        let refinement_bytes = self
-            .client
-            .read_one(self.refinement_count.clone())
-            .expect("CubeCL refinement-count readback failed");
+        // One batched readback: each separate read is a full device sync.
+        let [control_bytes, metric_bytes, overflow_bytes, refinement_bytes]: [_; 4] =
+            cubecl::future::reader::read_sync(self.client.read_async(vec![
+                self.control.clone(),
+                self.metrics.clone(),
+                self.cell_overflow.clone(),
+                self.refinement_count.clone(),
+            ]))
+            .expect("CubeCL batch-status readback failed")
+            .try_into()
+            .unwrap_or_else(|_| panic!("CubeCL returned the wrong number of status buffers"));
         let control = u32::from_bytes(&control_bytes);
         let metrics = f32::from_bytes(&metric_bytes);
         let overflow = u32::from_bytes(&overflow_bytes)[0] != 0 || control[3] != 0;
