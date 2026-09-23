@@ -48,7 +48,11 @@ def straight_assembly(offsets_yz_voxels):
 class ImageRelaxerTests(unittest.TestCase):
     def relaxer(self, offsets, centers):
         image = tube_image(centers, RADIUS / VOXEL)
-        settings = tangle.RelaxationSettings(backend=BACKEND, max_step=0.25 * VOXEL)
+        # Tolerances in the scene's own units: the default penetration
+        # tolerance (1e-4 m) would accept any overlap between these fibers.
+        settings = tangle.RelaxationSettings(
+            backend=BACKEND, max_step=0.25 * VOXEL, penetration_tolerance=0.01 * VOXEL
+        )
         return tangle.ImageRelaxer(
             straight_assembly(offsets), settings, image.tobytes(), image.shape, VOXEL
         )
