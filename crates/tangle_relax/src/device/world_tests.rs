@@ -1342,6 +1342,14 @@ fn neighbor_lists_hold_every_pair_within_the_skin() {
         let count = counts[first] as usize;
         assert!(count <= capacity, "segment {first} overflowed: {count}");
         let listed = &lists[first * capacity..first * capacity + count];
+        let mut unique = listed.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            count,
+            "segment {first} lists a neighbor twice"
+        );
         let (a, b) = (
             packed.segment_vertices[2 * first],
             packed.segment_vertices[2 * first + 1],
