@@ -21,6 +21,7 @@ ratio against the bend limit, deepest overlap, segment lengths) and writes
 before/after overlays. Fibers are resampled to segments at least one
 diameter long first: Tangle's contact treats non-adjacent segments of the
 same fiber as colliding, so shorter segments push a fiber apart by itself.
+Each fiber rests straight (see ``straightened``).
 
 Usage: ``python ct_gpu_geometry_check.py [output_dir] [fit.json]``; without a
 fit.json the CPU fit is run first (about a minute). ``CT_TRUTH_DIR`` names the
@@ -78,20 +79,38 @@ def relax(image: np.ndarray, lines: list[np.ndarray], radii: np.ndarray, rate: f
         key = int(round(2.0 * radius * h / 1e-9))
         if key not in materials:
             materials[key] = tangle.Material(f"ct {key}nm", diameter=key * 1e-9, min_bend_radius=BEND * h)
-        collection.add_fiber((np.asarray(line) * h).tolist(), materials[key])
+        line = np.asarray(line, dtype=np.float64)
+        collection.add_fiber((line * h).tolist(), materials[key], rest_centerline=(straightened(line) * h).tolist())
     assembly = tangle.Assembly(cell)
     assembly.insert(collection, name="ct fit")
     settings = tangle.RelaxationSettings(
         backend=BACKEND, max_iterations=ITERATIONS, max_step=0.25 * RADIUS * h, penetration_tolerance=0.02 * RADIUS * h,
+        neighbor_capacity=192,  # fits start overlapping; 48 slots overflow into the slow fallback
     )
     started = time.perf_counter()
     relaxer = tangle.ImageRelaxer(
         assembly, settings, np.ascontiguousarray(image, dtype="<f4").tobytes(), tuple(int(n) for n in image.shape), h
     )
     relaxer.set_image_force(rate=rate, reach_radii=1.4)
-    relaxer.run(ITERATIONS)
+    status = relaxer.run(ITERATIONS)
+    print(f"  solver: {status}")
     out = [np.asarray(line, dtype=np.float64) / h for line in relaxer.centerlines()]
     return out, time.perf_counter() - started
+
+
+def straightened(line: np.ndarray) -> np.ndarray:
+    """A straight rest shape with the same segment lengths.
+
+    Tangle takes a fiber's rest (intrinsic) shape from the centerline it is
+    placed with and rejects one that bends past the bend limit; a kinked fit
+    would also keep its kinks as the shape the bending force returns to. The
+    fibers here are straight-spun, so they rest straight: bending then
+    resists every curve, and the scan (and contact) supply the waviness.
+    """
+    lengths = np.linalg.norm(np.diff(line, axis=0), axis=1)
+    direction = line[-1] - line[0]
+    direction = direction / max(np.linalg.norm(direction), 1e-12)
+    return line[0] + np.concatenate([[0.0], np.cumsum(lengths)])[:, None] * direction
 
 
 def spaced(lines: list[np.ndarray]) -> list[np.ndarray]:
