@@ -235,7 +235,8 @@ The fit then uses it to **redraw the unsure parts**
 3. joins ends that meet and traces new fibers in whatever is still
    unexplained, with the usual steps;
 4. re-solves with the sure pieces pinned, so they stay where they are and
-   everything else fits around them.
+   everything else fits around them; a short settle without the scan then
+   runs unpinned, so fibers that touch can still be pushed apart.
 
 A pass is kept only if it raises the **sure coverage**: the fraction of the
 foreground explained by the fit, each voxel weighted by the confidence of

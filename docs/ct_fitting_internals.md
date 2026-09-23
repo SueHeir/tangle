@@ -429,9 +429,11 @@ After the final solve and its confidence, up to `redraw_passes` passes:
 3. `_Fitter.trace` seeds new fibers in the foreground still unclaimed;
    then the per-type topology step (§6b) joins the grown ends.
 4. `solver_batches` batches and a final solve, with device nodes within
-   0.3 r_min of an anchor pinned (`ImageRelaxer.set_pinned`; a build
-   without it ignores the anchors and says so in the log), then the
-   confidence again.
+   0.3 r_min of an anchor pinned during the image run
+   (`ImageRelaxer.set_pinned`; a build without it ignores the anchors and
+   says so in the log). The image-off settle after it runs unpinned: two
+   pinned stretches in contact could not otherwise be pushed apart, which
+   tripled the overlapping pairs. Then the confidence again.
 5. The pass is kept if `sure_coverage` rises by more than 0.001, where
    `sure_coverage` = Σ over foreground voxels of the owning segment's
    confidence (mean of its two nodes; 0 if unowned) / foreground voxels.

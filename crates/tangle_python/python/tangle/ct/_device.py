@@ -96,9 +96,11 @@ def relax(
     gets exactly the admissible state the solver reached.
 
     Device nodes within ``anchor_tolerance`` of an ``anchors`` polyline are
-    pinned: they do not move, and the other nodes fit around them. This
-    needs a Tangle build whose ``ImageRelaxer`` has ``set_pinned``; without
-    it the anchors are ignored (the log says so).
+    pinned during the image run: they do not move, and the other nodes fit
+    around them. The settle after it runs unpinned, so pinned fibers that
+    touch can still be pushed apart. This needs a Tangle build whose
+    ``ImageRelaxer`` has ``set_pinned``; without it the anchors are ignored
+    (the log says so).
     """
     import tangle
 
@@ -141,6 +143,11 @@ def relax(
     status = relaxer.run(iterations)
     if settle:
         relaxer.set_image_force(0.0)
+        if pinned > 0:
+            # Two pinned stretches that touch cannot push each other apart,
+            # so the settle runs unpinned: with the image force off, it only
+            # separates fibers in contact, and moves the rest little.
+            relaxer.set_pinned([[False] * len(line) for line in coarse])
         status = relaxer.run(settle)
     if log is not None:
         extra = {k: status[k] for k in ("converged", "max_curvature_ratio") if k in status}
