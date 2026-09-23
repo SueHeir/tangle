@@ -1684,3 +1684,206 @@ fn long_segments_get_proportionally_longer_neighbor_lists() {
     }
     assert!(crossings > 150, "{crossings} crossings");
 }
+
+/// Twenty 1.6-long single-segment fibers crossing in two layers 0.03 apart,
+/// packed adaptively: the unrefined roots are far longer than the finest
+/// leaves, so the neighbor grid bins each root as several proxy pieces.
+fn long_crossing_fibers() -> (PackedAssembly, f32) {
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic(
+        [2.0, 2.0, 1.0],
+        [true, true, false],
+    ));
+    let material = assembly.materials.add("fiber");
+    let section = assembly.sections.add(Section::Circular { radius: 0.02 });
+    let mut id = 1;
+    for index in 0..10 {
+        let offset = 0.1 + 0.19 * index as f64;
+        for placed in [
+            [[0.2, offset, 0.45], [1.8, offset + 0.05, 0.45]],
+            [[offset + 0.07, 0.2, 0.48], [offset + 0.02, 1.8, 0.48]],
+        ] {
+            assembly
+                .add_fiber(FiberId(id), material, section, &placed, &placed)
+                .unwrap();
+            id += 1;
+        }
+    }
+    let adaptive = AdaptiveSegmentationConfig {
+        contact_length_over_diameter: 100.0,
+        minimum_length_over_diameter: 1.0,
+        maximum_refinement_levels: 4,
+        ..AdaptiveSegmentationConfig::default()
+    };
+    let packed =
+        PackedAssembly::from_assembly_with_options(&assembly, Some(adaptive), false).unwrap();
+    (packed, 0.01)
+}
+
+#[test]
+fn long_segments_are_binned_as_proxy_pieces() {
+    let (packed, max_step) = long_crossing_fibers();
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed.clone(),
+        CellListConfig::default(),
+        max_step,
+    );
+    // The grid follows the 0.1-long leaves, not the 1.6-long roots.
+    assert!(world.cell_size() < 0.5, "cell size {}", world.cell_size());
+    assert!(world.segment_cell_size > 1.6);
+    let proxies = u32::from_bytes(
+        &world
+            .client
+            .read_one(world.segment_proxies.clone())
+            .unwrap(),
+    )
+    .to_vec();
+    let active: Vec<usize> = (0..packed.segment_count())
+        .filter(|&segment| packed.segment_active[segment] != 0)
+        .collect();
+    assert_eq!(active.len(), 20);
+    assert!(active.iter().all(|&segment| proxies[segment] >= 5));
+
+    let config = RelaxationConfig {
+        max_step,
+        max_iterations: 1,
+        iterations_per_batch: 1,
+        ..RelaxationConfig::default()
+    };
+    // The first contact pass builds the lists from the uploaded positions.
+    world.run_batch(&config, 1);
+    let lists = neighbor_lists(&world);
+    let skin = f64::from(world.neighbor_skin);
+    let vertex = |index: u32| {
+        let index = 3 * index as usize;
+        [
+            f64::from(packed.positions[index]),
+            f64::from(packed.positions[index + 1]),
+            f64::from(packed.positions[index + 2]),
+        ]
+    };
+    let lengths = [2.0, 2.0, 1.0];
+    let periodic = [true, true, false];
+    let mut listed_pairs = 0;
+    for &first in &active {
+        let listed = lists[first]
+            .as_deref()
+            .unwrap_or_else(|| panic!("segment {first} overflowed"));
+        let count = listed.len();
+        let mut unique = listed.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            count,
+            "segment {first} lists a neighbor twice"
+        );
+        let (p1, q1) = (
+            vertex(packed.segment_vertices[2 * first]),
+            vertex(packed.segment_vertices[2 * first + 1]),
+        );
+        for &second in &active {
+            if second == first {
+                continue;
+            }
+            let (mut p2, mut q2) = (
+                vertex(packed.segment_vertices[2 * second]),
+                vertex(packed.segment_vertices[2 * second + 1]),
+            );
+            for axis in 0..3 {
+                if periodic[axis] {
+                    let shift = (0.5 * (p2[axis] + q2[axis] - p1[axis] - q1[axis]) / lengths[axis])
+                        .round()
+                        * lengths[axis];
+                    p2[axis] -= shift;
+                    q2[axis] -= shift;
+                }
+            }
+            let interaction = 0.04 + skin;
+            let distance = host_segment_axis_distance(p1, q1, p2, q2);
+            let is_listed = listed.contains(&(second as u32));
+            if distance < 0.999 * interaction {
+                assert!(is_listed, "{first}-{second} at {distance} missing");
+                listed_pairs += 1;
+            } else if distance > 1.001 * interaction {
+                assert!(!is_listed, "{first}-{second} at {distance} listed");
+            }
+        }
+    }
+    // Most of the 100 x/y fiber pairs cross (each crossing counts from both
+    // sides); the fibers' ends leave a few apart.
+    assert!(listed_pairs > 150, "{listed_pairs} neighbor pairs");
+}
+
+fn relax_long_crossing_fibers(cell_list: CellListConfig) -> Vec<f32> {
+    let (packed, max_step) = long_crossing_fibers();
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed,
+        cell_list,
+        max_step,
+    );
+    let config = RelaxationConfig {
+        penetration_tolerance: 0.0,
+        force_full_iterations: true,
+        max_step,
+        max_iterations: 30,
+        iterations_per_batch: 30,
+        ..RelaxationConfig::default()
+    };
+    let status = world.run_batch(&config, 30);
+    assert!(status.max_penetration.is_finite(), "{status:?}");
+    world.download_positions()
+}
+
+#[test]
+fn proxy_overflow_scan_matches_neighbor_lists() {
+    let reference = relax_long_crossing_fibers(CellListConfig {
+        neighbor_skin_scale: 0.0,
+        ..CellListConfig::default()
+    });
+    let listed = relax_long_crossing_fibers(CellListConfig::default());
+    // One slot per segment sends every crossing through the per-proxy cell
+    // scan, which must find each contact exactly once.
+    let overflowed = relax_long_crossing_fibers(CellListConfig {
+        neighbor_capacity: 1,
+        ..CellListConfig::default()
+    });
+    let largest_difference = |left: &[f32], right: &[f32]| {
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0_f32, f32::max)
+    };
+    // The crossings overlap (0.03 apart, radii 0.02), so relaxation moves them.
+    let (packed, _) = long_crossing_fibers();
+    assert!(largest_difference(&reference, &packed.positions) > 1.0e-3);
+    assert!(largest_difference(&listed, &reference) < 1.0e-4);
+    assert!(largest_difference(&overflowed, &reference) < 1.0e-4);
+}
+
+#[test]
+fn proxy_relaxation_is_bitwise_repeatable() {
+    // Several proxy pieces append to one neighbor list concurrently; the
+    // lists are sorted after the build, so repeated runs stay identical.
+    for cell_list in [
+        CellListConfig::default(),
+        CellListConfig {
+            neighbor_capacity: 1,
+            ..CellListConfig::default()
+        },
+    ] {
+        let first = relax_long_crossing_fibers(cell_list);
+        let second = relax_long_crossing_fibers(cell_list);
+        let bits = |values: &[f32]| {
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            bits(&first) == bits(&second),
+            "{cell_list:?} relaxed differently"
+        );
+    }
+}

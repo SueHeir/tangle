@@ -12,10 +12,19 @@
 
 use cubecl::prelude::*;
 
-/// Distance between two segment axes `p1 + s d1` and `p2 + t d2`.
+use super::cell_list::{proxy_cell, proxy_of};
+
+/// Distance between two segment axes `p1 + s d1` and `p2 + t d2`, or
+/// [`NOT_CANONICAL`] unless the closest points lie in pieces `proxy1` and
+/// `proxy2` of the segments' proxy splits.
+///
+/// A pair of long segments can meet in several proxy pairs' stencils; only
+/// the pair holding the closest points reports it, so each neighbor is
+/// listed once. The closest points of a touching pair lie within one cell of
+/// each other, so that proxy pair's stencils always meet.
 #[cube]
 #[allow(clippy::too_many_arguments, unused_assignments)]
-fn segment_axis_distance(
+fn proxy_pair_axis_distance(
     p1x: f32,
     p1y: f32,
     p1z: f32,
@@ -28,6 +37,10 @@ fn segment_axis_distance(
     d2x: f32,
     d2y: f32,
     d2z: f32,
+    proxy1: u32,
+    proxies1: u32,
+    proxy2: u32,
+    proxies2: u32,
 ) -> f32 {
     let length_epsilon = 1.0e-20_f32;
     let parallel_relative_epsilon = 1.0e-6_f32;
@@ -65,15 +78,32 @@ fn segment_axis_distance(
     let delta_x = (p2x + d2x * t) - (p1x + d1x * s);
     let delta_y = (p2y + d2y * t) - (p1y + d1y * s);
     let delta_z = (p2z + d2z * t) - (p1z + d1z * s);
-    (delta_x * delta_x + delta_y * delta_y + delta_z * delta_z).sqrt()
+    let mut distance = (delta_x * delta_x + delta_y * delta_y + delta_z * delta_z).sqrt();
+    if proxy_of(s, proxies1) != proxy1 || proxy_of(t, proxies2) != proxy2 {
+        distance = NOT_CANONICAL;
+    }
+    distance
+}
+
+/// Distance reported for a proxy pair that does not hold the closest points.
+const NOT_CANONICAL: f32 = 3.0e38;
+
+/// Number of filled cell-list slots: the exclusive scan's last offset plus
+/// the last cell's count.
+#[cube]
+fn filled_slots(cell_counts: &[u32], cell_offsets: &[u32], cell_count: u32) -> u32 {
+    let last = (cell_count - 1) as usize;
+    cell_offsets[last] + cell_counts[last]
 }
 
 /// Copies the geometry of every cell-list slot into cell-sorted arrays.
 ///
 /// `slot_geometry` holds eight values per slot (first endpoint, radius,
-/// second endpoint, padding) and `slot_topology` three (both vertex ids and
-/// the owning fiber), so the neighbor-list build reads each candidate cell as
-/// one contiguous range instead of chasing segment and vertex indices.
+/// second endpoint, padding) and `slot_topology` five (both vertex ids, the
+/// owning fiber, the proxy piece and the segment's proxy count), so the
+/// neighbor-list build reads each candidate cell as one contiguous range
+/// instead of chasing segment and vertex indices. The slot holding a
+/// segment's first proxy also clears that segment's neighbor count.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn gather_cell_slot_geometry(
@@ -81,14 +111,21 @@ pub fn gather_cell_slot_geometry(
     segment_vertices: &[u32],
     segment_fibers: &[u32],
     segment_radii: &[f32],
-    active_counts: &[Atomic<u32>],
+    segment_proxies: &[u32],
+    cell_counts: &[u32],
+    cell_offsets: &[u32],
     cell_segments: &[u32],
+    cell_proxies: &[u32],
     neighbor_state: &[u32],
     slot_geometry: &mut [f32],
     slot_topology: &mut [u32],
+    neighbor_counts: &mut [u32],
+    cell_count: u32,
 ) {
     let slot = ABSOLUTE_POS;
-    if slot >= active_counts[0].load() as usize || neighbor_state[0] == 0 {
+    if neighbor_state[0] == 0
+        || slot >= filled_slots(cell_counts, cell_offsets, cell_count) as usize
+    {
         terminate!();
     }
     let segment = cell_segments[slot] as usize;
@@ -96,6 +133,7 @@ pub fn gather_cell_slot_geometry(
     let second = segment_vertices[2 * segment + 1];
     let first_index = first as usize;
     let second_index = second as usize;
+    let proxy = cell_proxies[slot];
     slot_geometry[8 * slot] = positions[3 * first_index];
     slot_geometry[8 * slot + 1] = positions[3 * first_index + 1];
     slot_geometry[8 * slot + 2] = positions[3 * first_index + 2];
@@ -104,29 +142,35 @@ pub fn gather_cell_slot_geometry(
     slot_geometry[8 * slot + 5] = positions[3 * second_index + 1];
     slot_geometry[8 * slot + 6] = positions[3 * second_index + 2];
     slot_geometry[8 * slot + 7] = 0.0;
-    slot_topology[3 * slot] = first;
-    slot_topology[3 * slot + 1] = second;
-    slot_topology[3 * slot + 2] = segment_fibers[segment];
+    slot_topology[5 * slot] = first;
+    slot_topology[5 * slot + 1] = second;
+    slot_topology[5 * slot + 2] = segment_fibers[segment];
+    slot_topology[5 * slot + 3] = proxy;
+    slot_topology[5 * slot + 4] = segment_proxies[segment];
+    if proxy == 0 {
+        neighbor_counts[segment] = 0;
+    }
 }
 
 /// Builds each active segment's neighbor list from the current cell list.
 ///
-/// One thread handles one cell-list slot, reading the cell-sorted copies made
-/// by [`gather_cell_slot_geometry`]: neighboring threads share a home cell, so
-/// they scan the same candidate cells, and each candidate cell is a contiguous
-/// range of slots.
+/// One thread handles one cell-list slot (one proxy piece of a segment),
+/// reading the cell-sorted copies made by [`gather_cell_slot_geometry`]:
+/// neighboring threads share a home cell, so they scan the same candidate
+/// cells, and each candidate cell is a contiguous range of slots. A segment
+/// split into several proxies is served by several threads, which append to
+/// its list atomically; each neighbor is found by exactly one proxy pair.
 ///
 /// Each segment's list holds `capacity * list_weights[segment]` entries starting
 /// at `capacity * list_offsets[segment]`, so long segments get proportionally
-/// more room. Segments with more neighbors than that store their true count, which
-/// tells the contact kernel to fall back to the cell-list traversal around the
-/// recorded home cell for that segment.
+/// more room. Segments with more neighbors than that store their true count,
+/// which tells the contact kernel to fall back to scanning the cells around
+/// each of the segment's proxies.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn build_segment_neighbor_lists(
     slot_geometry: &[f32],
     slot_topology: &[u32],
-    active_counts: &[Atomic<u32>],
     cell_counts: &[u32],
     cell_offsets: &[u32],
     cell_segments: &[u32],
@@ -134,24 +178,28 @@ pub fn build_segment_neighbor_lists(
     cell_upper: &[f32],
     cell_periodic: &[u32],
     neighbor_state: &[u32],
-    neighbor_counts: &mut [u32],
+    neighbor_counts: &mut [Atomic<u32>],
     neighbor_segments: &mut [u32],
-    neighbor_home_cells: &mut [u32],
     list_offsets: &[u32],
     list_weights: &[u32],
     skin: f32,
     capacity: u32,
+    cell_count: u32,
     cells_x: u32,
     cells_y: u32,
     cells_z: u32,
 ) {
     let slot = ABSOLUTE_POS;
-    if slot >= active_counts[0].load() as usize || neighbor_state[0] == 0 {
+    if neighbor_state[0] == 0
+        || slot >= filled_slots(cell_counts, cell_offsets, cell_count) as usize
+    {
         terminate!();
     }
     let segment_index = cell_segments[slot] as usize;
-    let first_vertex = slot_topology[3 * slot];
-    let second_vertex = slot_topology[3 * slot + 1];
+    let first_vertex = slot_topology[5 * slot];
+    let second_vertex = slot_topology[5 * slot + 1];
+    let proxy = slot_topology[5 * slot + 3];
+    let proxies = slot_topology[5 * slot + 4];
     let p1x = slot_geometry[8 * slot];
     let p1y = slot_geometry[8 * slot + 1];
     let p1z = slot_geometry[8 * slot + 2];
@@ -161,39 +209,35 @@ pub fn build_segment_neighbor_lists(
     let d1x = q1x - p1x;
     let d1y = q1y - p1y;
     let d1z = q1z - p1z;
-    let owner = slot_topology[3 * slot + 2];
+    let owner = slot_topology[5 * slot + 2];
     let radius = slot_geometry[8 * slot + 3];
     let half_length = 0.5 * (d1x * d1x + d1y * d1y + d1z * d1z).sqrt();
     let length_x = cell_upper[0] - cell_lower[0];
     let length_y = cell_upper[1] - cell_lower[1];
     let length_z = cell_upper[2] - cell_lower[2];
 
-    let midpoint_x = 0.5 * (p1x + q1x);
-    let midpoint_y = 0.5 * (p1y + q1y);
-    let midpoint_z = 0.5 * (p1z + q1z);
-    let width_x = length_x / cells_x as f32;
-    let width_y = length_y / cells_y as f32;
-    let width_z = length_z / cells_z as f32;
-    let raw_home_x = ((midpoint_x - cell_lower[0]) / width_x).floor() as i32;
-    let raw_home_y = ((midpoint_y - cell_lower[1]) / width_y).floor() as i32;
-    let raw_home_z = ((midpoint_z - cell_lower[2]) / width_z).floor() as i32;
-    let mut home_x = raw_home_x.clamp(0, cells_x as i32 - 1) as u32;
-    let mut home_y = raw_home_y.clamp(0, cells_y as i32 - 1) as u32;
-    let mut home_z = raw_home_z.clamp(0, cells_z as i32 - 1) as u32;
-    if cell_periodic[0] != 0 {
-        home_x = ((raw_home_x % cells_x as i32 + cells_x as i32) % cells_x as i32) as u32;
-    }
-    if cell_periodic[1] != 0 {
-        home_y = ((raw_home_y % cells_y as i32 + cells_y as i32) % cells_y as i32) as u32;
-    }
-    if cell_periodic[2] != 0 {
-        home_z = ((raw_home_z % cells_z as i32 + cells_z as i32) % cells_z as i32) as u32;
-    }
-    neighbor_home_cells[segment_index] = (home_z * cells_y + home_y) * cells_x + home_x;
+    let home = proxy_cell(
+        p1x,
+        p1y,
+        p1z,
+        q1x,
+        q1y,
+        q1z,
+        proxy,
+        proxies,
+        cell_lower,
+        cell_upper,
+        cell_periodic,
+        cells_x,
+        cells_y,
+        cells_z,
+    );
+    let home_x = home % cells_x;
+    let home_y = (home / cells_x) % cells_y;
+    let home_z = home / (cells_x * cells_y);
 
     let list_start = (capacity * list_offsets[segment_index]) as usize;
     let list_capacity = capacity * list_weights[segment_index];
-    let mut count = 0_u32;
     for neighbor in 0..27_u32 {
         let offset_x = (neighbor % 3) as i32 - 1;
         let offset_y = ((neighbor / 3) % 3) as i32 - 1;
@@ -231,14 +275,15 @@ pub fn build_segment_neighbor_lists(
             let start = cell_offsets[cell];
             for local in 0..cell_count {
                 let other_slot = (start + local) as usize;
-                let third_vertex = slot_topology[3 * other_slot];
-                let fourth_vertex = slot_topology[3 * other_slot + 1];
-                let adjacent_same_fiber = slot_topology[3 * other_slot + 2] == owner
+                let other = cell_segments[other_slot];
+                let third_vertex = slot_topology[5 * other_slot];
+                let fourth_vertex = slot_topology[5 * other_slot + 1];
+                let adjacent_same_fiber = slot_topology[5 * other_slot + 2] == owner
                     && (first_vertex == third_vertex
                         || first_vertex == fourth_vertex
                         || second_vertex == third_vertex
                         || second_vertex == fourth_vertex);
-                if other_slot != slot && !adjacent_same_fiber {
+                if other as usize != segment_index && !adjacent_same_fiber {
                     let mut p2x = slot_geometry[8 * other_slot];
                     let mut p2y = slot_geometry[8 * other_slot + 1];
                     let mut p2z = slot_geometry[8 * other_slot + 2];
@@ -280,24 +325,81 @@ pub fn build_segment_neighbor_lists(
                         + midpoint_dy * midpoint_dy
                         + midpoint_dz * midpoint_dz
                         <= reach * reach
-                        && segment_axis_distance(
-                            p1x, p1y, p1z, d1x, d1y, d1z, p2x, p2y, p2z, d2x, d2y, d2z,
+                        && proxy_pair_axis_distance(
+                            p1x,
+                            p1y,
+                            p1z,
+                            d1x,
+                            d1y,
+                            d1z,
+                            p2x,
+                            p2y,
+                            p2z,
+                            d2x,
+                            d2y,
+                            d2z,
+                            proxy,
+                            proxies,
+                            slot_topology[5 * other_slot + 3],
+                            slot_topology[5 * other_slot + 4],
                         ) <= interaction
                     {
-                        if count < list_capacity {
-                            neighbor_segments[list_start + count as usize] =
-                                cell_segments[other_slot];
+                        let position = neighbor_counts[segment_index].fetch_add(1);
+                        if position < list_capacity {
+                            neighbor_segments[list_start + position as usize] = other;
                         }
-                        count += 1;
                     }
                 }
             }
         }
     }
-    neighbor_counts[segment_index] = count;
 }
 
 /// Records the positions a freshly built neighbor list is valid for.
+/// Sorts each active segment's neighbor list by segment index.
+///
+/// A segment split into several proxy pieces is served by several build
+/// threads that append to its list atomically, in a run-dependent order;
+/// sorting makes the contact pass add its corrections in the same order every
+/// run. Overflowed lists are never read, so they are left as they are.
+#[cube(launch_unchecked)]
+pub fn sort_neighbor_lists(
+    active_segments: &[u32],
+    active_counts: &[Atomic<u32>],
+    neighbor_state: &[u32],
+    neighbor_counts: &[u32],
+    neighbor_segments: &mut [u32],
+    list_offsets: &[u32],
+    list_weights: &[u32],
+    capacity: u32,
+) {
+    let work = ABSOLUTE_POS;
+    if work >= active_counts[0].load() as usize || neighbor_state[0] == 0 {
+        terminate!();
+    }
+    let segment = active_segments[work] as usize;
+    let count = neighbor_counts[segment];
+    if count > capacity * list_weights[segment] {
+        terminate!();
+    }
+    let start = (capacity * list_offsets[segment]) as usize;
+    // Insertion sort with counted loops (CubeCL rejects early-exit `while`
+    // scans): an entry shifts up only while the gap is directly above it.
+    for sorted in 1..count {
+        let key = neighbor_segments[start + sorted as usize];
+        let mut position = sorted;
+        for step in 0..sorted {
+            let candidate = sorted - 1 - step;
+            if position == candidate + 1 && neighbor_segments[start + candidate as usize] > key {
+                neighbor_segments[start + position as usize] =
+                    neighbor_segments[start + candidate as usize];
+                position = candidate;
+            }
+        }
+        neighbor_segments[start + position as usize] = key;
+    }
+}
+
 #[cube(launch_unchecked)]
 pub fn snapshot_neighbor_reference_positions(
     positions: &[f32],
