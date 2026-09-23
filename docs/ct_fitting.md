@@ -43,7 +43,8 @@ on). The defaults are meant to work without changes.
 
 ## How the fit works
 
-The method follows the literature review in the project files. In short:
+The method follows the literature review in the project files. In short
+(every step, threshold and function is in [ct_fitting_internals.md](ct_fitting_internals.md)):
 
 1. **Normalize.** A light Gaussian denoise, then Otsu's threshold, maps void
    to 0 and fiber to 1. Once the first traces exist, the fiber level is reset
