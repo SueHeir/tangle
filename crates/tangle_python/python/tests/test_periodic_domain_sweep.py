@@ -56,10 +56,16 @@ class PeriodicDomainSweepTests(unittest.TestCase):
             with self.subTest(phase=placement.phase):
                 self.assertAlmostEqual(placement.amplitude, amplitude)
                 self.assertGreater(max(heights) - min(heights), 1.8 * amplitude)
+                # The tilt that breaks height ties may add a hair.
+                slack = 0.01 * config.diameter
                 self.assertLessEqual(
-                    max(heights) - min(heights), placement.rise(config) + 1e-4
+                    max(heights) - min(heights), placement.rise(config) + slack
                 )
-                self.assertGreaterEqual(min(heights), 1.0 - 1e-4)
+                self.assertGreaterEqual(min(heights), 1.0 - slack)
+                # Chords cut the curve's corners, so the polyline spans a
+                # little more in plane than the smooth wave.
+                span = math.dist(centerline[0][:2], centerline[-1][:2])
+                self.assertAlmostEqual(span / placement.span(config), 1.0, delta=0.01)
                 for a, b in zip(centerline, centerline[1:]):
                     self.assertAlmostEqual(
                         math.dist(a, b), config.segment_length, places=4

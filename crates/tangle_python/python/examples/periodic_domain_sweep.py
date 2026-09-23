@@ -211,10 +211,26 @@ class FiberPlacement:
         ramp = config.fiber_length * self.slope / math.hypot(1.0, self.slope)
         return ramp + 2.0 * self.amplitude
 
+    def span(self, config: SweepConfig) -> float:
+        """In-plane extent of the fiber.
+
+        A wave shortens the span; it is solved so the fiber carries exactly
+        ``waves_per_fiber`` waves over its length.
+        """
+        if not self.amplitude:
+            return config.fiber_length / math.hypot(1.0, self.slope + self.tilt)
+        span = config.fiber_length
+        samples = [math.cos(2.0 * math.pi * (i + 0.5) / 256) for i in range(256)]
+        for _ in range(50):
+            steepness = self.amplitude * 2.0 * math.pi * config.waves_per_fiber / span
+            stretch = sum(math.hypot(1.0, steepness * c) for c in samples) / 256
+            span = config.fiber_length / stretch
+        return span
+
     def height(self, config: SweepConfig, x: float, span: float) -> float:
         """Height above the layer base at in-plane distance ``x`` from the
         start of a fiber that spans ``span`` in plane."""
-        wavenumber = 2.0 * math.pi * config.waves_per_fiber / config.fiber_length
+        wavenumber = 2.0 * math.pi * config.waves_per_fiber / span
         return (
             (x - 0.5 * span) * self.tilt
             + x * self.slope
@@ -251,10 +267,8 @@ def profile(config: SweepConfig, placement: FiberPlacement) -> list[tuple[float,
     """In-plane distance and height of every vertex, with every segment
     exactly ``segment_length`` long so the fiber keeps its full length.
 
-    The span is not known before the walk, so the tilt is centered on the
-    straight-fiber span; the tilt only breaks exact height ties.
     """
-    span = config.fiber_length / math.hypot(1.0, placement.slope + placement.tilt)
+    span = placement.span(config)
     segment = config.segment_length
     points = [(0.0, placement.height(config, 0.0, span))]
     for _ in range(config.segments_per_fiber):
@@ -364,6 +378,12 @@ def build(
     layers = sample_layers(config, rng)
     rises = [layer_rise(config, placements) for placements in layers]
     spacing = STAGING_SPACING * config.diameter
+    gaps = [
+        LAYER_GAP * config.diameter + 0.5 * (below + above)
+        for below, above in zip(rises, rises[1:])
+    ]
+    # Staged stack height once every layer is lowered onto the one below.
+    stack = config.diameter + 0.5 * (rises[0] + rises[-1]) + sum(gaps)
     bases = []
     top = 0.0
     for rise in rises:
@@ -379,12 +399,11 @@ def build(
         recipe.relax_for(200)
         if layer == 0:
             continue
-        # The gap is between layer center planes; ramped layers are centered
-        # half their rise above their base.
-        gap = LAYER_GAP * config.diameter + 0.5 * (rises[layer - 1] + rises[layer])
+        # The gap is between layer center planes; ramped and wavy layers are
+        # centered half their rise above their base.
         with recipe.place_layer_above(
             layer,
-            gap=gap,
+            gap=gaps[layer - 1],
             stiffness=1.0,
             max_translation=0.05 * config.diameter,
         ):
@@ -395,7 +414,11 @@ def build(
     contact_stage(recipe, config, "baseline/contact", FORMATION_TOLERANCE, 30_000)
     # Drop the empty staging headroom so both walls start on the stack; a
     # thin stack otherwise floats below the top wall with an empty bottom.
-    recipe.fit_cell_to_active_fibers(padding=0.05 * config.diameter)
+    # A stack thinner than the target keeps enough headroom for compaction
+    # to finish at the target thickness.
+    recipe.fit_cell_to_active_fibers(
+        padding=max(0.05 * config.diameter, 0.5 * (config.target_thickness - stack))
+    )
     # Once the layers touch, the default averaged correction cannot clear a
     # compaction increment within one window; use the contact stages' solver.
     recipe.compact(
