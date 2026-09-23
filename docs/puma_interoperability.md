@@ -58,6 +58,8 @@ and can be compared byte-for-byte with the Python fixture's VTI/native JSON.
 | Transport/continuum mechanics | No native characterization solver | PuMA conductivity, diffusivity/tortuosity, permeability, radiation, elasticity |
 | Contacts and neighbors | `characterize_neighbors()`: contact events, crossing angles, in-axis/out-of-axis split, excess persistence, free lengths, neighbor counts, neighbor turnover | No counterpart; voxel connectivity is not contact |
 | Fiber shape | `characterize_shape()`: curvature and torsion distributions, tangent correlation and persistence length, curl index, Schladitz β orientation fit | No individual-fiber reconstruction in this workflow |
+| Entanglement | `characterize_entanglement()`: per-fiber writhe, Gauss linking of contacting fibers | No counterpart |
+| Cross-sections | `characterize_slices()`: section nearest-neighbor distances, Clark-Evans ratio, pair correlation g(r) | No counterpart; slice images would need section segmentation |
 
 PuMA's property methods are described in its
 [analysis API](https://puma-nasa.readthedocs.io/en/latest/python_api/pumapy.material_properties.html).
