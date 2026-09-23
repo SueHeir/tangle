@@ -253,7 +253,11 @@ def compaction(config: SweepConfig) -> tangle.CompactionSettings:
     return tangle.CompactionSettings.volume_fraction(
         config.volume_fraction,
         kinematics="moving_walls",
-        cell_anchor=[0.0, 0.0, 0.0],
+        # Close both z walls so the stack is pressed from above and below
+        # instead of being pushed against the top wall alone.
+        cell_anchor=[0.0, 0.0, 0.5],
+        balance_opposing_faces=True,
+        face_balance_strength=0.5,
         initial_log_strain=0.02,
         min_log_strain=0.000_5,
         max_log_strain=0.05,
@@ -332,6 +336,9 @@ def build(
     # Compaction first waits for a relaxed baseline; fixed-length deposition
     # relaxes do not guarantee one, and without it compaction stops at once.
     contact_stage(recipe, config, "baseline/contact", FORMATION_TOLERANCE, 30_000)
+    # Drop the empty staging headroom so both walls start on the stack; a
+    # thin stack otherwise floats below the top wall with an empty bottom.
+    recipe.fit_cell_to_active_fibers(padding=0.05 * config.diameter)
     # Once the layers touch, the default averaged correction cannot clear a
     # compaction increment within one window; use the contact stages' solver.
     recipe.compact(
