@@ -255,11 +255,11 @@ def compaction(config: SweepConfig) -> tangle.CompactionSettings:
         kinematics="moving_walls",
         cell_anchor=[0.0, 0.0, 0.0],
         initial_log_strain=0.02,
-        min_log_strain=0.002,
+        min_log_strain=0.000_5,
         max_log_strain=0.05,
         growth_factor=1.2,
         shrink_factor=0.5,
-        relax_iterations=1_000,
+        relax_iterations=2_000,
         max_shortening_over_min_diameter=0.5,
         max_penetration=5 * CONTACT_TOLERANCE * config.diameter,
         max_curvature_ratio=1.0e6,
@@ -332,7 +332,11 @@ def build(
     # Compaction first waits for a relaxed baseline; fixed-length deposition
     # relaxes do not guarantee one, and without it compaction stops at once.
     contact_stage(recipe, config, "baseline/contact", FORMATION_TOLERANCE, 30_000)
-    recipe.compact(compaction(config))
+    # Once the layers touch, the default averaged correction cannot clear a
+    # compaction increment within one window; use the contact stages' solver.
+    recipe.compact(
+        compaction(config), tangle.RelaxationOverrides.preset("contact_cleanup")
+    )
     contact_stage(recipe, config, "final/contact", CONTACT_TOLERANCE, 60_000)
     contact_stage(recipe, config, "polish/dem-contact", DEM_CONTACT_TOLERANCE, 100_000)
 
