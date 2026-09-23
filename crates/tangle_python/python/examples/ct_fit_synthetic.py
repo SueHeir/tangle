@@ -13,6 +13,7 @@ Needs NumPy and SciPy; tifffile and matplotlib add TIFF and PNG outputs.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -22,7 +23,9 @@ import tangle.ct as ct
 from tangle.units import um
 
 OUTPUT = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).with_name("output") / "ct_fit_synthetic")
-BACKEND = "cpu"
+# WGPU runs on the local GPU (Metal on Apple silicon); set TANGLE_BACKEND=cpu
+# on a machine without a usable GPU.
+BACKEND = os.environ.get("TANGLE_BACKEND", "wgpu")
 
 CELL = 240 * um
 DIAMETER = 12 * um

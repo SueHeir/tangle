@@ -146,14 +146,15 @@ class FitResult:
         """Remove remaining overlaps with Tangle's own contact relaxation.
 
         Returns the relaxed fit and the ``RunResult`` (which reports
-        ``max_penetration`` and ``max_curvature_ratio``).
+        ``max_penetration`` and ``max_curvature_ratio``). The default settings
+        use Tangle's default backend (WGPU, the local GPU); pass
+        ``RelaxationSettings(backend="cpu", ...)`` where no GPU is available.
         """
         import tangle
 
         recipe = tangle.Recipe(self.to_assembly())
         if settings is None:
             settings = tangle.RelaxationSettings(
-                backend="cpu",
                 max_iterations=2000,
                 max_step=0.25 * float(self.radii.mean()) * self.voxel_size,
                 penetration_tolerance=0.02 * self.spec.diameter,
