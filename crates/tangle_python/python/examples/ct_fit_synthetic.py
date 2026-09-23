@@ -67,6 +67,10 @@ def load_or_make_truth() -> tangle.Assembly:
         print(f"truth: {run} ({time.perf_counter() - started:.0f} s)")
         cache.write_text(json.dumps({"diameter": DIAMETER, "centerlines": run.centerlines()}) + "\n")
     centerlines = json.loads(cache.read_text())["centerlines"]
+    # float32 GPU relaxation can end a hair past the bend limit (a curvature
+    # ratio of 1.00001), which export_puma's validator rejects. The rendering
+    # doesn't depend on the limit, so render with a 1% looser one.
+    material = tangle.Material("synthetic fiber", diameter=DIAMETER, min_bend_radius=0.99 * MIN_BEND_RADIUS)
     assembly = tangle.Assembly(tangle.Cell([CELL] * 3))
     assembly.insert(tangle.FiberCollection.from_centerlines(centerlines, material), name="truth")
     return assembly
