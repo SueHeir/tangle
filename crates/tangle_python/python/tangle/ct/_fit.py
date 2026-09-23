@@ -841,8 +841,7 @@ class _Fitter:
     def _record(failures: list[list], low: np.ndarray, high: np.ndarray, ok: bool) -> None:
         """Forget failures overlapping a kept region; count one more for a failed one."""
         overlapping = [f for f in failures if np.all(f[0] <= high) and np.all(low <= f[1])]
-        for f in overlapping:
-            failures.remove(f)
+        failures[:] = [f for f in failures if not any(f is o for o in overlapping)]  # by identity: f holds arrays
         if not ok:
             count = max((f[2] for f in overlapping), default=0) + 1
             if overlapping:
