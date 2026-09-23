@@ -47,9 +47,11 @@ VOLUME_FRACTION = 0.20
 DOMAIN_SIDES = tuple(range(10, 0, -1))
 SEED = 20_260_923
 # In fiber diameters: starting spacing of the deposited layers, the gap each
-# layer is lowered to, and the relaxation and DEM-handoff penetration targets.
+# layer is lowered to, the convergence tolerance used during deposition and
+# compaction, and the final and DEM-handoff penetration targets.
 STAGING_SPACING = 4.0
 LAYER_GAP = 0.5
+FORMATION_TOLERANCE = 0.02
 CONTACT_TOLERANCE = 0.01
 DEM_CONTACT_TOLERANCE = 0.002
 DENSITY = 1_000.0
@@ -212,29 +214,38 @@ def build(
         placed += 1
     # Compaction first waits for a relaxed baseline; fixed-length deposition
     # relaxes do not guarantee one, and without it compaction stops at once.
-    recipe.relax_until_converged(max_iterations=30_000)
-    recipe.compact(compaction(config))
     recipe.solve(
         tangle.SolvePolicy(
-            "final/contact",
-            target_penetration=CONTACT_TOLERANCE * config.diameter,
-            max_iterations=60_000,
+            "baseline/contact",
+            target_penetration=FORMATION_TOLERANCE * config.diameter,
+            max_penetration=5 * CONTACT_TOLERANCE * config.diameter,
+            max_iterations=30_000,
+            on_budget_exhausted="continue_if_hard_ok",
         )
     )
-    recipe.solve(
-        tangle.SolvePolicy(
-            "polish/dem-contact",
-            target_penetration=DEM_CONTACT_TOLERANCE * config.diameter,
-            max_iterations=100_000,
-        ),
-        tangle.RelaxationOverrides.preset("contact_cleanup"),
-    )
+    recipe.compact(compaction(config))
+    # Each stage tightens penetration but keeps going on a stalled budget as
+    # long as its hard limit holds; the summary records what was reached.
+    for name, target, limit, budget in [
+        ("final/contact", CONTACT_TOLERANCE, 5 * CONTACT_TOLERANCE, 60_000),
+        ("polish/dem-contact", DEM_CONTACT_TOLERANCE, CONTACT_TOLERANCE, 100_000),
+    ]:
+        recipe.solve(
+            tangle.SolvePolicy(
+                name,
+                target_penetration=target * config.diameter,
+                max_penetration=limit * config.diameter,
+                max_iterations=budget,
+                on_budget_exhausted="continue_if_hard_ok",
+            ),
+            tangle.RelaxationOverrides.preset("contact_cleanup"),
+        )
 
     settings = tangle.RelaxationSettings(
         constraint_iterations=8,
         contact_aggregation="uniform_average",
         correction_fraction=0.5,
-        penetration_tolerance=CONTACT_TOLERANCE * config.diameter,
+        penetration_tolerance=FORMATION_TOLERANCE * config.diameter,
         max_step=0.05 * config.diameter,
         max_iterations=500_000,
         iterations_per_batch=10,
@@ -289,6 +300,8 @@ def run(
         "converged": result.converged,
         "iterations": result.iterations,
         "max_penetration": result.max_penetration,
+        "dem_contact_target_met": result.max_penetration
+        <= DEM_CONTACT_TOLERANCE * config.diameter * (1 + 1.0e-3),
         "cell_lengths": cell.lengths,
         "thickness": cell.lengths[2],
         "nominal_volume_fraction": analysis.nominal_swept_volume_fraction,
@@ -317,6 +330,7 @@ SUMMARY_COLUMNS = (
     "converged",
     "iterations",
     "max_penetration",
+    "dem_contact_target_met",
     "thickness",
     "nominal_volume_fraction",
     "compacted_to_target",
