@@ -12,11 +12,18 @@ use std::path::Path;
 use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 use tangle_app::prelude::*;
+mod distribution;
 mod neighbors;
+mod shape;
 
+pub use distribution::Distribution;
 pub use neighbors::{
     analyze_neighbors, ContactEvent, FiberNeighborMetrics, NeighborAnalysisConfig,
     NeighborAnalysisError, NeighborMetrics, NEIGHBOR_SCHEMA_VERSION,
+};
+pub use shape::{
+    analyze_shape, FiberShapeMetrics, ShapeAnalysisConfig, ShapeAnalysisError, ShapeMetrics,
+    SHAPE_SCHEMA_VERSION,
 };
 
 use tangle_core::{

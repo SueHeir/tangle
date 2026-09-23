@@ -21,7 +21,8 @@ use tangle_generate::{
 use tangle_relax::{RelaxationPlugin, RelaxationState};
 
 use crate::analysis::{
-    characterize_neighbors, PyAnalysisReport, PyNeighborReport, PyPumaExportReport,
+    characterize_neighbors, characterize_shape, PyAnalysisReport, PyNeighborReport,
+    PyPumaExportReport, PyShapeReport,
 };
 use crate::checkpoint::PyCheckpointSettings;
 use crate::collection::{
@@ -937,6 +938,29 @@ impl PyRunResult {
             sample_spacing,
             max_lag,
             lag_count,
+        )
+    }
+
+    /// Measures fiber curvature, torsion, tangent correlation, curl and the
+    /// Schladitz orientation fit.
+    #[pyo3(signature = (*, sample_spacing=None, max_lag=None, lag_count=24, quantile_count=101, orientation_axis=[0.0, 0.0, 1.0], min_torsion_curvature=None))]
+    fn characterize_shape(
+        &self,
+        sample_spacing: Option<f64>,
+        max_lag: Option<f64>,
+        lag_count: usize,
+        quantile_count: usize,
+        orientation_axis: [f64; 3],
+        min_torsion_curvature: Option<f64>,
+    ) -> PyResult<PyShapeReport> {
+        characterize_shape(
+            &self.model().assembly,
+            sample_spacing,
+            max_lag,
+            lag_count,
+            quantile_count,
+            orientation_axis,
+            min_torsion_curvature,
         )
     }
 

@@ -57,6 +57,7 @@ and can be compared byte-for-byte with the Python fixture's VTI/native JSON.
 | Void intercept lengths/connectivity | No native counterpart yet | PuMA mean intercept length and pore labeling |
 | Transport/continuum mechanics | No native characterization solver | PuMA conductivity, diffusivity/tortuosity, permeability, radiation, elasticity |
 | Contacts and neighbors | `characterize_neighbors()`: contact events, crossing angles, in-axis/out-of-axis split, excess persistence, free lengths, neighbor counts, neighbor turnover | No counterpart; voxel connectivity is not contact |
+| Fiber shape | `characterize_shape()`: curvature and torsion distributions, tangent correlation and persistence length, curl index, Schladitz β orientation fit | No individual-fiber reconstruction in this workflow |
 
 PuMA's property methods are described in its
 [analysis API](https://puma-nasa.readthedocs.io/en/latest/python_api/pumapy.material_properties.html).
@@ -127,6 +128,50 @@ boundary; compare per-length quantities rather than per-fiber counts.
 - **Voxel connectivity is not bonding.** A connected solid voxel cluster does
   not establish TANGLE junctions, friction, or mechanically bonded contacts.
   PuMA continuum elasticity is not equivalent to a DIRT bonded-particle test.
+
+## Fiber shape
+
+`characterize_shape()` resamples every fiber at a uniform arc-length
+`sample_spacing` and treats the chords between successive samples as its
+tangents. Everything is measured at that scale, so compare two structures only
+at the same spacing. The default is the larger of the smallest fiber diameter
+and the median polyline segment length: CT trackers resolve direction changes
+over about one diameter, and a finer spacing on a coarse polyline would only
+see its corners.
+
+- **Curvature:** turning angle between the chords on either side of a sample,
+  divided by the spacing. It is exact for a circular arc.
+- **Torsion:** signed rotation of the binormal about the tangent per unit
+  length, positive for a right-handed helix. It is only measured where the
+  curvature on both sides is at least `min_torsion_curvature` (default a
+  turning angle of 0.02 rad per spacing), because the binormal of a nearly
+  straight fiber is noise. `torsion_defined_fraction` says how often that held.
+- **Tangent correlation:** mean `t(u) · t(u + s)` over every fiber and position.
+  `tangent_correlation_length` is the lag at which it falls to `1/e`.
+  `persistence_length` is `L` from a least-squares fit of `exp(−s / L)` over the
+  lags before the correlation drops below 0.05. That is the persistence length
+  of a three-dimensional worm-like chain; a chain confined to a plane decays as
+  `exp(−s / 2L_p)`, so its planar persistence length is half this value.
+  Periodic waviness (a fixed sine) makes the correlation oscillate rather than
+  decay; read the curve before trusting either length.
+- **Curl index:** contour length over end-to-end distance, minus one, per fiber
+  (zero for a straight fiber). CT tracking truncates fibers at the scan edge,
+  which lowers it, so compare it on fibers of similar length.
+- **Orientation:** `axis_cosine` is `|cos θ|` between each chord and
+  `orientation_axis` (default z, through the thickness), and
+  `mean_squared_axis_cosine` its mean square (one third when isotropic).
+  `schladitz_beta` is the maximum-likelihood fit of the Schladitz et al. (2006)
+  density `β / (4π (1 + (β² − 1) cos² θ)^{3/2})`: `β = 1` is isotropic, `β < 1`
+  aligns fibers with the axis and `β > 1` lays them in the plane normal to it.
+  `schladitz_fit_distance` is the Wasserstein distance between the observed and
+  fitted `|cos θ|` distributions; a large value means the one-parameter model
+  does not describe the structure (for example, a bimodal one).
+
+Distributions are returned as `count`, `mean`, `standard_deviation` and evenly
+spaced `quantiles` (minimum first, maximum last; `quantile_count`, default 101).
+The quantile function is enough to plot a distribution and to compute its
+Wasserstein distance to another, which is how a generated structure will be
+scored against a scan.
 
 ## Bundle format (schema 1)
 

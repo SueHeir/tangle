@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use tangle_characterize::{
-    analyze_neighbors, write_analysis_json, AssemblyMetrics, NeighborAnalysisConfig,
-    NeighborMetrics,
+    analyze_neighbors, analyze_shape, write_analysis_json, AssemblyMetrics, Distribution,
+    NeighborAnalysisConfig, NeighborMetrics, ShapeAnalysisConfig, ShapeMetrics,
 };
 use tangle_core::FiberAssembly;
 use tangle_export::PumaExportReport;
@@ -398,6 +398,215 @@ impl PyNeighborReport {
         format!(
             "NeighborReport(contacts={}, contacts_per_length={:.6e}, in_axis_contact_fraction={:.3})",
             self.inner.contacts, self.inner.contacts_per_length, self.inner.in_axis_contact_fraction
+        )
+    }
+}
+
+/// Runs the fiber shape analysis with Python keyword settings.
+pub(crate) fn characterize_shape(
+    assembly: &FiberAssembly,
+    sample_spacing: Option<f64>,
+    max_lag: Option<f64>,
+    lag_count: usize,
+    quantile_count: usize,
+    orientation_axis: [f64; 3],
+    min_torsion_curvature: Option<f64>,
+) -> PyResult<PyShapeReport> {
+    let config = ShapeAnalysisConfig {
+        sample_spacing,
+        maximum_lag: max_lag,
+        lag_count,
+        quantile_count,
+        orientation_axis,
+        minimum_torsion_curvature: min_torsion_curvature,
+    };
+    analyze_shape(assembly, &config)
+        .map(|inner| PyShapeReport { inner })
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+/// Decodes JSON into plain Python objects.
+fn json_to_python(py: Python<'_>, encoded: serde_json::Result<String>) -> PyResult<Py<PyAny>> {
+    let encoded = encoded.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    Ok(py
+        .import("json")?
+        .call_method1("loads", (encoded,))?
+        .unbind())
+}
+
+#[pyclass(name = "ShapeReport", module = "tangle._tangle", frozen)]
+#[derive(Clone)]
+pub(crate) struct PyShapeReport {
+    pub(crate) inner: ShapeMetrics,
+}
+
+impl PyShapeReport {
+    fn distribution(py: Python<'_>, value: &Option<Distribution>) -> PyResult<Py<PyAny>> {
+        json_to_python(py, serde_json::to_string(value))
+    }
+}
+
+#[pymethods]
+impl PyShapeReport {
+    #[getter]
+    fn schema_version(&self) -> u32 {
+        self.inner.schema_version
+    }
+
+    #[getter]
+    fn sample_spacing(&self) -> f64 {
+        self.inner.sample_spacing
+    }
+
+    #[getter]
+    fn min_torsion_curvature(&self) -> f64 {
+        self.inner.minimum_torsion_curvature
+    }
+
+    #[getter]
+    fn orientation_axis(&self) -> [f64; 3] {
+        self.inner.orientation_axis
+    }
+
+    #[getter]
+    fn fiber_count(&self) -> usize {
+        self.inner.fiber_count
+    }
+
+    #[getter]
+    fn sample_count(&self) -> usize {
+        self.inner.samples
+    }
+
+    #[getter]
+    fn total_length(&self) -> f64 {
+        self.inner.total_length
+    }
+
+    /// Sampled curvature: ``count``, ``mean``, ``standard_deviation`` and
+    /// evenly spaced ``quantiles`` (minimum first, maximum last).
+    #[getter]
+    fn curvature(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Self::distribution(py, &self.inner.curvature)
+    }
+
+    /// Signed torsion where it is defined; positive is right-handed.
+    #[getter]
+    fn torsion(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Self::distribution(py, &self.inner.torsion)
+    }
+
+    #[getter]
+    fn absolute_torsion(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Self::distribution(py, &self.inner.absolute_torsion)
+    }
+
+    #[getter]
+    fn torsion_defined_fraction(&self) -> Option<f64> {
+        self.inner.torsion_defined_fraction
+    }
+
+    /// Curl index (contour over end-to-end length, minus one), one per fiber.
+    #[getter]
+    fn curl_index(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Self::distribution(py, &self.inner.curl_index)
+    }
+
+    #[getter]
+    fn fiber_length(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Self::distribution(py, &self.inner.fiber_length)
+    }
+
+    /// ``|cos θ|`` between sampled chords and the orientation axis.
+    #[getter]
+    fn axis_cosine(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Self::distribution(py, &self.inner.axis_cosine)
+    }
+
+    #[getter]
+    fn mean_squared_axis_cosine(&self) -> Option<f64> {
+        self.inner.mean_squared_axis_cosine
+    }
+
+    /// Maximum-likelihood Schladitz β: 1 is isotropic, below 1 aligns fibers
+    /// with the axis, above 1 lays them in the plane normal to it.
+    #[getter]
+    fn schladitz_beta(&self) -> Option<f64> {
+        self.inner.schladitz_beta
+    }
+
+    #[getter]
+    fn schladitz_fit_distance(&self) -> Option<f64> {
+        self.inner.schladitz_fit_distance
+    }
+
+    #[getter]
+    fn tangent_correlation_lags(&self) -> Vec<f64> {
+        self.inner.tangent_correlation_lags.clone()
+    }
+
+    #[getter]
+    fn tangent_correlation(&self) -> Vec<Option<f64>> {
+        self.inner.tangent_correlation.clone()
+    }
+
+    #[getter]
+    fn tangent_correlation_length(&self) -> Option<f64> {
+        self.inner.tangent_correlation_length
+    }
+
+    #[getter]
+    fn persistence_length(&self) -> Option<f64> {
+        self.inner.persistence_length
+    }
+
+    /// Curl index of every fiber in topology order.
+    #[getter]
+    fn fiber_curl_indices(&self) -> Vec<Option<f64>> {
+        self.inner.fibers.iter().map(|f| f.curl_index).collect()
+    }
+
+    /// Mean sampled curvature of every fiber in topology order.
+    #[getter]
+    fn fiber_mean_curvatures(&self) -> Vec<Option<f64>> {
+        self.inner.fibers.iter().map(|f| f.mean_curvature).collect()
+    }
+
+    #[pyo3(signature = (pretty=true))]
+    fn to_json(&self, pretty: bool) -> PyResult<String> {
+        if pretty {
+            serde_json::to_string_pretty(&self.inner)
+        } else {
+            serde_json::to_string(&self.inner)
+        }
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(py, serde_json::to_string(&self.inner))
+    }
+
+    fn write_json(&self, path: PathBuf) -> PyResult<()> {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        }
+        let encoded = serde_json::to_string_pretty(&self.inner)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        std::fs::write(path, encoded).map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    fn __repr__(&self) -> String {
+        let format = |value: Option<f64>| value.map_or("None".to_owned(), |v| format!("{v:.4}"));
+        format!(
+            "ShapeReport(fibers={}, median_curvature={}, persistence_length={}, schladitz_beta={})",
+            self.inner.fiber_count,
+            format(self.inner.curvature.as_ref().map(Distribution::median)),
+            format(self.inner.persistence_length),
+            format(self.inner.schladitz_beta),
         )
     }
 }
