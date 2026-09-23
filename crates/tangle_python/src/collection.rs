@@ -9,7 +9,9 @@ use tangle_characterize::characterize_assembly;
 use tangle_core::{FiberAssembly, FiberBendLimit, FiberId, PeriodicCell, Section, Vec3};
 use tangle_export::{write_puma_bundle, PumaVoxelExportConfig};
 
-use crate::analysis::{PyAnalysisReport, PyPumaExportReport};
+use crate::analysis::{
+    characterize_neighbors, PyAnalysisReport, PyNeighborReport, PyPumaExportReport,
+};
 
 #[pyclass(name = "Cell", module = "tangle._tangle", frozen)]
 #[derive(Clone)]
@@ -381,12 +383,63 @@ impl PyAssembly {
             .collect()
     }
 
+    /// Adds a collection's fibers directly, without a recipe or relaxation.
+    ///
+    /// Use this for imported geometry, such as centerlines tracked from a CT
+    /// scan, that only needs characterization or export. Fibers added here are
+    /// present from formation step 0.
+    #[pyo3(signature = (collection, *, name=None, translation=[0.0, 0.0, 0.0], rotation=None))]
+    fn insert(
+        &self,
+        collection: PyRef<'_, PyFiberCollection>,
+        name: Option<String>,
+        translation: Vec3,
+        rotation: Option<[[f64; 3]; 3]>,
+    ) -> PyResult<PyFiberSelection> {
+        if collection.fibers.is_empty() {
+            return Err(PyValueError::new_err(
+                "cannot insert an empty fiber collection",
+            ));
+        }
+        let name = name.unwrap_or_else(|| collection.name.clone());
+        self.model.lock().expect("assembly lock poisoned").insert(
+            &collection,
+            name,
+            0,
+            translation,
+            rotation.unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+        )
+    }
+
     /// Runs TANGLE's exact centerline characterization without a relaxation step.
     fn characterize(&self) -> PyAnalysisReport {
         let model = self.model.lock().expect("assembly lock poisoned");
         PyAnalysisReport {
             inner: characterize_assembly(&model.assembly),
         }
+    }
+
+    /// Measures fiber-to-fiber contacts, neighbor persistence, and turnover.
+    #[pyo3(signature = (contact_gap, *, neighbor_gap=None, in_axis_angle_degrees=20.0, sample_spacing=None, maximum_lag=None, lag_count=24))]
+    fn characterize_neighbors(
+        &self,
+        contact_gap: f64,
+        neighbor_gap: Option<f64>,
+        in_axis_angle_degrees: f64,
+        sample_spacing: Option<f64>,
+        maximum_lag: Option<f64>,
+        lag_count: usize,
+    ) -> PyResult<PyNeighborReport> {
+        let model = self.model.lock().expect("assembly lock poisoned");
+        characterize_neighbors(
+            &model.assembly,
+            contact_gap,
+            neighbor_gap,
+            in_axis_angle_degrees,
+            sample_spacing,
+            maximum_lag,
+            lag_count,
+        )
     }
 
     #[pyo3(signature = (output_directory, voxel_size, *, include_fiber_ids=true, include_interface=true, ambiguity_tolerance=None))]
