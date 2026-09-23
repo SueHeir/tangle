@@ -1,5 +1,6 @@
 import ast
 import math
+import random
 import tempfile
 import unittest
 from pathlib import Path
@@ -180,6 +181,39 @@ class CollectionTests(unittest.TestCase):
             self.assertTrue(path.is_file())
         with self.assertRaises(ValueError):
             assembly.characterize_shape(orientation_axis=[0.0, 0.0, 0.0])
+
+    def test_scorecard_flags_a_wavier_structure(self):
+        def slab(amplitude, seed):
+            rng = random.Random(seed)
+            lines = []
+            for _ in range(40):
+                x0, y0, z = 0.2 + 3.6 * rng.random(), 0.2 + 3.6 * rng.random(), 0.5
+                angle, phase = 2 * math.pi * rng.random(), 2 * math.pi * rng.random()
+                u, v = (math.cos(angle), math.sin(angle)), (-math.sin(angle), math.cos(angle))
+                line = []
+                for i in range(61):
+                    s = 1.2 * i / 60
+                    w = amplitude * math.sin(2 * math.pi * s / 0.4 + phase)
+                    line.append([x0 + s * u[0] + w * v[0], y0 + s * u[1] + w * v[1], z])
+                lines.append(line)
+            assembly = tangle.Assembly(tangle.Cell([4.0, 4.0, 1.0]))
+            material = tangle.Material("fiber", diameter=0.02)
+            assembly.insert(tangle.FiberCollection.from_centerlines(lines, material))
+            return assembly
+
+        reference = slab(0.02, 1)
+        card = tangle.score_structure(slab(0.08, 2), reference, 0.005, subdivisions=[2, 2, 1])
+        self.assertEqual(card.reference_subvolume_count, 4)
+        self.assertEqual(card.subvolume_size, [2.0, 2.0, 1.0])
+        self.assertIn("curvature", card.scores)
+        self.assertGreater(card.scores["curvature"], 2.0)
+        self.assertIn("curvature", card.table())
+        self.assertEqual(len(card.rows), len(card.scores))
+        self.assertEqual(card.to_dict()["schema_version"], 1)
+        # The same assembly on both sides must not deadlock.
+        tangle.score_structure(reference, reference, 0.005, subdivisions=[2, 2, 1])
+        with self.assertRaises(ValueError):
+            tangle.score_structure(reference, reference, 0.005, subdivisions=[1, 1, 1])
 
 
 class CellTests(unittest.TestCase):

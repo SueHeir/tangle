@@ -3,11 +3,14 @@ use std::path::PathBuf;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use tangle_characterize::{
-    analyze_neighbors, analyze_shape, write_analysis_json, AssemblyMetrics, Distribution,
-    NeighborAnalysisConfig, NeighborMetrics, ShapeAnalysisConfig, ShapeMetrics,
+    analyze_neighbors, analyze_shape, score_structure, write_analysis_json, AssemblyMetrics,
+    Distribution, NeighborAnalysisConfig, NeighborMetrics, Scorecard, ScorecardConfig,
+    ShapeAnalysisConfig, ShapeMetrics,
 };
 use tangle_core::FiberAssembly;
 use tangle_export::PumaExportReport;
+
+use crate::collection::PyAssembly;
 
 #[pyclass(name = "AnalysisReport", module = "tangle._tangle", frozen)]
 #[derive(Clone)]
@@ -608,5 +611,195 @@ impl PyShapeReport {
             format(self.inner.persistence_length),
             format(self.inner.schladitz_beta),
         )
+    }
+}
+
+/// Scores a candidate structure against a reference, metric by metric.
+#[pyfunction]
+#[pyo3(name = "score_structure", signature = (candidate, reference, contact_gap, *, subdivisions=[2, 2, 2], candidate_region=None, reference_region=None, max_candidate_subvolumes=64, min_piece_length=None, sample_spacing=None, neighbor_sample_spacing=None, neighbor_gap=None, in_axis_angle_degrees=20.0, orientation_axis=[0.0, 0.0, 1.0], quantile_count=101))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn score_structure_py(
+    candidate: PyRef<'_, PyAssembly>,
+    reference: PyRef<'_, PyAssembly>,
+    contact_gap: f64,
+    subdivisions: [usize; 3],
+    candidate_region: Option<([f64; 3], [f64; 3])>,
+    reference_region: Option<([f64; 3], [f64; 3])>,
+    max_candidate_subvolumes: usize,
+    min_piece_length: Option<f64>,
+    sample_spacing: Option<f64>,
+    neighbor_sample_spacing: Option<f64>,
+    neighbor_gap: Option<f64>,
+    in_axis_angle_degrees: f64,
+    orientation_axis: [f64; 3],
+    quantile_count: usize,
+) -> PyResult<PyScorecard> {
+    // Copy each assembly out of its lock in turn, so passing the same
+    // assembly twice cannot deadlock.
+    let candidate = candidate
+        .model
+        .lock()
+        .expect("assembly lock poisoned")
+        .assembly
+        .clone();
+    let reference = reference
+        .model
+        .lock()
+        .expect("assembly lock poisoned")
+        .assembly
+        .clone();
+    let mut config = ScorecardConfig::new(contact_gap);
+    config.subdivisions = subdivisions;
+    config.candidate_region = candidate_region;
+    config.reference_region = reference_region;
+    config.maximum_candidate_subvolumes = max_candidate_subvolumes;
+    config.minimum_piece_length = min_piece_length;
+    config.shape.sample_spacing = sample_spacing;
+    config.shape.orientation_axis = orientation_axis;
+    config.shape.quantile_count = quantile_count;
+    config.neighbors.sample_spacing = neighbor_sample_spacing;
+    config.neighbors.neighbor_gap = neighbor_gap;
+    config.neighbors.in_axis_angle = in_axis_angle_degrees.to_radians();
+    score_structure(&candidate, &reference, &config)
+        .map(|inner| PyScorecard { inner })
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyclass(name = "Scorecard", module = "tangle._tangle", frozen)]
+#[derive(Clone)]
+pub(crate) struct PyScorecard {
+    pub(crate) inner: Scorecard,
+}
+
+#[pymethods]
+impl PyScorecard {
+    #[getter]
+    fn schema_version(&self) -> u32 {
+        self.inner.schema_version
+    }
+
+    #[getter]
+    fn subvolume_size(&self) -> [f64; 3] {
+        self.inner.subvolume_size
+    }
+
+    #[getter]
+    fn reference_subvolume_count(&self) -> usize {
+        self.inner.reference_subvolumes
+    }
+
+    #[getter]
+    fn candidate_subvolume_count(&self) -> usize {
+        self.inner.candidate_subvolumes
+    }
+
+    #[getter]
+    fn min_piece_length(&self) -> f64 {
+        self.inner.minimum_piece_length
+    }
+
+    /// One dict per metric: ``metric``, ``distribution``, ``candidate``,
+    /// ``reference``, ``distance``, ``reference_spread`` and ``score``.
+    #[getter]
+    fn rows(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(py, serde_json::to_string(&self.inner.rows))
+    }
+
+    /// Score of every metric, keyed by name (``None`` where undefined).
+    #[getter]
+    fn scores(&self) -> std::collections::BTreeMap<String, Option<f64>> {
+        self.inner
+            .rows
+            .iter()
+            .map(|row| (row.metric.clone(), row.score))
+            .collect()
+    }
+
+    /// Metrics of the whole candidate region.
+    #[getter]
+    fn candidate_profile(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(py, serde_json::to_string(&self.inner.candidate))
+    }
+
+    /// Metrics of the whole reference region.
+    #[getter]
+    fn reference_profile(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(py, serde_json::to_string(&self.inner.reference))
+    }
+
+    /// The rows as a fixed-width text table, worst score first.
+    fn table(&self) -> String {
+        let mut rows: Vec<_> = self.inner.rows.iter().collect();
+        rows.sort_by(|a, b| {
+            let key = |score: Option<f64>| score.unwrap_or(f64::NEG_INFINITY);
+            key(b.score)
+                .partial_cmp(&key(a.score))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let format = |value: Option<f64>| value.map_or("-".to_owned(), |v| format!("{v:.4g}"));
+        let mut text = format!(
+            "{:<28} {:>10} {:>10} {:>10} {:>10} {:>8}\n",
+            "metric", "candidate", "reference", "distance", "spread", "score"
+        );
+        for row in rows {
+            text.push_str(&format!(
+                "{:<28} {:>10} {:>10} {:>10} {:>10} {:>8}\n",
+                row.metric,
+                format(row.candidate),
+                format(row.reference),
+                format(row.distance),
+                format(row.reference_spread),
+                format(row.score),
+            ));
+        }
+        text
+    }
+
+    #[pyo3(signature = (pretty=true))]
+    fn to_json(&self, pretty: bool) -> PyResult<String> {
+        if pretty {
+            serde_json::to_string_pretty(&self.inner)
+        } else {
+            serde_json::to_string(&self.inner)
+        }
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        json_to_python(py, serde_json::to_string(&self.inner))
+    }
+
+    fn write_json(&self, path: PathBuf) -> PyResult<()> {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        }
+        let encoded = serde_json::to_string_pretty(&self.inner)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        std::fs::write(path, encoded).map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    fn __repr__(&self) -> String {
+        let scored = self
+            .inner
+            .rows
+            .iter()
+            .filter(|row| row.score.is_some())
+            .count();
+        let worst = self
+            .inner
+            .rows
+            .iter()
+            .filter_map(|row| row.score.map(|score| (score, &row.metric)))
+            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        match worst {
+            Some((score, metric)) => {
+                format!("Scorecard(metrics_scored={scored}, worst={metric} at {score:.2})")
+            }
+            None => format!("Scorecard(metrics_scored={scored})"),
+        }
     }
 }

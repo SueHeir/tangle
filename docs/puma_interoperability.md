@@ -173,6 +173,54 @@ The quantile function is enough to plot a distribution and to compute its
 Wasserstein distance to another, which is how a generated structure will be
 scored against a scan.
 
+## Scoring against a scan
+
+`tangle.score_structure(candidate, reference, contact_gap)` compares a
+generated structure with a reference, usually centerlines fitted to a CT scan
+(`tangle.ct` `fit.to_assembly()`, or tracked centerlines added with
+`Assembly.insert()`). Both must use the same length unit.
+
+A raw difference cannot say whether a structure matches: a 10% difference in
+median curvature may be inside the scan's own variation or far outside it. The
+scorecard therefore cuts the reference region into `subdivisions` subvolumes
+(default 2×2×2), tiles the candidate region with subvolumes of the same
+physical size, and measures every metric in each. For each metric:
+
+```text
+score = median distance over (candidate, reference) subvolume pairs
+        ───────────────────────────────────────────────────────────
+        median distance over (reference, reference) subvolume pairs
+```
+
+The distance is the absolute difference for a scalar and the Wasserstein
+distance for a distribution. A score near one means the candidate differs from
+the scan about as much as the scan differs from itself at that scale; well
+above one is a real difference. `Scorecard.table()` lists the metrics worst
+first.
+
+| Kind | Metrics |
+| --- | --- |
+| Scalars | `volume_fraction`, `length_density`, `mean_squared_axis_cosine`, `log_schladitz_beta`, `persistence_length`, `tangent_correlation_length`, `contacts_per_length`, `contact_ratio_to_random`, `in_axis_contact_fraction`, `mean_neighbors`, `neighbor_correlation_length` |
+| Distributions | `curvature`, `absolute_torsion`, `curl_index`, `axis_cosine`, `fiber_length`, `crossing_angle`, `free_length`, `excess_persistence` |
+
+- **Same settings on both sides.** Sample spacings, the neighbor gap, lag
+  ranges and the torsion threshold are resolved once from the whole reference
+  region and reused for every subvolume; the resolved values are in the
+  report's `shape` and `neighbors` settings.
+- **Cropping.** Each subvolume is analyzed as a non-periodic box. Fibers are
+  clipped at its faces (periodic images included), and pieces shorter than
+  `min_piece_length` (default the largest reference fiber diameter) are
+  dropped, as a CT tracker drops fibers clipping a corner. Truncation shortens
+  fibers and lowers the curl index equally on both sides because the
+  subvolumes have the same size.
+- **Regions.** `candidate_region` and `reference_region` take `(lower, upper)`
+  corners. Restrict the candidate to the part its fibers actually fill, for
+  example the thickness of a generated stack, or the volume fraction will be
+  diluted by empty cell.
+- **Undefined scores.** A score is `None` when a metric is undefined in the
+  subvolumes (no contacts, no decay of the tangent correlation) or the
+  reference spread is zero. At least two reference subvolumes are required.
+
 ## Bundle format (schema 1)
 
 ```text

@@ -14,12 +14,17 @@ use grass_scheduler::prelude::*;
 use tangle_app::prelude::*;
 mod distribution;
 mod neighbors;
+mod scorecard;
 mod shape;
 
 pub use distribution::Distribution;
 pub use neighbors::{
     analyze_neighbors, ContactEvent, FiberNeighborMetrics, NeighborAnalysisConfig,
     NeighborAnalysisError, NeighborMetrics, NEIGHBOR_SCHEMA_VERSION,
+};
+pub use scorecard::{
+    crop_assembly, profile_structure, score_structure, ScoreRow, Scorecard, ScorecardConfig,
+    ScorecardError, StructureProfile, SCORECARD_SCHEMA_VERSION,
 };
 pub use shape::{
     analyze_shape, FiberShapeMetrics, ShapeAnalysisConfig, ShapeAnalysisError, ShapeMetrics,

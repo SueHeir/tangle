@@ -58,6 +58,7 @@ from ._tangle import (
     RelaxationOverrides,
     RelaxationSettings,
     RunResult,
+    Scorecard,
     ShapeReport,
     SolvePolicy,
     StressRatioPath,
@@ -67,6 +68,7 @@ from ._tangle import (
     generate_fiber_population,
     generate_multisegment_crossing,
     generate_point_crossing,
+    score_structure,
 )
 
 __all__ = [
@@ -105,6 +107,7 @@ __all__ = [
     "RelaxationOverrides",
     "RelaxationSettings",
     "RunResult",
+    "Scorecard",
     "ShapeReport",
     "SolvePolicy",
     "StressRatioPath",
@@ -114,6 +117,7 @@ __all__ = [
     "generate_fiber_population",
     "generate_multisegment_crossing",
     "generate_point_crossing",
+    "score_structure",
     "units",
     "__version__",
 ]
