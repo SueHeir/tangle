@@ -10,12 +10,11 @@ use super::kernels::{
     apply_vertex_targets, assess_reduced_metrics, begin_relaxation_batch,
     clear_active_index_counts, clear_adaptation_epoch, clear_reduced_metrics, clear_wall_reactions,
     compact_active_indices, compact_affine_vertices, compact_moving_walls,
-    compact_rigid_fiber_centers, find_curvature_limit_corrections, find_internal_corrections,
-    finish_adaptation_epoch, gather_curvature_limit_corrections,
+    compact_rigid_fiber_centers, find_internal_corrections, finish_adaptation_epoch,
     initialize_vertex_displacement_targets, mark_coarsening_candidates, measure_compaction_metrics,
     measure_curvature_ratio, measure_layer_target_error, measure_vertex_target_error,
-    reduce_active_segment_penetration, reduce_active_vertex_metrics, refine_contact_segments,
-    refine_vertex_paths,
+    project_fiber_curvature_in_place, reduce_active_segment_penetration,
+    reduce_active_vertex_metrics, refine_contact_segments, refine_vertex_paths,
 };
 use super::{
     AdaptiveSegmentationConfig, FiberMotion, PackedAssembly, PackingError, RelaxationConfig,
@@ -156,7 +155,6 @@ pub struct DeviceFiberWorld<R: Runtime> {
     corrections: Handle,
     segment_max: Handle,
     curvature_ratio: Handle,
-    bend_corrections: Handle,
     internal_corrections: Handle,
     vertex_step: Handle,
     wall_reactions: Handle,
@@ -413,8 +411,6 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             client.create_from_slice(f32::as_bytes(&vec![0.0_f32; packed.segment_count()]));
         let curvature_ratio =
             client.create_from_slice(f32::as_bytes(&vec![0.0_f32; packed.vertex_count()]));
-        let bend_corrections =
-            client.empty(9 * packed.vertex_count() * core::mem::size_of::<f32>());
         let internal_corrections =
             client.empty(3 * packed.vertex_count() * core::mem::size_of::<f32>());
         let vertex_step =
@@ -505,7 +501,6 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             corrections,
             segment_max,
             curvature_ratio,
-            bend_corrections,
             internal_corrections,
             vertex_step,
             wall_reactions,
@@ -710,122 +705,55 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         self.active_vertex_count = counts[1] as usize;
     }
 
+    /// Projects every active fiber back inside its curvature limit with
+    /// forward/backward Gauss–Seidel sweeps, one thread per fiber.
+    ///
+    /// Each projection sees the corrections already applied to its neighbors,
+    /// so adjacent bend constraints reinforce each other instead of being
+    /// averaged as in a Jacobi pass, and one launch covers every sweep.
     fn launch_curvature_cleanup(&self, config: &RelaxationConfig) {
-        let cube_dim = CubeDim::new_1d(64);
-        let vertex_cubes = CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1);
-        // These two kernels index vertices directly rather than through the
-        // active list, so they must be launched over every packed vertex.
-        let all_vertex_cubes =
-            CubeCount::Static(self.packed.vertex_count().div_ceil(64) as u32, 1, 1);
-        for _ in 0..config.curvature_cleanup_sweeps {
-            unsafe {
-                find_curvature_limit_corrections::launch_unchecked::<R>(
-                    &self.client,
-                    all_vertex_cubes.clone(),
-                    cube_dim.clone(),
-                    BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                    BufferArg::from_raw_parts(
-                        self.segment_vertices.clone(),
-                        self.packed.segment_vertices.len(),
-                    ),
-                    BufferArg::from_raw_parts(
-                        self.vertex_max_curvature.clone(),
-                        self.packed.vertex_max_curvature.len(),
-                    ),
-                    BufferArg::from_raw_parts(
-                        self.vertex_active.clone(),
-                        self.packed.vertex_active.len(),
-                    ),
-                    BufferArg::from_raw_parts(
-                        self.vertex_pinned.clone(),
-                        self.packed.vertex_pinned.len(),
-                    ),
-                    BufferArg::from_raw_parts(
-                        self.vertex_segments.clone(),
-                        self.packed.vertex_segments.len(),
-                    ),
-                    BufferArg::from_raw_parts(self.control.clone(), 4),
-                    BufferArg::from_raw_parts(
-                        self.bend_corrections.clone(),
-                        9 * self.packed.vertex_count(),
-                    ),
-                    config.curvature_limit_stiffness,
-                    config.curvature_limit_safety_margin,
-                );
-                gather_curvature_limit_corrections::launch_unchecked::<R>(
-                    &self.client,
-                    all_vertex_cubes.clone(),
-                    cube_dim.clone(),
-                    BufferArg::from_raw_parts(
-                        self.segment_vertices.clone(),
-                        self.packed.segment_vertices.len(),
-                    ),
-                    BufferArg::from_raw_parts(
-                        self.vertex_active.clone(),
-                        self.packed.vertex_active.len(),
-                    ),
-                    BufferArg::from_raw_parts(
-                        self.vertex_pinned.clone(),
-                        self.packed.vertex_pinned.len(),
-                    ),
-                    BufferArg::from_raw_parts(
-                        self.vertex_segments.clone(),
-                        self.packed.vertex_segments.len(),
-                    ),
-                    BufferArg::from_raw_parts(self.control.clone(), 4),
-                    BufferArg::from_raw_parts(
-                        self.bend_corrections.clone(),
-                        9 * self.packed.vertex_count(),
-                    ),
-                    BufferArg::from_raw_parts(
-                        self.internal_corrections.clone(),
-                        3 * self.packed.vertex_count(),
-                    ),
-                );
-                apply_internal_corrections::launch_unchecked::<R>(
-                    &self.client,
-                    vertex_cubes.clone(),
-                    cube_dim.clone(),
-                    BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                    BufferArg::from_raw_parts(
-                        self.internal_corrections.clone(),
-                        3 * self.packed.vertex_count(),
-                    ),
-                    BufferArg::from_raw_parts(
-                        self.segment_radii.clone(),
-                        self.packed.segment_radii.len(),
-                    ),
-                    BufferArg::from_raw_parts(
-                        self.vertex_fibers.clone(),
-                        self.packed.vertex_fibers.len(),
-                    ),
-                    BufferArg::from_raw_parts(
-                        self.fiber_segment_spans.clone(),
-                        self.packed.fiber_segment_spans.len(),
-                    ),
-                    BufferArg::from_raw_parts(
-                        self.active_vertex_indices.clone(),
-                        self.packed.vertex_count(),
-                    ),
-                    BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
-                    BufferArg::from_raw_parts(
-                        self.vertex_active.clone(),
-                        self.packed.vertex_active.len(),
-                    ),
-                    BufferArg::from_raw_parts(
-                        self.vertex_pinned.clone(),
-                        self.packed.vertex_pinned.len(),
-                    ),
-                    BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
-                    BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
-                    BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
-                    BufferArg::from_raw_parts(
-                        self.wall_reactions.clone(),
-                        3 * self.packed.vertex_count(),
-                    ),
-                    BufferArg::from_raw_parts(self.control.clone(), 4),
-                );
-            }
+        unsafe {
+            project_fiber_curvature_in_place::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::Static(self.packed.fiber_count().div_ceil(64) as u32, 1, 1),
+                CubeDim::new_1d(64),
+                BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                BufferArg::from_raw_parts(
+                    self.wall_reactions.clone(),
+                    3 * self.packed.vertex_count(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.fiber_segment_spans.clone(),
+                    self.packed.fiber_segment_spans.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.fiber_vertex_spans.clone(),
+                    self.packed.fiber_vertex_spans.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.segment_radii.clone(),
+                    self.packed.segment_radii.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.vertex_max_curvature.clone(),
+                    self.packed.vertex_max_curvature.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.vertex_active.clone(),
+                    self.packed.vertex_active.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.vertex_pinned.clone(),
+                    self.packed.vertex_pinned.len(),
+                ),
+                BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
+                BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
+                BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
+                BufferArg::from_raw_parts(self.control.clone(), 4),
+                config.curvature_cleanup_sweeps as u32,
+                config.curvature_limit_stiffness,
+                config.curvature_limit_safety_margin,
+            );
         }
     }
 
@@ -1218,9 +1146,9 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     }
                 }
                 // Contact is applied after the main stretch/bend sweep. Finish
-                // flexible iterations with race-free forward/backward sweeps
-                // along each fiber so neighboring bend constraints reinforce
-                // rather than cancel one another.
+                // flexible iterations with in-place Gauss–Seidel sweeps along
+                // each fiber (race-free: one thread owns each fiber) so
+                // neighboring bend constraints reinforce rather than cancel.
                 if config.motion_model == FiberMotion::Flexible {
                     self.launch_curvature_cleanup(config);
                 }
