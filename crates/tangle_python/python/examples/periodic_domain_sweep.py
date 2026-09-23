@@ -7,9 +7,9 @@ periodic cell changes, from 10 (one fiber length) down to 1 (a tenth of a
 fiber length). Areal fiber density, layer count, and final volume fraction are
 held fixed, so every specimen has the same nominal thickness and the fiber
 count scales with the cell area: 200 fibers (5,000 segments) at side 10 and
-2 fibers at side 1. On small cells each fiber wraps the periodic cell several
-times and meets its own image; that interaction is the domain effect under
-study, not an error.
+2 fibers at side 1 (run only on request: its two fibers never touch). On
+small cells each fiber wraps the periodic cell several times and meets its
+own image; that interaction is the domain effect under study, not an error.
 
 Fibers (diameter 0.2) use 25 segments (length 0.4) wherever the cell allows
 it. A segment plus one diameter must stay below half the cell side, or a
@@ -19,10 +19,12 @@ smallest cell therefore refines to 40 segments per fiber. Segments must also
 be at least one diameter long: only adjacent segments of a fiber are excluded
 from contact, so shorter segments make every next-nearest pair overlap.
 
-Each fiber undulates out of plane (three waves along its length, 1.5
-diameters in amplitude, so about one layer spacing peak to peak) with a random
-phase, so neighboring layers nest into each other under compaction and carry
-load through the thickness. Straight in-plane layers only touch by friction
+Each fiber undulates out of plane (two waves along its length, 3 diameters
+in amplitude, so a crest reaches about two layers over) with a random phase,
+so neighboring layers nest into each other under compaction and carry load
+through the thickness. At 1.5 diameters and three waves only about 2% of
+fibers reached the next layer's mid-plane and load fell to near zero within
+2% strain. Straight in-plane layers only touch by friction
 and have almost no through-thickness strength.
 
 A fiber that meets one of its own periodic images (every fiber on side
@@ -59,7 +61,8 @@ IMAGE_CLEARANCE = 0.45
 FIBERS_PER_AREA = 2.0
 LAYER_COUNT = 5
 VOLUME_FRACTION = 0.20
-DOMAIN_SIDES = tuple(range(10, 0, -1))
+# Side 1 holds two fibers that never touch; run it with --sides 1 if needed.
+DOMAIN_SIDES = tuple(range(10, 1, -1))
 SEED = 20_260_923
 # In fiber diameters: the clearance between staged layers, the gap between
 # the top of one deposited layer and the bottom of the next (a flat layer of
@@ -74,8 +77,8 @@ DEM_CONTACT_TOLERANCE = 0.002
 # Rise between self-touching strands of a ramped fiber, in diameters.
 RAMP_MARGIN = 1.2
 # Out-of-plane waviness: amplitude in diameters and full waves per fiber.
-WAVE_AMPLITUDE = 1.5
-WAVES_PER_FIBER = 3.0
+WAVE_AMPLITUDE = 3.0
+WAVES_PER_FIBER = 2.0
 # In-plane distance, in diameters, below which two strands count as touching.
 SELF_CONTACT_CLEARANCE = 1.1
 DENSITY = 1_000.0
@@ -556,7 +559,7 @@ if __name__ == "__main__":
         type=float,
         nargs="+",
         default=list(DOMAIN_SIDES),
-        help="periodic cell sides to run (default: 10 9 ... 1)",
+        help="periodic cell sides to run (default: 10 9 ... 2)",
     )
     parser.add_argument("--fiber-length", type=float, default=FIBER_LENGTH)
     parser.add_argument("--diameter", type=float, default=DIAMETER)
