@@ -237,8 +237,8 @@ pub fn random_footprint_center(
     extent: [f32; 2],
 ) -> [f32; 2] {
     let unit = |bits: u64| (((bits >> 40) as f64) * (1.0 / ((1_u64 << 24) as f64))) as f32;
-    let first = splitmix64(seed ^ (2 * layer) as u64);
-    let second = splitmix64(seed ^ (2 * layer + 1) as u64);
+    let first = splitmix64(seed ^ (2 * u64::from(layer)));
+    let second = splitmix64(seed ^ (2 * u64::from(layer) + 1));
     [
         origin[0] + extent[0] * unit(first),
         origin[1] + extent[1] * unit(second),

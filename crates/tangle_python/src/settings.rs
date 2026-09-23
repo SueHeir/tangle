@@ -860,6 +860,16 @@ impl PySolvePolicy {
                 )));
             }
         }
+        // A curvature ratio is curvature over allowed curvature, so a limit
+        // below 1 could never be met.
+        for (name, value) in [
+            ("target_curvature_ratio", self.target_curvature_ratio),
+            ("max_curvature_ratio", self.max_curvature_ratio()),
+        ] {
+            if value < 1.0 {
+                return Err(PyValueError::new_err(format!("{name} must be at least 1")));
+            }
+        }
         let enforcement = |hard: bool| {
             if hard {
                 LimitEnforcement::Hard

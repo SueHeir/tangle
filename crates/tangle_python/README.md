@@ -149,7 +149,8 @@ recipe.relax_until_converged()
 `insert()` returns a stable `FiberSelection` containing the assigned fiber IDs
 and formation step. Every collection is packed once; recipe activation and
 relaxation then occur inside one Rust/CubeCL execution. Layers stack along the
-cell's `stack_axis`: its single non-periodic axis, else z. Pass
+cell's `stack_axis`: z when z is bounded or every axis is periodic, otherwise
+the last bounded axis. Pass
 `stack_axis="x"` to `Cell` or `Recipe` to choose another. Generators,
 compaction and `fit_cell_to_active_fibers` default to the same axis. Recipe
 operations are ordered manufacturing instructions, not physical timesteps.
@@ -249,7 +250,9 @@ with recipe.needle_layer(
 ):
     recipe.settle_targets(tolerance=0.5 * um, max_iterations=3_000)
     recipe.relax_for(150)
-``` `JunctionPolicy` provides explicit,
+```
+
+`JunctionPolicy` provides explicit,
 deterministic contact-to-junction capture; contacts remain transient unless a
 recipe includes `capture_junctions()` or `relax_and_capture()`.
 Captured junctions are not mechanically enforced by subsequent relaxation.

@@ -92,13 +92,16 @@ impl PyCell {
 }
 
 /// The single non-periodic axis when there is exactly one, otherwise z.
+/// Plies stack along a bounded axis: z when it is bounded or when every axis
+/// is periodic, otherwise the last bounded axis.
 fn infer_stack_axis(periodic: [bool; 3]) -> usize {
-    let open = (0..3).filter(|axis| !periodic[*axis]).collect::<Vec<_>>();
-    if open.len() == 1 {
-        open[0]
-    } else {
-        DEFAULT_STACK_AXIS
+    if !periodic[DEFAULT_STACK_AXIS] {
+        return DEFAULT_STACK_AXIS;
     }
+    (0..3)
+        .rev()
+        .find(|axis| !periodic[*axis])
+        .unwrap_or(DEFAULT_STACK_AXIS)
 }
 
 pub(crate) fn cell_lengths(cell: &PeriodicCell) -> [f64; 3] {
@@ -533,8 +536,13 @@ impl AssemblyModel {
         }
     }
 
-    /// Wraps a finished assembly, for example a recipe result.
-    pub(crate) fn from_assembly(assembly: FiberAssembly, stack_axis: usize) -> Self {
+    /// Wraps a finished assembly, for example a recipe result. Every fiber is
+    /// already formed, so all are moved to formation step 0; a recipe that
+    /// continues from here then keeps them active from its first operation.
+    pub(crate) fn from_assembly(mut assembly: FiberAssembly, stack_axis: usize) -> Self {
+        for fiber in &mut assembly.topology.fibers {
+            fiber.formation_step = 0;
+        }
         let next_fiber_id = assembly
             .topology
             .fibers

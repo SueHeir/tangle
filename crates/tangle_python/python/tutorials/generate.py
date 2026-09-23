@@ -941,11 +941,12 @@ NOTEBOOKS: dict[str, list[dict]] = {
         ## The stack axis
 
         Layer-aware operations (layered generation, layer placement, needling,
-        and default compaction) act along one *stack axis*. When exactly one
-        axis is bounded, the cell infers it as the stack axis, so a
-        `periodic="xy"` sheet stacks along z. Otherwise the stack axis
-        defaults to z; pass `stack_axis=` to the `Cell` (or to `Recipe`) to
-        choose another. Axes may be written as `"x"`, `"y"`, `"z"` or `0`,
+        and default compaction) act along one *stack axis*. The cell infers
+        it: z when z is bounded or every axis is periodic, otherwise the last
+        bounded axis. A `periodic="xy"` sheet stacks along z and a
+        `periodic="xz"` wall along y. Pass `stack_axis=` to the `Cell` to
+        choose another; `Recipe(cell, stack_axis=)` exists too, but generators
+        follow the cell, so the `Cell` argument keeps everything consistent. Axes may be written as `"x"`, `"y"`, `"z"` or `0`,
         `1`, `2`; the property always reports the index.
         """),
         code("""
@@ -1221,8 +1222,8 @@ NOTEBOOKS: dict[str, list[dict]] = {
             name="local-coordinate ply",
             formation_layer=0,
         )
-        # The recipe takes its stack axis (z) from the cell; pass
-        # stack_axis="x" (or 0) to Recipe to override it.
+        # The recipe takes its stack axis (z) from the cell. Set it on the Cell
+        # (stack_axis="x") so generators and the recipe agree.
         recipe = tangle.Recipe(cell)
         # Rotation is applied first, then translation places the rotated fiber.
         selection = recipe.insert(

@@ -766,19 +766,22 @@ class HeldTargets:
     """Returned by operations that hold fibers on targets.
 
     Use it as a context manager to release the targets when the block ends,
-    or ignore it and call the matching ``release_*`` method yourself.
+    even if it raises, or ignore it and call the matching ``release_*`` method
+    yourself. Releasing layer placement releases every held layer, including
+    layers placed before the block.
     """
 
     def __enter__(self) -> Recipe: ...
     def __exit__(
         self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None: ...
+        exc_type: type[BaseException] | None = ...,
+        exc: BaseException | None = ...,
+        traceback: TracebackType | None = ...,
+    ) -> bool: ...
 
 class Recipe:
-    stack_axis: int
+    @property
+    def stack_axis(self) -> int: ...
     def __init__(self, cell: Cell | Assembly, *, stack_axis: Axis | None = ...) -> None: ...
     def insert(
         self,

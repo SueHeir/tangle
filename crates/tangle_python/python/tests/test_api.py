@@ -171,6 +171,16 @@ class CellTests(unittest.TestCase):
         self.assertEqual(tangle.Recipe(cell).stack_axis, 0)
         self.assertEqual(tangle.Recipe(cell, stack_axis="z").stack_axis, 2)
 
+    def test_axis_edge_cases(self):
+        self.assertEqual(tangle.Cell([1.0, 1.0, 1.0], periodic=True).periodic, [True] * 3)
+        self.assertEqual(tangle.Cell([1.0, 1.0, 1.0], periodic=False).periodic, [False] * 3)
+        # z is periodic here, so the last bounded axis (y) is the stack axis.
+        self.assertEqual(tangle.Cell([1.0, 1.0, 1.0], periodic="z").stack_axis, 1)
+        with self.assertRaises(TypeError):
+            tangle.Cell([1.0, 1.0, 1.0], stack_axis=True)
+        with self.assertRaises(AttributeError):
+            tangle.Recipe(tangle.Cell([1.0, 1.0, 1.0])).stack_axis = 0
+
     def test_bad_axes_are_rejected(self):
         with self.assertRaises(ValueError):
             tangle.Cell([1.0, 1.0, 1.0], periodic="xw")
@@ -223,6 +233,18 @@ class SettingsTests(unittest.TestCase):
             settings.contact_aggregation = "deepest"
         with self.assertRaises(ValueError):
             tangle.SolvePolicy("p", on_budget_exhausted="ignore")
+
+    def test_values_the_solver_would_reject_fail_early(self):
+        with self.assertRaisesRegex(ValueError, "at least 1"):
+            tangle.SolvePolicy("p", target_curvature_ratio=0.5)
+        with self.assertRaisesRegex(ValueError, "shrink_factor"):
+            tangle.CompactionSettings.volume_fraction(0.1, shrink_factor=1.5)
+        with self.assertRaisesRegex(ValueError, "growth_factor"):
+            tangle.CompactionSettings.volume_fraction(0.1, growth_factor=0.5)
+        with self.assertRaises(ValueError):
+            tangle.Recipe(tangle.Cell([1.0, 1.0, 1.0])).place_layer_above(1, gap=1e-50)
+        with self.assertRaisesRegex(TypeError, "copy"):
+            tangle.RelaxationSettings(copy=1)
 
     def test_solve_policy_limits_default_to_targets(self):
         policy = tangle.SolvePolicy("contact first", target_penetration=0.05)
@@ -289,6 +311,7 @@ class SettingsTests(unittest.TestCase):
         )
         self.assertEqual(population.orientation.max_angle, 0.1)
         self.assertEqual(population.length, (0.2, 0.4))
+        self.assertEqual(population.replace(length=[0.1, 0.3]).length, (0.1, 0.3))
         planar = population.replace(orientation=tangle.PlanarOrientation(max_tilt=0.2))
         self.assertIsInstance(planar.orientation, tangle.PlanarOrientation)
         self.assertIsInstance(population.orientation, tangle.AlignedOrientation)
@@ -310,11 +333,19 @@ class RecipeTests(unittest.TestCase):
         self.assertIn("needle layer 0", operations[-3])
         self.assertEqual(operations[-1], "release needles")
 
-    def test_bend_radius_rejects_unknown_materials(self):
+    def test_bend_radius_names_are_checked_at_run(self):
         recipe = tangle.Recipe(tangle.Cell([1.0, 1.0, 1.0]))
         recipe.insert(two_crossing_fibers())
-        with self.assertRaisesRegex(ValueError, "fiber"):
-            recipe.set_min_bend_radius("missing", 1.0)
+        # A material inserted later in the recipe is fine.
+        recipe.set_min_bend_radius("late", 1.0)
+        late = tangle.Material("late", diameter=0.05)
+        recipe.insert(
+            tangle.FiberCollection.from_centerlines([[[0.2, 0.2, 0.2], [0.8, 0.2, 0.2]]], late)
+        )
+        recipe.set_min_bend_radius("missing", 1.0)
+        recipe.relax_for(1)
+        with self.assertRaisesRegex(ValueError, "missing"):
+            recipe.run(tangle.RelaxationSettings(backend="cpu"))
 
     def test_failed_operation_raises_recipe_error(self):
         recipe = tangle.Recipe(tangle.Cell([1.0, 1.0, 1.0]))
@@ -333,6 +364,41 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(caught.exception.operation_index, 1)
         self.assertIn("strict", caught.exception.operation)
         self.assertIn("penetration", caught.exception.reason)
+
+    def test_a_result_assembly_continues_in_a_new_recipe(self):
+        recipe = tangle.Recipe(tangle.Cell([1.0, 1.0, 1.0]))
+        fibers = two_crossing_fibers()
+        recipe.insert(fibers)
+        extra = tangle.FiberCollection.from_centerlines(
+            [[[0.2, 0.2, 0.8], [0.8, 0.2, 0.8]]], tangle.Material("fiber", diameter=0.1)
+        )
+        recipe.insert(extra)
+        recipe.relax_for(2)
+        first = recipe.run(tangle.RelaxationSettings(backend="cpu"))
+        self.assertEqual(first.assembly.fiber_count, 3)
+
+        follow_on = tangle.Recipe(first.assembly)
+        follow_on.insert(
+            tangle.FiberCollection.from_centerlines(
+                [[[0.2, 0.8, 0.2], [0.8, 0.8, 0.2]]], tangle.Material("fiber", diameter=0.1)
+            )
+        )
+        follow_on.relax_for(2)
+        second = follow_on.run(tangle.RelaxationSettings(backend="cpu"))
+        self.assertEqual(second.fiber_count, 4)
+
+    def test_result_assembly_is_the_same_object_state(self):
+        recipe = tangle.Recipe(tangle.Cell([1.0, 1.0, 1.0]))
+        recipe.insert(two_crossing_fibers())
+        recipe.relax_for(1)
+        result = recipe.run(tangle.RelaxationSettings(backend="cpu"))
+        result.assembly.insert(
+            tangle.FiberCollection.from_centerlines(
+                [[[0.2, 0.8, 0.8], [0.8, 0.8, 0.8]]], tangle.Material("fiber", diameter=0.1)
+            )
+        )
+        self.assertEqual(result.assembly.fiber_count, 3)
+        self.assertEqual(result.fiber_count, 3)
 
     def test_run_returns_a_new_assembly(self):
         assembly = tangle.Assembly(tangle.Cell([1.0, 1.0, 1.0]))

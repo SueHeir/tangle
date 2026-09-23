@@ -150,8 +150,10 @@ enum HeldKind {
 }
 
 /// Returned by operations that hold fibers on targets. Use it as a context
-/// manager to release the targets when the block ends, or ignore it and call
-/// the matching `release_*` method yourself.
+/// manager to release the targets when the block ends, even if it raises, or
+/// ignore it and call the matching `release_*` method yourself. Releasing layer
+/// placement releases every held layer, including layers placed before the
+/// block.
 #[pyclass(name = "HeldTargets", module = "tangle._tangle")]
 pub(crate) struct PyHeldTargets {
     recipe: Py<PyRecipe>,
@@ -233,15 +235,12 @@ impl PyRecipe {
     }
 
     /// The axis plies stack along (0, 1, or 2). Defaults to the cell's.
+    /// Fixed when the recipe is created, because recorded operations use it.
+    /// Generators follow the `Cell`, so set `Cell(..., stack_axis=)` when
+    /// generated populations should stack along the same axis.
     #[getter]
     fn stack_axis(&self) -> usize {
         self.stack_axis
-    }
-
-    #[setter]
-    fn set_stack_axis(&mut self, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.stack_axis = parse_axis(value, "stack_axis")?;
-        Ok(())
     }
 
     #[pyo3(signature = (collection, *, name=None, translation=[0.0, 0.0, 0.0], rotation=None))]
@@ -367,22 +366,6 @@ impl PyRecipe {
             return Err(PyValueError::new_err("material name must not be empty"));
         }
         positive_finite(min_bend_radius, "min_bend_radius")?;
-        // A recipe that resumes from a checkpoint has no fibers yet, so the
-        // name can only be checked here when fibers were inserted.
-        {
-            let model = self.model.lock().expect("assembly lock poisoned");
-            let materials = &model.assembly.materials.entries;
-            if !materials.is_empty() && !materials.iter().any(|entry| entry.name == material_name) {
-                let known = materials
-                    .iter()
-                    .map(|entry| format!("{:?}", entry.name))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(PyValueError::new_err(format!(
-                    "unknown material {material_name:?}; this recipe has {known}"
-                )));
-            }
-        }
         self.push(
             FormationOperation::SetMaterialBendRadius {
                 material_name: material_name.clone(),
@@ -644,6 +627,9 @@ impl PyRecipe {
                 .assembly
                 .validate()
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            // A recipe resuming from a checkpoint has no fibers here, so its
+            // material names are checked when the operation runs instead.
+            check_material_names(&model.assembly, &self.operations)?;
         }
         let mut settings = settings
             .map(|settings| settings.clone())
@@ -822,13 +808,38 @@ fn recipe_error(
     error
 }
 
+/// Rejects `set_min_bend_radius` names that match no inserted material.
+fn check_material_names(
+    assembly: &FiberAssembly,
+    operations: &[FormationOperation],
+) -> PyResult<()> {
+    let materials = &assembly.materials.entries;
+    for operation in operations {
+        let FormationOperation::SetMaterialBendRadius { material_name, .. } = operation else {
+            continue;
+        };
+        if !materials.iter().any(|entry| &entry.name == material_name) {
+            let known = materials
+                .iter()
+                .map(|entry| format!("{:?}", entry.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(PyValueError::new_err(format!(
+                "set_min_bend_radius names unknown material {material_name:?}; this recipe has {known}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 // --- Run result --------------------------------------------------------------
 
 #[pyclass(name = "RunResult", module = "tangle._tangle", frozen)]
 #[derive(Clone)]
 pub(crate) struct PyRunResult {
-    assembly: FiberAssembly,
-    stack_axis: usize,
+    /// Shared with the `Assembly` returned by `.assembly`, so edits to that
+    /// object show up in this result's exports.
+    model: Arc<Mutex<AssemblyModel>>,
     #[pyo3(get)]
     pub iterations: usize,
     #[pyo3(get)]
@@ -875,31 +886,35 @@ pub(crate) struct PyRunResult {
     pub debug_ovito_frames: usize,
 }
 
+impl PyRunResult {
+    fn model(&self) -> std::sync::MutexGuard<'_, AssemblyModel> {
+        self.model.lock().expect("assembly lock poisoned")
+    }
+}
+
 #[pymethods]
 impl PyRunResult {
     #[getter]
     fn fiber_count(&self) -> usize {
-        self.assembly.topology.fibers.len()
+        self.model().assembly.topology.fibers.len()
     }
 
     /// The final assembly, for inspection or as the start of another recipe.
+    /// Every access returns the same underlying assembly.
     #[getter]
     fn assembly(&self) -> PyAssembly {
         PyAssembly {
-            model: Arc::new(Mutex::new(AssemblyModel::from_assembly(
-                self.assembly.clone(),
-                self.stack_axis,
-            ))),
+            model: Arc::clone(&self.model),
         }
     }
 
     fn centerlines(&self) -> Vec<Vec<Vec3>> {
-        assembly_centerlines(&self.assembly)
+        assembly_centerlines(&self.model().assembly)
     }
 
     fn characterize(&self) -> PyAnalysisReport {
         PyAnalysisReport {
-            inner: characterize_assembly(&self.assembly),
+            inner: characterize_assembly(&self.model().assembly),
         }
     }
 
@@ -915,7 +930,7 @@ impl PyRunResult {
         lag_count: usize,
     ) -> PyResult<PyNeighborReport> {
         characterize_neighbors(
-            &self.assembly,
+            &self.model().assembly,
             contact_gap,
             neighbor_gap,
             in_axis_angle_degrees,
@@ -927,7 +942,7 @@ impl PyRunResult {
 
     #[getter]
     fn junction_count(&self) -> usize {
-        self.assembly.junctions.junctions.len()
+        self.model().assembly.junctions.junctions.len()
     }
 
     #[pyo3(signature = (path, *, view_script_path=None, session_path=None, coloring="fiber"))]
@@ -943,7 +958,7 @@ impl PyRunResult {
         config.representation = OvitoRepresentation::FiberSegments;
         config.view_script_path = view_script_path.clone();
         config.session_path = session_path;
-        write_ovito_assembly_frame(&self.assembly, &config, self.iterations, false)
+        write_ovito_assembly_frame(&self.model().assembly, &config, self.iterations, false)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         if let Some(script) = view_script_path {
             write_ovito_view_script(&config, &script)
@@ -972,7 +987,7 @@ impl PyRunResult {
             atom_type,
             bond_type,
         };
-        let model = build_bpm_model(&self.assembly, &config)
+        let model = build_bpm_model(&self.model().assembly, &config)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         write_bpm_lammps_data(&model, &data_path)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
@@ -994,7 +1009,7 @@ impl PyRunResult {
         if let Some(tolerance) = ambiguity_tolerance {
             config = config.with_ambiguity_tolerance(tolerance);
         }
-        let report = write_puma_bundle(&self.assembly, &config)
+        let report = write_puma_bundle(&self.model().assembly, &config)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         Ok(PyPumaExportReport { inner: report })
     }
@@ -1005,7 +1020,7 @@ impl PyRunResult {
                 "RunResult(fibers={}, iterations={}, converged={}, ",
                 "max_penetration={}, max_curvature_ratio={}, active_segments={})"
             ),
-            self.assembly.topology.fibers.len(),
+            self.model().assembly.topology.fibers.len(),
             self.iterations,
             self.converged,
             self.max_penetration,
@@ -1077,8 +1092,9 @@ fn run_native_recipe(
         .get_resource_ref::<OvitoTrajectoryReport>()
         .map_or(0, |report| report.frames);
     Ok(PyRunResult {
-        assembly,
-        stack_axis,
+        model: Arc::new(Mutex::new(AssemblyModel::from_assembly(
+            assembly, stack_axis,
+        ))),
         iterations: relaxation.iterations,
         converged: relaxation.converged,
         max_penetration: relaxation.max_penetration,

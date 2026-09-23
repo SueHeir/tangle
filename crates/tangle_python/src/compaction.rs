@@ -663,6 +663,20 @@ impl PyCompactionSettings {
         ] {
             positive_finite(value, name)?;
         }
+        if self.growth_factor < 1.0 {
+            return Err(PyValueError::new_err("growth_factor must be at least 1"));
+        }
+        if self.shrink_factor >= 1.0 {
+            return Err(PyValueError::new_err("shrink_factor must be in (0, 1)"));
+        }
+        if self.max_curvature_ratio < 1.0 {
+            return Err(PyValueError::new_err(
+                "max_curvature_ratio must be at least 1",
+            ));
+        }
+        if self.target_tolerance >= 1.0 {
+            return Err(PyValueError::new_err("target_tolerance must be below 1"));
+        }
         if self.min_log_strain > self.initial_log_strain
             || self.initial_log_strain > self.max_log_strain
         {

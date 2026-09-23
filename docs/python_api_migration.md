@@ -14,8 +14,9 @@ misuse. There are no deprecated aliases: old names raise `AttributeError` or
   such as `"xy"`, one axis, or a bool triple.
 - `*Settings` are run-wide, a `*Policy` is a named rule for one step, and
   `*Overrides` are temporary per-step deltas.
-- Every configuration class takes keyword arguments and has
-  `replace(**changes)`. Unknown keywords raise `TypeError`; bad option strings
+- Every settings, policy and overrides class takes keyword arguments and has
+  `replace(**changes)`; the small typed option classes (orientations,
+  positions, compaction targets and paths, footprints) are immutable. Unknown keywords raise `TypeError`; bad option strings
   raise `ValueError` on the line that set them.
 - Recipe failures raise `tangle.RecipeError` (a `RuntimeError`) with
   `operation_index`, `operation`, `iteration` and `reason`.
@@ -25,8 +26,8 @@ misuse. There are no deprecated aliases: old names raise `AttributeError` or
 
 | Old | New |
 |---|---|
-| `Cell(lengths, periodic=[True, True, False])` | `Cell(lengths, periodic="xy")` (bool lists still work) |
-| `Recipe(cell, layer_axis=2)` | `Cell(...)` infers `stack_axis` from its single bounded axis; override with `Cell(..., stack_axis="z")` or `Recipe(cell, stack_axis="z")` |
+| `Cell(lengths, periodic=[True, True, False])` | `Cell(lengths, periodic="xy")` (bool lists and a single `True`/`False` still work) |
+| `Recipe(cell, layer_axis=2)` | `Cell(...)` infers `stack_axis` (z when bounded, else the last bounded axis); override with `Cell(..., stack_axis="x")`. `Recipe(cell, stack_axis=)` also exists, but generators follow the cell, so prefer the `Cell` argument |
 | `Material(name, diameter, minimum_bend_radius=r)` | `Material(name, diameter, min_bend_radius=r)` |
 | `FiberCollection.layers()` | `FiberCollection.layer_ids()` |
 | `a.extend(b)` for a new collection | `a + b` (`extend` still mutates in place) |
@@ -76,7 +77,7 @@ The generator functions take `material=Material(...)` in place of
 | `path="axis_weights"`, `axis_weights` | `path=AxisWeightsPath("z")` or `AxisWeightsPath([0, 0, 1])`; `AxisWeightsPath()` follows the stack axis |
 | `path="equal_pressure"`, `active_axes`, `pressure_floor` | `EqualPressurePath("xy", pressure_floor=)` |
 | `path="stress_ratio"`, `stress_ratio` | `StressRatioPath(ratio, pressure_floor=)` |
-| `path="minimum_work"`, `active_axes` | `MinimumWorkPath("xy")` |
+| `path="minimum_incremental_work"`, `active_axes` | `MinimumWorkPath("xy")` |
 | `volume_fraction(v, axis_weights=[0, 0, 1])` | `volume_fraction(v)` compresses along the stack axis; any field can follow as a keyword |
 | `minimum_log_strain`, `maximum_log_strain`, `maximum_steps`, `maximum_relax_windows`, `maximum_pressure`, `maximum_penalty_energy`, `maximum_penetration` | `min_log_strain`, `max_log_strain`, `max_steps`, `max_relax_windows`, `max_pressure`, `max_penalty_energy`, `max_penetration` |
 | `maximum_bend_ratio` | `max_curvature_ratio` |

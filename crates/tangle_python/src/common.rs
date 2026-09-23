@@ -2,7 +2,7 @@
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBool, PyDict};
 use pyo3::PyClass;
 use tangle_generate::ScalarDistribution;
 
@@ -20,6 +20,12 @@ pub(crate) fn parse_axis(value: &Bound<'_, PyAny>, name: &str) -> PyResult<usize
                 "{name} must be 'x', 'y', 'z', 0, 1, or 2; got {other:?}"
             ))),
         };
+    }
+    // `True` would otherwise extract as axis 1.
+    if value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(format!(
+            "{name} must be 'x', 'y', 'z', 0, 1, or 2, not a bool"
+        )));
     }
     match value.extract::<usize>() {
         Ok(axis) if axis < 3 => Ok(axis),
@@ -54,6 +60,10 @@ pub(crate) fn parse_axis_mask(value: &Bound<'_, PyAny>, name: &str) -> PyResult<
     }
     if let Ok(mask) = value.extract::<[bool; 3]>() {
         return Ok(mask);
+    }
+    // A single bool applies to every axis, e.g. `periodic=True`.
+    if value.is_instance_of::<PyBool>() {
+        return Ok([value.extract::<bool>()?; 3]);
     }
     let axis = parse_axis(value, name)?;
     let mut mask = [false; 3];
@@ -97,7 +107,7 @@ pub(crate) fn parse_range(value: &Bound<'_, PyAny>, name: &str) -> PyResult<Scal
     if let Ok(scalar) = value.extract::<f64>() {
         return Ok(ScalarDistribution::Constant(scalar));
     }
-    if let Ok((minimum, maximum)) = value.extract::<(f64, f64)>() {
+    if let Ok([minimum, maximum]) = value.extract::<[f64; 2]>() {
         if minimum > maximum {
             return Err(PyValueError::new_err(format!(
                 "{name} range must be ordered as (min, max)"
@@ -151,7 +161,14 @@ where
     let object = bound.as_any();
     for (key, item) in kwargs.iter() {
         let key: String = key.extract()?;
-        if key.starts_with('_') || !object.hasattr(key.as_str())? {
+        // Only settable attributes (data descriptors) count, so a method name
+        // such as `copy` is reported as an unknown keyword too.
+        let settable = !key.starts_with('_')
+            && object
+                .get_type()
+                .getattr(key.as_str())
+                .is_ok_and(|attribute| attribute.hasattr("__set__").unwrap_or(false));
+        if !settable {
             return Err(PyTypeError::new_err(format!(
                 "{class_name}() got an unexpected keyword argument {key:?}"
             )));
@@ -191,8 +208,11 @@ pub(crate) fn choice_name<T: Copy + PartialEq>(
         .expect("every enum value has a Python spelling")
 }
 
+/// Most values are narrowed to `f32` for the solver, so they must stay
+/// positive and finite there as well.
 pub(crate) fn positive_finite(value: f64, name: &str) -> PyResult<()> {
-    if value.is_finite() && value > 0.0 {
+    let narrowed = value as f32;
+    if value.is_finite() && value > 0.0 && narrowed.is_finite() && narrowed > 0.0 {
         Ok(())
     } else {
         Err(PyValueError::new_err(format!(
@@ -202,7 +222,7 @@ pub(crate) fn positive_finite(value: f64, name: &str) -> PyResult<()> {
 }
 
 pub(crate) fn nonnegative_finite(value: f64, name: &str) -> PyResult<()> {
-    if value.is_finite() && value >= 0.0 {
+    if value.is_finite() && value >= 0.0 && (value as f32).is_finite() {
         Ok(())
     } else {
         Err(PyValueError::new_err(format!(

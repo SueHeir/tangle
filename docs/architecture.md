@@ -17,7 +17,8 @@ scheduled insertion steps. Dormant fibers do not participate in contacts.
 GRASS schedules bounded batches and operation transitions; it can change layer
 targets, activate populations, and compact the cell between batches without
 re-uploading all geometry. The stack axis (the direction layers stack along)
-comes from the cell: its single non-periodic axis, else z. `Recipe(cell,
+comes from the cell: z when z is bounded or every axis is periodic,
+otherwise the last bounded axis. `Recipe(cell,
 stack_axis="x")` overrides it.
 
 ## Quasi-static relaxation, not a dynamics solver

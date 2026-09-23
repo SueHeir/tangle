@@ -192,3 +192,25 @@ fn circular_needling_selects_one_internal_vertex_per_fiber_in_footprint() {
 
     assert_eq!(selected, vec![6]);
 }
+
+#[test]
+fn random_footprint_center_is_deterministic_and_inside_the_footprint() {
+    // Pinned against the felt example's original local implementation.
+    assert_eq!(
+        random_footprint_center(20_260_940, 2, [0.0, 0.0], [1.0e-3, 1.0e-3]),
+        [0.000_797_881_1, 0.000_692_911_7]
+    );
+    for layer in [0, 1, 7, u32::MAX] {
+        let center = random_footprint_center(11, layer, [-1.0, 2.0], [0.5, 0.25]);
+        assert_eq!(
+            center,
+            random_footprint_center(11, layer, [-1.0, 2.0], [0.5, 0.25])
+        );
+        assert!((-1.0..-0.5).contains(&center[0]));
+        assert!((2.0..2.25).contains(&center[1]));
+    }
+    assert_ne!(
+        random_footprint_center(11, 0, [0.0, 0.0], [1.0, 1.0]),
+        random_footprint_center(11, 1, [0.0, 0.0], [1.0, 1.0])
+    );
+}

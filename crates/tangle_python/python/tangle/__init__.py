@@ -12,8 +12,10 @@ Configuration objects follow three naming conventions:
     Temporary deltas that apply only to the step they are passed to, such as
     ``RelaxationOverrides.preset("curvature_cleanup")``.
 
-Every configuration class accepts keyword arguments in its constructor and
-has a ``replace(**changes)`` method that returns a modified copy. Lengths are
+Every settings, policy and overrides class accepts keyword arguments in its
+constructor and has a ``replace(**changes)`` method that returns a modified
+copy. The small option classes (orientations, positions, compaction targets
+and paths, needle footprints) are immutable values. Lengths are
 in meters; ``tangle.units`` has ``um`` and ``mm`` helpers.
 """
 
