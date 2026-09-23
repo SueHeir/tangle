@@ -443,13 +443,15 @@ pub(crate) enum PolicyGate {
     Reject,
 }
 
-/// Decides a policy gate from the iterations completed at it and the
-/// relaxation state measured after the latest batch.
+/// Decides a policy gate from the iterations completed at it, the relaxation
+/// state measured after the latest batch, and the iterations left before the
+/// run's overall [`RelaxationConfig::max_iterations`] cap.
 pub(crate) fn policy_gate(
     policy: &SolvePolicy,
     completed: usize,
     measured_current_geometry: bool,
     relaxation: &RelaxationState,
+    run_remaining: usize,
 ) -> PolicyGate {
     if measured_current_geometry && acceptance_satisfied(policy.acceptance, relaxation) {
         return PolicyGate::Accept;
@@ -464,10 +466,15 @@ pub(crate) fn policy_gate(
     {
         return PolicyGate::ContinueWithWarning;
     }
-    let extended_budget = policy.maximum_iterations + policy.extra_iterations;
-    if completed < extended_budget {
+    // The extension stops one iteration short of the run's overall cap, so
+    // it ends at a batch boundary where the recipe can still record the
+    // failure instead of the run stopping mid-operation.
+    let extended_budget = policy
+        .maximum_iterations
+        .saturating_add(policy.extra_iterations);
+    if completed < extended_budget && run_remaining > 1 {
         return PolicyGate::Solve {
-            remaining: extended_budget - completed,
+            remaining: (extended_budget - completed).min(run_remaining - 1),
         };
     }
     PolicyGate::Reject
@@ -480,7 +487,7 @@ fn extension_note(policy: &SolvePolicy, completed: usize) -> String {
         String::new()
     } else {
         format!(
-            ", {extra} iterations past the {}-iteration budget",
+            ", {extra} of them past the {}-iteration budget",
             policy.maximum_iterations
         )
     }
@@ -1385,7 +1392,16 @@ fn control_formation_recipe(
                 let completed = relaxation.iterations.saturating_sub(started);
                 let measured_current_geometry = completed > 0 || relaxation.converged;
                 let extra = completed.saturating_sub(policy.maximum_iterations);
-                match policy_gate(policy, completed, measured_current_geometry, &relaxation) {
+                let run_remaining = relaxation_config
+                    .max_iterations
+                    .saturating_sub(relaxation.iterations);
+                match policy_gate(
+                    policy,
+                    completed,
+                    measured_current_geometry,
+                    &relaxation,
+                    run_remaining,
+                ) {
                     PolicyGate::Accept => {
                         state.relaxation_started_at = None;
                         clear_recipe_solver_targets(&mut workflow);
@@ -1411,12 +1427,17 @@ fn control_formation_recipe(
                     }
                     PolicyGate::ContinueWithWarning => {
                         let unmet = unmet_acceptance_limits(policy.acceptance, &relaxation);
-                        let reason = format!(
-                            "{} exhausted {} iterations with deferred soft limits{}: {unmet}",
-                            policy.name,
-                            policy.maximum_iterations,
-                            extension_note(policy, completed)
-                        );
+                        let reason = if extra == 0 {
+                            format!(
+                                "{} exhausted {} iterations with deferred soft limits: {unmet}",
+                                policy.name, policy.maximum_iterations
+                            )
+                        } else {
+                            format!(
+                                "{} exhausted {} iterations with deferred soft limits (hard limits met {extra} iterations later): {unmet}",
+                                policy.name, policy.maximum_iterations
+                            )
+                        };
                         let operation = state.next_operation;
                         state.warnings.push(FormationWarning {
                             operation,
@@ -1442,9 +1463,8 @@ fn control_formation_recipe(
                     PolicyGate::Reject => {
                         let unmet = unmet_acceptance_limits(policy.acceptance, &relaxation);
                         let reason = format!(
-                            "{} failed after {} iterations{}: {unmet}",
+                            "{} failed after {completed} iterations{}: {unmet}",
                             policy.name,
-                            policy.maximum_iterations,
                             extension_note(policy, completed)
                         );
                         state.failure = Some(FormationFailure {

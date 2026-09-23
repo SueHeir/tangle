@@ -1464,8 +1464,8 @@ NOTEBOOKS: dict[str, list[dict]] = {
         ## When a stage fails
 
         `Recipe.run()` raises `tangle.RecipeError` (a `RuntimeError`) when an
-        operation cannot meet a hard limit within its budget, or fails
-        validation. The exception says which step failed: `operation_index`
+        operation cannot meet a hard limit within its budget plus
+        `max_extra_iterations`, or fails validation. The exception says which step failed: `operation_index`
         (zero-based position in `recipe.operations()`), `operation` (its
         description), `iteration` (the solver iteration at failure), and
         `reason`.
