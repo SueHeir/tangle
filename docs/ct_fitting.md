@@ -156,16 +156,21 @@ fit = ct.fit_fibers(volume, voxel_size=1.25 * um, spec=[small, large])
 Brightness uses a scale where void is 0 and the brightest type is 1. How
 it works:
 
-- Void and the reference fiber level come from a three-class threshold
-  (void, dim, bright), because a two-class one would split a dim type from
-  the bright one.
-- Types are fitted one after another, largest first. Each type sees the scan
-  through its own detection image. A rimmed type's image is smoothed at half
-  its radius, which fills the dim core, and rescaled so the type reads about
-  1 on its axis.
-- Fibers already found claim their voxels. A smaller type therefore isn't
-  traced along a larger fiber's bright rim, and it can't pull on voxels a
-  larger fiber owns.
+- Void and the reference fiber level come from a multi-level threshold with
+  one class per brightness level (void, large-fiber core, rim, small-fiber
+  center), because a two-class one would split a dim type from the bright
+  one.
+- Types are fitted one after another, brightest first. A solid type that is
+  brighter than the rest sees only the brightness above them, so the 7 µm
+  fibers are fitted from the top grey level alone and the 19 µm rims don't
+  look like them. A rimmed type's image is smoothed at half its radius,
+  which fills the dim core, and rescaled so the type reads about 1 on its
+  axis.
+- Fibers already found are taken out of the image the later types see, and
+  they keep their voxels. A cluster of small bright fibers therefore can't
+  be traced as one large fiber.
+- A fit of a rimmed type is kept only if the scan shows its dim core inside
+  a brighter rim along it.
 - Radii are sized from the scan itself by inverting the type's profile. For
   a rimmed type, the owned brightness isn't just π r².
 - `fit.json` stores every spec and each fiber's type. `score()` reports

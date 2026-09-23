@@ -281,20 +281,36 @@ score.
 
 When `spec` is a list, or its profile isn't solid at brightness 1:
 
-- **Levels:** `_fit._three_class_levels` finds two thresholds by exhaustive
-  three-class Otsu on a 128-bin histogram. Void is the darkest class median
-  and brightness 1 the brightest class median. The re-level step (5) is
-  skipped.
-- **Order:** types are fitted largest diameter first, each through sections
-  3–7 in full, on its own detection image (`_fit._detection_image`). For a
-  rimmed type that image is the normalized scan blurred with σ = r/2, divided
-  by the blurred profile's value on the axis (`CrossSection.center_response`).
-  For a solid type it is the scan divided by the type's brightness.
-- **Earlier types are frozen:**
+- **Levels:** `_fit._class_levels` splits the histogram into one class for
+  void plus one per distinct brightness level of the types (rim and core
+  count separately; 2 to 4 classes) by exhaustive multi-level Otsu. For 7 µm
+  solid plus 19 µm rim/core fibers that is 4 classes: void, large-fiber core,
+  large-fiber rim and small-fiber edge, small-fiber center. Void is the
+  darkest class median and brightness 1 the brightest class median. The
+  re-level step (5) is skipped.
+- **Order:** brightest type first (by `CrossSection.brightness`), larger
+  diameter first among equally bright types. Each type goes through sections
+  3–7 in full, on its own detection image (`_fit._detection_image`):
+  - A solid type brighter than every type fitted after it sees only the
+    brightness above those types' brightest level `b`:
+    `clip((image − b) / (brightness − b), 0)`. The 7 µm fibers are then the
+    only thing in their image; the 19 µm rims (0.75) read 0.
+  - A rimmed type sees the scan blurred with σ = r/2, divided by the blurred
+    profile's value on the axis (`CrossSection.center_response`).
+  - Any other solid type sees the scan divided by its brightness.
+- **Fitted types are removed:** voxels within r + 2 of every fiber already
+  fitted are set to void in the image the later types see (their detection
+  image and their mass image). The earlier fibers also stay frozen:
   - they block tracing (their voxels within 1.2 r are pre-claimed);
   - they own voxels in the data force (6a.1) and in end growth (6a.4);
   - they push in the non-overlap step (6a.5) without moving.
-- **Radii:** the owned mass is summed over the normalized scan, not the
+- **Rim/core check** (`_moves.remove_off_profile`, each round after 7.4, for
+  rimmed types): on the normalized scan, the median brightness on the fit's
+  axis must be below the midpoint of the rim and core levels, and the median
+  on a 12-spoke ring at r − rim/2 must exceed the axis by a quarter of the
+  rim-core contrast. A cluster of solid bright fibers fails the first test;
+  a fit running along one side of a rim fails the second.
+- **Radii:** the owned mass is summed over the image this type sees, not the
   detection image, and converted to a radius by inverting the type's
   integrated profile (`CrossSection.radius_from_area`).
 

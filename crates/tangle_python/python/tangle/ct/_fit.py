@@ -429,10 +429,16 @@ def fit_fibers(
     unsupported fibers → merge fragments → trace new fibers in what is still
     unexplained).
 
-    ``spec`` may be a list of fiber types. Types are fitted one after another,
-    largest diameter first, each on a detection image matched to its own
-    brightness profile (``FiberSpec.profile``); the fibers already found claim
-    their voxels, so a smaller type is not traced along a larger fiber's rim.
+    ``spec`` may be a list of fiber types. Grey levels then come from a
+    multi-class threshold with one class per brightness level of the types.
+    Types are fitted one after another, brightest first (larger diameter
+    first among equally bright types), each on a detection image matched to
+    its own brightness profile (``FiberSpec.profile``). A solid type sees
+    only the brightness above the brightest level of the types fitted after
+    it, so dimmer fibers' rims do not look like it. Each fitted type is then
+    removed from the image the later types see, and it keeps owning its
+    voxels, so a later type cannot be traced over it. Fits of a rimmed type
+    must show its dim core (see ``_moves.remove_off_profile``).
     """
     settings = settings or FitSettings()
     volume = np.asarray(volume)
@@ -451,7 +457,10 @@ def fit_fibers(
     if single or settings.levels is not None:
         image, levels = normalize(volume, denoise_sigma=settings.denoise_sigma_voxels, levels=settings.levels)
     else:
-        image, levels = normalize(volume, denoise_sigma=settings.denoise_sigma_voxels, levels=_three_class_levels(volume, settings))
+        classes = 1 + len(_brightness_levels(specs))
+        image, levels = normalize(
+            volume, denoise_sigma=settings.denoise_sigma_voxels, levels=_class_levels(volume, settings, classes)
+        )
 
     history: list[dict[str, Any]] = []
 
@@ -461,23 +470,31 @@ def fit_fibers(
         if verbose:
             print(entry)
 
-    order = sorted(range(len(specs)), key=lambda k: -specs[k].diameter)
+    order = sorted(range(len(specs)), key=lambda k: (-specs[k].profile.brightness, -specs[k].diameter))
     lines: list[np.ndarray] = []
     radii = np.zeros(0)
     types = np.zeros(0, dtype=int)
-    for kind in order:
+    remaining = image  # the scan with the types fitted so far removed
+    for position, kind in enumerate(order):
         item = specs[kind]
         if single:
             detect = image
         else:
-            detect = _detection_image(image, item, voxel_size)
-            log(f"type {item.name}", lines, diameter=item.diameter)
+            dimmer = [specs[k].profile.brightness for k in order[position + 1 :]]
+            floor = max(dimmer, default=0.0)
+            detect = _detection_image(remaining, item, voxel_size, floor=floor)
+            log(f"type {item.name}", lines, diameter=item.diameter, floor=floor)
         found, found_radii, detect, levels = _fit_type(
-            detect, None if single else image, item, settings, voxel_size, levels,
+            detect, None if single else remaining, item, settings, voxel_size, levels,
             frozen=lines, frozen_radii=radii, relevel=single, log=log,
+            profile_image=None if single else image,
         )
         if single:
             image = detect
+        elif found and position + 1 < len(order):
+            # Later types see void where this type's fibers (and their blur) are.
+            covered, _, _ = rasterize(image.shape, found, found_radii, reach=found_radii + 2.0)
+            remaining = np.where(covered > 0, np.float32(0.0), remaining)
         lines = lines + found
         radii = np.concatenate([radii, found_radii])
         types = np.concatenate([types, np.full(len(found), kind, dtype=int)])
@@ -496,50 +513,81 @@ def fit_fibers(
     )
 
 
-def _three_class_levels(volume: np.ndarray, settings: FitSettings) -> Levels:
+def _brightness_levels(specs: Sequence[FiberSpec]) -> set[float]:
+    """The distinct brightness levels of the fiber types (rim and core)."""
+    values = set()
+    for item in specs:
+        values.add(round(item.profile.brightness, 2))
+        if not item.profile.solid:
+            values.add(round(item.profile.brightness * item.profile.core, 2))
+    return values
+
+
+def _class_levels(volume: np.ndarray, settings: FitSettings, classes: int) -> Levels:
     """Void and reference-fiber levels for a scan with several fiber types.
 
     A two-class threshold would split a dim fiber type from the bright one.
-    Three classes (void, dim, bright) are found by exhaustive search over a
-    histogram; void is the darkest class median and the reference fiber level
+    The histogram is split into ``classes`` classes (void plus one per
+    brightness level of the types, at most 4) by exhaustive multi-level Otsu;
+    void is the darkest class median and the reference fiber level
     (brightness 1) the brightest.
     """
+    import itertools
+
     from scipy.ndimage import gaussian_filter
 
+    classes = int(min(max(classes, 2), 4))
     image = np.asarray(volume, dtype=np.float32)
     if settings.denoise_sigma_voxels > 0:
         image = gaussian_filter(image, settings.denoise_sigma_voxels)
     sample = image[:: max(1, image.shape[0] // 64)].ravel()
     low, high = np.percentile(sample, [0.1, 99.9])
-    histogram, edges = np.histogram(np.clip(sample, low, high), bins=128, range=(low, high))
+    bins = 128 if classes <= 3 else 64
+    histogram, edges = np.histogram(np.clip(sample, low, high), bins=bins, range=(low, high))
     centers = 0.5 * (edges[:-1] + edges[1:])
     weight = np.concatenate([[0.0], np.cumsum(histogram)])
     moment = np.concatenate([[0.0], np.cumsum(histogram * centers)])
-    total_w, total_m = weight[-1], moment[-1]
-    best, split = -1.0, (1, 2)
-    for a in range(1, len(centers) - 1):
-        for b in range(a + 1, len(centers)):
-            w0, w1, w2 = weight[a], weight[b] - weight[a], total_w - weight[b]
-            if min(w0, w1, w2) <= 0:
-                continue
-            m0, m1, m2 = moment[a], moment[b] - moment[a], total_m - moment[b]
-            between = m0 * m0 / w0 + m1 * m1 / w1 + m2 * m2 / w2
-            if between > best:
-                best, split = between, (a, b)
-    t1, t2 = edges[split[0]], edges[split[1]]
-    void = float(np.median(sample[sample < t1]))
-    fiber = float(np.median(sample[sample >= t2]))
-    return Levels(void=void, fiber=fiber, threshold=float(t1))
+
+    def term(a, b):
+        w = weight[b] - weight[a]
+        m = moment[b] - moment[a]
+        return np.where(w > 0, m * m / np.maximum(w, 1e-12), -np.inf)
+
+    best, split = -np.inf, tuple(range(1, classes))
+    last = np.arange(1, bins)
+    # All but the last threshold are enumerated; the last is vectorized.
+    for head in itertools.combinations(range(1, bins), classes - 2):
+        bounds = (0,) + head
+        fixed = sum(term(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)) if head else 0.0
+        if not np.isfinite(fixed):
+            continue
+        tail = last[last > (head[-1] if head else 0)]
+        if tail.size == 0:
+            continue
+        between = fixed + term(bounds[-1], tail) + term(tail, bins)
+        k = int(np.argmax(between))
+        if between[k] > best:
+            best, split = float(between[k]), head + (int(tail[k]),)
+    t_low, t_high = edges[split[0]], edges[split[-1]]
+    void = float(np.median(sample[sample < t_low]))
+    fiber = float(np.median(sample[sample >= t_high]))
+    return Levels(void=void, fiber=fiber, threshold=float(t_low))
 
 
-def _detection_image(image: np.ndarray, spec: FiberSpec, voxel_size: float) -> np.ndarray:
+def _detection_image(image: np.ndarray, spec: FiberSpec, voxel_size: float, floor: float = 0.0) -> np.ndarray:
     """The scan as this fiber type sees it: about 1 on its axis, 0 in void.
 
-    A rimmed type is smoothed at half its radius, which fills its dim core;
-    the result is divided by the level such a fiber reaches on its axis.
+    A solid type brighter than ``floor`` (the brightest level of the types
+    fitted after it) sees only the brightness above ``floor``, rescaled so its
+    own level reads 1. A rimmed type is smoothed at half its radius, which
+    fills its dim core; the result is divided by the level such a fiber
+    reaches on its axis.
     """
     from scipy.ndimage import gaussian_filter
 
+    brightness = spec.profile.brightness
+    if spec.profile.solid and 0.0 < floor < brightness:
+        return np.clip((image - floor) / (brightness - floor), 0.0, None).astype(np.float32)
     radius = 0.5 * spec.diameter / voxel_size
     sigma = 0.0 if spec.profile.solid else 0.5 * radius
     smoothed = gaussian_filter(image, sigma) if sigma > 0 else image
@@ -558,9 +606,11 @@ def _fit_type(
     frozen_radii: np.ndarray,
     relevel: bool,
     log,
+    profile_image: np.ndarray | None = None,
 ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, Levels]:
     """Fit one fiber type; ``frozen`` fibers (earlier types) stay fixed but
-    own their voxels and block tracing."""
+    own their voxels and block tracing. ``profile_image`` is the normalized
+    scan that a rimmed type's fits are checked against."""
     radius = 0.5 * spec.diameter / voxel_size
     bend = (spec.min_bend_radius or 5.0 * spec.diameter) / voxel_size
     min_length = (spec.min_length or 3.0 * spec.diameter) / voxel_size
@@ -638,6 +688,9 @@ def _fit_type(
         )
         lines, radii = _moves.trim_duplicates(lines, radii, min_length=min_length)
         lines, radii = _moves.remove_unsupported(image, lines, radii, min_length=min_length, min_support=settings.min_support)
+        off_profile = 0
+        if profile_image is not None and not spec.profile.solid:
+            lines, radii, off_profile = _moves.remove_off_profile(profile_image, lines, radii, spec.profile, voxel_size)
         lines, radii, merges = _moves.merge_fragments(
             image, lines, radii, max_gap=settings.merge_gap_radii * radius,
             min_bend_radius=bend, kink_threshold=settings.kink_threshold,
@@ -648,6 +701,8 @@ def _fit_type(
         explained = _explained_fraction(foreground, lines, radii)
         ends = end_statistics(lines, radii, image.shape, length=length)
         extra = {"interior_ends": ends["interior_ends"]}
+        if off_profile:
+            extra["off_profile"] = off_profile
         if ends["implied_length"]:
             extra["implied_length_m"] = ends["implied_length"] * voxel_size
         if length:

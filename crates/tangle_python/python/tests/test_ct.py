@@ -152,6 +152,34 @@ class CtFitTests(unittest.TestCase):
         self.assertEqual(list(reloaded.types), list(typed.types))
         self.assertEqual(len(typed.suggested_population()), 2)
 
+    def test_class_levels_find_void_and_the_brightest_type(self):
+        from tangle.ct._fit import _class_levels
+
+        rng = np.random.default_rng(0)
+        # void, a large fiber's core, its rim, a small fiber: four grey levels
+        values = rng.choice([0.0, 0.25, 0.75, 1.0], p=[0.55, 0.1, 0.15, 0.2], size=(32, 32, 32))
+        volume = (100 + 400 * (values + rng.normal(0.0, 0.03, values.shape))).astype(np.float32)
+        levels = _class_levels(volume, ct.FitSettings(denoise_sigma_voxels=0.0), classes=4)
+        self.assertAlmostEqual((levels.void - 100) / 400, 0.0, delta=0.03)
+        self.assertAlmostEqual((levels.fiber - 100) / 400, 1.0, delta=0.03)
+
+    def test_rim_core_check_rejects_solid_fibers_and_rim_tracks(self):
+        from tangle.ct._moves import remove_off_profile
+
+        profile = ct.CrossSection(brightness=0.75, rim=2 * VOXEL, core=1 / 3)
+        z, y, _ = np.indices((40, 40, 40), dtype=np.float64) + 0.5
+        rho = np.hypot(y - 20.0, z - 20.0)
+        rimmed = profile.level(rho, 8.0, VOXEL).astype(np.float32)
+        solid = (rho <= 3.0).astype(np.float32)
+        axis = np.stack([np.linspace(4, 36, 17), np.full(17, 20.0), np.full(17, 20.0)], axis=1)
+        along_rim = axis + np.array([0.0, 7.0, 0.0])
+        radii = np.array([8.0, 8.0])
+        kept, _, removed = remove_off_profile(rimmed, [axis, along_rim], radii, profile, VOXEL)
+        self.assertEqual(removed, 1)
+        np.testing.assert_allclose(kept[0], axis)
+        _, _, removed = remove_off_profile(solid, [axis], radii[:1], profile, VOXEL)
+        self.assertEqual(removed, 1)
+
     def test_thin_fibers_are_rejected(self):
         with self.assertRaises(ValueError):
             ct.fit_fibers(self.scan.volume, VOXEL, ct.FiberSpec(diameter=1 * um))

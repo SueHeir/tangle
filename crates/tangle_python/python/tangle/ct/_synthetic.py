@@ -58,7 +58,8 @@ class SyntheticScan:
         lines, radii, origin, types = [], [], [], []
         shifts = [
             np.array(combo) * self.period
-            for combo in itertools.product(*[(-1, 0, 1) if p > 0 else (0,) for p in self.period])
+            # a fiber longer than the cell can reach past the next cell wall
+            for combo in itertools.product(*[(-2, -1, 0, 1, 2) if p > 0 else (0,) for p in self.period])
         ]
         copies = [(index, shift) for index in range(len(self.centerlines)) for shift in shifts]
         for index, shift in copies:
@@ -136,9 +137,13 @@ def synthetic_ct(
     centerlines = [np.asarray(line) / voxel_size for line in source.centerlines()]
     # Export ids are one-based in source order for these single-material scans.
     radii = _radii(source, labels, centerlines, voxel_size)
+    period = np.zeros(3)
+    cell = getattr(source, "cell", None)
+    if cell is not None:
+        period = np.array([n / voxel_size if p else 0.0 for n, p in zip(cell.lengths, cell.periodic)])
     types = None
     if profiles:
-        occupancy, types = _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles)
+        occupancy, types = _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles, period)
     rng = np.random.default_rng(seed)
     attenuation = void_level + (1.0 - void_level) * gaussian_filter(occupancy, psf_sigma_voxels)
     attenuation += rng.normal(0.0, noise, size=attenuation.shape).astype(np.float32)
@@ -149,24 +154,43 @@ def synthetic_ct(
     low, high = np.percentile(attenuation, [0.5, 99.5])
     volume = np.clip((attenuation - low) / (high - low) * 65535, 0, 65535).astype(np.uint16)
 
-    period = np.zeros(3)
-    cell = getattr(source, "cell", None)
-    if cell is not None:
-        period = np.array([n / voxel_size if p else 0.0 for n, p in zip(cell.lengths, cell.periodic)])
     return SyntheticScan(volume, labels, centerlines, radii, voxel_size, period, types)
 
 
-def _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles):
-    """Scale occupancy by each fiber type's brightness profile."""
+def _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles, period):
+    """Scale occupancy by each fiber type's brightness profile.
+
+    In a periodic cell a fiber's centerline runs past the cell walls while its
+    voxels wrap around, so every periodic image of each centerline that
+    reaches the volume is rendered as that fiber.
+    """
+    import itertools
+
     from ._geometry import rasterize
 
     diameters = np.array([d for d, _ in profiles]) / voxel_size
     shapes = [profile for _, profile in profiles]
     types = np.array([int(np.argmin(np.abs(diameters - 2.0 * r))) for r in radii], dtype=int)
-    owner, best, _ = rasterize(occupancy.shape, centerlines, radii, reach=radii + 2.0, signed=True)
-    level = np.ones(occupancy.shape, dtype=np.float32)  # periodic images without a centerline stay solid
+    upper = np.array(occupancy.shape[::-1], dtype=np.float64)
+    shifts = [
+        np.array(combo) * period
+        for combo in itertools.product(*[(-2, -1, 0, 1, 2) if p > 0 else (0,) for p in period])
+    ]
+    copies, copy_radii, source = [], [], []
+    for index, line in enumerate(centerlines):
+        line = np.asarray(line, dtype=np.float64)
+        reach = radii[index] + 2.0
+        for shift in shifts:
+            moved = line + shift
+            if np.all(moved.min(axis=0) - reach < upper) and np.all(moved.max(axis=0) + reach > 0):
+                copies.append(moved)
+                copy_radii.append(radii[index])
+                source.append(index)
+    copy_radii = np.asarray(copy_radii, dtype=np.float64)
+    owner, best, _ = rasterize(occupancy.shape, copies, copy_radii, reach=copy_radii + 2.0, signed=True)
+    level = np.ones(occupancy.shape, dtype=np.float32)
     owned = owner > 0
-    fiber = owner[owned] - 1
+    fiber = np.asarray(source, dtype=int)[owner[owned] - 1]
     rho = best[owned] + radii[fiber]
     brightness = np.array([p.brightness for p in shapes])[types[fiber]]
     core = np.array([1.0 if p.solid else p.core for p in shapes])[types[fiber]]

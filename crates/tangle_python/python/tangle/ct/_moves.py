@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._geometry import polyline_length, sample_image
+from ._geometry import polyline_length, sample_image, tangents
 
 
 def _others_tree(lines: list[np.ndarray], skip: int):
@@ -72,6 +72,54 @@ def remove_unsupported(
         keep.append(ok)
     keep = np.array(keep, dtype=bool)
     return [line for line, k in zip(centerlines, keep) if k], radii[keep]
+
+
+def remove_off_profile(
+    image: np.ndarray,
+    centerlines: list[np.ndarray],
+    radii: np.ndarray,
+    profile,
+    voxel_size: float,
+    spokes: int = 12,
+) -> tuple[list[np.ndarray], np.ndarray, int]:
+    """Drop fits of a bright-rim, dim-core type that do not show that profile.
+
+    ``image`` is the normalized scan (void 0, brightest type 1). Along each
+    fit, the median brightness on the axis must sit below the midpoint of the
+    profile's rim and core levels, and the median on a ring through the rim
+    must exceed the axis by a quarter of the rim-core contrast. A cluster of
+    bright solid fibers fails the first test; a fit that runs along one side
+    of a rim fails the second, since its ring passes through core and void.
+    """
+    if profile.solid or not centerlines:
+        return centerlines, radii, 0
+    rim_level = profile.brightness
+    core_level = profile.brightness * profile.core
+    contrast = rim_level - core_level
+    angles = np.linspace(0.0, 2.0 * np.pi, spokes, endpoint=False)
+    keep = []
+    for line, radius in zip(centerlines, radii):
+        if len(line) < 2:
+            keep.append(False)
+            continue
+        axis = sample_image(image, line, fill=np.nan)
+        t = tangents(line)
+        helper = np.where(np.abs(t[:, :1]) < 0.9, np.array([[1.0, 0.0, 0.0]]), np.array([[0.0, 1.0, 0.0]]))
+        u = np.cross(t, helper)
+        u /= np.maximum(np.linalg.norm(u, axis=1, keepdims=True), 1e-12)
+        v = np.cross(t, u)
+        rho = max(radius - 0.5 * profile.rim / voxel_size, 0.5 * radius)
+        ring = line[:, None, :] + rho * (
+            np.cos(angles)[None, :, None] * u[:, None, :] + np.sin(angles)[None, :, None] * v[:, None, :]
+        )
+        around = sample_image(image, ring.reshape(-1, 3), fill=np.nan)
+        if np.all(np.isnan(axis)) or np.all(np.isnan(around)):
+            keep.append(False)
+            continue
+        on_axis, on_ring = float(np.nanmedian(axis)), float(np.nanmedian(around))
+        keep.append(on_axis < core_level + 0.5 * contrast and on_ring - on_axis > 0.25 * contrast)
+    keep = np.array(keep, dtype=bool)
+    return [line for line, k in zip(centerlines, keep) if k], radii[keep], int((~keep).sum())
 
 
 def _end(line: np.ndarray, which: int) -> tuple[np.ndarray, np.ndarray]:
