@@ -83,6 +83,16 @@ class FitSettings:
     min_support: float = 0.5
     separate_fibers: bool = True
     levels: Levels | None = None
+    # "numpy" moves fibers with the NumPy loop in _refine; "tangle" runs
+    # Tangle's own relaxation with the scan as an extra force (tangle.ImageRelaxer,
+    # the GPU by default), so contact, stretch and the bend limit hold throughout.
+    engine: str = "numpy"
+    backend: str | None = None
+    solver_batches: int = 3
+    solver_iterations: int = 300
+    solver_settle_iterations: int = 100
+    solver_image_rate: float = 0.3
+    solver_reach_radii: float = 1.4
 
     def replace(self, **changes: Any) -> "FitSettings":
         return replace(self, **changes)
@@ -441,6 +451,13 @@ def fit_fibers(
     must show its dim core (see ``_moves.remove_off_profile``).
     """
     settings = settings or FitSettings()
+    if settings.engine not in ("numpy", "tangle"):
+        raise ValueError(f"engine must be 'numpy' or 'tangle', not {settings.engine!r}")
+    if settings.engine == "tangle":
+        from . import _device
+
+        if not _device.available():
+            raise ValueError("engine='tangle' needs a Tangle build with ImageRelaxer")
     volume = np.asarray(volume)
     if volume.ndim != 3:
         raise ValueError("volume must be a 3D (z, y, x) array")
@@ -649,8 +666,27 @@ def _fit_type(
         foreground = image > 0.5
         log("relevel", lines, void=levels.void, fiber=levels.fiber)
 
+    # The solver path covers one type on its own scan; types fitted after
+    # another (frozen fibers, a separate mass image) use the NumPy loop.
+    use_solver = settings.engine == "tangle" and not frozen_count and mass_image is None
+    if settings.engine == "tangle" and not use_solver:
+        log("engine", lines, note="numpy loop for a type fitted after another")
+
+    def solve(lines: list[np.ndarray], radii: np.ndarray, batches: int) -> tuple[list[np.ndarray], np.ndarray]:
+        from . import _device
+
+        return _device.refine(
+            image, lines, radii, voxel_size=voxel_size, radius=radius, tolerance=spec.diameter_tolerance,
+            prior_weight=settings.radius_prior_weight, bend=bend, spacing=spacing,
+            rate=settings.solver_image_rate, reach_radii=settings.solver_reach_radii, batches=batches,
+            iterations=settings.solver_iterations, settle=settings.solver_settle_iterations,
+            backend=settings.backend, profile=profile, log=log,
+        )
+
     for round_index in range(settings.rounds):
-        for _ in range(settings.iterations_per_round):
+        if use_solver and lines:
+            lines, radii = solve(lines, radii, settings.solver_batches)
+        for _ in range(0 if use_solver else settings.iterations_per_round):
             if not lines:
                 break
             if frozen_count:
@@ -719,6 +755,10 @@ def _fit_type(
             lines = lines + born
             radii = np.concatenate([radii, np.full(len(born), radius)])
             log(f"births {round_index + 1}", lines, born=len(born))
+    if use_solver and lines:
+        # The last round's splits and joins are not yet admissible fibers.
+        lines, radii = solve(lines, radii, 1)
+        log("final solve", lines)
     return lines, np.asarray(radii, dtype=np.float64), image, levels
 
 

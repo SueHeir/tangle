@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -193,6 +194,20 @@ class CtFitTests(unittest.TestCase):
         self.assertEqual(report["fibers_over_bend_limit"], 1)
         self.assertEqual(report["overlapping_pairs"], 0)
         self.assertAlmostEqual(report["min_segment_diameters"], 1.25, places=6)
+
+    @unittest.skipUnless(hasattr(tangle, "ImageRelaxer"), "needs a Tangle build with ImageRelaxer")
+    def test_fit_on_tangle_solver_recovers_valid_fibers(self):
+        settings = ct.FitSettings(
+            engine="tangle", backend=os.environ.get("TANGLE_BACKEND", "cpu"), solver_iterations=150,
+            solver_settle_iterations=50,
+        )
+        fit = ct.fit_fibers(self.scan.volume, VOXEL, ct.FiberSpec(diameter=DIAMETER), settings)
+        report = ct.score(fit, self.scan)
+        self.assertEqual(report["recovered"], 3, report)
+        geometry = ct.geometry_report(fit.centerlines, fit.radii, 5 * DIAMETER / VOXEL)
+        self.assertEqual(geometry["overlapping_pairs"], 0, geometry)
+        self.assertEqual(geometry["fibers_over_bend_limit"], 0, geometry)
+        self.assertTrue(any(entry["stage"] == "solver" for entry in fit.history))
 
     def test_thin_fibers_are_rejected(self):
         with self.assertRaises(ValueError):

@@ -10,8 +10,11 @@ FiberForm crop is like this). This example imitates that:
    against the walls and the central crop would see almost none.
 2. Render the whole cell as a CT-like scan and crop the central 240 µm, so
    fibers run through the crop boundary.
-3. Fit it twice, without and with ``FiberSpec(length=...)``, score both
-   against the ground truth, and write both fits.
+3. Fit it three times: without and with ``FiberSpec(length=...)`` on the
+   NumPy loop, and with the length prior on Tangle's own solver
+   (``FitSettings(engine="tangle")``, the GPU by default). Score each against
+   the ground truth, measure its geometry (bend limit, overlaps) and write
+   the fits.
 
 Needs NumPy and SciPy; tifffile and matplotlib add TIFF and PNG outputs.
 """
@@ -85,24 +88,33 @@ def main() -> None:
     print(f"scan: {scan.volume.shape} voxels cropped from {full.volume.shape}; {len(scan.centerlines)} true fiber pieces")
 
     base = ct.FiberSpec(diameter=DIAMETER, min_bend_radius=MIN_BEND_RADIUS)
-    specs = {"no_length_prior": base, "length_prior": base.replace(length=sum(LENGTH) / 2)}
+    prior = base.replace(length=sum(LENGTH) / 2)
+    numpy_loop = ct.FitSettings()
+    runs = {
+        "no_length_prior": (base, numpy_loop),
+        "length_prior": (prior, numpy_loop),
+        "length_prior_solver": (prior, ct.FitSettings(engine="tangle", backend=BACKEND)),
+    }
+    geometry_keys = ("curvature_ratio_max", "fibers_over_bend_limit", "max_penetration_radii", "overlapping_pairs")
     keys = ("fitted_fibers", "recovered", "split", "missed", "stubs", "false_fibers", "merged_fibers",
             "interior_ends_fit", "interior_ends_truth", "implied_mean_length_fit_m",
             "centerline_error_voxels", "voxel_label_accuracy")
     reports = {}
-    for name, spec in specs.items():
+    for name, (spec, settings) in runs.items():
         started = time.perf_counter()
-        fit = ct.fit_fibers(scan.volume, VOXEL, spec, verbose=True)
+        fit = ct.fit_fibers(scan.volume, VOXEL, spec, settings, verbose=True)
         elapsed = time.perf_counter() - started
         report = ct.score(fit, scan)
         report["seconds"] = elapsed
+        geometry = ct.geometry_report(fit.centerlines, fit.radii, MIN_BEND_RADIUS / VOXEL)
+        report.update({key: geometry[key] for key in geometry_keys})
         reports[name] = report
         fit.write(OUTPUT / name, volume=scan.volume)
         (OUTPUT / name / "score.json").write_text(json.dumps(report, indent=1) + "\n")
     ct.save_overlay_figure(OUTPUT / "truth_overlay.png", scan.volume, scan.labels, title="ground truth")
 
     print(f"{'':32s}" + "".join(f"{name:>18s}" for name in reports))
-    for key in keys + ("seconds",):
+    for key in keys + geometry_keys + ("seconds",):
         values = [reports[name][key] for name in reports]
         print(f"{key:32s}" + "".join(f"{v:>18.4g}" if isinstance(v, float) else f"{v!s:>18s}" for v in values))
 

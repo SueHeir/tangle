@@ -42,6 +42,14 @@ relaxed, run = fit.relax()               # optional: clean up remaining overlaps
 `FitSettings` holds the numerical settings (rounds, rates, merge gap and so
 on). The defaults are meant to work without changes.
 
+`FitSettings(engine="tangle")` moves the fibers with Tangle's own relaxation
+(the GPU by default, `backend="cpu"` without one) and the scan as an extra
+force, instead of the NumPy loop in step 3 below. Contact, segment lengths
+and the bend limit then hold throughout, so every fit comes out as round,
+non-overlapping tubes within the bend limit. It needs a Tangle build with
+`tangle.ImageRelaxer`; see
+[ct_fitting_internals.md](ct_fitting_internals.md#8b-the-fit-on-tangles-solver-fitsettingsenginetangle).
+
 ## How the fit works
 
 The method follows the literature review in the project files. In short
@@ -243,9 +251,11 @@ short fits.
 - **No explicit PSF.** The data force is an intensity centroid rather than a
   full blurred forward model. It is unbiased for a symmetric point-spread
   function but ignores other artifacts, such as streaks or rings.
-- **Speed.** Everything runs single-threaded in Python/NumPy. A 160³ scan
-  with 40 fibers takes minutes. Rasterization and the per-segment data force
-  are the hot spots and would be natural to move into Rust.
+- **Speed.** Outside `engine="tangle"` everything runs single-threaded in
+  Python/NumPy, and a 160³ scan with 40 fibers takes minutes. With the
+  solver, the continuous fit costs about 1.3 ms per iteration on an M-series
+  GPU even for 475 fibers; tracing and the one-fiber-or-two check are then
+  the slow steps.
 - **Validation.** Next are benchmarks with real ground truth: the
   Math2Market FiberFind validation set and the DTU multimodal glass-fiber
   scans. See the project's dataset notes.

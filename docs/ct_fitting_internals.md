@@ -325,10 +325,9 @@ When `spec` is a list, or its profile isn't solid at brightness 1:
   the spec's bend limit.
 - **Relaxation after the fit:** the optional `FitResult.relax()` runs Tangle's
   contact relaxation, on the default GPU backend, to remove leftover overlaps.
-  **Tangle's solver is not called inside the fitting loop.** The Python
-  `separate_step` and `bend_step` stand in for it there. Alternating fit
-  iterations with short Tangle relaxation passes, as the literature review
-  proposed, is not implemented.
+  By default (`FitSettings.engine="numpy"`) Tangle's solver is not called
+  inside the fitting loop; the Python `separate_step` and `bend_step` stand
+  in for it. With `engine="tangle"` it is (section 8b).
 - **Synthetic scans** (`_synthetic.synthetic_ct`): the ground truth is a
   Tangle structure.
   1. `export_puma(include_interface=True, include_fiber_ids=True)` gives
@@ -338,6 +337,56 @@ When `spec` is a list, or its profile isn't solid at brightness 1:
      cosine drift, scaled to uint16.
   3. `SyntheticScan.crop` cuts a window from a larger render, so fibers cross
      its boundary as in a real scan.
+
+## 8b. The fit on Tangle's solver (`FitSettings(engine="tangle")`)
+
+`_device.refine`, `tangle.ImageRelaxer` (kernels in
+`crates/tangle_relax/src/device/image_force.rs`)
+
+With `engine="tangle"`, each round's continuous fit (6a) is replaced by
+`solver_batches` (3) batches on Tangle's own relaxation, the GPU by default
+(`FitSettings.backend`). The topology moves (6b) and births stay as they
+are. One batch:
+
+1. **Upload.** Fibers are resampled to segments of 1.25 diameters (never
+   shorter than one: Tangle's contact treats non-adjacent segments of one
+   fiber as colliding) and placed in a closed cell padded by 3 r around the
+   scan. Each fiber gets a material with its fitted diameter and the spec's
+   bend limit, and a straight rest shape with its own segment lengths:
+   bending then resists every curve, and a kinked fit does not keep its
+   kinks as its natural shape. `neighbor_capacity` is 192, because
+   overlapping starts overflow the default 48 slots into a slow fallback.
+2. **Relax with the image force** for `solver_iterations` (300). Every
+   iteration applies Tangle's contact, stretch, bending and bend-limit steps
+   and one image step: each vertex samples the normalized scan on a polar
+   grid across the fiber (4 rings × 12 spokes out to `solver_reach_radii` =
+   1.4 r, Gaussian σ = 0.8 r, area-weighted), keeps the samples nearer its
+   own capsule surface than any other fiber's, and moves sideways toward
+   their brightness-weighted centroid at `solver_image_rate` (0.3), scaled
+   by the brightness of its innermost ring and capped at the max step.
+3. **Read the owned intensity** of every vertex (`vertex_image_stats`: area
+   in voxels² of owned brightness). The mean over interior vertices is each
+   fiber's cross-section area, turned into a radius as in 6a.3 (profile
+   inversion for non-solid types), blended with the spec radius and clamped
+   to the tolerance.
+4. **Settle** for `solver_settle_iterations` (100) with the image force
+   off. The image step re-adds a little curvature each iteration before the
+   solver removes it; the settle ends on geometry the constraints alone
+   accept (it converges in a few dozen iterations).
+5. **Ends** grow or trim on the host (6a.4), and fibers are respaced to the
+   fitter's node spacing.
+
+After the last round, one more batch makes the last splits and joins
+admissible. A type fitted after another (several fiber types) still uses
+the NumPy loop, since its frozen predecessors would have to stay fixed in
+the solver.
+
+Checked with `examples/ct_gpu_geometry_check.py` on the single-type
+synthetic scan (Mac GPU): from the NumPy fit with the image off, 46
+overlapping pairs and 3 fibers over the bend limit go to 0 in 26
+iterations; true fibers damaged with random kinks come back to within 0.25
+voxels of the truth with no overlaps and the bend limit met; polishing the
+NumPy fit keeps its score (35 of 40 recovered).
 
 ## 9. Outputs
 
