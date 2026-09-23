@@ -310,9 +310,13 @@ score.
 same steps size the fibers.
 
 - **Thickness:** the distance transform of the foreground (image > 0.5),
-  sampled along each fiber's interior nodes; the median, less half a voxel
-  (the distance on an axis is to the nearest void voxel *center*), is its
-  measured radius m.
+  taken as the maximum over each 3×3×3 neighborhood and sampled along each
+  fiber's interior nodes; the median is its measured radius m. On an axis
+  the distance is about the radius, because the foreground edge sits at the
+  half-maximum, which is the fiber surface; the neighborhood maximum keeps a
+  centerline between voxel centers from reading an interpolated, lower
+  value. (Subtracting half a voxel, as an earlier version did, made radii
+  5–10% small.)
 - **Margin:** a generous mask makes every fiber look thicker by some δ.
   With `FitSettings.thickness_margin_voxels` unset, δ is estimated: start
   at 0, give each fiber the type nearest m − δ, set δ to the median of
