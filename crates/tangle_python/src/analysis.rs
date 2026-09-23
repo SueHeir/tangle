@@ -736,7 +736,15 @@ impl PyScorecard {
                 .partial_cmp(&key(a.score))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let format = |value: Option<f64>| value.map_or("-".to_owned(), |v| format!("{v:.4g}"));
+        let format = |value: Option<f64>| {
+            value.map_or("-".to_owned(), |v| {
+                if v == 0.0 || (1e-3..1e5).contains(&v.abs()) {
+                    format!("{v:.4}")
+                } else {
+                    format!("{v:.3e}")
+                }
+            })
+        };
         let mut text = format!(
             "{:<28} {:>10} {:>10} {:>10} {:>10} {:>8}\n",
             "metric", "candidate", "reference", "distance", "spread", "score"
