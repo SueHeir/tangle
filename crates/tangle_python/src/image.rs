@@ -146,6 +146,42 @@ impl PyImageRelaxer {
         Ok(())
     }
 
+    /// Pins vertices: one list of flags per fiber, one flag per centerline
+    /// node as the fiber was passed in. A pinned node keeps its position
+    /// through every correction (contact, stretch, bend, curvature, image)
+    /// but still takes part in contact, so pinned fibers are fixed obstacles
+    /// for the others. Pass all ``False`` to release every pin.
+    fn set_pinned(&mut self, flags: Vec<Vec<bool>>) -> PyResult<()> {
+        let spans: Vec<(usize, usize)> = self.fiber_spans().collect();
+        if flags.len() != spans.len() {
+            return Err(PyValueError::new_err(format!(
+                "set_pinned needs one list per fiber ({}), got {}",
+                spans.len(),
+                flags.len()
+            )));
+        }
+        let mut pinned = vec![0_u32; self.world.packed().vertex_count()];
+        for (fiber, ((start, count), fiber_flags)) in spans.iter().zip(&flags).enumerate() {
+            if fiber_flags.len() != *count {
+                return Err(PyValueError::new_err(format!(
+                    "fiber {fiber} has {count} nodes but {} pin flags",
+                    fiber_flags.len()
+                )));
+            }
+            for (offset, &flag) in fiber_flags.iter().enumerate() {
+                pinned[start + offset] = u32::from(flag);
+            }
+        }
+        self.world.set_vertex_pinned(&pinned);
+        Ok(())
+    }
+
+    /// Number of pinned nodes.
+    #[getter]
+    fn pinned_count(&self) -> usize {
+        self.world.pinned_vertex_count()
+    }
+
     /// Whether the image force is on.
     #[getter]
     fn image_force_active(&self) -> bool {

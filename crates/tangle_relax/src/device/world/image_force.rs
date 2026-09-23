@@ -451,6 +451,42 @@ mod tests {
     }
 
     #[test]
+    fn pinned_fiber_stays_put_while_its_neighbor_follows_the_image() {
+        let assembly = straight_fibers(&[[10.5, 12.0], [13.5, 12.0]], 2.0);
+        let mut world = world(&assembly);
+        world.set_image(
+            &tube_image(&[[9.9, 12.0], [14.1, 12.0]], 2.0),
+            [SIDE; 3],
+            1.0,
+            [0.0; 3],
+        );
+        world.set_image_force(ImageForceSettings {
+            rate: 0.5,
+            ..ImageForceSettings::default()
+        });
+        let vertices = world.download_positions().len() / 3;
+        let mut pinned = vec![0_u32; vertices];
+        pinned[..vertices / 2].fill(1);
+        world.set_vertex_pinned(&pinned);
+        assert_eq!(world.pinned_vertex_count(), vertices / 2);
+        // The pinned fiber sits 0.6 off its tube (at 10.5), so contact keeps
+        // the neighbor, drawn toward 14.1, at least 4 (two radii) away: the
+        // pinned fiber is a fixed obstacle, not a movable one.
+        let before = world.download_positions();
+        world.run_batch(&config(), 80);
+        world.set_image_force(ImageForceSettings::default());
+        world.run_batch(&config(), 50);
+        let after = world.download_positions();
+        let half = 3 * (vertices / 2);
+        assert_eq!(&after[..half], &before[..half], "pinned fiber moved");
+        for [y, _] in vertex_yz(&world).split_at(vertices / 2).1 {
+            assert!(*y > 14.45 && *y < 14.6, "unpinned fiber y = {y}");
+        }
+        world.set_vertex_pinned(&vec![0; vertices]);
+        assert_eq!(world.pinned_vertex_count(), 0);
+    }
+
+    #[test]
     fn neighboring_fibers_each_keep_their_own_tube() {
         // Tubes 4.2 apart (a 0.2 gap between radius-2 surfaces); each fiber
         // starts 0.6 toward the other tube and must move back out.

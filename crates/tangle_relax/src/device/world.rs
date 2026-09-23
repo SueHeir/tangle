@@ -1,6 +1,7 @@
 mod cell_list;
 mod image_force;
 mod neighbor_list;
+mod pinning;
 
 pub use image_force::ImageForceSettings;
 

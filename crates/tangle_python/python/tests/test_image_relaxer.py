@@ -85,6 +85,25 @@ class ImageRelaxerTests(unittest.TestCase):
         np.testing.assert_allclose(first[:, 1], 9.9, atol=0.15)
         np.testing.assert_allclose(second[:, 1], 14.1, atol=0.15)
 
+    def test_pinned_fiber_stays_put_while_its_neighbor_moves(self):
+        # The first fiber is pinned 0.6 voxels off its tube; the second is
+        # drawn toward its tube but stays two radii from the pinned one.
+        relaxer = self.relaxer([(10.5, 12.0), (13.5, 12.0)], [(9.9, 12.0), (14.1, 12.0)])
+        first, second = relaxer.centerlines()
+        relaxer.set_pinned([[True] * len(first), [False] * len(second)])
+        self.assertEqual(relaxer.pinned_count, len(first))
+        relaxer.set_image_force(0.5)
+        relaxer.run(80)
+        relaxer.set_image_force(0.0)
+        relaxer.run(50)
+        pinned, free = (np.asarray(line) / VOXEL for line in relaxer.centerlines())
+        np.testing.assert_allclose(pinned, np.asarray(first) / VOXEL, atol=1e-6)
+        self.assertTrue(np.all((free[:, 1] > 14.45) & (free[:, 1] < 14.6)), free[:, 1])
+        with self.assertRaises(ValueError):
+            relaxer.set_pinned([[True] * len(first)])
+        relaxer.set_pinned([[False] * len(first), [False] * len(second)])
+        self.assertEqual(relaxer.pinned_count, 0)
+
     def test_rejects_a_mismatched_image(self):
         image = tube_image([(12.0, 12.0)], 2.0)
         with self.assertRaises(ValueError):

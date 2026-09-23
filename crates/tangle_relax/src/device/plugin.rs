@@ -452,6 +452,35 @@ impl DeviceWorld {
         }
     }
 
+    /// Replaces the per-vertex pin flags (one per packed vertex; nonzero pins).
+    /// See [`DeviceFiberWorld::set_vertex_pinned`].
+    pub fn set_vertex_pinned(&mut self, pinned: &[u32]) {
+        match self {
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(world) => world.set_vertex_pinned(pinned),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.set_vertex_pinned(pinned),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(world) => world.set_vertex_pinned(pinned),
+            #[cfg(feature = "hip")]
+            Self::Hip(world) => world.set_vertex_pinned(pinned),
+        }
+    }
+
+    /// Number of currently pinned packed vertices.
+    pub fn pinned_vertex_count(&self) -> usize {
+        match self {
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(world) => world.pinned_vertex_count(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.pinned_vertex_count(),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(world) => world.pinned_vertex_count(),
+            #[cfg(feature = "hip")]
+            Self::Hip(world) => world.pinned_vertex_count(),
+        }
+    }
+
     /// Per-vertex `(owned mass in voxel², support)` at the current positions.
     pub fn image_vertex_stats(&self) -> Vec<f32> {
         match self {
