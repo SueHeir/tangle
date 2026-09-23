@@ -219,6 +219,7 @@ is only ever one result per example:
 | `mask.tif` | the fiber mask the fit starts from |
 | `true.tif` | the true fibers, one color per fiber, over the scan (RGB) |
 | `segment.tif` | the fitted fibers, one color per fiber, over the scan (RGB) |
+| `diff.tif` | where fit and truth disagree, over the dimmed scan (RGB): red = true fiber left empty (missed), blue = fit over void (extra), yellow = fiber voxel given to the wrong fiber |
 | `fit.json` | the fit (`ct.load_fit`) |
 | `score.json` | score against the truth, geometry report, run time |
 

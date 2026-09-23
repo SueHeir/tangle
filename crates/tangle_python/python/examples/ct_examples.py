@@ -12,6 +12,9 @@ replaces the old result):
 * ``mask.tif``: the fiber mask the fit starts from (0/255);
 * ``true.tif``: the true fibers, one color per fiber, over the scan (RGB);
 * ``segment.tif``: the fitted fibers, one color per fiber, over the scan (RGB);
+* ``diff.tif``: where the segmentation and the truth disagree, over the dimmed
+  scan (RGB): red = true fiber the fit left empty (missed), blue = fit where
+  there is no fiber (extra), yellow = fiber given to the wrong fiber;
 * ``fit.json``: the fit (reload with ``ct.load_fit``);
 * ``score.json``: the score against the truth, the geometry report and the
   run time.
@@ -74,7 +77,8 @@ from tangle.units import um
 
 BACKEND = os.environ.get("TANGLE_BACKEND", "wgpu")
 MASK_LEVEL = 0.35  # of the way from void to fiber grey level: a generous threshold
-FILES = ("raw.tif", "mask.tif", "true.tif", "segment.tif", "fit.json", "score.json")
+FILES = ("raw.tif", "mask.tif", "true.tif", "segment.tif", "diff.tif", "fit.json", "score.json")
+DIFF_COLORS = {"missed": (230, 50, 50), "extra": (60, 120, 255), "wrong_fiber": (255, 200, 0)}
 
 
 @dataclass
@@ -281,6 +285,38 @@ EXAMPLES: dict[str, Callable[[Path], Example]] = {
 # -- the runner -----------------------------------------------------------------
 
 
+def label_diff(scan: ct.SyntheticScan, fit_labels: np.ndarray) -> tuple[np.ndarray, dict]:
+    """RGB stack of where the fit and the truth disagree, and voxel counts.
+
+    Each fitted fiber is matched to the true fiber it overlaps most; a voxel
+    both call fiber is "wrong_fiber" when its fit is matched to another one.
+    """
+    truth = np.asarray(scan.labels)
+    both = (truth > 0) & (fit_labels > 0)
+    mapping = np.zeros(int(fit_labels.max()) + 1, dtype=truth.dtype)
+    if both.any():
+        pairs = fit_labels[both].astype(np.int64) * (int(truth.max()) + 1) + truth[both]
+        values, counts = np.unique(pairs, return_counts=True)
+        fits, trues = np.divmod(values, int(truth.max()) + 1)
+        order = np.lexsort((counts, fits))  # by fit, then count ascending
+        mapping[fits[order]] = trues[order]  # the last (largest count) write wins per fit
+    classes = {
+        "missed": (truth > 0) & (fit_labels == 0),
+        "extra": (truth == 0) & (fit_labels > 0),
+        "wrong_fiber": both & (mapping[fit_labels] != truth),
+    }
+    volume = np.asarray(scan.volume, dtype=np.float32)
+    low, high = np.percentile(volume[:: max(1, volume.shape[0] // 32)], [0.5, 99.5])
+    grey = (np.clip((volume - low) / max(high - low, 1e-6), 0.0, 1.0) * 110).astype(np.uint8)
+    rgb = np.repeat(grey[..., None], 3, axis=-1)
+    for name, where in classes.items():
+        rgb[where] = DIFF_COLORS[name]
+    fiber = max(int((truth > 0).sum()), 1)
+    counts = {f"{name}_voxels": int(where.sum()) for name, where in classes.items()}
+    counts.update({f"{name}_fraction_of_true_fiber": int(where.sum()) / fiber for name, where in classes.items()})
+    return rgb, counts
+
+
 def run(name: str, output: Path) -> dict:
     print(f"{name}:")
     example = EXAMPLES[name](output / ".cache" / f"{name}.json")
@@ -307,11 +343,17 @@ def run(name: str, output: Path) -> dict:
     _write_stack(folder / "raw", scan.volume, h)
     _write_stack(folder / "mask", mask.astype(np.uint8) * 255, h)
     _write_stack(folder / "true", ct.overlay_volume(scan.volume, scan.labels), h, rgb=True)
-    _write_stack(folder / "segment", ct.overlay_volume(scan.volume, fit.label_volume()), h, rgb=True)
+    fit_labels = fit.label_volume()
+    _write_stack(folder / "segment", ct.overlay_volume(scan.volume, fit_labels), h, rgb=True)
+    diff, diff_counts = label_diff(scan, fit_labels)
+    _write_stack(folder / "diff", diff, h, rgb=True)
     (folder / "fit.json").write_text(json.dumps(fit.to_dict(), indent=1) + "\n")
     summary = {key: value for key, value in report.items() if key not in ("per_true_fiber", "per_type")}
     (folder / "score.json").write_text(
-        json.dumps({"seconds": seconds, "score": report, "geometry": geometry, **extra}, indent=1, default=str) + "\n"
+        json.dumps(
+            {"seconds": seconds, "score": report, "geometry": geometry, "diff": diff_counts, **extra},
+            indent=1, default=str,
+        ) + "\n"
     )
     row = {
         "example": name,
@@ -325,6 +367,9 @@ def run(name: str, output: Path) -> dict:
         "line error (vox)": summary["centerline_error_voxels"],
         "diameter bias (um)": summary["diameter_bias_m"] / um if summary["diameter_bias_m"] is not None else None,
         "label accuracy": summary["voxel_label_accuracy"],
+        "missed / extra / wrong (% of fiber)": "/".join(
+            f"{100 * diff_counts[f'{k}_fraction_of_true_fiber']:.1f}" for k in ("missed", "extra", "wrong_fiber")
+        ),
         "end error max (vox)": extra.get("end_error_max_voxels"),
         "overlaps": geometry.get("overlapping_pairs"),
         "over bend limit": geometry.get("fibers_over_bend_limit"),
@@ -354,7 +399,8 @@ def write_summary(output: Path, rows: list[dict]) -> None:
     header = (
         "# tangle.ct examples\n\n"
         f"Fitted from binary masks thresholded at {MASK_LEVEL} of the way from void to fiber. "
-        "Each example's folder holds raw.tif, mask.tif, true.tif, segment.tif, fit.json and score.json.\n\n"
+        "Each example's folder holds raw.tif, mask.tif, true.tif, segment.tif, diff.tif, fit.json and score.json. "
+        "diff.tif: red = missed, blue = extra, yellow = wrong fiber.\n\n"
     )
     (output / "summary.md").write_text(header + "\n".join(lines) + "\n")
 
