@@ -253,8 +253,9 @@ short fits.
   function but ignores other artifacts, such as streaks or rings.
 - **Speed.** The continuous fit costs about 1.3 ms per solver iteration on
   an M-series GPU even for 475 fibers; tracing and the one-fiber-or-two
-  check, single-threaded Python, are the slow steps. The CPU backend is
-  much slower and meant for tests.
+  check, single-threaded Python, are the slow steps. The CPU backend runs
+  the same steps but is far too slow for real scans; the tests run on the
+  GPU too and are skipped on CI, which has none.
 - **Validation.** Next are benchmarks with real ground truth: the
   Math2Market FiberFind validation set and the DTU multimodal glass-fiber
   scans. See the project's dataset notes.

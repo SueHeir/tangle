@@ -448,8 +448,6 @@ def fit_fibers(
     from . import _device
 
     settings = settings or FitSettings()
-    if not _device.available():
-        raise RuntimeError("tangle.ct needs a Tangle build with tangle.ImageRelaxer")
     volume = np.asarray(volume)
     if volume.ndim != 3:
         raise ValueError("volume must be a 3D (z, y, x) array")
@@ -463,6 +461,8 @@ def fit_fibers(
             )
     if exclude is not None and np.shape(exclude) != volume.shape:
         raise ValueError("exclude must have the same shape as volume")
+    if not _device.available():
+        raise RuntimeError("tangle.ct needs a Tangle build with tangle.ImageRelaxer")
 
     history: list[dict[str, Any]] = []
 

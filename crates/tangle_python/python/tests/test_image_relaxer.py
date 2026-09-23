@@ -13,7 +13,10 @@ except ImportError:  # the image is built with NumPy
 VOXEL = 1.0 * um
 SIDE = 24
 RADIUS = 2.0 * um
-BACKEND = os.environ.get("TANGLE_BACKEND", "cpu")
+# The solver runs on the GPU. CI runners have none, so these tests are
+# skipped on CI unless TANGLE_BACKEND names a backend.
+BACKEND = os.environ.get("TANGLE_BACKEND", "wgpu")
+GPU = not (os.environ.get("CI") and "TANGLE_BACKEND" not in os.environ)
 
 
 def tube_image(centers_yz_voxels, radius_voxels):
@@ -41,10 +44,10 @@ def straight_assembly(offsets_yz_voxels):
 
 
 @unittest.skipIf(np is None, "the test image needs NumPy")
+@unittest.skipUnless(GPU, "runs on the GPU; set TANGLE_BACKEND to run it here")
 class ImageRelaxerTests(unittest.TestCase):
     def relaxer(self, offsets, centers):
         image = tube_image(centers, RADIUS / VOXEL)
-        # CI has no GPU; set TANGLE_BACKEND=wgpu to run these on one.
         settings = tangle.RelaxationSettings(backend=BACKEND, max_step=0.25 * VOXEL)
         return tangle.ImageRelaxer(
             straight_assembly(offsets), settings, image.tobytes(), image.shape, VOXEL
