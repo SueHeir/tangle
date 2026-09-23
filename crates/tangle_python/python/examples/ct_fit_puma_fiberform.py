@@ -21,7 +21,7 @@ import urllib.request
 from pathlib import Path
 
 import tangle.ct as ct
-from tangle.units import um
+from tangle.units import mm, um
 
 OUTPUT = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).with_name("output") / "ct_fit_fiberform")
 SOURCE = "https://raw.githubusercontent.com/nasa/puma/main/python/pumapy/data/200_fiberform.tif"
@@ -31,6 +31,10 @@ SPEC = ct.FiberSpec(
     diameter=10 * um,
     diameter_tolerance=0.35,  # lobed cross-sections vary in equal-area diameter
     min_bend_radius=40 * um,
+    # Fiber-length prior. FiberForm fibers are much longer than this 260 µm
+    # crop; 1 mm is an assumed round figure, not a measured one. Set it to
+    # None to fit without the prior.
+    length=1 * mm,
     name="FiberForm fiber",
 )
 
@@ -51,7 +55,10 @@ def main() -> None:
     print(f"fit: {fit.fiber_count} fibers ({time.perf_counter() - started:.0f} s)")
 
     summary = fit.population_summary()
-    for key in ("diameter_mean", "length_mean", "fibers_touching_boundary", "volume_fraction", "orientation_eigenvalues"):
+    for key in (
+        "diameter_mean", "length_mean", "fibers_touching_boundary", "volume_fraction", "orientation_eigenvalues",
+        "interior_ends", "expected_interior_ends", "implied_mean_length",
+    ):
         print(f"  {key}: {summary[key]}")
     for name, path in fit.write(OUTPUT, volume=volume).items():
         print(f"  {name}: {path}")

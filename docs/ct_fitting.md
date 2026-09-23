@@ -36,6 +36,7 @@ relaxed, run = fit.relax()               # optional: clean up remaining overlaps
 | `min_bend_radius` | The tightest bend a fiber can make. It limits how sharply a trace can turn, decides where a fit is split at a kink, and becomes the Tangle material's bend limit. Default 5 diameters. |
 | `min_length` | Shorter fragments are dropped. Default 3 diameters. |
 | `max_length` | Optional. Fits longer than this are split where the scan gives them the least support. |
+| `length` | Optional typical fiber length. Turns on the fiber-length prior (below). A rough value is enough. |
 
 `FitSettings` holds the numerical settings (rounds, rates, merge gap and so
 on). The defaults are meant to work without changes.
@@ -85,6 +86,54 @@ that point they look like two touching fibers. To tell the cases apart, the
 fitter renders the neighborhood twice: once with both fibers, and once with a
 single fiber along their midline. It keeps whichever rendering leaves the
 smaller squared residual against the scan.
+
+## The fiber-length prior
+
+If you know roughly how long the fibers are, set `FiberSpec(length=...)`.
+The fitter then treats fiber ends as rare, which stops it from breaking long
+fibers into pieces wherever the scan is unclear.
+
+The reasoning: if fibers of mean length L have their ends spread uniformly
+through the material, a scan holds 2Λ/L fiber ends, where Λ is the total
+fiber length inside it. That holds however the scan boundary cuts the
+fibers, and ends on the boundary are fibers leaving the scan, so they don't
+count. Put another way, a break is expected about once per L of fiber, and
+a position along a fiber can be resolved to about a diameter D, so every end
+inside the scan costs ln(L/D) nats. For 1 mm fibers of 10 µm that is 4.6.
+
+The scan's evidence is measured in the same units. It is the change in
+squared residual between two renderings of the neighborhood, divided by
+2σ²·πr². Here σ² is the fit's own mean squared residual per voxel near the
+fibers (noise plus misfit such as lobed cross-sections), and πr² is one fiber
+cross-section, the scale on which neighboring voxels move together. With the
+prior on:
+
+- **Joins** are considered for any two ends within 16 radii whose directions
+  agree within 45°, including pieces that overlap a little. A join is made
+  when the joined fiber explains the scan better than the two pieces, with
+  2·ln(L/D) credited for the two ends it removes. The joins are chosen
+  together, best first, with each end used once, so pieces meeting at a
+  crossing are paired the way the scan supports best.
+- **Kinks** sharper than the bend limit are first smoothed out. A fiber is cut
+  only when the smoothed fiber explains the scan worse by more than the two
+  new ends cost. A trace that jumped onto another fiber can't be smoothed
+  without leaving both fibers, so it is still cut.
+- **One fiber or two** also charges or credits the ends each rendering has.
+
+Every fit also reports its interior ends and the fiber length they imply,
+2Λ divided by the number of interior ends (`interior_ends` and
+`implied_mean_length` in the population summary, per round in the history).
+With `length` set it adds the count expected, and its Poisson spread. An
+implied length far below the true one means the fit is over-split. For
+example, the FiberForm fit without the prior has 603 interior ends and
+implies 134 µm fibers; 1 mm fibers would give about 81 ± 9 ends.
+
+Ends are not perfectly uniform in real materials, for example in layered
+felts, so this is a soft cost rather than a hard count.
+[`ct_fit_synthetic_long.py`](../crates/tangle_python/python/examples/ct_fit_synthetic_long.py)
+tests it on a scan cropped from a larger cell, so fibers run through the
+scan boundary as in a real scan. It fits with and without the prior and
+scores both.
 
 ## Checking a fit against known answers
 

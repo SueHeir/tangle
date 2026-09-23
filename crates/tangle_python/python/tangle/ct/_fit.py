@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from . import _moves, _refine
+from ._ends import end_cost, end_statistics, evidence_scale
 from ._geometry import polyline_length, rasterize, tangents
 from ._image import HessianField, Levels, normalize
 from ._trace import trace_fibers
@@ -30,6 +31,13 @@ class FiberSpec:
         Shorter fragments are discarded. Defaults to 3 diameters.
     ``max_length``
         Optional; longer fits are split where the image support is weakest.
+    ``length``
+        Optional typical (mean) fiber length. It turns on the fiber-length
+        prior: fiber ends are assumed spread uniformly, about ``2 / length``
+        per unit of fiber length, so each end inside the scan costs
+        ``ln(length / diameter)`` nats. Splits, joins and the one-or-two-fiber
+        decision then weigh the scan against that cost, and joins across
+        longer gaps become possible. A rough value is enough.
     ``name``
         Material name used in the exported Tangle configuration.
     """
@@ -39,6 +47,7 @@ class FiberSpec:
     min_bend_radius: float | None = None
     min_length: float | None = None
     max_length: float | None = None
+    length: float | None = None
     name: str = "ct fiber"
 
     def replace(self, **changes: Any) -> "FiberSpec":
@@ -61,6 +70,8 @@ class FitSettings:
     node_spacing_radii: float = 1.0
     ownership_reach_radii: float = 1.6
     merge_gap_radii: float = 4.0
+    prior_merge_gap_radii: float = 16.0
+    prior_merge_angle_degrees: float = 45.0
     kink_threshold: float = 2.0
     min_support: float = 0.5
     separate_fibers: bool = True
@@ -195,6 +206,7 @@ class FitResult:
         values, vectors = np.linalg.eigh(tensor)
         diameters = self.diameters_m()
         volume = float(np.prod(self.shape))
+        ends = end_statistics(self.centerlines, self.radii, self.shape, length=self.spec.length / h if self.spec.length else None)
         return {
             "fiber_count": self.fiber_count,
             "diameter_mean": float(diameters.mean()) if len(diameters) else None,
@@ -209,6 +221,10 @@ class FitResult:
             "orientation_eigenvalues": values.tolist(),
             "orientation_eigenvectors": vectors.T.tolist(),
             "volume_fraction": float((self.label_volume() > 0).sum()) / volume,
+            "interior_ends": ends["interior_ends"],
+            "implied_mean_length": ends["implied_length"] * h if ends["implied_length"] else None,
+            "expected_interior_ends": ends.get("expected_interior_ends"),
+            "expected_interior_ends_sd": ends.get("expected_interior_ends_sd"),
             "_tilt": tilt,
         }
 
@@ -367,7 +383,9 @@ def fit_fibers(
     bend = (spec.min_bend_radius or 5.0 * spec.diameter) / voxel_size
     min_length = (spec.min_length or 3.0 * spec.diameter) / voxel_size
     max_length = spec.max_length / voxel_size if spec.max_length else None
+    length = spec.length / voxel_size if spec.length else None
     spacing = settings.node_spacing_radii * radius
+    cost = end_cost(spec.length, spec.diameter)
 
     image, levels = normalize(volume, denoise_sigma=settings.denoise_sigma_voxels, levels=settings.levels)
     hessian = HessianField(image, sigma=max(0.6 * radius, 1.0))
@@ -410,20 +428,34 @@ def fit_fibers(
             if settings.separate_fibers:
                 lines = _refine.separate_step(lines, radii)
             lines = _refine.respace(lines, spacing)
+        scale = evidence_scale(image, lines, radii, radius) if cost > 0 else 1.0
         lines, radii, splits = _moves.split_kinks(
             lines, radii, min_bend_radius=bend, min_length=min_length, max_length=max_length,
-            threshold=settings.kink_threshold, image=image,
+            threshold=settings.kink_threshold, image=image, end_cost=cost, scale=scale,
         )
-        lines, radii, duplicates = _moves.resolve_side_by_side(image, lines, radii, min_length=min_length)
+        lines, radii, duplicates = _moves.resolve_side_by_side(
+            image, lines, radii, min_length=min_length, end_cost=cost, scale=scale
+        )
         lines, radii = _moves.trim_duplicates(lines, radii, min_length=min_length)
         lines, radii = _moves.remove_unsupported(image, lines, radii, min_length=min_length, min_support=settings.min_support)
         lines, radii, merges = _moves.merge_fragments(
             image, lines, radii, max_gap=settings.merge_gap_radii * radius,
             min_bend_radius=bend, kink_threshold=settings.kink_threshold,
+            end_cost=cost, scale=scale, max_prior_gap=settings.prior_merge_gap_radii * radius,
+            max_prior_angle_degrees=settings.prior_merge_angle_degrees,
         )
         lines = _refine.respace(lines, spacing)
         explained = _explained_fraction(foreground, lines, radii)
-        log(f"round {round_index + 1}", lines, splits=splits, duplicates=duplicates, merges=merges, explained=explained)
+        ends = end_statistics(lines, radii, image.shape, length=length)
+        extra = {"interior_ends": ends["interior_ends"]}
+        if ends["implied_length"]:
+            extra["implied_length_m"] = ends["implied_length"] * voxel_size
+        if length:
+            extra["expected_interior_ends"] = round(ends["expected_interior_ends"], 1)
+        log(
+            f"round {round_index + 1}", lines, splits=splits, duplicates=duplicates, merges=merges,
+            explained=explained, **extra,
+        )
         if round_index + 1 < settings.rounds:
             claimed, _, _ = rasterize(image.shape, lines, radii, reach=1.2 * radii)
             born = trace_fibers(

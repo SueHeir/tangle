@@ -76,6 +76,56 @@ class CtFitTests(unittest.TestCase):
         self.assertEqual(stack.dtype, np.uint8)
         self.assertEqual(stack.shape, labels.shape + (3,))
 
+    def test_length_prior_keeps_every_fiber(self):
+        spec = ct.FiberSpec(diameter=DIAMETER, length=200 * um)
+        fit = ct.fit_fibers(self.scan.volume, VOXEL, spec)
+        report = ct.score(fit, self.scan)
+        self.assertEqual(report["recovered"], 3, report)
+        self.assertEqual(report["false_fibers"], 0, report)
+        summary = fit.population_summary()
+        self.assertIn("interior_ends", summary)
+        self.assertGreater(summary["expected_interior_ends"], 0.0)
+
+    def test_length_prior_joins_across_a_long_gap(self):
+        from tangle.ct import _ends, _moves
+        from tangle.ct._geometry import resample
+        from tangle.ct._image import normalize
+
+        image, _ = normalize(self.scan.volume, denoise_sigma=0.7)
+        line = resample(self.scan.centerlines[0], 4.0)
+        radius = 0.5 * DIAMETER / VOXEL
+        gap = int(np.ceil(6 * radius / 4.0))  # a 6-radius break, beyond the fixed 4-radius limit
+        middle = len(line) // 2
+        pieces = [line[: middle - gap // 2], line[middle + gap - gap // 2 :]]
+        radii = np.full(2, radius)
+        _, _, without = _moves.merge_fragments(image, pieces, radii, max_gap=4 * radius)
+        self.assertEqual(without, 0)
+        cost = _ends.end_cost(200 * um, DIAMETER)
+        scale = _ends.evidence_scale(image, pieces, radii, radius)
+        joined, _, merges = _moves.merge_fragments(
+            image, pieces, radii, max_gap=4 * radius, end_cost=cost, scale=scale, max_prior_gap=16 * radius
+        )
+        self.assertEqual(merges, 1)
+        self.assertEqual(len(joined), 1)
+
+    def test_end_statistics_ignore_boundary_ends(self):
+        from tangle.ct._ends import end_statistics
+
+        shape = (40, 40, 40)
+        through = np.array([[0.0, 20.0, 20.0], [40.0, 20.0, 20.0]])
+        inside = np.array([[10.0, 10.0, 10.0], [30.0, 10.0, 10.0]])
+        stats = end_statistics([through, inside], np.array([2.0, 2.0]), shape, length=60.0)
+        self.assertEqual(stats["interior_ends"], 2)
+        self.assertAlmostEqual(stats["implied_length"], 60.0)
+        self.assertAlmostEqual(stats["expected_interior_ends"], 2.0)
+
+    def test_crop_clips_truth_to_the_window(self):
+        crop = self.scan.crop((0, 0, 0), (36, 72, 72))
+        self.assertEqual(crop.volume.shape, (72, 72, 36))
+        for line in crop.centerlines:
+            self.assertTrue(np.all(line[:, 0] < 36))
+        self.assertEqual(int(crop.labels.max()), len(crop.centerlines))
+
     def test_thin_fibers_are_rejected(self):
         with self.assertRaises(ValueError):
             ct.fit_fibers(self.scan.volume, VOXEL, ct.FiberSpec(diameter=1 * um))

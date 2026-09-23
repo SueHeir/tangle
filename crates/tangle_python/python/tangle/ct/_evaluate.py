@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 
+from ._ends import end_statistics
 from ._geometry import resample
 
 
@@ -105,6 +106,8 @@ def score(fit, truth, *, coverage_threshold: float = 0.8) -> dict[str, Any]:
     label_accuracy = float((mapped_labels[truth_solid] == truth_labels[truth_solid]).mean()) if truth_solid.any() else 0.0
 
     h = fit.voxel_size
+    fit_ends = end_statistics(fit.centerlines, fit.radii, shape)
+    truth_ends = end_statistics(truth.centerlines, np.asarray(truth.radii), shape)
     precision = (len(owner) - false_positive) / max(len(owner), 1)
     recall = recovered / max(present, 1)
     return {
@@ -124,5 +127,9 @@ def score(fit, truth, *, coverage_threshold: float = 0.8) -> dict[str, Any]:
         "diameter_rms_error_m": 2 * float(np.sqrt(np.mean(np.square(radius_errors)))) * h if radius_errors else None,
         "solid_dice": dice,
         "voxel_label_accuracy": label_accuracy,
+        "interior_ends_fit": fit_ends["interior_ends"],
+        "interior_ends_truth": truth_ends["interior_ends"],
+        "implied_mean_length_fit_m": fit_ends["implied_length"] * h if fit_ends["implied_length"] else None,
+        "implied_mean_length_truth_m": truth_ends["implied_length"] * h if truth_ends["implied_length"] else None,
         "per_true_fiber": per_truth,
     }

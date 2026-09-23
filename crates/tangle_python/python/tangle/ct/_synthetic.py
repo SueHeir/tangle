@@ -33,6 +33,55 @@ class SyntheticScan:
     radii: np.ndarray
     voxel_size: float
 
+    def crop(self, low: tuple[int, int, int], high: tuple[int, int, int]) -> "SyntheticScan":
+        """The sub-volume ``[low, high)`` (voxel indices, ``(x, y, z)``).
+
+        Cropping a scan of a larger cell gives fibers that run through the
+        scan boundary, as in a real scan. Truth centerlines are clipped to the
+        crop; a fiber that leaves and re-enters becomes several pieces, and
+        labels are renumbered to match the remaining pieces.
+        """
+        from ._geometry import resample
+
+        low_a, high_a = np.asarray(low, dtype=int), np.asarray(high, dtype=int)
+        window = (slice(low_a[2], high_a[2]), slice(low_a[1], high_a[1]), slice(low_a[0], high_a[0]))
+        volume = self.volume[window].copy()
+        old_labels = self.labels[window]
+        extent = (high_a - low_a).astype(np.float64)
+        lines, radii, origin = [], [], []
+        for index, line in enumerate(self.centerlines):
+            dense = resample(np.asarray(line, dtype=np.float64), 0.5) - low_a
+            inside = np.all((dense >= 0) & (dense < extent), axis=1)
+            start = None
+            for k, flag in enumerate(list(inside) + [False]):
+                if flag and start is None:
+                    start = k
+                elif not flag and start is not None:
+                    if k - start >= 2:
+                        lines.append(dense[start:k])
+                        radii.append(self.radii[index])
+                        origin.append(index + 1)
+                    start = None
+        # Voxels keep the id of the nearest surviving piece of their fiber.
+        labels = np.zeros_like(old_labels)
+        pieces_of: dict[int, list[int]] = {}
+        for piece, fiber in enumerate(origin):
+            pieces_of.setdefault(fiber, []).append(piece)
+        for fiber, pieces in pieces_of.items():
+            mask = old_labels == fiber
+            if len(pieces) == 1:
+                labels[mask] = pieces[0] + 1
+                continue
+            z, y, x = np.nonzero(mask)
+            points = np.stack([x, y, z], axis=1) + 0.5
+            from scipy.spatial import cKDTree
+
+            nodes = np.concatenate([lines[p] for p in pieces])
+            owner = np.concatenate([np.full(len(lines[p]), p) for p in pieces])
+            _, nearest = cKDTree(nodes).query(points)
+            labels[z, y, x] = owner[nearest] + 1
+        return SyntheticScan(volume, labels, lines, np.asarray(radii, dtype=np.float64), self.voxel_size)
+
 
 def synthetic_ct(
     source,

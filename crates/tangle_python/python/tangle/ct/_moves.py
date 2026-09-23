@@ -95,12 +95,25 @@ def merge_fragments(
     min_bridge_support: float = 0.45,
     min_bend_radius: float | None = None,
     kink_threshold: float = 2.0,
+    end_cost: float = 0.0,
+    scale: float = 1.0,
+    max_prior_gap: float | None = None,
+    max_prior_angle_degrees: float = 45.0,
 ) -> tuple[list[np.ndarray], np.ndarray, int]:
     """Join pairs of ends that continue each other across a short gap.
 
     With ``min_bend_radius``, a join that would create a kink the split step
     would cut again is not made.
+
+    With an ``end_cost`` (the fiber-length prior, see ``_ends``), the fixed
+    gap, angle and bridge tests are replaced by :func:`_merge_with_prior`.
     """
+    if end_cost > 0.0:
+        return _merge_with_prior(
+            image, centerlines, radii,
+            max_gap=max_prior_gap or 4.0 * max_gap, max_angle_degrees=max_prior_angle_degrees,
+            min_bend_radius=min_bend_radius, kink_threshold=kink_threshold, end_cost=end_cost, scale=scale,
+        )
     lines = [line.copy() for line in centerlines]
     radii = radii.copy()
     cos_limit = np.cos(np.radians(max_angle_degrees))
@@ -149,6 +162,152 @@ def merge_fragments(
     return lines, radii, merges
 
 
+def _join(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+    """Join ``first`` (ending at the junction) to ``second`` (starting there).
+
+    Both are cut back at the plane through the midpoint of their tips, so
+    pieces separated by a gap are bridged and pieces that overlap are trimmed.
+    """
+    _, out = _end(first, 1)
+    _, back = _end(second, 0)
+    axis = out - back
+    axis /= max(np.linalg.norm(axis), 1e-12)
+    middle = 0.5 * (first[-1] + second[0])
+    stop = len(first)
+    while stop > 2 and float((first[stop - 1] - middle) @ axis) > 0.0:
+        stop -= 1
+    start = 0
+    while start < len(second) - 2 and float((second[start] - middle) @ axis) < 0.0:
+        start += 1
+    return np.vstack([first[:stop], second[start:]])
+
+
+def _oriented(line: np.ndarray, end: int, at_start: bool) -> np.ndarray:
+    """``line`` ordered so that its end ``end`` comes first (``at_start``) or last."""
+    if at_start:
+        return line if end == 0 else line[::-1]
+    return line if end == 1 else line[::-1]
+
+
+def _merge_with_prior(
+    image: np.ndarray,
+    centerlines: list[np.ndarray],
+    radii: np.ndarray,
+    *,
+    max_gap: float,
+    max_angle_degrees: float,
+    min_bend_radius: float | None,
+    kink_threshold: float,
+    end_cost: float,
+    scale: float,
+) -> tuple[list[np.ndarray], np.ndarray, int]:
+    """Join aligned end pairs whose join the scan and the length prior favor.
+
+    Every pair of ends within ``max_gap`` whose directions (and the gap
+    between them) agree within ``max_angle_degrees`` is a candidate; the ends
+    may also overlap by up to two radii. A candidate is scored in nats: the
+    drop in squared residual when the neighborhood is rendered with the joined
+    fiber instead of the two pieces, divided by ``scale``, plus
+    ``2 * end_cost`` for the two ends the join removes. Joins that would kink
+    beyond the bend limit are never made.
+
+    Pairings are chosen together: candidates are taken best first, each end
+    joins at most once, and joins that would close a loop are skipped, so
+    pieces meeting at a crossing are paired the way the scan supports best.
+    """
+    from scipy.spatial import cKDTree
+
+    from ._ends import local_box, local_residual, near_box
+
+    lines = [np.asarray(line, dtype=np.float64) for line in centerlines]
+    radii = np.asarray(radii, dtype=np.float64)
+    ends = [(i, e, *_end(line, e)) for i, line in enumerate(lines) if len(line) >= 3 for e in (0, 1)]
+    if len(ends) < 2:
+        return lines, radii, 0
+    cos_limit = np.cos(np.radians(max_angle_degrees))
+    tips = np.array([tip for _, _, tip, _ in ends])
+    candidates = []
+    for a, b in cKDTree(tips).query_pairs(max_gap):
+        i, ei, pi, ti = ends[a]
+        j, ej, pj, tj = ends[b]
+        if i == j or float(ti @ -tj) < cos_limit:
+            continue
+        r = 0.5 * (radii[i] + radii[j])
+        gap = pj - pi
+        distance = float(np.linalg.norm(gap))
+        along = float(gap @ ti)
+        if along < -2.0 * r or float(-gap @ tj) < -2.0 * r:
+            continue
+        if distance > r:
+            lateral = float(np.linalg.norm(gap - along * ti))
+            if along <= 0.0 and lateral > 1.5 * r:
+                continue
+            if along > 0.0 and (along / distance < cos_limit or float(-gap @ tj) / distance < cos_limit):
+                continue
+        joined = _join(_oriented(lines[i], ei, at_start=False), _oriented(lines[j], ej, at_start=True))
+        if min_bend_radius is not None:
+            junction = len(_oriented(lines[i], ei, at_start=False))
+            excess = _kink_excess(joined, min_bend_radius, kink_threshold)
+            window = excess[max(junction - 6, 0) : junction + 3]
+            if len(window) and window.max() > 1.0:
+                continue
+        region = np.vstack([lines[i][-4:] if ei == 1 else lines[i][:4], lines[j][-4:] if ej == 1 else lines[j][:4]])
+        low, high = local_box(region, 2.5 * r, image.shape)
+        others = near_box(lines, radii, low, high, skip=(i, j))
+        context = [lines[k] for k in others]
+        context_r = list(radii[others])
+        length_i, length_j = polyline_length(lines[i]), polyline_length(lines[j])
+        radius = (radii[i] * length_i + radii[j] * length_j) / max(length_i + length_j, 1e-9)
+        apart = local_residual(image, low, high, context + [lines[i], lines[j]], np.array(context_r + [radii[i], radii[j]]))
+        together = local_residual(image, low, high, context + [joined], np.array(context_r + [radius]))
+        odds = (apart - together) / scale + 2.0 * end_cost
+        if odds > 0.0:
+            candidates.append((odds, i, ei, j, ej))
+
+    # Best first; each end once; no loops (union-find over fibers).
+    parent = list(range(len(lines)))
+
+    def root(k: int) -> int:
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    link: dict[tuple[int, int], tuple[int, int]] = {}
+    for _, i, ei, j, ej in sorted(candidates, reverse=True):
+        if (i, ei) in link or (j, ej) in link or root(i) == root(j):
+            continue
+        link[(i, ei)] = (j, ej)
+        link[(j, ej)] = (i, ei)
+        parent[root(i)] = root(j)
+    if not link:
+        return lines, radii, 0
+
+    # Walk each chain from a fiber with a free end.
+    used = np.zeros(len(lines), dtype=bool)
+    merged_lines, merged_radii = [], []
+    for start in range(len(lines)):
+        if used[start]:
+            continue
+        free = [e for e in (0, 1) if (start, e) not in link]
+        if not free:
+            continue  # interior of a chain; reached from its free end
+        i, entry = start, free[0]
+        path = _oriented(lines[i], entry, at_start=True)
+        weight, total = radii[i] * polyline_length(lines[i]), polyline_length(lines[i])
+        used[i] = True
+        while (i, 1 - entry) in link:
+            j, ej = link[(i, 1 - entry)]
+            path = _join(path, _oriented(lines[j], ej, at_start=True))
+            weight += radii[j] * polyline_length(lines[j])
+            total += polyline_length(lines[j])
+            used[j] = True
+            i, entry = j, ej
+        merged_lines.append(path)
+        merged_radii.append(weight / max(total, 1e-9))
+    return merged_lines, np.array(merged_radii), len(link) // 2
+
+
 def split_kinks(
     centerlines: list[np.ndarray],
     radii: np.ndarray,
@@ -159,6 +318,8 @@ def split_kinks(
     threshold: float = 2.0,
     min_angle_degrees: float = 35.0,
     image: np.ndarray | None = None,
+    end_cost: float = 0.0,
+    scale: float = 1.0,
 ) -> tuple[list[np.ndarray], np.ndarray, int]:
     """Split fibers at kinks sharper than the bend limit, and overlong fibers.
 
@@ -167,13 +328,40 @@ def split_kinks(
     spacings on each side to ignore node-scale noise; ``threshold`` is the
     allowed multiple of the admissible curvature. Fibers longer than
     ``max_length`` are cut where the image support along them is weakest.
+
+    With an ``end_cost`` (the fiber-length prior, see ``_ends``), a kink is
+    first smoothed out locally; the fiber is only cut when the smoothed
+    fiber matches ``image`` worse than the kinked one by more than the cost of
+    the two new ends. A trace that jumped onto another fiber cannot be smoothed
+    without leaving both fibers, so it is still cut.
     """
-    queue = [(line, radius) for line, radius in zip(centerlines, radii)]
+    from ._ends import local_box, local_residual, near_box
+
+    context_lines = [np.asarray(line) for line in centerlines]
+    context_radii = np.asarray(radii, dtype=np.float64)
+    # Each queued piece remembers which input fiber it came from, so that
+    # fiber is left out of the rendering context around its own kink.
+    queue = [(line, radius, source) for source, (line, radius) in enumerate(zip(centerlines, radii))]
     done: list[tuple[np.ndarray, float]] = []
     splits = 0
+    kept = 0
     while queue:
-        line, radius = queue.pop()
+        line, radius, source = queue.pop()
         cut = _kink_index(line, min_bend_radius, threshold, min_angle_degrees)
+        if cut is not None and end_cost > 0 and image is not None and kept < 10 * len(centerlines):
+            smoothed = _smooth_kink(line, cut, min_bend_radius, threshold, min_angle_degrees)
+            if smoothed is not None:
+                window = np.vstack([line[max(cut - 6, 0) : cut + 7], smoothed[max(cut - 6, 0) : cut + 7]])
+                low, high = local_box(window, 2.5 * radius, image.shape)
+                others = near_box(context_lines, context_radii, low, high, skip=(source,))
+                context = [context_lines[k] for k in others]
+                context_r = [context_radii[k] for k in others]
+                kinked = local_residual(image, low, high, context + [line], np.array(context_r + [radius]))
+                smooth = local_residual(image, low, high, context + [smoothed], np.array(context_r + [radius]))
+                if (kinked - smooth) / scale + 2.0 * end_cost > 0.0:
+                    kept += 1
+                    queue.append((smoothed, radius, source))
+                    continue
         if cut is None and max_length is not None and polyline_length(line) > max_length:
             cut = _weakest_index(line, image, min_length)
         if cut is None:
@@ -182,15 +370,14 @@ def split_kinks(
         splits += 1
         for part in (line[: cut + 1], line[cut:]):
             if len(part) >= 2 and polyline_length(part) >= min_length:
-                queue.append((part, radius))
+                queue.append((part, radius, source))
     return [line for line, _ in done], np.array([radius for _, radius in done]), splits
 
 
-def _kink_index(
-    line: np.ndarray, min_bend_radius: float, threshold: float, min_angle_degrees: float = 35.0, k: int = 3
-) -> int | None:
+def _kink_excess(line: np.ndarray, min_bend_radius: float, threshold: float, min_angle_degrees: float = 35.0, k: int = 3) -> np.ndarray:
+    """Turn over ``k`` node spacings on each side of node ``k..n-k``, as a multiple of the allowed turn."""
     if len(line) < 2 * k + 1:
-        return None
+        return np.zeros(0)
     before = line[k:-k] - line[: -2 * k]
     after = line[2 * k :] - line[k:-k]
     lengths = np.linalg.norm(before, axis=1) * np.linalg.norm(after, axis=1)
@@ -198,11 +385,44 @@ def _kink_index(
     window = 0.5 * (np.linalg.norm(before, axis=1) + np.linalg.norm(after, axis=1))
     angle = np.arccos(cosine)
     limit = np.maximum(threshold * window / min_bend_radius, np.radians(min_angle_degrees))
-    excess = angle / limit
+    return angle / limit
+
+
+def _kink_index(
+    line: np.ndarray, min_bend_radius: float, threshold: float, min_angle_degrees: float = 35.0, k: int = 3
+) -> int | None:
+    excess = _kink_excess(line, min_bend_radius, threshold, min_angle_degrees, k)
+    if len(excess) == 0:
+        return None
     worst = int(np.argmax(excess))
     if excess[worst] <= 1.0:
         return None
     return worst + k
+
+
+def _smooth_kink(
+    line: np.ndarray,
+    cut: int,
+    min_bend_radius: float,
+    threshold: float,
+    min_angle_degrees: float = 35.0,
+    k: int = 3,
+    passes: int = 40,
+) -> np.ndarray | None:
+    """Relax the nodes around ``cut`` until no kink is left there, or give up (``None``)."""
+    low, high = max(cut - 2 * k, 1), min(cut + 2 * k, len(line) - 2)
+    if high <= low:
+        return None
+    smoothed = line.copy()
+    for _ in range(passes):
+        smoothed[low : high + 1] += 0.5 * (0.5 * (smoothed[low - 1 : high] + smoothed[low + 1 : high + 2]) - smoothed[low : high + 1])
+        excess = _kink_excess(smoothed, min_bend_radius, threshold, min_angle_degrees, k)
+        near = excess[max(low - k, 0) : max(high - k + 1, 0)]
+        if len(near) == 0:
+            return None
+        if near.max() <= 1.0:
+            return smoothed
+    return None
 
 
 def _weakest_index(line: np.ndarray, image: np.ndarray | None, min_length: float) -> int | None:
@@ -240,6 +460,8 @@ def resolve_side_by_side(
     *,
     min_length: float,
     reach: float = 2.3,
+    end_cost: float = 0.0,
+    scale: float = 1.0,
 ) -> tuple[list[np.ndarray], np.ndarray, int]:
     """Decide, from the image, whether two adjacent parallel fits are one fiber.
 
@@ -248,7 +470,10 @@ def resolve_side_by_side(
     touching fibers. For every pair running side by side, the image in their
     neighborhood is compared with two renderings: both fibers as they are, and
     one fiber along their midline (the weaker fit is removed there). The
-    rendering with the smaller squared residual wins.
+    rendering with the smaller squared residual wins. With an ``end_cost``
+    (the fiber-length prior), each fiber end a rendering adds or removes is
+    charged or credited ``end_cost`` nats, the residual being measured in
+    units of ``scale``.
     """
     from scipy.spatial import cKDTree
 
@@ -256,7 +481,6 @@ def resolve_side_by_side(
     radii = np.asarray(radii, dtype=np.float64).copy()
     upper = np.array(image.shape[::-1])
     changed = 0
-    index = 0
     order = list(np.argsort([float(sample_image(image, line).mean()) for line in lines]))
     done: set[int] = set()
     while order:
@@ -302,7 +526,9 @@ def resolve_side_by_side(
             low, high, context + [merged_j] + pieces,
             np.concatenate([context_radii, [radii[j]], np.full(len(pieces), radii[i])]),
         )
-        if ((observed - one) ** 2).sum() < ((observed - both) ** 2).sum():
+        added_ends = 2 * len(pieces) - 2
+        gain = (((observed - both) ** 2).sum() - ((observed - one) ** 2).sum()) / scale
+        if gain - added_ends * end_cost > 0.0:
             lines[j] = merged_j
             lines[i] = pieces[0] if pieces else np.empty((0, 3))
             for piece in pieces[1:]:
