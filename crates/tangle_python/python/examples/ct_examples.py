@@ -477,7 +477,7 @@ def write_summary(output: Path, rows: list[dict]) -> None:
         return f"{value:.3g}" if isinstance(value, float) else str(value)
 
     lines = ["| " + " | ".join(columns) + " |", "|" + "---|" * len(columns)]
-    lines += ["| " + " | ".join(cell(row[c]) for c in columns) + " |" for row in known.values()]
+    lines += ["| " + " | ".join(cell(row.get(c)) for c in columns) + " |" for row in known.values()]
     header = (
         "# tangle.ct examples\n\n"
         f"Fitted from binary masks thresholded at {MASK_LEVEL} of the way from void to fiber. "
