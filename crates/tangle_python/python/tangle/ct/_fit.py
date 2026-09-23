@@ -672,7 +672,9 @@ def _fit_type(
     if settings.engine == "tangle" and not use_solver:
         log("engine", lines, note="numpy loop for a type fitted after another")
 
-    def solve(lines: list[np.ndarray], radii: np.ndarray, batches: int) -> tuple[list[np.ndarray], np.ndarray]:
+    def solve(
+        lines: list[np.ndarray], radii: np.ndarray, batches: int, final: bool = False
+    ) -> tuple[list[np.ndarray], np.ndarray]:
         from . import _device
 
         return _device.refine(
@@ -680,7 +682,7 @@ def _fit_type(
             prior_weight=settings.radius_prior_weight, bend=bend, spacing=spacing,
             rate=settings.solver_image_rate, reach_radii=settings.solver_reach_radii, batches=batches,
             iterations=settings.solver_iterations, settle=settings.solver_settle_iterations,
-            backend=settings.backend, profile=profile, log=log,
+            backend=settings.backend, profile=profile, log=log, final=final,
         )
 
     for round_index in range(settings.rounds):
@@ -756,8 +758,9 @@ def _fit_type(
             radii = np.concatenate([radii, np.full(len(born), radius)])
             log(f"births {round_index + 1}", lines, born=len(born))
     if use_solver and lines:
-        # The last round's splits and joins are not yet admissible fibers.
-        lines, radii = solve(lines, radii, 1)
+        # The last round's splits and joins are not yet admissible fibers; the
+        # fit is returned exactly as the solver leaves it.
+        lines, radii = solve(lines, radii, 1, final=True)
         log("final solve", lines)
     return lines, np.asarray(radii, dtype=np.float64), image, levels
 

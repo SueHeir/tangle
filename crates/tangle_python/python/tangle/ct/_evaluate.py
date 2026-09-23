@@ -170,8 +170,15 @@ def geometry_report(
     min_bend_radius: float,
     *,
     penetration_tolerance: float = 0.05,
+    spacing: float | None = None,
 ) -> dict[str, Any]:
     """How far fibers are from being valid Tangle fibers (voxel units).
+
+    ``spacing`` resamples every fiber to that node spacing first. Discrete
+    curvature depends on the spacing: resampling a polyline more finely than
+    its own segments puts nodes at its corners, where the turn per unit
+    length roughly doubles. Compare fits at the spacing Tangle uses for them
+    (1.25 diameters in ``engine="tangle"``).
 
     * ``curvature_ratio_max`` / ``_p95``: largest discrete curvature per fiber
       times ``min_bend_radius`` (1 is the bend limit);
@@ -188,6 +195,8 @@ def geometry_report(
 
     radii = np.asarray(radii, dtype=np.float64)
     lines = [np.asarray(line, dtype=np.float64) for line in centerlines if len(line) >= 2]
+    if spacing:
+        lines = [resample(line, spacing) for line in lines]
     keep = [i for i, line in enumerate(centerlines) if len(line) >= 2]
     radii = radii[keep]
     report: dict[str, Any] = {"fibers": len(lines)}

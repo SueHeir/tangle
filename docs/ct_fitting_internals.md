@@ -348,7 +348,9 @@ With `engine="tangle"`, each round's continuous fit (6a) is replaced by
 (`FitSettings.backend`). The topology moves (6b) and births stay as they
 are. One batch:
 
-1. **Upload.** Fibers are resampled to segments of 1.25 diameters (never
+1. **Ends** grow or trim on the host (6a.4), before the solve, so the solver
+   also cleans up what end growth does.
+2. **Upload.** Fibers are resampled to segments of 1.25 diameters (never
    shorter than one: Tangle's contact treats non-adjacent segments of one
    fiber as colliding) and placed in a closed cell padded by 3 r around the
    scan. Each fiber gets a material with its fitted diameter and the spec's
@@ -356,7 +358,7 @@ are. One batch:
    bending then resists every curve, and a kinked fit does not keep its
    kinks as its natural shape. `neighbor_capacity` is 192, because
    overlapping starts overflow the default 48 slots into a slow fallback.
-2. **Relax with the image force** for `solver_iterations` (300). Every
+3. **Relax with the image force** for `solver_iterations` (300). Every
    iteration applies Tangle's contact, stretch, bending and bend-limit steps
    and one image step: each vertex samples the normalized scan on a polar
    grid across the fiber (4 rings × 12 spokes out to `solver_reach_radii` =
@@ -364,20 +366,23 @@ are. One batch:
    own capsule surface than any other fiber's, and moves sideways toward
    their brightness-weighted centroid at `solver_image_rate` (0.3), scaled
    by the brightness of its innermost ring and capped at the max step.
-3. **Read the owned intensity** of every vertex (`vertex_image_stats`: area
+4. **Read the owned intensity** of every vertex (`vertex_image_stats`: area
    in voxels² of owned brightness). The mean over interior vertices is each
-   fiber's cross-section area, turned into a radius as in 6a.3 (profile
-   inversion for non-solid types), blended with the spec radius and clamped
-   to the tolerance.
-4. **Settle** for `solver_settle_iterations` (100) with the image force
+   fiber's cross-section area, turned into a radius for the next batch as in
+   6a.3 (profile inversion for non-solid types), blended with the spec
+   radius and clamped to the tolerance.
+5. **Settle** for `solver_settle_iterations` (100) with the image force
    off. The image step re-adds a little curvature each iteration before the
    solver removes it; the settle ends on geometry the constraints alone
    accept (it converges in a few dozen iterations).
-5. **Ends** grow or trim on the host (6a.4), and fibers are respaced to the
-   fitter's node spacing.
+6. Fibers are respaced to the fitter's node spacing for the topology moves.
 
 After the last round, one more batch makes the last splits and joins
-admissible. A type fitted after another (several fiber types) still uses
+admissible, and its solver output is returned unchanged (segments of 1.25
+diameters, the radii it was solved with), so the fit is exactly the state
+the solver converged to. Measure it with `geometry_report(...,
+spacing=1.25 * diameter)`: finer resampling puts nodes at the polyline's
+corners and roughly doubles the discrete curvature there. A type fitted after another (several fiber types) still uses
 the NumPy loop, since its frozen predecessors would have to stay fixed in
 the solver.
 

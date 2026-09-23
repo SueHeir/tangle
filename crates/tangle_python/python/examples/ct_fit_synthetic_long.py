@@ -106,7 +106,10 @@ def main() -> None:
         elapsed = time.perf_counter() - started
         report = ct.score(fit, scan)
         report["seconds"] = elapsed
-        geometry = ct.geometry_report(fit.centerlines, fit.radii, MIN_BEND_RADIUS / VOXEL)
+        # Measured at the solver's segment length (1.25 diameters) for every fit.
+        geometry = ct.geometry_report(
+            fit.centerlines, fit.radii, MIN_BEND_RADIUS / VOXEL, spacing=1.25 * DIAMETER / VOXEL
+        )
         report.update({key: geometry[key] for key in geometry_keys})
         reports[name] = report
         fit.write(OUTPUT / name, volume=scan.volume)

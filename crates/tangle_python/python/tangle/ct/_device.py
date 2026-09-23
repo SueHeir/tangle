@@ -7,12 +7,12 @@ scan as one more force: every vertex moves sideways toward the intensity
 centroid of the cross-section samples it owns under the
 nearest-capsule-surface rule (``tangle.ImageRelaxer``).
 
-One batch is: upload the fibers, relax with the image force, read back each
-vertex's owned intensity (for the radii), relax a little more without the
-image so the fibers come back admissible, then grow or trim the ends on the
-host. Radii and ends change the fibers, so every batch uploads again;
-topology moves (splits, joins, births) still happen once per round in
-``_fit``.
+One batch is: grow or trim the fiber ends on the host, upload the fibers,
+relax with the image force, read back each vertex's owned intensity (for the
+radii of the next batch), then relax a little more without the image so the
+fibers come back admissible. Ends change before the solve, so the solver
+also cleans up what end growth did; every batch uploads again. Topology
+moves (splits, joins, births) still happen once per round in ``_fit``.
 """
 
 from __future__ import annotations
@@ -87,12 +87,16 @@ def refine(
     backend: str | None,
     profile=None,
     log=None,
+    final: bool = False,
 ) -> tuple[list[np.ndarray], np.ndarray]:
-    """``batches`` rounds of (solver with the image force → radii → ends).
+    """``batches`` rounds of (ends → solver with the image force → radii).
 
-    ``lines`` and the result are in voxels at the fitter's node ``spacing``;
-    on the device, fibers use segments of 1.25 diameters, because Tangle's
-    contact treats non-adjacent segments of one fiber as colliding.
+    ``lines`` are in voxels. On the device, fibers use segments of 1.25
+    diameters, because Tangle's contact treats non-adjacent segments of one
+    fiber as colliding. The result is respaced to the fitter's node
+    ``spacing`` for the topology moves, except with ``final``: then the last
+    batch's solver output is returned as it is, with the radii it was solved
+    with, so the fit is exactly the admissible state the solver reached.
     """
     import tangle
 
@@ -112,9 +116,12 @@ def refine(
         options["backend"] = backend
     settings = tangle.RelaxationSettings(**options)
     radii = np.asarray(radii, dtype=np.float64)
-    for _ in range(batches):
+    for batch in range(batches):
         if not lines:
             break
+        lines = _refine.respace(lines, spacing)
+        occupied, _, _ = rasterize(image.shape, lines, radii, signed=True)
+        lines = _refine.end_step(image, lines, radii, step=spacing, occupied=occupied)
         coarse = [resample(line, device_spacing) for line in lines]
         relaxer = _relaxer(image, payload, coarse, radii, voxel_size=h, bend=bend, pad=pad, settings=settings)
         relaxer.set_image_force(rate, reach_radii=reach_radii)
@@ -126,6 +133,8 @@ def refine(
         if log is not None:
             log("solver", coarse, **{k: status[k] for k in ("converged", "max_curvature_ratio") if k in status})
         lines = [np.asarray(line, dtype=np.float64) / h - pad for line in relaxer.centerlines()]
+        if final and batch + 1 == batches:
+            return lines, radii
 
         # Owned intensity per vertex is area-weighted over its cross-section
         # (voxels²); ends only own half a disc, so interior vertices size the fiber.
@@ -140,9 +149,4 @@ def refine(
             measured = profile.radius_from_area(area, h, 0.25 * radius, 2.0 * radius)
         blended = (measured + prior_weight * radius) / (1.0 + prior_weight)
         radii = np.clip(blended, radius * (1 - tolerance), radius * (1 + tolerance))
-
-        lines = _refine.respace(lines, spacing)
-        occupied, _, _ = rasterize(image.shape, lines, radii, signed=True)
-        lines = _refine.end_step(image, lines, radii, step=spacing, occupied=occupied)
-        lines = _refine.respace(lines, spacing)
-    return lines, radii
+    return _refine.respace(lines, spacing), radii

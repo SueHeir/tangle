@@ -198,8 +198,8 @@ class CtFitTests(unittest.TestCase):
     @unittest.skipUnless(hasattr(tangle, "ImageRelaxer"), "needs a Tangle build with ImageRelaxer")
     def test_fit_on_tangle_solver_recovers_valid_fibers(self):
         settings = ct.FitSettings(
-            engine="tangle", backend=os.environ.get("TANGLE_BACKEND", "cpu"), solver_iterations=150,
-            solver_settle_iterations=50,
+            engine="tangle", backend=os.environ.get("TANGLE_BACKEND", "cpu"), rounds=2, solver_batches=1,
+            solver_iterations=150, solver_settle_iterations=50,
         )
         fit = ct.fit_fibers(self.scan.volume, VOXEL, ct.FiberSpec(diameter=DIAMETER), settings)
         report = ct.score(fit, self.scan)
