@@ -900,7 +900,7 @@ NOTEBOOKS: dict[str, list[dict]] = {
         | 11 | Dynamic compaction targets, paths, and guards |
         | 12 | Explicit junction capture |
         | 13 | Checkpoints, continuation, and branching |
-        | 14 | Results, OVITO visualization, and BPM export |
+        | 14 | Results, native analysis, contact and neighbor metrics, OVITO, BPM, and PuMA export |
         """),
     ],
     "02_cells_and_boundaries.ipynb": [
@@ -1774,12 +1774,52 @@ NOTEBOOKS: dict[str, list[dict]] = {
             resume_case_id=checkpoint.case_id,
             fresh_formation_on_resume=True,
         )
+        {name: getattr(branch, name) for name in fields}
+        """),
+        md("""
+        The complete round trip below first writes a checkpoint from a small
+        two-fiber recipe, then branches a cleanup from it. A checkpoint is
+        written only when a run crosses `interval_iterations`, so a short run
+        with the 500-iteration cadence above would leave nothing to resume.
+        """),
+        code("""
+        from tangle.units import mm, um
 
-        # Expensive execution is deliberately opt-in in this reference notebook.
+        # Execution is opt-in in this reference notebook. The default backend
+        # is "wgpu"; add backend="cpu" on a machine without a supported GPU.
         RUN_RECIPE = False
         if RUN_RECIPE:
-            recipe = tangle.Recipe(tangle.Cell([1e-3, 1e-3, 1e-3]))
-            result = recipe.run(tangle.RelaxationSettings(), checkpoint=branch)
+            fiber = tangle.Material("fiber", diameter=20 * um)
+            crossing = tangle.FiberCollection("crossing")
+            crossing.add_fiber([[0.2 * mm, 0.5 * mm, 0.5 * mm], [0.8 * mm, 0.5 * mm, 0.5 * mm]], fiber)
+            crossing.add_fiber([[0.5 * mm, 0.2 * mm, 0.5 * mm], [0.5 * mm, 0.8 * mm, 0.5 * mm]], fiber)
+            cell = tangle.Cell([1 * mm, 1 * mm, 1 * mm])
+            settings = tangle.RelaxationSettings()
+
+            # Save every 100 iterations so this 300-iteration run leaves a restart.
+            source = tangle.CheckpointSettings(
+                "two-fiber-demo", Path("output/two_fiber.restart"), interval_iterations=100
+            )
+            formation = tangle.Recipe(cell)
+            formation.insert(crossing)
+            formation.relax_for(300)
+            formed = formation.run(settings, checkpoint=source)
+            print(formed.checkpoint_saves, formed.last_checkpoint_iteration)
+
+            # The branch carries the saved geometry into a new recipe; with
+            # fresh_formation_on_resume it runs from that recipe's first operation.
+            cleanup = tangle.Recipe(cell)
+            cleanup.relax_until_converged()
+            result = cleanup.run(
+                settings,
+                checkpoint=source.replace(
+                    path=Path("output/two_fiber_cleanup.restart"),
+                    resume=True,
+                    resume_path=source.path,
+                    resume_case_id=source.case_id,
+                    fresh_formation_on_resume=True,
+                ),
+            )
             # The resumed, relaxed geometry is a new Assembly on the result.
             print(result.resumed, result.resumed_iteration, result.assembly.fiber_count)
         """),
@@ -1938,6 +1978,68 @@ NOTEBOOKS: dict[str, list[dict]] = {
             print(analysis.volume_weighted_orientation_tensor)
             print(analysis.max_curvature_ratio, analysis.curvature_limit_violations)
             analysis.write_json(output / "tangle_analysis.json")
+        """),
+        md("""
+        ## Contacts and neighbors
+
+        `characterize_neighbors()` measures how fibers touch and travel
+        together, which volume fraction and orientation tensors cannot show. It
+        samples each centerline at a uniform spacing and works on an
+        `Assembly` or a `RunResult`. The
+        [analysis guide](../../../../docs/puma_interoperability.md#contacts-and-neighbors)
+        defines each quantity.
+        """),
+        md(table([
+            ("contact_gap", "Surface gap counted as touching (required).", "m"),
+            ("neighbor_gap", "Surface gap counted as a neighbor.", "m, or `None` for twice the largest radius"),
+            ("in_axis_angle_degrees", "Tangent angle below which a pair runs side by side.", "degrees"),
+            ("sample_spacing", "Arc-length spacing between samples.", "m, or `None` for a quarter of the smallest radius"),
+            ("max_lag", "Largest lag of the neighbor-turnover curve.", "m, or `None` for half the median fiber length (at most 200 samples)"),
+            ("lag_count", "Logarithmically spaced turnover lags.", "count"),
+        ])),
+        md(table([
+            ("contacts_per_length", "Contacts per unit centerline length.", "1/m"),
+            ("contact_ratio_to_random", "Ratio to a random-placement baseline.", "ratio or `None`"),
+            ("in_axis_contact_fraction", "Share of contacts between side-by-side fibers.", "fraction"),
+            ("median_crossing_angle_degrees", "Median angle of crossing contacts.", "degrees or `None`"),
+            ("median_excess_persistence", "Crossing contact length over a straight crossing's.", "ratio or `None`"),
+            ("mean_free_length", "Mean centerline length between contacts.", "m or `None`"),
+            ("mean_neighbors", "Mean neighbor count per sample.", "count"),
+            ("neighbor_correlation_length", "Lag at which neighbor sets decorrelate to 1/e.", "m or `None`"),
+            ("contact_count_dispersion", "Variance over mean of contacts per fiber.", "ratio or `None`"),
+        ])),
+        code("""
+        # Any Assembly can be analyzed without a recipe or relaxation, for
+        # example centerlines tracked from a CT scan. insert() adds them as-is.
+        scan = tangle.Assembly(tangle.Cell([1 * mm, 1 * mm, 1 * mm]))
+        scan.insert(
+            tangle.FiberCollection.from_centerlines(
+                [
+                    [[0.1 * mm, 0.5 * mm, 0.5 * mm], [0.9 * mm, 0.5 * mm, 0.5 * mm]],
+                    # 19.5 um apart: a 0.5 um surface gap between 19 um fibers.
+                    [[0.5 * mm, 0.1 * mm, 0.5 * mm + 19.5 * um], [0.5 * mm, 0.9 * mm, 0.5 * mm + 19.5 * um]],
+                ],
+                tangle.Material("fiber", diameter=19 * um),
+            )
+        )
+        # CT cannot resolve gaps below about one voxel, so use a contact gap of
+        # that order on both sides of a comparison.
+        reference = scan.characterize_neighbors(contact_gap=1 * um)
+        print(reference.contact_count, reference.contacts_per_length)
+        print(reference.in_axis_contact_fraction, reference.median_crossing_angle_degrees)
+        """),
+        code("""
+        if RUN_SOLVER:
+            # The same call on the relaxed result; keep the gaps and angle equal
+            # when comparing two assemblies.
+            neighbors = result.characterize_neighbors(
+                contact_gap=1 * um,
+                neighbor_gap=10 * um,
+                in_axis_angle_degrees=20,
+            )
+            print(neighbors.contacts_per_length, neighbors.contact_ratio_to_random)
+            print(neighbors.mean_neighbors, neighbors.neighbor_correlation_length)
+            neighbors.write_json(output / "neighbors.json")
         """),
         md("""
         ## PuMA-compatible voxel bundle

@@ -175,6 +175,10 @@ small windows and resolution studies.
 
 ## Direct PuMA comparison
 
+Install PuMA with `conda create -n puma conda-forge::puma` and build TANGLE into
+the same environment (see the [installation guide](../crates/tangle_python/README.md)).
+NASA's PuMA ships `pumapy` through conda-forge, not PyPI: `pip install pumapy` installs an unrelated package with the same name.
+
 After exporting a bundle, use PuMA normally:
 
 ```python
