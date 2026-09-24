@@ -2255,6 +2255,10 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 epoch,
             );
         }
+        // The split parents are now inactive and the path midpoints active;
+        // every per-iteration kernel walks the active lists, so refresh them
+        // now rather than at the next adaptation epoch.
+        self.rebuild_active_indices();
         self.request_neighbor_list_rebuild();
         split_count
     }

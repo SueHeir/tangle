@@ -1418,3 +1418,61 @@ fn relaxation_is_bitwise_repeatable() {
         );
     }
 }
+
+#[test]
+fn needle_split_midpoints_join_the_relaxation_immediately() {
+    // Fiber 1 is pinned at both ends and crossed at its middle by fiber 2,
+    // 0.15 apart with radii 0.1. Only its reserved midpoint can move.
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([4.0; 3], [false; 3]));
+    let material = assembly.materials.add("fiber");
+    let section = assembly.sections.add(Section::Circular { radius: 0.1 });
+    for (id, placed) in [
+        (1, [[1.0, 2.0, 2.0], [3.0, 2.0, 2.0]]),
+        (2, [[2.0, 1.0, 2.15], [2.0, 3.0, 2.15]]),
+    ] {
+        assembly
+            .add_fiber(FiberId(id), material, section, &placed, &placed)
+            .unwrap();
+    }
+    let adaptive = AdaptiveSegmentationConfig {
+        contact_length_over_diameter: 100.0,
+        minimum_length_over_diameter: 1.0,
+        maximum_refinement_levels: 3,
+        refinement_interval: 1_000,
+        ..AdaptiveSegmentationConfig::default()
+    };
+    let packed =
+        PackedAssembly::from_assembly_with_options(&assembly, Some(adaptive), true).unwrap();
+    let first = packed.segment_vertices[0];
+    let second = packed.segment_vertices[1];
+    let midpoint = (first + second) / 2;
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed,
+        CellListConfig::default(),
+        0.2,
+    );
+    // A needle pull forces the midpoint in, as the recipe's NeedleLayer does.
+    assert_eq!(world.activate_refinement_vertices(&[midpoint], 1_000), 1);
+    assert_eq!(world.active_segment_count, 3);
+
+    let config = RelaxationConfig {
+        adaptive_segmentation: Some(adaptive),
+        pin_fiber_ends: true,
+        force_full_iterations: true,
+        correction_fraction: 1.0,
+        max_step: 0.2,
+        max_iterations: 1,
+        iterations_per_batch: 1,
+        ..RelaxationConfig::default()
+    };
+    world.run_batch(&config, 1);
+    let positions = world.download_positions();
+    let index = 3 * midpoint as usize;
+    // Contact with fiber 2 (above) pushes the new midpoint down.
+    assert!(
+        positions[index + 2] < 2.0,
+        "midpoint stayed at {:?}",
+        &positions[index..index + 3]
+    );
+}
