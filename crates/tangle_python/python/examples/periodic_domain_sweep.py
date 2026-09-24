@@ -151,6 +151,20 @@ class SweepConfig:
                 "need 0 < placement_volume_fraction <= volume_fraction < 1"
             )
         self.segments_per_fiber
+        # Every fiber, including one lifted clear of its own image by the
+        # steepest possible minimum tilt, must fit between the z walls.
+        clearance = SELF_CONTACT_CLEARANCE * self.diameter
+        shortest_arc = math.sqrt(max(self.side**2 - clearance**2, 0.0))
+        steepest = max(
+            math.radians(self.max_tilt),
+            math.atan2(SELF_RISE * self.diameter, shortest_arc),
+        )
+        if self.fiber_length * math.sin(steepest) + self.diameter > self.placement_thickness:
+            raise ValueError(
+                f"a fiber tilted {math.degrees(steepest):.1f} degrees does not fit "
+                f"the {self.placement_thickness:.3g}-thick placement cell; lower "
+                "max_tilt or placement_volume_fraction, or raise fibers_per_area"
+            )
 
 
 def material(config: SweepConfig) -> tangle.Material:
@@ -164,12 +178,14 @@ def self_contact_arc(config: SweepConfig, angle: float) -> float | None:
     A fiber heading in in-plane direction ``u`` meets its periodic image
     shifted by lattice vector ``n * side`` where the in-plane distance
     ``|n * side x u|`` drops below the contact clearance, at in-plane distance
-    ``n * side . u``. Returns ``None`` when no such point lies on the fiber.
+    ``n * side . u``. Returns ``None`` when no such point lies on the fiber
+    or within one contact clearance past its end.
     """
     ux, uy = math.cos(angle), math.sin(angle)
-    reach = config.fiber_length + config.diameter
-    limit = math.ceil(reach / config.side)
     clearance = SELF_CONTACT_CLEARANCE * config.diameter
+    # An end can also touch the start of its own image just past one length.
+    reach = config.fiber_length + clearance
+    limit = math.ceil(reach / config.side)
     shortest = None
     for nx in range(-limit, limit + 1):
         for ny in range(-limit, limit + 1):
@@ -177,7 +193,7 @@ def self_contact_arc(config: SweepConfig, angle: float) -> float | None:
                 continue
             arc = config.side * (nx * ux + ny * uy)
             offset = config.side * abs(nx * uy - ny * ux)
-            if 0.0 < arc <= config.fiber_length and offset < clearance:
+            if 0.0 < arc <= reach and offset < clearance:
                 shortest = arc if shortest is None else min(shortest, arc)
     return shortest
 
@@ -225,12 +241,8 @@ def sample_fibers(config: SweepConfig, rng: random.Random) -> list[FiberPlacemen
             tilt = math.copysign(floor, tilt)
         placement = FiberPlacement(angle, tilt, (0.0, 0.0, 0.0))
         margin = 0.5 * placement.rise(config) + 0.5 * config.diameter
-        if 2.0 * margin > height:
-            raise ValueError(
-                f"a fiber tilted {math.degrees(tilt):.1f} degrees does not fit "
-                f"a {height:.3g}-thick placement cell; lower max_tilt or "
-                "placement_volume_fraction"
-            )
+        # validate() guarantees every allowed tilt fits.
+        assert 2.0 * margin <= height
         center = (
             rng.uniform(0.0, config.side),
             rng.uniform(0.0, config.side),
@@ -318,7 +330,8 @@ def build(
     """Recipe, settings, and configuration for one cell side."""
     config = SweepConfig(side=side, **changes)
     config.validate()
-    rng = random.Random(f"{config.seed}:{config.side!r}")
+    # Format the side so 10 and 10.0 (default and --sides) draw the same.
+    rng = random.Random(f"{config.seed}:{config.side:g}")
     placements = sample_fibers(config, rng)
     cell = tangle.Cell(
         [config.side, config.side, config.placement_thickness], periodic="xy"

@@ -72,6 +72,9 @@ class PeriodicDomainSweepTests(unittest.TestCase):
         # side-2 cell after one wrap.
         side_two = sweep.SweepConfig(side=2.0)
         self.assertAlmostEqual(sweep.self_contact_arc(side_two, 0.0), 2.0)
+        # Just past one fiber length, the end meets the start of its image.
+        odd = sweep.SweepConfig(side=1.97)
+        self.assertGreater(sweep.min_tilt(odd, math.atan2(5.0, -1.0)), 0.0)
 
     def test_self_touching_strands_clear_each_other(self):
         config = sweep.SweepConfig(side=1.0)
@@ -103,6 +106,11 @@ class PeriodicDomainSweepTests(unittest.TestCase):
             sweep.build(10.0, placement_volume_fraction=0.3)
         with self.assertRaises(ValueError):
             sweep.build(10.0, max_tilt=90.0)
+        # Too steep for the placement cell, whatever the seed.
+        with self.assertRaises(ValueError):
+            sweep.build(2.0, max_tilt=38.0)
+        with self.assertRaises(ValueError):
+            sweep.build(2.0, fibers_per_area=0.5, placement_volume_fraction=0.2)
 
 
 if __name__ == "__main__":
