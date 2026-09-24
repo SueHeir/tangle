@@ -1251,8 +1251,9 @@ fn neighbor_lists_match_rebuilding_every_iteration() {
         neighbor_capacity: 1,
         ..CellListConfig::default()
     });
-    // Atomic cell scatter makes the order of each correction sum, and so the
-    // last float bits, run-dependent; the contacts themselves are identical.
+    // Lists built at different iterations visit the same contacts in a
+    // different order, so the last float bits of each correction sum differ;
+    // the contacts themselves are identical.
     let largest_difference = |left: &[f32], right: &[f32]| {
         left.iter()
             .zip(right)
@@ -1264,5 +1265,214 @@ fn neighbor_lists_match_rebuilding_every_iteration() {
     assert!(
         listed_rebuilds < reference_rebuilds,
         "skin did not reuse lists: {listed_rebuilds} vs {reference_rebuilds}"
+    );
+}
+
+/// Distance between the axes of two segments, in f64 on the host.
+fn host_segment_axis_distance(p1: [f64; 3], q1: [f64; 3], p2: [f64; 3], q2: [f64; 3]) -> f64 {
+    let d1 = [q1[0] - p1[0], q1[1] - p1[1], q1[2] - p1[2]];
+    let d2 = [q2[0] - p2[0], q2[1] - p2[1], q2[2] - p2[2]];
+    let r = [p1[0] - p2[0], p1[1] - p2[1], p1[2] - p2[2]];
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let (a, e, f, c, b) = (
+        dot(d1, d1),
+        dot(d2, d2),
+        dot(d2, r),
+        dot(d1, r),
+        dot(d1, d2),
+    );
+    let denominator = a * e - b * b;
+    let mut s = if denominator > 1.0e-12 * a * e {
+        ((b * f - c * e) / denominator).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let mut t = (b * s + f) / e;
+    if t < 0.0 {
+        t = 0.0;
+        s = (-c / a).clamp(0.0, 1.0);
+    } else if t > 1.0 {
+        t = 1.0;
+        s = ((b - c) / a).clamp(0.0, 1.0);
+    }
+    let delta = [
+        p2[0] + d2[0] * t - p1[0] - d1[0] * s,
+        p2[1] + d2[1] * t - p1[1] - d1[1] * s,
+        p2[2] + d2[2] * t - p1[2] - d1[2] * s,
+    ];
+    dot(delta, delta).sqrt()
+}
+
+#[test]
+fn neighbor_lists_hold_every_pair_within_the_skin() {
+    let packed = dense_crossed_mat();
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed.clone(),
+        CellListConfig::default(),
+        0.01,
+    );
+    let config = RelaxationConfig {
+        max_step: 0.01,
+        max_iterations: 1,
+        iterations_per_batch: 1,
+        ..RelaxationConfig::default()
+    };
+    // The first contact pass builds the lists from the uploaded positions.
+    world.run_batch(&config, 1);
+    let read_u32 =
+        |handle: &Handle| u32::from_bytes(&world.client.read_one(handle.clone()).unwrap()).to_vec();
+    let counts = read_u32(&world.neighbor_counts);
+    let lists = read_u32(&world.neighbor_segments);
+    let capacity = world.neighbor_capacity as usize;
+    let skin = f64::from(world.neighbor_skin);
+
+    let vertex = |index: u32| {
+        let index = 3 * index as usize;
+        [
+            f64::from(packed.positions[index]),
+            f64::from(packed.positions[index + 1]),
+            f64::from(packed.positions[index + 2]),
+        ]
+    };
+    let lengths = [2.4, 2.4, 1.0];
+    let periodic = [true, true, false];
+    let segments = packed.segment_count();
+    let mut checked = 0;
+    for first in 0..segments {
+        let count = counts[first] as usize;
+        assert!(count <= capacity, "segment {first} overflowed: {count}");
+        let listed = &lists[first * capacity..first * capacity + count];
+        let mut unique = listed.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            count,
+            "segment {first} lists a neighbor twice"
+        );
+        let (a, b) = (
+            packed.segment_vertices[2 * first],
+            packed.segment_vertices[2 * first + 1],
+        );
+        let (p1, q1) = (vertex(a), vertex(b));
+        for second in 0..segments {
+            let (c, d) = (
+                packed.segment_vertices[2 * second],
+                packed.segment_vertices[2 * second + 1],
+            );
+            let adjacent = packed.segment_fibers[first] == packed.segment_fibers[second]
+                && (a == c || a == d || b == c || b == d);
+            if second == first || adjacent {
+                assert!(!listed.contains(&(second as u32)));
+                continue;
+            }
+            let (mut p2, mut q2) = (vertex(c), vertex(d));
+            for axis in 0..3 {
+                if periodic[axis] {
+                    let shift = (0.5 * (p2[axis] + q2[axis] - p1[axis] - q1[axis]) / lengths[axis])
+                        .round()
+                        * lengths[axis];
+                    p2[axis] -= shift;
+                    q2[axis] -= shift;
+                }
+            }
+            let interaction = f64::from(packed.segment_radii[first])
+                + f64::from(packed.segment_radii[second])
+                + skin;
+            let distance = host_segment_axis_distance(p1, q1, p2, q2);
+            let is_listed = listed.contains(&(second as u32));
+            // Leave a thin band around the cutoff for f32 rounding.
+            if distance < 0.999 * interaction {
+                assert!(is_listed, "{first}-{second} at {distance} missing");
+                checked += 1;
+            } else if distance > 1.001 * interaction {
+                assert!(!is_listed, "{first}-{second} at {distance} listed");
+            }
+        }
+    }
+    assert!(checked > segments, "fixture has too few neighbor pairs");
+}
+
+#[test]
+fn relaxation_is_bitwise_repeatable() {
+    // Same input, code and backend give identical positions: the cell list
+    // is ranked into segment order after its atomic scatter, so every
+    // correction sum adds the same terms in the same order.
+    for cell_list in [
+        CellListConfig::default(),
+        // One slot per segment sends crowded segments through the cell scan.
+        CellListConfig {
+            neighbor_capacity: 1,
+            ..CellListConfig::default()
+        },
+    ] {
+        let (first, first_rebuilds) = relax_dense_mat(cell_list);
+        let (second, second_rebuilds) = relax_dense_mat(cell_list);
+        assert_eq!(first_rebuilds, second_rebuilds);
+        let first_bits: Vec<u32> = first.iter().map(|value| value.to_bits()).collect();
+        let second_bits: Vec<u32> = second.iter().map(|value| value.to_bits()).collect();
+        assert!(
+            first_bits == second_bits,
+            "{cell_list:?} relaxed differently"
+        );
+    }
+}
+
+#[test]
+fn needle_split_midpoints_join_the_relaxation_immediately() {
+    // Fiber 1 is pinned at both ends and crossed at its middle by fiber 2,
+    // 0.15 apart with radii 0.1. Only its reserved midpoint can move.
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([4.0; 3], [false; 3]));
+    let material = assembly.materials.add("fiber");
+    let section = assembly.sections.add(Section::Circular { radius: 0.1 });
+    for (id, placed) in [
+        (1, [[1.0, 2.0, 2.0], [3.0, 2.0, 2.0]]),
+        (2, [[2.0, 1.0, 2.15], [2.0, 3.0, 2.15]]),
+    ] {
+        assembly
+            .add_fiber(FiberId(id), material, section, &placed, &placed)
+            .unwrap();
+    }
+    let adaptive = AdaptiveSegmentationConfig {
+        contact_length_over_diameter: 100.0,
+        minimum_length_over_diameter: 1.0,
+        maximum_refinement_levels: 3,
+        refinement_interval: 1_000,
+        ..AdaptiveSegmentationConfig::default()
+    };
+    let packed =
+        PackedAssembly::from_assembly_with_options(&assembly, Some(adaptive), true).unwrap();
+    let first = packed.segment_vertices[0];
+    let second = packed.segment_vertices[1];
+    let midpoint = (first + second) / 2;
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed,
+        CellListConfig::default(),
+        0.2,
+    );
+    // A needle pull forces the midpoint in, as the recipe's NeedleLayer does.
+    assert_eq!(world.activate_refinement_vertices(&[midpoint], 1_000), 1);
+    assert_eq!(world.active_segment_count, 3);
+
+    let config = RelaxationConfig {
+        adaptive_segmentation: Some(adaptive),
+        pin_fiber_ends: true,
+        force_full_iterations: true,
+        correction_fraction: 1.0,
+        max_step: 0.2,
+        max_iterations: 1,
+        iterations_per_batch: 1,
+        ..RelaxationConfig::default()
+    };
+    world.run_batch(&config, 1);
+    let positions = world.download_positions();
+    let index = 3 * midpoint as usize;
+    // Contact with fiber 2 (above) pushes the new midpoint down.
+    assert!(
+        positions[index + 2] < 2.0,
+        "midpoint stayed at {:?}",
+        &positions[index..index + 3]
     );
 }

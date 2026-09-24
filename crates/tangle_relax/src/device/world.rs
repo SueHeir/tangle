@@ -140,6 +140,10 @@ pub struct DeviceFiberWorld<R: Runtime> {
     cell_offsets: Handle,
     cell_cursors: Handle,
     cell_segments: Handle,
+    // Scatter scratch: run-order slots and each slot's cell, ranked into
+    // `cell_segments` in segment order.
+    scattered_cell_segments: Handle,
+    cell_slot_cells: Handle,
     cell_overflow: Handle,
     cell_scan_block_size: usize,
     cell_scan_block_sums: Vec<Handle>,
@@ -150,6 +154,10 @@ pub struct DeviceFiberWorld<R: Runtime> {
     neighbor_segments: Handle,
     neighbor_home_cells: Handle,
     neighbor_reference_positions: Handle,
+    // Cell-sorted copies of each slot's segment geometry (eight floats) and
+    // topology (vertex ids and fiber), refreshed at every list build.
+    slot_geometry: Handle,
+    slot_topology: Handle,
     neighbor_skin: f32,
     neighbor_capacity: u32,
     corrections: Handle,
@@ -370,6 +378,9 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         let cell_offsets = client.create_from_slice(u32::as_bytes(&vec![0_u32; cell_count]));
         let cell_cursors = client.create_from_slice(u32::as_bytes(&vec![0_u32; cell_count]));
         let cell_segments = client.empty(packed.segment_count() * core::mem::size_of::<u32>());
+        let scattered_cell_segments =
+            client.empty(packed.segment_count() * core::mem::size_of::<u32>());
+        let cell_slot_cells = client.empty(packed.segment_count() * core::mem::size_of::<u32>());
         let cell_overflow = client.create_from_slice(u32::as_bytes(&[0_u32]));
         let maximum_scan_block_size = CELL_SCAN_BLOCK_SIZE
             .min(client.properties().hardware.max_cube_dim.0 as usize)
@@ -405,6 +416,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             client.create_from_slice(u32::as_bytes(&vec![0_u32; packed.segment_count()]));
         let neighbor_reference_positions =
             client.create_from_slice(f32::as_bytes(&packed.positions));
+        let slot_geometry = client.empty(8 * packed.segment_count() * core::mem::size_of::<f32>());
+        let slot_topology = client.empty(3 * packed.segment_count() * core::mem::size_of::<u32>());
         let corrections =
             client.create_from_slice(f32::as_bytes(&vec![0.0_f32; 6 * packed.segment_count()]));
         let segment_max =
@@ -487,6 +500,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             cell_offsets,
             cell_cursors,
             cell_segments,
+            scattered_cell_segments,
+            cell_slot_cells,
             cell_overflow,
             cell_scan_block_size,
             cell_scan_block_sums,
@@ -496,6 +511,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             neighbor_segments,
             neighbor_home_cells,
             neighbor_reference_positions,
+            slot_geometry,
+            slot_topology,
             neighbor_skin,
             neighbor_capacity,
             corrections,
@@ -2001,7 +2018,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         let coordinates = f32::from_bytes(&coordinates_bytes);
         let gaps = f32::from_bytes(&gaps_bytes);
         let angles = f32::from_bytes(&angles_bytes);
-        let candidates = (0..count)
+        let mut candidates: Vec<_> = (0..count)
             .map(|index| SegmentContactCandidate {
                 first_segment: segments[2 * index],
                 second_segment: segments[2 * index + 1],
@@ -2011,6 +2028,14 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 crossing_angle: angles[index],
             })
             .collect();
+        // The device appends candidates in a run-dependent order; sort them so
+        // junction capture sees the same sequence every run.
+        candidates.sort_by(|left, right| {
+            (left.first_segment, left.second_segment)
+                .cmp(&(right.first_segment, right.second_segment))
+                .then(left.first_coordinate.total_cmp(&right.first_coordinate))
+                .then(left.second_coordinate.total_cmp(&right.second_coordinate))
+        });
         ContactCapture {
             candidates,
             overflow: count_values[1] != 0 || u32::from_bytes(&cell_overflow_bytes)[0] != 0,
@@ -2230,6 +2255,10 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 epoch,
             );
         }
+        // The split parents are now inactive and the path midpoints active;
+        // every per-iteration kernel walks the active lists, so refresh them
+        // now rather than at the next adaptation epoch.
+        self.rebuild_active_indices();
         self.request_neighbor_list_rebuild();
         split_count
     }
