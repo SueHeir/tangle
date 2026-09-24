@@ -49,6 +49,14 @@ class FiberSpec:
         type, between the void grey and a range is partly fiber (an edge),
         and outside is void; and a fiber's type then follows the range its
         core falls in. See ``_ranges``.
+    ``profile``
+        Optional grey profile of this type in the raw scan (its own units,
+        after the light denoise): grey values at evenly spaced radii from
+        the axis (first) to the surface (last), e.g. a dim core inside a
+        bright rim. Given for every type, it sets the grey ranges (unless
+        ``intensity`` is given), fits are judged by drawing them with their
+        profiles and comparing with the scan, and a fiber's type follows
+        the profile that matches the grey across it. See ``_grey``.
     """
 
     diameter: float
@@ -59,6 +67,7 @@ class FiberSpec:
     length: float | None = None
     name: str = "ct fiber"
     intensity: tuple[float, float] | None = None
+    profile: tuple[float, ...] | None = None
 
     def replace(self, **changes: Any) -> "FiberSpec":
         return replace(self, **changes)
@@ -103,12 +112,15 @@ class FitSettings:
     # left alone after ``redraw_attempts`` failures.
     redraw_passes: int = 5
     redraw_attempts: int = 3
-    # How a region's redraw is judged: "mask" (fewer foreground voxels left
-    # unexplained plus fewer fit voxels over void; tracks the truth best in
-    # the redraw study), "confidence" (sure coverage, see
+    # How a region's redraw is judged: "grey" (the scan's grey is matched
+    # better by the fit drawn with its profiles, by more than a nat; needs
+    # ``FiberSpec.profile``), "mask" (fewer foreground voxels left
+    # unexplained plus fewer fit voxels over void; tracked the truth best of
+    # the voxel scores in the redraw study), "confidence" (sure coverage, see
     # ``_confidence.sure_coverage``), or "all" (every redraw is kept, for
-    # comparison). The same score picks among the ``redraw_plans``.
-    redraw_score: str = "mask"
+    # comparison). "auto" is "grey" with profiles, else "mask". The same
+    # score picks among the ``redraw_plans``.
+    redraw_score: str = "auto"
     # How a region is redrawn: "match" tries every way its loose fiber ends
     # can connect or end (``_junctions``), solves the ``redraw_plans``
     # best-scoring ones and keeps, region by region, the one with the most
@@ -460,7 +472,10 @@ def load_fit(path: str | Path) -> FitResult:
 
     def spec_from(values: dict[str, Any]) -> FiberSpec:
         values = dict(values)
-        values.pop("profile", None)  # fits written before types were chosen by size
+        if not isinstance(values.get("profile"), (list, tuple)):
+            values.pop("profile", None)  # fits written before types were chosen by size
+        else:
+            values["profile"] = tuple(values["profile"])
         if values.get("intensity") is not None:
             values["intensity"] = tuple(values["intensity"])
         return FiberSpec(**values)
@@ -532,8 +547,8 @@ def fit_fibers(
             )
     if exclude is not None and np.shape(exclude) != volume.shape:
         raise ValueError("exclude must have the same shape as volume")
-    if settings.redraw_score not in ("confidence", "mask", "all"):
-        raise ValueError('redraw_score must be "confidence", "mask" or "all"')
+    if settings.redraw_score not in ("auto", "grey", "confidence", "mask", "all"):
+        raise ValueError('redraw_score must be "auto", "grey", "confidence", "mask" or "all"')
     if settings.redraw_moves not in ("match", "grow"):
         raise ValueError('redraw_moves must be "match" or "grow"')
     if settings.redraw_plans < 1:
@@ -550,25 +565,45 @@ def fit_fibers(
             print(entry)
 
     ranged = [item.intensity is not None for item in specs]
-    if any(ranged) and not all(ranged):
+    profiled = [item.profile is not None for item in specs]
+    if any(profiled) and not all(profiled):
+        raise ValueError("give a grey profile for every fiber type, or for none")
+    if any(ranged) and not all(ranged) and not all(profiled):
         raise ValueError("give an intensity range for every fiber type, or for none")
+    if settings.redraw_score == "grey" and not all(profiled):
+        raise ValueError('redraw_score "grey" needs a FiberSpec.profile for every type')
     binary = _is_mask(volume)
     largest = max(0.5 * item.diameter for item in specs) / voxel_size
     type_bits = None
+    grey_model = None
     if binary:
         image, levels = _mask_image(volume, exclude, settings, largest)
         source = "mask"
-    elif all(ranged):
+    elif all(ranged) or all(profiled):
         from ._ranges import range_image
 
-        ranges = [tuple(item.intensity) for item in specs]
+        if all(profiled):
+            from scipy.ndimage import gaussian_filter
+
+            from . import _grey
+
+            grey = np.asarray(volume, dtype=np.float32)
+            if settings.denoise_sigma_voxels > 0:
+                grey = gaussian_filter(grey, settings.denoise_sigma_voxels)
+            profiles = [np.asarray(item.profile, dtype=np.float64) for item in specs]
+            grey_void, noise, derived = _grey.profile_levels(grey, profiles)
+            ranges = [tuple(item.intensity) if item.intensity is not None else derived[k] for k, item in enumerate(specs)]
+            grey_model = (grey, profiles, grey_void)
+            log("profiles", [], void=round(grey_void, 4), noise=round(noise, 4), ranges=[[round(v, 4) for v in r] for r in ranges])
+        else:
+            ranges = [tuple(item.intensity) for item in specs]
         image, type_bits, void = range_image(
             volume, ranges, denoise_sigma=settings.denoise_sigma_voxels, exclude=exclude,
             fill_holes_area=np.pi * (largest + 1.0) ** 2 if settings.fill_mask_holes else None,
         )
         low = min(r[0] for r in ranges)
         levels = Levels(void=void, fiber=float(np.mean(ranges[0])), threshold=0.5 * (void + low))
-        source = "grey ranges"
+        source = "grey profiles" if grey_model is not None else "grey ranges"
     else:
         image, levels = normalize(volume, denoise_sigma=settings.denoise_sigma_voxels, levels=settings.levels)
         if exclude is not None:
@@ -578,6 +613,8 @@ def fit_fibers(
 
     fitter = _Fitter(image, specs, settings, voxel_size, log)
     fitter.type_bits = type_bits
+    if grey_model is not None:
+        fitter.grey, fitter.profiles, fitter.grey_void = grey_model
     lines = fitter.trace([], np.zeros(0))
     radii, types = fitter.classify(lines)
     log("trace", lines, types=fitter.counts(types), thickness_margin=round(fitter.margin, 2))
@@ -712,6 +749,10 @@ class _Fitter:
         self.hessians: dict[int, HessianField] = {}
         self.margin = settings.thickness_margin_voxels or 0.0
         self.type_bits: np.ndarray | None = None  # per voxel, one bit per type whose grey range it is in
+        # With FiberSpec.profile: the denoised scan, each type's profile and the void grey.
+        self.grey: np.ndarray | None = None
+        self.profiles: list[np.ndarray] | None = None
+        self.grey_void = 0.0
         self.set_image(image)
 
     def set_image(self, image: np.ndarray) -> None:
@@ -804,7 +845,13 @@ class _Fitter:
         """Each fiber's type by the grey range its core falls in (-1 where no range has 60%)."""
         from ._ranges import type_fractions
 
-        if self.type_bits is None or len(self.specs) < 2:
+        if len(self.specs) < 2:
+            return None
+        if self.profiles is not None:
+            from . import _grey
+
+            return _grey.profile_types(self.grey, lines, self.radius, self.profiles, self.grey_void)
+        if self.type_bits is None:
             return None
         out = np.full(len(lines), -1, dtype=int)
         for i, line in enumerate(lines):
@@ -884,9 +931,14 @@ class _Fitter:
             count = int(component.max()) + 1 if len(component) else 0
             old_residual = _confidence.residual_map(self.foreground, lines, radii, self.margin)
             new_residual = _confidence.residual_map(self.foreground, new_lines, new_radii, self.margin)
+            if self.profiles is not None:
+                scale = self.grey_scale(lines, radii, types)
+                old_misfit = self.grey_misfit(lines, radii, types)
+                new_misfit = self.grey_misfit(new_lines, new_radii, new_types)
             masks = [self._box_mask([boxes[k] for k in np.flatnonzero(component == c)]) for c in range(count)]
             confidence_gain = np.zeros(count)
             mask_gain = np.zeros(count)
+            grey_gain = np.zeros(count)
             for c, mask in enumerate(masks):
                 foreground = max(float(self.foreground[mask].sum()), 1.0)
                 confidence_gain[c] = (
@@ -895,13 +947,22 @@ class _Fitter:
                 mask_gain[c] = (
                     float(old_residual[mask].sum(dtype=np.int64)) - float(new_residual[mask].sum(dtype=np.int64))
                 ) / foreground
-            better = {"confidence": confidence_gain > 1e-3, "mask": mask_gain > 1e-3, "all": np.ones(count, dtype=bool)}
-            accepted = better[s.redraw_score]
+                if self.profiles is not None:
+                    # Nats: the drop in squared grey residual over the evidence scale.
+                    grey_gain[c] = (
+                        float(old_misfit[mask].sum(dtype=np.float64)) - float(new_misfit[mask].sum(dtype=np.float64))
+                    ) / scale
+            better = {
+                "confidence": confidence_gain > 1e-3, "mask": mask_gain > 1e-3, "grey": grey_gain > 1.0,
+                "all": np.ones(count, dtype=bool),
+            }
+            accepted = better[self.score_name]
             if _REDRAW_PROBE is not None:
                 _REDRAW_PROBE(
                     {
                         "pass": pass_index + 1, "masks": masks, "old": (lines, radii), "new": (new_lines, new_radii),
-                        "confidence_gain": confidence_gain, "mask_gain": mask_gain, "accepted": accepted.copy(),
+                        "confidence_gain": confidence_gain, "mask_gain": mask_gain, "grey_gain": grey_gain,
+                        "accepted": accepted.copy(),
                     }
                 )
             keep_old, keep_new = _regrow.choose(old_touch, new_touch, component, accepted)
@@ -943,6 +1004,7 @@ class _Fitter:
                 groups_accepted=int(accepted.sum()),
                 groups_better_by_confidence=int(better["confidence"].sum()),
                 groups_better_by_mask=int(better["mask"].sum()),
+                groups_better_by_grey=int(better["grey"].sum()) if self.profiles is not None else None,
                 regions_given_up=len(given_up), regions_widened=len(widen),
                 sure_coverage=round(coverage if kept else before_coverage, 4),
                 sure_coverage_before=round(before_coverage, 4), residual_change=round(residual_change, 4), kept=kept,
@@ -952,6 +1014,28 @@ class _Fitter:
                 lines, radii, types = merged, merged_radii, merged_types
                 confidence, settled = merged_confidence, merged_settled
         return lines, radii, types, confidence
+
+    @property
+    def score_name(self) -> str:
+        """``FitSettings.redraw_score`` with "auto" resolved."""
+        name = self.settings.redraw_score
+        if name == "auto":
+            return "grey" if self.profiles is not None else "mask"
+        return name
+
+    def grey_misfit(self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray) -> np.ndarray:
+        """Per voxel, (scan grey − the fit drawn with its profiles)²."""
+        from . import _grey
+
+        profiles = [self.profiles[int(t)] for t in types]
+        return _grey.squared_residual_map(self.grey, lines, radii, profiles, self.grey_void)
+
+    def grey_scale(self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray) -> float:
+        """Squared grey residual worth one nat for these fibers (``_grey.evidence_scale``)."""
+        from . import _grey
+
+        profiles = [self.profiles[int(t)] for t in types]
+        return _grey.evidence_scale(self.grey, lines, radii, profiles, self.grey_void, float(self.radius.min()))
 
     def _box_mask(self, boxes: list[_regrow.Box]) -> np.ndarray:
         mask = np.zeros(self.image.shape, dtype=bool)
@@ -1012,7 +1096,9 @@ class _Fitter:
                 offsets[close] = c
             candidate = self.redraw_candidate(cut, radii, types, attempt=attempt, offsets=offsets)
             lines, cand_radii = candidate[0], candidate[1]
-            if self.settings.redraw_score == "mask":
+            if self.score_name == "grey":
+                cover = -self.grey_misfit(lines, cand_radii, candidate[2])
+            elif self.score_name == "mask":
                 cover = -_confidence.residual_map(self.foreground, lines, cand_radii, self.margin)
             else:
                 _, settled, _ = self.scores(lines, cand_radii)
@@ -1133,7 +1219,12 @@ class _Fitter:
         for index, piece in enumerate(cut.pieces):
             paint(claimed, piece, 1.1 * float(piece_radii[index]), index + 1)
         max_length = 20.0 * float(self.radius.max())
-        scale = evidence_scale(self.image, cut.pieces, piece_radii, float(self.radius.min()))
+        if self.profiles is not None:
+            scale = self.grey_scale(cut.pieces, piece_radii, piece_types)
+            grey_args = {"grey": self.grey, "void": self.grey_void}
+        else:
+            scale = evidence_scale(self.image, cut.pieces, piece_radii, float(self.radius.min()))
+            grey_args = {}
         connections = []
         extensions: dict[tuple[int, int], np.ndarray] = {}
         plans_tried = joins = ends = grown = with_ports = 0
@@ -1181,7 +1272,15 @@ class _Fitter:
                 self.image, (low, high), region_ports, pairs, region_extensions,
                 [cut.pieces[i] for i in nearby], piece_radii[nearby],
                 margin=self.margin, scale=scale, end_costs=np.array(end_costs), interior=interior,
-                join_costs=join_costs,
+                join_costs=join_costs, **grey_args,
+                **(
+                    {
+                        "port_profiles": [self.profiles[p.kind] for p in region_ports],
+                        "base_profiles": [self.profiles[int(piece_types[i])] for i in nearby],
+                    }
+                    if grey_args
+                    else {}
+                ),
             )
             plans_tried += len(plans)
             base = int(attempt(0.5 * (low + high))) * self.settings.redraw_plans if attempt else 0

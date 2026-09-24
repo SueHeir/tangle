@@ -176,6 +176,10 @@ def rank_plans(
     end_costs: np.ndarray,
     interior: list[bool],
     join_costs: dict[tuple[int, int], float] | None = None,
+    grey: np.ndarray | None = None,
+    port_profiles: list[np.ndarray] | None = None,
+    base_profiles: list[np.ndarray] | None = None,
+    void: float = 0.0,
     cap: int = 1024,
 ) -> list[Plan]:
     """Every combination for one region, best (lowest score) first.
@@ -185,6 +189,11 @@ def rank_plans(
     the scan (an end on the scan boundary costs nothing) and ``end_costs[k]``
     its price in nats. ``join_costs`` prices a pair's join (default 0).
     ``base_lines`` are the fixed fibers near the box.
+
+    With ``grey`` (the denoised scan) and profiles for the ports and the
+    base fibers, the residual compares the scan's grey with the fibers
+    drawn with their profiles (``_grey.render_grey``, brighter fiber where
+    two meet) instead of ``image`` with plain occupancy.
     """
     from ._moves import render_occupancy
 
@@ -209,15 +218,25 @@ def rank_plans(
     bridge_occupancy = {
         key: element(curve, ports[key[0]].radius) for key, curve in pairs.items()
     }
-    extension_occupancy = [
-        element(
-            np.vstack([ports[k].point[None], extensions[k]])
-            if len(extensions[k])
-            else extensions[k],
-            ports[k].radius,
-        )
+    tails = [
+        np.vstack([ports[k].point[None], extensions[k]]) if len(extensions[k]) else extensions[k]
         for k in range(len(ports))
     ]
+    extension_occupancy = [element(tails[k], ports[k].radius) for k in range(len(ports))]
+    drawn_base = bridge_grey = extension_grey = None
+    if grey is not None:
+        from ._grey import render_grey
+
+        observed = grey[low[2] : high[2], low[1] : high[1], low[0] : high[0]].astype(np.float64)
+        drawn_base = render_grey(low, high, base_lines, base_radii, base_profiles, void)
+
+        def drawn(line: np.ndarray, k: int) -> np.ndarray | None:
+            if len(line) < 2:
+                return None
+            return render_grey(low, high, [line], [ports[k].radius], [port_profiles[k]], void)
+
+        bridge_grey = {key: drawn(curve, key[0]) for key, curve in pairs.items()}
+        extension_grey = [drawn(tails[k], k) for k in range(len(ports))]
     plans = []
     for chosen in matchings(len(ports), list(pairs), cap=cap):
         paired = {i for pair in chosen for i in pair}
@@ -229,6 +248,13 @@ def rank_plans(
         for part in parts:
             np.maximum(rendered, part, out=rendered)
             count += part >= 0.5
+        if drawn_base is not None:
+            rendered = drawn_base.copy()
+            shown = [bridge_grey[key] for key in chosen]
+            shown += [extension_grey[k] for k in range(len(ports)) if k not in paired]
+            for part in shown:
+                if part is not None:
+                    np.maximum(rendered, part, out=rendered)
         residual = float(((observed - rendered) ** 2).sum())
         overlap = float(np.maximum(count - np.maximum(base_count, 1), 0).sum())
         ends = [k for k in range(len(ports)) if k not in paired and interior[k]]

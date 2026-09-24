@@ -410,6 +410,34 @@ class CtToolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             range_image(volume, [(0.0, 0.5)], denoise_sigma=0.0)  # nothing darker: no void
 
+    def test_grey_profiles_draw_measure_and_type_fibers(self):
+        from tangle.ct import _grey
+
+        shape = (32, 40, 40)
+        void = 0.1
+        solid = np.array([1.0, 1.0, 1.0, 1.0, 1.0])  # 3-voxel radius, bright
+        rimmed = np.array([0.3, 0.3, 0.3, 0.8, 0.8])  # 5-voxel radius, dim core, brighter rim
+        lines = [
+            np.array([[10.0, 10.0, z] for z in np.linspace(0.0, 32.0, 9)]),
+            np.array([[28.0, 28.0, z] for z in np.linspace(0.0, 32.0, 9)]),
+        ]
+        radii = np.array([3.0, 5.0])
+        grey = _grey.render_grey(np.zeros(3, dtype=int), np.array(shape[::-1]), lines, radii, [solid, rimmed], void)
+        self.assertAlmostEqual(float(grey[16, 10, 10]), 1.0, places=6)  # axis of the solid fiber
+        self.assertAlmostEqual(float(grey[16, 28, 28]), 0.3, places=6)  # dim core
+        self.assertAlmostEqual(float(grey[16, 2, 2]), void, places=6)  # far from both
+        np.testing.assert_allclose(_grey.squared_residual_map(grey, lines, radii, [solid, rimmed], void), 0.0, atol=1e-9)
+        measured = _grey.measure_profiles(grey, lines, radii, np.array([0, 1]), 2, samples=5)
+        np.testing.assert_allclose(measured[0], solid, atol=0.02)
+        np.testing.assert_allclose(measured[1][:2], rimmed[:2], atol=0.05)
+        self.assertGreater(measured[1][4], 0.7)
+        found_void, noise, ranges = _grey.profile_levels(grey, [solid, rimmed])
+        self.assertAlmostEqual(found_void, void, places=6)
+        self.assertLessEqual(ranges[1][0], 0.3)
+        self.assertGreater(ranges[1][0], void)
+        types = _grey.profile_types(grey, lines, radii, [solid, rimmed], void)
+        np.testing.assert_array_equal(types, [0, 1])
+
     def test_thin_fibers_are_rejected(self):
         with self.assertRaises(ValueError):
             ct.fit_fibers(self.scan.volume, VOXEL, ct.FiberSpec(diameter=1 * um))
@@ -450,6 +478,26 @@ class CtFitTests(unittest.TestCase):
         self.assertGreater(report["voxel_label_accuracy"], 0.9)
         with self.assertRaises(ValueError):
             ct.fit_fibers(self.scan.volume, VOXEL, [spec, ct.FiberSpec(diameter=2 * DIAMETER)], fit_settings())
+
+    def test_fit_from_grey_profiles(self):
+        from scipy.ndimage import gaussian_filter
+
+        from tangle.ct._grey import measure_profiles
+
+        grey = gaussian_filter(self.scan.volume.astype(np.float32), 0.7)
+        kinds = np.zeros(len(self.scan.centerlines), dtype=int)
+        profile = measure_profiles(grey, self.scan.centerlines, self.scan.radii, kinds, 1)[0]
+        spec = ct.FiberSpec(diameter=DIAMETER, length=200 * um, profile=tuple(float(v) for v in profile))
+        fit = ct.fit_fibers(self.scan.volume, VOXEL, spec, fit_settings())
+        self.assertEqual(fit.history[0]["stage"], "profiles")
+        self.assertEqual(next(e for e in fit.history if e["stage"] == "input")["source"], "grey profiles")
+        report = ct.score(fit, self.scan)
+        self.assertEqual(report["recovered"], 3, report)
+        self.assertEqual(report["false_fibers"], 0, report)
+        self.assertGreater(report["voxel_label_accuracy"], 0.9)
+        with tempfile.TemporaryDirectory() as tmp:
+            reloaded = ct.load_fit(fit.write(tmp)["config"])
+        self.assertEqual(reloaded.specs[0].profile, spec.profile)
 
     def test_outputs_round_trip_into_tangle(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -2,9 +2,9 @@
 
 Each example is a synthetic scan rendered from a Tangle structure whose true
 fibers are known. By default the raw scan is fitted, with a grey range per
-fiber type (``FiberSpec.intensity``) read off the histogram of the true
-fiber voxels (the 1st to 99th percentile of the bright part, leaving out
-blurred edges and dim cores). With ``--input mask`` a generous binary
+fiber type (``FiberSpec.profile``: its grey at 9 radii from the axis to
+the surface, measured around the true fibers as one would on a few fibers
+of a real scan). With ``--input mask`` a generous binary
 mask is fitted instead (``scan.fiber_mask(level=MASK_LEVEL)``: fibers look
 a little thicker, as with a real threshold). The fibers are fitted with
 Tangle's solver on the GPU. Every example writes the same files, and only
@@ -13,7 +13,7 @@ replaces the old result):
 
 * ``raw.tif``: the rendered scan (uint16);
 * ``input.tif``: what the fit sees, 0 (void) to 255 (fiber): the grey
-  ranges' fiber fraction per voxel, or the mask;
+  profiles' fiber fraction per voxel, or the mask;
 * ``true.tif``: the true fibers, one color per fiber, over the scan (RGB);
 * ``segment.tif``: the fitted fibers, one color per fiber, over the scan (RGB);
 * ``diff.tif``: where the segmentation and the truth disagree, over the dimmed
@@ -395,39 +395,35 @@ def confidence_check(fit: ct.FitResult, report: dict, classes: dict, confidence:
     return result
 
 
-def intensity_ranges(scan: ct.SyntheticScan, count: int, sigma: float = 0.7) -> list[tuple[float, float]]:
-    """Each type's grey range, as read off a histogram of its true voxels.
+def grey_profiles(scan: ct.SyntheticScan, count: int, sigma: float = 0.7) -> list[tuple[float, ...]]:
+    """Each type's grey profile, measured on the denoised scan around the true fibers.
 
-    The denoised grey of a type's voxels splits (Otsu) into the blurred
-    edges and dim cores below and the fiber grey above; the range is the
-    1st-99th percentile of the upper part.
+    As one would measure it on a few fibers of a real scan: the median grey
+    at 9 radii from the axis to the surface (``tangle.ct._grey.measure_profiles``).
     """
     from scipy.ndimage import gaussian_filter
-    from tangle.ct._image import otsu_threshold
+    from tangle.ct._grey import measure_profiles
 
     grey = gaussian_filter(np.asarray(scan.volume, dtype=np.float32), sigma)
-    labels = np.asarray(scan.labels)
     types = np.asarray(scan.types) if scan.types is not None else np.zeros(len(scan.centerlines), dtype=int)
-    voxel_type = np.concatenate([[-1], types])[labels]  # label 0 = void
-    ranges = []
-    for k in range(count):
-        values = grey[voxel_type == k]
-        bright = values[values >= otsu_threshold(values)]
-        low, high = np.percentile(bright, [1, 99])
-        ranges.append((float(low), float(high)))
-    return ranges
+    profiles = measure_profiles(grey, scan.centerlines, scan.radii, types, count)
+    return [tuple(round(float(v), 2) for v in profile) for profile in profiles]
 
 
 def fit_input(scan: ct.SyntheticScan, spec) -> tuple[np.ndarray, object, np.ndarray]:
     """What to fit (the raw scan or a mask), the specs to fit it with, and the 0-1 image the fit sees."""
+    from scipy.ndimage import gaussian_filter
+    from tangle.ct._grey import profile_levels
     from tangle.ct._ranges import range_image
 
     if INPUT == "mask":
         mask = scan.fiber_mask(level=MASK_LEVEL)
         return mask, spec, mask.astype(np.float32)
     specs = spec if isinstance(spec, list) else [spec]
-    ranges = intensity_ranges(scan, len(specs))
-    specs = [item.replace(intensity=r) for item, r in zip(specs, ranges)]
+    profiles = grey_profiles(scan, len(specs))
+    specs = [item.replace(profile=profile) for item, profile in zip(specs, profiles)]
+    grey = gaussian_filter(np.asarray(scan.volume, dtype=np.float32), 0.7)
+    _, _, ranges = profile_levels(grey, [np.asarray(profile) for profile in profiles])
     seen, _, _ = range_image(scan.volume, ranges, denoise_sigma=0.7)
     return scan.volume, specs if isinstance(spec, list) else specs[0], seen
 
@@ -533,7 +529,7 @@ def write_summary(output: Path, rows: list[dict]) -> None:
         + (
             f"Fitted from binary masks thresholded at {MASK_LEVEL} of the way from void to fiber. "
             if INPUT == "mask"
-            else "Fitted from the raw scan with a grey range per fiber type (1st-99th percentile of the bright part of the true fiber voxels). "
+            else "Fitted from the raw scan with a grey profile per fiber type, measured around the true fibers. "
         )
         + "Each example's folder holds raw.tif, input.tif, true.tif, segment.tif, diff.tif, confidence.tif, fit.json and score.json. "
         "diff.tif: red = missed, blue = extra, orange = wrong fiber. confidence.tif: green = sure, red = unsure. "
@@ -616,7 +612,7 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=2, help="fits per example for --redraw-study")
     parser.add_argument(
         "--input", choices=("grey", "mask"), default=None,
-        help="fit the raw scan with grey ranges (default) or a generous mask",
+        help="fit the raw scan with grey profiles (default) or a generous mask",
     )
     args = parser.parse_args()
     global INPUT

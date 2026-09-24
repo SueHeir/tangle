@@ -41,6 +41,18 @@ read through the **grey ranges** (a mask input ignores them):
 Each voxel keeps one bit per type whose range it is in (`types`), used
 for typing (7b).
 
+With `FiberSpec.profile` on every type (`_grey`), the ranges come from the
+profiles: on the denoised scan the void grey v is the median of voxels
+darker than every profile, the noise σ_n 1.4826 × MAD of those below
+halfway to it, and a type's range is [min p − 2σ_n, max p + 2σ_n], its low
+end kept at least halfway from v to min p (an explicit `intensity` wins).
+The denoised scan, profiles and v are kept for scoring: `render_grey`
+draws fibers as the scan should show them (each voxel takes the profile
+of the fiber whose surface is nearest, at d / R, and outside the surface
+fades linearly from the profile's last value to v over 2 × 1.2 voxels;
+`measure_profiles` measures on the blurred scan, so the blur inside the
+fiber is in the profile).
+
 A `bool` array, or one with only two values (the larger is fiber), is a
 **mask**:
 
@@ -350,7 +362,12 @@ same steps size the fibers.
   at 0, give each fiber the type nearest m − δ, set δ to the median of
   m − r_type, repeat 3 times; δ is clamped to [−0.5, r_min]. It is logged
   per round as `thickness_margin`.
-- **Type:** with grey ranges and several types, the type bits (step 1)
+- **Type:** with profiles and several types, `_grey.profile_types`
+  samples the grey across the fiber at up to 24 interior nodes, in four
+  directions at 0 … 1.4 of each type's radius, and compares it with that
+  type's drawn profile; the type with the lowest median squared misfit is
+  taken when it is below 0.7 × the next type's. With grey ranges only, the
+  type bits (step 1)
   are sampled at the fiber's interior nodes; a type whose bit is set at
   ≥ 60% of them, with no other type within 0.1 of it, is the fiber's type
   (`_Fitter._grey_types`). Otherwise the spec whose radius is nearest
@@ -475,7 +492,11 @@ After the final solve and its confidence, up to `redraw_passes` passes:
    length plus its extension (a lower bound when the piece runs on through
    another region or the scan boundary); plus, per join, the joined
    fiber's cumulative hazard −ln S(ℓ_a + ℓ_b + bridge) less the two
-   pieces' (`_ends.length_end_cost`, `length_join_cost`). Shape 1 gives
+   pieces' (`_ends.length_end_cost`, `length_join_cost`). With profiles
+   the residual is instead the denoised scan against the fibers drawn with
+   their profiles (`render_grey`, the brighter fiber where two meet), over
+   the grey evidence scale 2 σ² π r² (σ² the mean squared grey residual
+   near the fibers). Shape 1 gives
    the old constant ln(L/D) and free joins. A piece's own (uncut) end
    inside a region box and away from the scan boundary is a port as well;
    unjoined it gets no extension and stays where it is. The
@@ -506,7 +527,11 @@ After the final solve and its confidence, up to `redraw_passes` passes:
    (`changed_regions`; a changed node outside every region joins the
    nearest, whose box grows to hold it). Tying regions by any fiber that
    merely passes through them chained every region of a dense scan into
-   one group. With `redraw_score = "mask"` (the default) a group is kept if
+   one group. With `redraw_score = "grey"` (the default with profiles:
+   `"auto"`) a group is kept if its boxes' squared grey residual, scan
+   against the fit drawn with its profiles, falls by more than one nat
+   (the grey evidence scale). With `"mask"` (the default otherwise) a
+   group is kept if
    its boxes' sum of `residual_map` (foreground farther than r + m from
    every fit, plus background inside a capsule) falls by more than 0.001
    per foreground voxel; with `"confidence"`, if the sum of `coverage_map`
