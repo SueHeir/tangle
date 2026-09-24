@@ -1,15 +1,19 @@
 """Every ``tangle.ct`` example, fitted the same way, one result folder each.
 
 Each example is a synthetic scan rendered from a Tangle structure whose true
-fibers are known. A generous binary fiber mask is thresholded from the scan
-(``scan.fiber_mask(level=MASK_LEVEL)``: fibers look a little thicker, as
-with a real threshold), and the fibers are fitted from the mask with
+fibers are known. By default the raw scan is fitted, with a grey range per
+fiber type (``FiberSpec.intensity``) read off the histogram of the true
+fiber voxels (the 1st to 99th percentile of the bright part, leaving out
+blurred edges and dim cores). With ``--input mask`` a generous binary
+mask is fitted instead (``scan.fiber_mask(level=MASK_LEVEL)``: fibers look
+a little thicker, as with a real threshold). The fibers are fitted with
 Tangle's solver on the GPU. Every example writes the same files, and only
 these, to ``<output>/<example>/`` (the folder is emptied first, so a re-run
 replaces the old result):
 
 * ``raw.tif``: the rendered scan (uint16);
-* ``mask.tif``: the fiber mask the fit starts from (0/255);
+* ``input.tif``: what the fit sees, 0 (void) to 255 (fiber): the grey
+  ranges' fiber fraction per voxel, or the mask;
 * ``true.tif``: the true fibers, one color per fiber, over the scan (RGB);
 * ``segment.tif``: the fitted fibers, one color per fiber, over the scan (RGB);
 * ``diff.tif``: where the segmentation and the truth disagree, over the dimmed
@@ -45,7 +49,8 @@ Examples:
   plane, cropped to the central 240 µm, so most fibers cross the scan
   boundary (the case for the fiber-length prior).
 * ``two_types``: 7 µm solid fibers and 19 µm fibers with a bright rim and a
-  dim core (the core comes out as a hole in the mask, which is filled);
+  dim core (the core falls below the grey range, or out of the mask, and
+  the hole is filled);
   each fit's type is chosen by its thickness.
 * ``scenario_*``: one small scan per fitting step, a few 12 µm fibers
   placed by hand in a 150 µm box:
@@ -81,7 +86,8 @@ from tangle.units import um
 
 BACKEND = os.environ.get("TANGLE_BACKEND", "wgpu")
 MASK_LEVEL = 0.35  # of the way from void to fiber grey level: a generous threshold
-FILES = ("raw.tif", "mask.tif", "true.tif", "segment.tif", "diff.tif", "confidence.tif", "fit.json", "score.json")
+INPUT = os.environ.get("TANGLE_CT_INPUT", "grey")  # "grey" (raw scan + ranges) or "mask"
+FILES = ("raw.tif", "input.tif", "true.tif", "segment.tif", "diff.tif", "confidence.tif", "fit.json", "score.json")
 DIFF_COLORS = {"missed": (230, 50, 50), "extra": (60, 120, 255), "wrong_fiber": (255, 200, 0)}
 
 
@@ -389,14 +395,51 @@ def confidence_check(fit: ct.FitResult, report: dict, classes: dict, confidence:
     return result
 
 
+def intensity_ranges(scan: ct.SyntheticScan, count: int, sigma: float = 0.7) -> list[tuple[float, float]]:
+    """Each type's grey range, as read off a histogram of its true voxels.
+
+    The denoised grey of a type's voxels splits (Otsu) into the blurred
+    edges and dim cores below and the fiber grey above; the range is the
+    1st-99th percentile of the upper part.
+    """
+    from scipy.ndimage import gaussian_filter
+    from tangle.ct._image import otsu_threshold
+
+    grey = gaussian_filter(np.asarray(scan.volume, dtype=np.float32), sigma)
+    labels = np.asarray(scan.labels)
+    types = np.asarray(scan.types) if scan.types is not None else np.zeros(len(scan.centerlines), dtype=int)
+    voxel_type = np.concatenate([[-1], types])[labels]  # label 0 = void
+    ranges = []
+    for k in range(count):
+        values = grey[voxel_type == k]
+        bright = values[values >= otsu_threshold(values)]
+        low, high = np.percentile(bright, [1, 99])
+        ranges.append((float(low), float(high)))
+    return ranges
+
+
+def fit_input(scan: ct.SyntheticScan, spec) -> tuple[np.ndarray, object, np.ndarray]:
+    """What to fit (the raw scan or a mask), the specs to fit it with, and the 0-1 image the fit sees."""
+    from tangle.ct._ranges import range_image
+
+    if INPUT == "mask":
+        mask = scan.fiber_mask(level=MASK_LEVEL)
+        return mask, spec, mask.astype(np.float32)
+    specs = spec if isinstance(spec, list) else [spec]
+    ranges = intensity_ranges(scan, len(specs))
+    specs = [item.replace(intensity=r) for item, r in zip(specs, ranges)]
+    seen, _, _ = range_image(scan.volume, ranges, denoise_sigma=0.7)
+    return scan.volume, specs if isinstance(spec, list) else specs[0], seen
+
+
 def run(name: str, output: Path) -> dict:
     print(f"{name}:")
     example = EXAMPLES[name](output / ".cache" / f"{name}.json")
     scan = example.scan
     h = scan.voxel_size
-    mask = scan.fiber_mask(level=MASK_LEVEL)
+    volume, spec, seen = fit_input(scan, example.spec)
     started = time.perf_counter()
-    fit = ct.fit_fibers(mask, h, example.spec, ct.FitSettings(backend=BACKEND))
+    fit = ct.fit_fibers(volume, h, spec, ct.FitSettings(backend=BACKEND))
     seconds = time.perf_counter() - started
 
     report = ct.score(fit, scan)
@@ -413,7 +456,7 @@ def run(name: str, output: Path) -> dict:
         shutil.rmtree(folder)
     folder.mkdir(parents=True)
     _write_stack(folder / "raw", scan.volume, h)
-    _write_stack(folder / "mask", mask.astype(np.uint8) * 255, h)
+    _write_stack(folder / "input", (np.clip(seen, 0.0, 1.0) * 255).astype(np.uint8), h)
     _write_stack(folder / "true", ct.overlay_volume(scan.volume, scan.labels), h, rgb=True)
     fit_labels = fit.label_volume()
     _write_stack(folder / "segment", ct.overlay_volume(scan.volume, fit_labels), h, rgb=True)
@@ -487,8 +530,12 @@ def write_summary(output: Path, rows: list[dict]) -> None:
     lines += ["| " + " | ".join(cell(row.get(c)) for c in columns) + " |" for row in known.values()]
     header = (
         "# tangle.ct examples\n\n"
-        f"Fitted from binary masks thresholded at {MASK_LEVEL} of the way from void to fiber. "
-        "Each example's folder holds raw.tif, mask.tif, true.tif, segment.tif, diff.tif, confidence.tif, fit.json and score.json. "
+        + (
+            f"Fitted from binary masks thresholded at {MASK_LEVEL} of the way from void to fiber. "
+            if INPUT == "mask"
+            else "Fitted from the raw scan with a grey range per fiber type (1st-99th percentile of the bright part of the true fiber voxels). "
+        )
+        + "Each example's folder holds raw.tif, input.tif, true.tif, segment.tif, diff.tif, confidence.tif, fit.json and score.json. "
         "diff.tif: red = missed, blue = extra, orange = wrong fiber. confidence.tif: green = sure, red = unsure. "
         "Confidence AUC: how well low confidence picks out the wrong voxels (extra or wrong fiber) among fitted "
         "voxels, and the merged or false fits among all fits; 0.5 is chance, 1 is perfect.\n\n"
@@ -514,7 +561,7 @@ def redraw_study(names: list[str], output: Path, repeats: int) -> None:
         scan = example.scan
         truth = np.asarray(scan.labels)
         solid = truth > 0
-        mask = scan.fiber_mask(level=MASK_LEVEL)
+        volume, spec, _ = fit_input(scan, example.spec)
 
         def correct(lines, radii):
             labels, _, _ = rasterize(truth.shape, lines, np.asarray(radii), signed=True)
@@ -536,7 +583,7 @@ def redraw_study(names: list[str], output: Path, repeats: int) -> None:
             fit_module._REDRAW_PROBE = probe
             try:
                 ct.fit_fibers(
-                    mask, scan.voxel_size, example.spec,
+                    volume, scan.voxel_size, spec,
                     ct.FitSettings(backend=BACKEND, redraw_score="all", redraw_passes=1),
                 )
             finally:
@@ -567,7 +614,14 @@ def main() -> None:
         help="print how well the redraw scores agree with the truth (default single_type two_types)",
     )
     parser.add_argument("--repeats", type=int, default=2, help="fits per example for --redraw-study")
+    parser.add_argument(
+        "--input", choices=("grey", "mask"), default=None,
+        help="fit the raw scan with grey ranges (default) or a generous mask",
+    )
     args = parser.parse_args()
+    global INPUT
+    if args.input:
+        INPUT = args.input
     if args.list:
         print("\n".join(EXAMPLES))
         return

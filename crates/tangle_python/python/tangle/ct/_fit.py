@@ -41,6 +41,13 @@ class FiberSpec:
     ``name``
         Material name used in the exported Tangle configuration; also names
         the type when several are fitted together.
+    ``intensity``
+        Optional ``(low, high)`` grey range this type's voxels take in the
+        raw scan (its own units, after the light denoise). Given for every
+        type, it decides what is fiber: inside a range is fiber of that
+        type, between the void grey and a range is partly fiber (an edge),
+        and outside is void; and a fiber's type then follows the range its
+        core falls in. See ``_ranges``.
     """
 
     diameter: float
@@ -50,6 +57,7 @@ class FiberSpec:
     max_length: float | None = None
     length: float | None = None
     name: str = "ct fiber"
+    intensity: tuple[float, float] | None = None
 
     def replace(self, **changes: Any) -> "FiberSpec":
         return replace(self, **changes)
@@ -100,10 +108,12 @@ class FitSettings:
     # is kept, for comparison).
     redraw_score: str = "confidence"
     # How a region is redrawn: "match" tries every way its loose fiber ends
-    # can connect or end (``_junctions``) and builds the best-scoring one
-    # (the next best on a retry); "grow" grows the ends along their own
-    # direction (``_regrow.grow_cut_ends``).
+    # can connect or end (``_junctions``), solves the ``redraw_plans``
+    # best-scoring ones and keeps, region by region, the one with the most
+    # sure coverage (a retry moves on to the next plans); "grow" grows the
+    # ends along their own direction (``_regrow.grow_cut_ends``).
     redraw_moves: str = "match"
+    redraw_plans: int = 3
     confidence_threshold: float = 0.5
 
     def replace(self, **changes: Any) -> "FitSettings":
@@ -439,6 +449,8 @@ def load_fit(path: str | Path) -> FitResult:
     def spec_from(values: dict[str, Any]) -> FiberSpec:
         values = dict(values)
         values.pop("profile", None)  # fits written before types were chosen by size
+        if values.get("intensity") is not None:
+            values["intensity"] = tuple(values["intensity"])
         return FiberSpec(**values)
 
     specs = [spec_from(item) for item in data["specs"]] if data.get("specs") else None
@@ -512,6 +524,8 @@ def fit_fibers(
         raise ValueError('redraw_score must be "confidence", "mask" or "all"')
     if settings.redraw_moves not in ("match", "grow"):
         raise ValueError('redraw_moves must be "match" or "grow"')
+    if settings.redraw_plans < 1:
+        raise ValueError("redraw_plans must be at least 1")
     if not _device.available():
         raise RuntimeError("tangle.ct needs a Tangle build with tangle.ImageRelaxer")
 
@@ -523,21 +537,39 @@ def fit_fibers(
         if verbose:
             print(entry)
 
+    ranged = [item.intensity is not None for item in specs]
+    if any(ranged) and not all(ranged):
+        raise ValueError("give an intensity range for every fiber type, or for none")
     binary = _is_mask(volume)
+    largest = max(0.5 * item.diameter for item in specs) / voxel_size
+    type_bits = None
     if binary:
-        largest = max(0.5 * item.diameter for item in specs) / voxel_size
         image, levels = _mask_image(volume, exclude, settings, largest)
+        source = "mask"
+    elif all(ranged):
+        from ._ranges import range_image
+
+        ranges = [tuple(item.intensity) for item in specs]
+        image, type_bits, void = range_image(
+            volume, ranges, denoise_sigma=settings.denoise_sigma_voxels, exclude=exclude,
+            fill_holes_area=np.pi * (largest + 1.0) ** 2 if settings.fill_mask_holes else None,
+        )
+        low = min(r[0] for r in ranges)
+        levels = Levels(void=void, fiber=float(np.mean(ranges[0])), threshold=0.5 * (void + low))
+        source = "grey ranges"
     else:
         image, levels = normalize(volume, denoise_sigma=settings.denoise_sigma_voxels, levels=settings.levels)
         if exclude is not None:
             image = np.where(np.asarray(exclude, dtype=bool), np.float32(0.0), image)
-    log("input", [], mask=binary)
+        source = "grey"
+    log("input", [], mask=binary, source=source)
 
     fitter = _Fitter(image, specs, settings, voxel_size, log)
+    fitter.type_bits = type_bits
     lines = fitter.trace([], np.zeros(0))
     radii, types = fitter.classify(lines)
     log("trace", lines, types=fitter.counts(types), thickness_margin=round(fitter.margin, 2))
-    if not binary and len(specs) == 1 and settings.levels is None and lines:
+    if source == "grey" and len(specs) == 1 and settings.levels is None and lines:
         # Otsu class medians put the fiber level below the fiber core (blurred
         # edge voxels are in the fiber class); re-level on the traced cores.
         image, levels = _relevel(image, levels, lines, float(fitter.radius[0]))
@@ -667,6 +699,7 @@ class _Fitter:
         self.order = [int(k) for k in np.argsort(-self.radius, kind="stable")]  # largest first
         self.hessians: dict[int, HessianField] = {}
         self.margin = settings.thickness_margin_voxels or 0.0
+        self.type_bits: np.ndarray | None = None  # per voxel, one bit per type whose grey range it is in
         self.set_image(image)
 
     def set_image(self, image: np.ndarray) -> None:
@@ -736,19 +769,39 @@ class _Fitter:
             inner = line[1:-1] if len(line) > 2 else line
             measured[i] = max(float(np.median(sample_image(self.depth, inner))), 0.5)
         margin = self.settings.thickness_margin_voxels
+        by_grey = self._grey_types(lines)
         if margin is None:
             margin = 0.0
             for _ in range(3):
                 types = self._nearest(measured - margin)
+                if by_grey is not None:
+                    types = np.where(by_grey >= 0, by_grey, types)
                 margin = float(np.clip(np.median(measured - self.radius[types]), -0.5, float(self.radius.min())))
             self.margin = margin
         types = self._nearest(measured - margin)
+        if by_grey is not None:
+            types = np.where(by_grey >= 0, by_grey, types)
         prior = self.radius[types]
         w = self.settings.radius_prior_weight
         blended = (np.maximum(measured - margin, 0.5) + w * prior) / (1.0 + w)
         tolerance = self.tolerance[types]
         radii = np.clip(blended, prior * (1 - tolerance), prior * (1 + tolerance))
         return radii, types
+
+    def _grey_types(self, lines: list[np.ndarray]) -> np.ndarray | None:
+        """Each fiber's type by the grey range its core falls in (-1 where no range has 60%)."""
+        from ._ranges import type_fractions
+
+        if self.type_bits is None or len(self.specs) < 2:
+            return None
+        out = np.full(len(lines), -1, dtype=int)
+        for i, line in enumerate(lines):
+            inner = line[1:-1] if len(line) > 2 else line
+            fractions = type_fractions(self.type_bits, inner, len(self.specs))
+            best = int(np.argmax(fractions))
+            if fractions[best] >= 0.6 and np.sum(fractions >= fractions[best] - 0.1) == 1:
+                out[i] = best
+        return out
 
     def _nearest(self, radius: np.ndarray) -> np.ndarray:
         radius = np.maximum(radius, 0.25)
@@ -797,9 +850,11 @@ class _Fitter:
             )
             if cut is None or not lines:
                 break
-            new_lines, new_radii, new_types, info = self.redraw_candidate(
-                cut, radii, types, attempt=lambda point: self._attempt(point, failures)
-            )
+            attempt = lambda point: self._attempt(point, failures)  # noqa: E731
+            if s.redraw_moves == "match" and s.redraw_plans > 1:
+                new_lines, new_radii, new_types, info = self.pick_plans(cut, radii, types, attempt)
+            else:
+                new_lines, new_radii, new_types, info = self.redraw_candidate(cut, radii, types, attempt=attempt)
             _, new_settled, _ = self.scores(new_lines, new_radii)
             old_map = _confidence.coverage_map(self.foreground, lines, radii, settled)
             new_map = _confidence.coverage_map(self.foreground, new_lines, new_radii, new_settled)
@@ -908,14 +963,55 @@ class _Fitter:
                 high = np.maximum(high, np.max([f[1] for f in overlapping], axis=0))
             failures.append([low, high, count])
 
+    def pick_plans(
+        self, cut: _regrow.Cut, radii: np.ndarray, types: np.ndarray, attempt
+    ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, dict[str, Any]]:
+        """Solve each region's best ``redraw_plans`` combinations and keep, per region, the surest.
+
+        Candidate ``c`` builds every region with its ``c``-th best plan and
+        is solved with the sure pieces pinned. Each region then takes the
+        plan whose candidate has the most sure coverage (foreground voxels
+        weighted by their fiber's confidence) inside the region's box. If
+        the regions disagree, the chosen mix is built and solved once more.
+        """
+        count = self.settings.redraw_plans
+        totals = np.zeros((count, len(cut.regions)))
+        candidates = []
+        upper = np.array(self.image.shape[::-1])
+        for c in range(count):
+            candidate = self.redraw_candidate(
+                cut, radii, types, attempt=attempt, offsets=np.full(len(cut.regions), c)
+            )
+            lines, cand_radii = candidate[0], candidate[1]
+            _, settled, _ = self.scores(lines, cand_radii)
+            cover = _confidence.coverage_map(self.foreground, lines, cand_radii, settled)
+            for k, (low, high) in enumerate(cut.regions):
+                a = np.clip(np.floor(low).astype(int), 0, upper)
+                b = np.clip(np.ceil(high).astype(int), 0, upper)
+                totals[c, k] = float(cover[a[2] : b[2], a[1] : b[1], a[0] : b[0]].sum(dtype=np.float64))
+            candidates.append(candidate)
+            if c == 0 and candidate[3].get("plans_scored", 0) <= candidate[3].get("regions_with_ports", 0):
+                break  # every region has a single plan: nothing to compare
+        solved = len(candidates)
+        choice = np.argmax(totals[:solved], axis=0)  # ties keep the better-ranked plan
+        if len(set(choice.tolist())) <= 1:
+            lines, new_radii, new_types, info = candidates[int(choice[0]) if len(choice) else 0]
+        else:
+            lines, new_radii, new_types, info = self.redraw_candidate(
+                cut, radii, types, attempt=attempt, offsets=choice
+            )
+        info = {**info, "plans_solved": solved, "plan_choices": np.bincount(choice, minlength=solved).tolist()}
+        return lines, new_radii, new_types, info
+
     def redraw_candidate(
-        self, cut: _regrow.Cut, radii: np.ndarray, types: np.ndarray, attempt=None
+        self, cut: _regrow.Cut, radii: np.ndarray, types: np.ndarray, attempt=None, offsets=None
     ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, dict[str, Any]]:
         """Grow the cut's sure pieces back, trace the rest, and solve with the pieces pinned.
 
         ``attempt(point)`` is how many times the region at ``point`` failed
         before; it picks the move for a cut end there (see
-        ``_regrow.grow_cut_ends``).
+        ``_regrow.grow_cut_ends``). With the "match" move, ``offsets[k]``
+        picks region ``k``'s plan among the ``redraw_plans`` tried per attempt.
         """
         from ._trace import Tracer
 
@@ -933,7 +1029,9 @@ class _Fitter:
 
         matched: dict[str, Any] = {}
         if s.redraw_moves == "match":
-            pieces, piece_radii, piece_types, matched = self._match(cut, piece_radii, piece_types, tracer_for, attempt)
+            pieces, piece_radii, piece_types, matched = self._match(
+                cut, piece_radii, piece_types, tracer_for, attempt, offsets
+            )
             grown = matched.pop("grown")
         else:
             pieces, grown = _regrow.grow_cut_ends(
@@ -967,12 +1065,13 @@ class _Fitter:
         return lines, np.asarray(radii, dtype=np.float64), np.asarray(types, dtype=int), info
 
     def _match(
-        self, cut: _regrow.Cut, piece_radii: np.ndarray, piece_types: np.ndarray, tracer_for, attempt
+        self, cut: _regrow.Cut, piece_radii: np.ndarray, piece_types: np.ndarray, tracer_for, attempt, offsets=None
     ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, dict[str, Any]]:
         """Connect or end every loose fiber end, region by region (see ``_junctions``).
 
-        A region takes its best-scoring combination, or on a retry (``attempt``
-        at the region's center) the next best.
+        Region ``k`` takes plan ``attempt × redraw_plans + offsets[k]`` in
+        score order (``attempt`` at the region's center: how often it failed),
+        or the last plan if there are fewer.
         """
         from ._ends import evidence_scale, near_box
         from ._geometry import paint
@@ -988,10 +1087,11 @@ class _Fitter:
         end_cost = np.maximum(self.cost, 1.0)
         connections = []
         extensions: dict[tuple[int, int], np.ndarray] = {}
-        plans_tried = joins = ends = grown = 0
+        plans_tried = joins = ends = grown = with_ports = 0
         for k, region_ports in enumerate(ports):
             if not region_ports:
                 continue
+            with_ports += 1
             region_extensions = []
             interior = []
             for port in region_ports:
@@ -1014,7 +1114,8 @@ class _Fitter:
                 margin=self.margin, scale=scale, end_cost=end_cost, interior=interior,
             )
             plans_tried += len(plans)
-            rank = int(attempt(0.5 * (low + high))) if attempt else 0
+            rank = int(attempt(0.5 * (low + high))) * self.settings.redraw_plans if attempt else 0
+            rank += int(offsets[k]) if offsets is not None else 0
             plan = plans[min(rank, len(plans) - 1)]
             paired = set()
             for i, j in plan.pairs:
@@ -1032,7 +1133,7 @@ class _Fitter:
         first = np.asarray(first, dtype=int)
         info = {
             "grown": grown, "ports": int(sum(len(p) for p in ports)), "plans_scored": plans_tried,
-            "joins": joins, "ends_in_regions": ends,
+            "joins": joins, "ends_in_regions": ends, "regions_with_ports": with_ports,
         }
         return lines, piece_radii[first], piece_types[first], info
 

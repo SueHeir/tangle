@@ -19,11 +19,16 @@ non-overlapping tubes within the bend limit. The rest is Python and needs
 NumPy and SciPy. `tifffile` and `matplotlib` are optional and add the TIFF
 and PNG outputs.
 
-The input is a grey-level scan or, better, a **binary fiber mask** (a
-`bool` array, or any array with two values). A mask may over-reach: some
-background kept as fiber and fibers a little thicker than they are. Pass
-`exclude=` with a mask of voxels known not to be fiber to hide them from
-the fit.
+The input is the **raw grey scan with a grey range per fiber type**
+(`FiberSpec(intensity=(low, high))`, read off the scan's histogram), a
+**binary fiber mask** (a `bool` array, or any array with two values), or a
+grey scan without ranges. The ranges decide what is fiber: a voxel inside
+a type's range is fiber of that type, a voxel between the void grey and a
+range is part fiber (a fiber edge), and anything else is void, so the fit
+sees sub-voxel edges and each fiber's grey as well as its size. A mask may
+over-reach: some background kept as fiber and fibers a little thicker than
+they are. Pass `exclude=` with a mask of voxels known not to be fiber to
+hide them from the fit.
 
 ```python
 import tangle.ct as ct
@@ -31,6 +36,8 @@ from tangle.units import um
 
 spec = ct.FiberSpec(diameter=10 * um, min_bend_radius=40 * um)
 fit = ct.fit_fibers(mask, voxel_size=1.3 * um, spec=spec)   # mask: (z, y, x) array
+ranged = spec.replace(intensity=(0.62, 0.95))                # this type's grey, from the histogram
+fit = ct.fit_fibers(volume, 1.3 * um, ranged)                # raw scan: the ranges decide what is fiber
 fit = ct.fit_fibers(mask, 1.3 * um, spec, exclude=not_fiber)  # optional: voxels known not to be fiber
 fit.write("fit_output", volume=volume)   # fit.json, labels.tif, overlay.tif, overlay.png
 assembly = fit.to_assembly()             # cell = scanned volume, not periodic
@@ -48,6 +55,7 @@ relaxed, run = fit.relax()               # optional: clean up remaining overlaps
 | `min_length` | Shorter fragments are dropped. Default 3 diameters. |
 | `max_length` | Optional. Fits longer than this are split where the scan gives them the least support. |
 | `length` | Optional typical fiber length. Turns on the fiber-length prior (below). A rough value is enough. |
+| `intensity` | Optional `(low, high)` grey range of this type's voxels in the raw scan (after a light σ = 0.7 voxel denoise). Give it for every type or none. Take it from the bright peak of the histogram: blurred edges and dim cores are handled without it. |
 
 `FitSettings` holds the numerical settings (rounds, solver iterations,
 merge gap and so on). The defaults are meant to work without changes.
@@ -60,9 +68,13 @@ merge gap and so on). The defaults are meant to work without changes.
 The method follows the literature review in the project files. In short
 (every step, threshold and function is in [ct_fitting_internals.md](ct_fitting_internals.md)):
 
-1. **Input.** A mask is used as 0 (void) and 1 (fiber), with holes the size
+1. **Input.** With grey ranges, the denoised scan becomes each voxel's
+   fiber fraction: 1 inside a range, rising linearly from the void grey
+   (the median of voxels darker than every range) up to a range, fading
+   out over one range width above it; core-sized holes are filled. A mask
+   is used as 0 (void) and 1 (fiber), with holes the size
    of a fiber core filled (a threshold can miss a dim core) and a light
-   blur. A grey scan is denoised and mapped to 0…1 with Otsu's threshold,
+   blur. A grey scan without ranges is denoised and mapped to 0…1 with Otsu's threshold,
    then re-leveled on the traced fiber cores. Estimating grey levels fails
    when fibers are a small part of the scan (the threshold then splits the
    noise), which is why a mask is the better input.
@@ -159,8 +171,10 @@ fit = ct.fit_fibers(mask, voxel_size=1.25 * um, spec=[fine, coarse])
 
 - A fiber's thickness is the foreground's depth (distance to the nearest
   void voxel) along its centerline, less the margin by which the mask
-  over-reaches. Its type is the spec whose diameter is nearest in ratio,
-  and that type sets its radius prior, bend limit, minimum length and
+  over-reaches. With grey ranges, a fiber whose centerline is at least
+  60% in one type's range (a dim core ringed by that range counts) takes
+  that type; otherwise, and without ranges, its type is the spec whose
+  diameter is nearest in ratio. The type sets its radius prior, bend limit, minimum length and
   length prior.
 - Types are re-chosen after every solver batch, so a fiber can change type
   as its fit improves. Splits and joins happen within a type.
@@ -173,9 +187,10 @@ fit = ct.fit_fibers(mask, voxel_size=1.25 * um, spec=[fine, coarse])
   per type.
 
 The `two_types` example (below) renders a scan of 7 µm solid fibers and
-19 µm fibers with a bright rim and a dim core, thresholds a generous mask
-(the large fibers' cores come out as holes, which are filled) and fits both
-types from it.
+19 µm fibers with a bright rim and a dim core and fits both types from
+the raw scan with a grey range per type (the large fibers' cores fall
+below their range and are filled), or from a generous mask with
+`--input mask`.
 
 ## Checking a fit against known answers
 
@@ -235,8 +250,10 @@ The fit then uses it to **redraw the unsure parts**
    direction until the scan stops being fiber). Each combination is scored
    by how well it explains the scan in the region, the overlaps it makes,
    and the fiber ends it leaves (priced by the fiber-length prior, at
-   least one nat each), and the best is built
-   (`FitSettings.redraw_moves = "match"`; `"grow"` instead only grows the
+   least one nat each). The best three are each solved on the GPU with
+   the sure pieces pinned, and every region keeps the one with the most
+   sure coverage; a retry tries the next three
+   (`FitSettings.redraw_plans`, `FitSettings.redraw_moves = "match"`; `"grow"` instead only grows the
    ends along their own direction);
 3. joins ends that meet and traces new fibers in whatever is still
    unexplained, with the usual steps;
@@ -262,15 +279,17 @@ were kept, widened or given up, and the sure coverage.
 
 [`ct_examples.py`](../crates/tangle_python/python/examples/ct_examples.py)
 holds every example, and every example is run the same way. A synthetic
-scan with known true fibers is thresholded into a generous mask, then
-fitted from the mask with Tangle's solver on the GPU. Each writes exactly
+scan with known true fibers is fitted from the raw scan, with each type's
+grey range taken from the bright part of its true voxels (1st to 99th
+percentile above an Otsu split), with Tangle's solver on the GPU.
+`--input mask` fits a generous thresholded mask instead. Each writes exactly
 these files to `<output>/<example>/`. The folder is emptied first, so there
 is only ever one result per example:
 
 | File | Contents |
 | --- | --- |
 | `raw.tif` | the rendered scan |
-| `mask.tif` | the fiber mask the fit starts from |
+| `input.tif` | what the fit sees, 0 (void) to 255 (fiber): the fiber fraction from the grey ranges, or the mask |
 | `true.tif` | the true fibers, one color per fiber, over the scan (RGB) |
 | `segment.tif` | the fitted fibers, one color per fiber, over the scan (RGB) |
 | `diff.tif` | where fit and truth disagree, over the dimmed scan (RGB): red = true fiber left empty (missed), blue = fit over void (extra), orange = fiber voxel given to the wrong fiber |

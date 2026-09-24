@@ -362,6 +362,34 @@ class CtToolTests(unittest.TestCase):
         self.assertEqual(report["overlapping_pairs"], 0)
         self.assertAlmostEqual(report["min_segment_diameters"], 1.25, places=6)
 
+    def test_grey_ranges_decide_what_is_fiber(self):
+        from tangle.ct._ranges import range_image, type_fractions
+
+        volume = np.zeros((10, 10, 10), dtype=np.float32)
+        volume[:, :, 1:4] = 1.0  # type 0: grey 0.9-1.1
+        volume[:, :, 6:9] = 0.5  # type 1: grey 0.45-0.55
+        volume[5, 5, 5] = 0.25  # an edge voxel, half of type 1's grey
+        volume[5, 5, 2] = 3.0  # a bright inclusion inside type 0
+        volume[5, 2, 2] = 1.15  # noise just above type 0's range
+        ranges = [(0.9, 1.1), (0.45, 0.55)]
+        image, types, void = range_image(volume, ranges, denoise_sigma=0.0)
+        self.assertEqual(void, 0.0)
+        self.assertEqual(float(image[0, 0, 2]), 1.0)
+        self.assertEqual(float(image[0, 0, 7]), 1.0)
+        self.assertEqual(float(image[0, 0, 0]), 0.0)
+        self.assertAlmostEqual(float(image[5, 5, 5]), 0.25 / 0.45, places=5)
+        self.assertEqual(float(image[5, 5, 2]), 0.0)
+        self.assertAlmostEqual(float(image[5, 2, 2]), 0.75, places=5)
+        self.assertEqual((int(types[0, 0, 2]), int(types[0, 0, 7]), int(types[0, 0, 0])), (1, 2, 0))
+        line = np.array([[2.5, 0.5, z + 0.5] for z in range(10)])
+        np.testing.assert_allclose(type_fractions(types, line, 2), [1.0, 0.0])
+        exclude = np.zeros(volume.shape, dtype=bool)
+        exclude[:, :, 7] = True
+        image, types, _ = range_image(volume, ranges, denoise_sigma=0.0, exclude=exclude)
+        self.assertEqual((float(image[0, 0, 7]), int(types[0, 0, 7])), (0.0, 0))
+        with self.assertRaises(ValueError):
+            range_image(volume, [(0.0, 0.5)], denoise_sigma=0.0)  # nothing darker: no void
+
     def test_thin_fibers_are_rejected(self):
         with self.assertRaises(ValueError):
             ct.fit_fibers(self.scan.volume, VOXEL, ct.FiberSpec(diameter=1 * um))
@@ -384,6 +412,24 @@ class CtFitTests(unittest.TestCase):
         self.assertLess(report["centerline_error_voxels"], 0.5)
         self.assertLess(abs(report["diameter_bias_m"]), 0.05 * DIAMETER)
         self.assertGreater(report["voxel_label_accuracy"], 0.95)
+
+    def test_fit_from_grey_ranges(self):
+        from scipy.ndimage import gaussian_filter
+
+        from tangle.ct._image import otsu_threshold
+
+        grey = gaussian_filter(self.scan.volume.astype(np.float32), 0.7)
+        values = grey[self.scan.labels > 0]
+        low, high = np.percentile(values[values >= otsu_threshold(values)], [1, 99])
+        spec = ct.FiberSpec(diameter=DIAMETER, length=200 * um, intensity=(float(low), float(high)))
+        fit = ct.fit_fibers(self.scan.volume, VOXEL, spec, fit_settings())
+        self.assertEqual(fit.history[0]["source"], "grey ranges")
+        report = ct.score(fit, self.scan)
+        self.assertEqual(report["recovered"], 3, report)
+        self.assertEqual(report["false_fibers"], 0, report)
+        self.assertGreater(report["voxel_label_accuracy"], 0.9)
+        with self.assertRaises(ValueError):
+            ct.fit_fibers(self.scan.volume, VOXEL, [spec, ct.FiberSpec(diameter=2 * DIAMETER)], fit_settings())
 
     def test_outputs_round_trip_into_tangle(self):
         with tempfile.TemporaryDirectory() as tmp:

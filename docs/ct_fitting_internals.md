@@ -16,9 +16,30 @@ is the user guide.
 - Nodes are kept about `r` apart (`FitSettings.node_spacing_radii = 1`), so
   each segment is roughly as long as it is thick.
 
-## 1. Input: a mask or a grey scan
+## 1. Input: grey ranges, a mask or a grey scan
 
-`_fit._is_mask`, `_fit._mask_image`, `_image.normalize`
+`_fit._is_mask`, `_fit._mask_image`, `_ranges.range_image`, `_image.normalize`
+
+With `FiberSpec.intensity = (low, high)` on every type, the raw scan is
+read through the **grey ranges** (a mask input ignores them):
+
+1. Blur with σ = 0.7 voxels. The void grey v is the median of the voxels
+   darker than every range's low end.
+2. For each type, a voxel's fiber fraction is 1 in [low, high];
+   (g − v) / (low − v), clipped to [0, 1], below it (a partial-volume
+   edge); and 1 − (g − high) / (high − low), clipped, above it, so noise
+   just over the range still counts and a much brighter inclusion does
+   not. The image is the largest fraction over the types.
+3. Core-sized holes (as in the mask fill below) in the image > 0.5 are set
+   to 1, and, per type, holes enclosed by that type's in-range voxels get
+   that type's bit: a dim core inside a bright rim is fiber of the rim's
+   type.
+4. `exclude` voxels are set to 0 with no type bits. Levels: void v, fiber
+   the middle of the first range, threshold halfway from v to the lowest
+   range. No re-level (step 5).
+
+Each voxel keeps one bit per type whose range it is in (`types`), used
+for typing (7b).
 
 A `bool` array, or one with only two values (the larger is fiber), is a
 **mask**:
@@ -329,8 +350,11 @@ same steps size the fibers.
   at 0, give each fiber the type nearest m − δ, set δ to the median of
   m − r_type, repeat 3 times; δ is clamped to [−0.5, r_min]. It is logged
   per round as `thickness_margin`.
-- **Type:** the spec whose radius is nearest m − δ in log scale (by ratio).
-  The type sets the fiber's radius prior, bend limit, minimum and maximum
+- **Type:** with grey ranges and several types, the type bits (step 1)
+  are sampled at the fiber's interior nodes; a type whose bit is set at
+  ≥ 60% of them, with no other type within 0.1 of it, is the fiber's type
+  (`_Fitter._grey_types`). Otherwise the spec whose radius is nearest
+  m − δ in log scale (by ratio). The type sets the fiber's radius prior, bend limit, minimum and maximum
   length and length prior.
 - **Radius:** (m − δ + r_type) / 2, clamped to `diameter × (1 ±
   diameter_tolerance) / 2` of the type.
@@ -446,9 +470,15 @@ After the final solve and its confidence, up to `redraw_passes` passes:
    `render_occupancy` of the nearby pieces plus the chosen bridges and
    extensions (radius + margin), over `evidence_scale`; plus overlap voxels
    beyond one fiber over π r²; plus max(ln(L/D), 1) per interior end. The
-   region takes the best plan, or the plan ranked by its failure count on a
-   retry; `_junctions.assemble` chains the pieces through the bridges
-   (a link that would close a loop is dropped).
+   plans are tried `redraw_plans` (3) at a time: `_Fitter.pick_plans`
+   builds candidate c from every region's c-th best plan (after the
+   attempt × 3 plans spent on earlier failures there), runs steps 3–4 on
+   each, and gives every region the plan whose candidate has the most
+   sure coverage (`coverage_map` summed over the region box); if regions
+   disagree, that mix is built and solved once more. Candidates stop after
+   the first when every region has a single plan. `_junctions.assemble`
+   chains the pieces through the bridges (a link that would close a loop
+   is dropped). The history logs `plans_solved` and `plan_choices`.
 3. `_Fitter.trace` seeds new fibers in the foreground still unclaimed;
    then the per-type topology step (§6b) joins the grown ends.
 4. `solver_batches` batches and a final solve, with device nodes within
