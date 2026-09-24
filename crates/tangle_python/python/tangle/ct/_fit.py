@@ -766,6 +766,7 @@ class _Fitter:
         self.profiles: list[np.ndarray] | None = None
         self.grey_void = 0.0
         self._grey_scale: float | None = None
+        self._match_cache: tuple | None = None  # (cut, ranking): reused by a pass's candidates
         self.set_image(image)
 
     def set_image(self, image: np.ndarray) -> None:
@@ -1214,6 +1215,49 @@ class _Fitter:
         score order (``attempt`` at the region's center: how often it failed),
         or the last plan if there are fewer.
         """
+        cached = self._match_cache
+        if cached is not None and cached[0] is cut:
+            natural, ports, ranked = cached[1]  # the pass's other candidates: same ranking
+        else:
+            natural, ports, ranked = self._rank_regions(cut, piece_radii, piece_types, tracer_for)
+            self._match_cache = (cut, (natural, ports, ranked))
+        connections = []
+        extensions: dict[tuple[int, int], np.ndarray] = {}
+        plans_tried = joins = ends = grown = 0
+        plan_scores: dict[int, list[float]] = {}
+        for k, (region_extensions, interior, pairs, plans) in ranked.items():
+            region_ports = ports[k]
+            low, high = cut.regions[k]
+            plans_tried += len(plans)
+            base = int(attempt(0.5 * (low + high))) * self.settings.redraw_plans if attempt else 0
+            plan_scores[k] = [plan.score for plan in plans[base : base + self.settings.redraw_plans]]
+            rank = base + (int(offsets[k]) if offsets is not None else 0)
+            plan = plans[min(rank, len(plans) - 1)]
+            paired = set()
+            for i, j in plan.pairs:
+                a, b = region_ports[i], region_ports[j]
+                connections.append((a.piece, a.end, b.piece, b.end, pairs[(i, j)]))
+                paired |= {i, j}
+                joins += 1
+            for i, port in enumerate(region_ports):
+                if i not in paired:
+                    extensions[(port.piece, port.end)] = region_extensions[i]
+                    ends += int(interior[i])
+                    if len(region_extensions[i]):
+                        grown += polyline_length(np.vstack([port.point[None], region_extensions[i]]))
+        lines, first = _junctions.assemble(cut.pieces, connections, extensions, self.spacing)
+        first = np.asarray(first, dtype=int)
+        info = {
+            "grown": grown, "ports": int(sum(len(p) for p in ports)), "plans_scored": plans_tried,
+            "joins": joins, "ends_in_regions": ends, "regions_with_ports": len(ranked),
+            "existing_ends_as_ports": len(natural), "plan_scores": plan_scores,
+        }
+        return lines, piece_radii[first], piece_types[first], info
+
+    def _rank_regions(
+        self, cut: _regrow.Cut, piece_radii: np.ndarray, piece_types: np.ndarray, tracer_for
+    ) -> tuple[list[tuple[int, int]], list[list], dict[int, tuple]]:
+        """Every region's loose ends, their extensions and its plans in score order (for ``_match``)."""
         from ._ends import evidence_scale, length_end_cost, length_join_cost, near_box
         from ._geometry import paint
 
@@ -1246,15 +1290,11 @@ class _Fitter:
         else:
             scale = evidence_scale(self.image, cut.pieces, piece_radii, float(self.radius.min()))
             grey_args = {}
-        connections = []
-        extensions: dict[tuple[int, int], np.ndarray] = {}
-        plans_tried = joins = ends = grown = with_ports = 0
-        plan_scores: dict[int, list[float]] = {}
         diameter = 2.0 * self.radius
+        ranked: dict[int, tuple] = {}
         for k, region_ports in enumerate(ports):
             if not region_ports:
                 continue
-            with_ports += 1
             region_extensions = []
             interior = []
             end_costs = []
@@ -1303,31 +1343,8 @@ class _Fitter:
                     else {}
                 ),
             )
-            plans_tried += len(plans)
-            base = int(attempt(0.5 * (low + high))) * self.settings.redraw_plans if attempt else 0
-            plan_scores[k] = [plan.score for plan in plans[base : base + self.settings.redraw_plans]]
-            rank = base + (int(offsets[k]) if offsets is not None else 0)
-            plan = plans[min(rank, len(plans) - 1)]
-            paired = set()
-            for i, j in plan.pairs:
-                a, b = region_ports[i], region_ports[j]
-                connections.append((a.piece, a.end, b.piece, b.end, pairs[(i, j)]))
-                paired |= {i, j}
-                joins += 1
-            for i, port in enumerate(region_ports):
-                if i not in paired:
-                    extensions[(port.piece, port.end)] = region_extensions[i]
-                    ends += int(interior[i])
-                    if len(region_extensions[i]):
-                        grown += polyline_length(np.vstack([port.point[None], region_extensions[i]]))
-        lines, first = _junctions.assemble(cut.pieces, connections, extensions, self.spacing)
-        first = np.asarray(first, dtype=int)
-        info = {
-            "grown": grown, "ports": int(sum(len(p) for p in ports)), "plans_scored": plans_tried,
-            "joins": joins, "ends_in_regions": ends, "regions_with_ports": with_ports,
-            "existing_ends_as_ports": len(natural), "plan_scores": plan_scores,
-        }
-        return lines, piece_radii[first], piece_types[first], info
+            ranked[k] = (region_extensions, interior, pairs, plans)
+        return natural, ports, ranked
 
     def scores(
         self, lines: list[np.ndarray], radii: np.ndarray, *, previous: list[np.ndarray] | None = None
