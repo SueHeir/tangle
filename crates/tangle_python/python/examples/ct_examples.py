@@ -379,6 +379,12 @@ def varied(index: int) -> Callable[[Path], Example]:
             length=(shortest, longest),
             curvature_amplitude=tuple(x * um for x in v["waviness_um"]),
             orientation=orientation,
+            # A biaxial orientation picks a direction per layer: layers about 4 diameters apart.
+            position=(
+                tangle.LayeredPosition(max(3, int(side / (4 * diameter))), jitter_fraction=0.25)
+                if v["orientation"] == "biaxial"
+                else tangle.UniformPosition()
+            ),
         )
         # The cache is per name; a settings change needs a new one.
         key = hashlib.sha1(json.dumps(v, sort_keys=True).encode()).hexdigest()[:8]
