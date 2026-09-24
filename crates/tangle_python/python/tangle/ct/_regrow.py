@@ -325,8 +325,15 @@ def grow_cut_ends(
     shape: tuple[int, int, int],
     spacing: float,
     max_length: float,
+    attempt=None,
 ) -> tuple[list[np.ndarray], int]:
     """Extend every cut end along its own direction into the unsure region.
+
+    ``attempt(piece_index, end)`` says which try this is for the region the
+    end is in (0 when none failed before): 0 grows the longest pieces first;
+    1 does not grow (the region is re-traced from fresh seeds instead); 2
+    grows the shortest pieces first, so the other fiber claims the contested
+    voxels.
 
     ``tracer_for(piece_index, claimed)`` returns the ``_trace.Tracer`` for
     that piece's type, reading ``claimed`` (a one-based label volume of
@@ -340,7 +347,14 @@ def grow_cut_ends(
     claimed = np.zeros(shape, dtype=np.int32)
     for index, piece in enumerate(pieces):
         paint(claimed, piece, 1.1 * float(radii[index]), index + 1)
-    order = sorted(cut_ends, key=lambda item: -polyline_length(pieces[item[0]]))
+    tries = {item: int(attempt(*item)) if attempt else 0 for item in cut_ends}
+    growing = [item for item in cut_ends if tries[item] % 3 != 1]
+    order = sorted(
+        growing,
+        key=lambda item: (
+            (1.0 if tries[item] % 3 == 2 else -1.0) * polyline_length(pieces[item[0]])
+        ),
+    )
     grown = 0.0
     for index, end in order:
         piece = pieces[index]

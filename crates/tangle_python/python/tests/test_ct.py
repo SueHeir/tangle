@@ -238,6 +238,13 @@ class CtToolTests(unittest.TestCase):
         self.assertLess(first[:, 0].max(), second[:, 0].min())
         self.assertLess(second[:, 0].min() - first[:, 0].max(), 16.0)  # within the join gap
         self.assertLess(np.abs(first[:, 1:] - 20.0).max(), 1.0)  # stayed on the fiber axis
+        # The second try at a region re-traces it from fresh seeds instead of growing.
+        unchanged, none = grow_cut_ends(
+            cut.pieces, cut.cut_ends, np.array([4.0, 4.0]), tracer_for=tracer_for, shape=image.shape,
+            spacing=4.0, max_length=80.0, attempt=lambda index, end: 1,
+        )
+        self.assertEqual(none, 0.0)
+        self.assertTrue(all(np.array_equal(a, b) for a, b in zip(unchanged, cut.pieces)))
         flags = pinned_flags([first], cut.anchors, 0.5)[0]
         self.assertTrue(flags[0])
         self.assertFalse(flags[-1])

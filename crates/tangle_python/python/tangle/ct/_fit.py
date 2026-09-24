@@ -777,7 +777,9 @@ class _Fitter:
             )
             if cut is None or not lines:
                 break
-            new_lines, new_radii, new_types, info = self.redraw_candidate(cut, radii, types)
+            new_lines, new_radii, new_types, info = self.redraw_candidate(
+                cut, radii, types, attempt=lambda point: self._attempt(point, failures)
+            )
             _, new_settled, _ = self.scores(new_lines, new_radii)
             old_map = _confidence.coverage_map(self.foreground, lines, radii, settled)
             new_map = _confidence.coverage_map(self.foreground, new_lines, new_radii, new_settled)
@@ -844,6 +846,11 @@ class _Fitter:
         return mask
 
     @staticmethod
+    def _attempt(point: np.ndarray, failures: list[list]) -> int:
+        """How many times the region around ``point`` failed before."""
+        return max((f[2] for f in failures if np.all(f[0] <= point) and np.all(point <= f[1])), default=0)
+
+    @staticmethod
     def _record(failures: list[list], low: np.ndarray, high: np.ndarray, ok: bool) -> None:
         """Forget failures overlapping a kept region; count one more for a failed one."""
         overlapping = [f for f in failures if np.all(f[0] <= high) and np.all(low <= f[1])]
@@ -856,9 +863,14 @@ class _Fitter:
             failures.append([low, high, count])
 
     def redraw_candidate(
-        self, cut: _regrow.Cut, radii: np.ndarray, types: np.ndarray
+        self, cut: _regrow.Cut, radii: np.ndarray, types: np.ndarray, attempt=None
     ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, dict[str, Any]]:
-        """Grow the cut's sure pieces back, trace the rest, and solve with the pieces pinned."""
+        """Grow the cut's sure pieces back, trace the rest, and solve with the pieces pinned.
+
+        ``attempt(point)`` is how many times the region at ``point`` failed
+        before; it picks the move for a cut end there (see
+        ``_regrow.grow_cut_ends``).
+        """
         from ._trace import Tracer
 
         s = self.settings
@@ -876,6 +888,7 @@ class _Fitter:
         pieces, grown = _regrow.grow_cut_ends(
             cut.pieces, cut.cut_ends, piece_radii, tracer_for=tracer_for, shape=self.image.shape,
             spacing=self.spacing, max_length=20.0 * float(self.radius.max()),
+            attempt=(lambda index, end: attempt(cut.pieces[index][end])) if attempt else None,
         )
         born = self.trace(pieces, piece_radii)
         born_radii, born_types = self.classify(born)

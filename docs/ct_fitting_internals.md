@@ -424,7 +424,10 @@ After the final solve and its confidence, up to `redraw_passes` passes:
    cut end. The anchors are the pieces less 2 r at each cut end, so the
    join can bend. Removed stretches within 2 r_max of each other form a
    region, a box around them padded by 2 r_max.
-2. `grow_cut_ends`: longest pieces first, each cut end is extended with
+2. `grow_cut_ends`: the move depends on how often the region at the cut
+   end failed before (`_Fitter._attempt`): 0, grow longest pieces first;
+   1, do not grow (step 3 re-traces the region from fresh seeds); 2, grow
+   shortest pieces first. Each growing cut end is extended with
    `Tracer.trace_one_way` from the tip along the end tangent (its own
    capsule is not avoided; the others are down-weighted as in tracing),
    for at most 20 r_max. Where the extension enters another piece, it is

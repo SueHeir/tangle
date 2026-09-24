@@ -242,9 +242,12 @@ The fit then uses it to **redraw the unsure parts**
    explained by the fit, each voxel weighted by the confidence of the fit
    that owns it). Two regions are decided together only when one redrawn stretch spans both.
 
-A region whose redraw failed is cut wider the next time, and left alone
-after `FitSettings.redraw_attempts` (3) failures, so every pass can only
-improve the fit and the passes end. Keeping or reverting uses the
+A region whose redraw failed gets a different move the next time, with a
+wider cut: the second try re-traces it from fresh seeds instead of growing
+into it, and the third grows again with the shortest pieces first, so the
+other fiber claims the contested voxels. After
+`FitSettings.redraw_attempts` (3) failures it is left alone, so every
+pass can only improve the fit and the passes end. Keeping or reverting uses the
 confidence without the stability check, since a redrawn stretch moves
 because it was redrawn. The history records every pass: regions, how many
 were kept, widened or given up, and the sure coverage.
