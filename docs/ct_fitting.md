@@ -318,7 +318,9 @@ is only ever one result per example:
 by the scan), `two_types` (7 µm and 19 µm fibers), and one `scenario_*` per
 fitting step: a straight fiber, interior ends, gaps of 2, 6 and 12 radii,
 crossings at 90° and 30°, touching parallel fibers, a piece below the
-minimum length and a bend near the limit.
+minimum length and a bend near the limit, plus `scenario_missed_fiber`:
+`single_type`'s densest bundle (a fiber touching 11 others at 4–88°,
+which the fit split in two) cut out into its own 150 µm scan.
 
 ```
 python ct_examples.py --list

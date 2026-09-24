@@ -64,6 +64,7 @@ Examples:
   | ``parallel_touching`` | one fiber or two | two fits |
   | ``short_piece`` | removal | no fit (2 diameters, below the minimum length) |
   | ``bent_near_limit`` | kink splits | one fit, not cut (bends at 1.25x the bend radius) |
+  | ``missed_fiber`` | a fiber in single_type's densest bundle, touching 11 others at 4-88° | 12 fits, the center one whole (single_type split it in two) |
 """
 
 from __future__ import annotations
@@ -255,6 +256,24 @@ def crossing(angle_degrees: float) -> list[list[list[float]]]:
     ]
 
 
+# single_type's densest bundle: true fiber 35 (first) and the 11 fibers touching it,
+# in µm in a 150 µm cube centered on it (single_type fit split fiber 35 in two).
+MISSED_FIBER_BUNDLE_UM = [
+    [[143.3, 103.4, 105.3], [132.7, 95.0, 98.4], [121.0, 89.5, 90.7], [108.2, 85.7, 83.6], [94.2, 81.7, 80.0], [79.4, 78.6, 79.9], [64.8, 75.8, 78.6], [51.6, 71.6, 73.1], [40.9, 65.8, 64.3], [32.0, 59.3, 54.0], [20.9, 52.4, 46.5], [8.7, 43.8, 43.3]],  # 35
+    [[125.6, 145.9, 35.5], [119.4, 131.9, 39.7], [111.6, 118.3, 41.4], [102.3, 105.6, 43.1], [92.0, 94.2, 46.9], [80.9, 85.0, 53.1], [70.6, 76.3, 61.3], [62.3, 65.6, 69.2], [55.9, 52.0, 73.5], [49.9, 37.5, 74.9], [41.9, 24.5, 79.0], [31.1, 12.9, 78.9]],  # 4
+    [[90.6, 87.1, 95.8], [96.2, 80.4, 92.6], [102.2, 73.8, 90.4], [108.7, 67.3, 89.4], [114.6, 60.3, 88.0], [120.2, 53.2, 86.2], [125.5, 46.0, 83.7], [130.6, 38.5, 81.8], [135.5, 30.9, 79.9], [139.8, 23.3, 76.8], [144.1, 16.0, 73.1], [148.5, 8.9, 69.0]],  # 5
+    [[138.6, 117.8, 115.2], [129.0, 106.0, 107.5], [118.2, 93.7, 102.9], [107.7, 80.4, 104.3], [94.2, 70.4, 101.8], [80.6, 63.5, 94.2], [66.7, 56.7, 87.2], [51.4, 49.4, 85.3], [38.4, 38.8, 82.7], [27.7, 28.1, 74.9], [14.8, 18.9, 68.6], [3.7, 7.3, 63.0]],  # 7
+    [[139.1, 110.4, 130.4], [130.5, 102.9, 121.6], [119.6, 95.3, 116.3], [106.9, 89.1, 114.4], [94.7, 83.3, 110.1], [83.0, 78.3, 103.5], [71.0, 73.6, 97.4], [59.0, 68.9, 91.2], [47.2, 64.4, 84.6], [34.3, 59.2, 81.4], [20.9, 54.2, 81.4], [8.5, 47.2, 79.0]],  # 11
+    [[22.2, 41.2, 79.2], [32.7, 47.1, 74.9], [42.3, 51.5, 67.8], [52.6, 55.6, 61.9], [64.2, 59.8, 58.9], [76.1, 64.3, 58.9], [86.5, 71.4, 61.2], [97.5, 77.6, 59.9], [108.7, 82.8, 56.8], [120.0, 87.9, 53.7], [131.3, 93.6, 51.9], [142.4, 99.9, 51.2]],  # 17
+    [[149.2, 105.4, 92.9], [136.0, 107.4, 92.6], [122.8, 108.7, 94.2], [109.6, 109.8, 96.1], [96.5, 110.8, 98.2], [83.6, 112.2, 101.4], [70.7, 115.5, 103.1], [57.5, 117.4, 103.0], [44.2, 118.7, 103.9], [31.0, 120.4, 105.0], [17.7, 121.9, 105.4], [4.3, 121.5, 105.4]],  # 23
+    [[98.0, 3.9, 37.6], [91.9, 9.8, 41.5], [85.9, 16.2, 44.3], [80.1, 23.4, 45.7], [74.8, 31.1, 44.9], [69.5, 38.6, 43.4], [63.3, 45.4, 41.6], [56.9, 52.0, 41.8], [50.3, 58.5, 43.1], [43.8, 64.5, 46.2], [36.7, 70.1, 48.5], [29.3, 75.5, 50.3]],  # 26
+    [[7.6, 64.2, 61.0], [10.3, 58.0, 60.2], [13.0, 51.8, 59.4], [15.2, 45.9, 57.1], [17.3, 40.1, 54.3], [20.0, 35.1, 50.8], [23.1, 30.6, 46.8], [26.6, 26.0, 43.5], [30.8, 21.1, 41.3], [34.9, 16.1, 39.4], [38.7, 10.5, 39.0], [42.4, 4.9, 38.6]],  # 28
+    [[93.1, 2.5, 87.9], [97.3, 8.6, 90.5], [101.5, 14.6, 92.8], [106.4, 20.7, 93.8], [111.3, 26.6, 94.5], [116.5, 32.5, 94.4], [121.7, 38.2, 94.7], [127.0, 44.0, 95.5], [131.9, 50.0, 95.8], [136.7, 56.1, 95.9], [141.0, 62.3, 97.7], [145.3, 68.5, 99.9]],  # 29
+    [[56.1, 5.5, 67.3], [50.3, 14.0, 66.9], [44.1, 22.3, 66.7], [38.1, 30.5, 66.2], [32.8, 39.1, 63.9], [27.9, 48.1, 63.5], [24.5, 57.8, 63.3], [22.4, 67.8, 63.0], [20.5, 77.6, 60.2], [17.5, 87.1, 57.8], [13.5, 96.4, 56.2], [8.4, 105.3, 55.8]],  # 32
+    [[143.2, 128.3, 109.3], [132.6, 127.2, 107.6], [122.3, 124.9, 106.1], [112.0, 122.7, 104.6], [101.5, 122.5, 102.7], [91.4, 123.3, 99.3], [81.1, 124.0, 96.4], [70.6, 124.4, 94.5], [60.0, 125.8, 94.3], [49.3, 126.1, 94.0], [38.8, 125.0, 93.6], [28.5, 122.1, 93.1]],  # 36
+]
+
+
 SCENARIOS = {
     "single_straight": [line([5 * um, 60 * um, 70 * um], [BOX - 5 * um, 90 * um, 80 * um])],
     "interior_ends": [line([30 * um, MID, MID], [120 * um, 80 * um, MID], 10)],
@@ -269,16 +288,18 @@ SCENARIOS = {
     ],
     "short_piece": [line([MID - DIAMETER, MID, MID], [MID + DIAMETER, MID, MID], 3)],
     "bent_near_limit": [arc(1.25 * MIN_BEND_RADIUS, 1.6, [MID, 45 * um, MID])],
+    "missed_fiber": [[[v * um for v in point] for point in line] for line in MISSED_FIBER_BUNDLE_UM],
 }
+SCENARIO_LENGTH = {"missed_fiber": 180 * um}  # as single_type; the rest use 400 µm
 
 
-def scenario(centerlines) -> Callable[[Path], Example]:
+def scenario(centerlines, length: float = 400 * um) -> Callable[[Path], Example]:
     def build(cache: Path) -> Example:
         material = tangle.Material("fiber_12um", diameter=DIAMETER, min_bend_radius=MIN_BEND_RADIUS)
         assembly = tangle.Assembly(tangle.Cell([BOX] * 3))
         assembly.insert(tangle.FiberCollection.from_centerlines(centerlines, material), name="scenario")
         scan = ct.synthetic_ct(assembly, 1.5 * um, seed=5)
-        spec = ct.FiberSpec(diameter=DIAMETER, min_bend_radius=MIN_BEND_RADIUS, length=400 * um, name="fiber_12um")
+        spec = ct.FiberSpec(diameter=DIAMETER, min_bend_radius=MIN_BEND_RADIUS, length=length, name="fiber_12um")
         return Example(scan, spec, MIN_BEND_RADIUS, end_error_report)
 
     return build
@@ -288,7 +309,10 @@ EXAMPLES: dict[str, Callable[[Path], Example]] = {
     "single_type": single_type,
     "long_fibers": long_fibers,
     "two_types": two_types,
-    **{f"scenario_{name}": scenario(lines) for name, lines in SCENARIOS.items()},
+    **{
+        f"scenario_{name}": scenario(lines, SCENARIO_LENGTH.get(name, 400 * um))
+        for name, lines in SCENARIOS.items()
+    },
 }
 
 

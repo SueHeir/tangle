@@ -765,6 +765,7 @@ class _Fitter:
         self.grey: np.ndarray | None = None
         self.profiles: list[np.ndarray] | None = None
         self.grey_void = 0.0
+        self._grey_scale: float | None = None
         self.set_image(image)
 
     def set_image(self, image: np.ndarray) -> None:
@@ -911,6 +912,8 @@ class _Fitter:
         radii = np.asarray(radii, dtype=np.float64)
         types = np.asarray(types, dtype=int)
         failures: list[list] = []  # [low, high, count] per region that failed
+        self._grey_scale = None  # measured on the fit the loop starts from
+        old_misfit = None
         step = 2.0 * float(self.radius.max())
         for pass_index in range(s.redraw_passes):
             started = time.perf_counter()
@@ -945,7 +948,8 @@ class _Fitter:
             new_residual = _confidence.residual_map(self.foreground, new_lines, new_radii, self.margin)
             if self.profiles is not None:
                 scale = self.grey_scale(lines, radii, types)
-                old_misfit = self.grey_misfit(lines, radii, types)
+                if old_misfit is None:  # kept from the last pass when nothing changed
+                    old_misfit = self.grey_misfit(lines, radii, types)
                 new_misfit = self.grey_misfit(new_lines, new_radii, new_types)
             masks = [self._box_mask([boxes[k] for k in np.flatnonzero(component == c)]) for c in range(count)]
             confidence_gain = np.zeros(count)
@@ -1025,6 +1029,7 @@ class _Fitter:
             if kept:
                 lines, radii, types = merged, merged_radii, merged_types
                 confidence, settled = merged_confidence, merged_settled
+                old_misfit = None
         return lines, radii, types, confidence
 
     @property
@@ -1043,11 +1048,15 @@ class _Fitter:
         return _grey.squared_residual_map(self.grey, lines, radii, profiles, self.grey_void)
 
     def grey_scale(self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray) -> float:
-        """Squared grey residual worth one nat for these fibers (``_grey.evidence_scale``)."""
+        """Squared grey residual worth one nat (``_grey.evidence_scale``), measured once per redraw loop."""
         from . import _grey
 
-        profiles = [self.profiles[int(t)] for t in types]
-        return _grey.evidence_scale(self.grey, lines, radii, profiles, self.grey_void, float(self.radius.min()))
+        if self._grey_scale is None:
+            profiles = [self.profiles[int(t)] for t in types]
+            self._grey_scale = _grey.evidence_scale(
+                self.grey, lines, radii, profiles, self.grey_void, float(self.radius.min())
+            )
+        return self._grey_scale
 
     def _box_mask(self, boxes: list[_regrow.Box]) -> np.ndarray:
         mask = np.zeros(self.image.shape, dtype=bool)

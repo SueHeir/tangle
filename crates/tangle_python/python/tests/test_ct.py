@@ -433,8 +433,10 @@ class CtToolTests(unittest.TestCase):
         self.assertGreater(measured[1][4], 0.7)
         found_void, noise, ranges = _grey.profile_levels(grey, [solid, rimmed])
         self.assertAlmostEqual(found_void, void, places=6)
-        self.assertLessEqual(ranges[1][0], 0.3)
-        self.assertGreater(ranges[1][0], void)
+        # The range is the bright body (the rim); the dim core falls below it.
+        self.assertGreater(ranges[1][0], 0.3)
+        self.assertLess(ranges[1][0], 0.8)
+        self.assertGreater(ranges[1][1], 0.8)
         types = _grey.profile_types(grey, lines, radii, [solid, rimmed], void)
         np.testing.assert_array_equal(types, [0, 1])
 

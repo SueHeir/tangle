@@ -5,8 +5,9 @@ scan, after the fitter's light denoise, at evenly spaced radii from the axis
 (first value) to the surface (last value), for example a bright rim around
 a dim core. With profiles the fitter:
 
-* derives each type's grey range (what counts as fiber of that type) from
-  the profile and the scan's noise (:func:`profile_levels`);
+* derives each type's grey range (what counts as fiber of that type: the
+  bright body of the profile) from the profile and the scan's noise
+  (:func:`profile_levels`);
 * draws a fit as the grey the scan should show (:func:`render_grey`): each
   voxel takes the profile of the fiber whose surface is nearest, at its
   distance from that fiber's axis, and outside the surface fades from the
@@ -34,15 +35,19 @@ def profile_radii(profile: np.ndarray) -> np.ndarray:
 
 
 def profile_levels(
-    grey: np.ndarray, profiles: list[np.ndarray], *, spread: float = 2.0
+    grey: np.ndarray, profiles: list[np.ndarray], *, spread: float = 2.5
 ) -> tuple[float, float, list[tuple[float, float]]]:
     """The void grey, the noise, and each type's grey range.
 
     The void grey is the median of the voxels darker than every profile's
     dimmest value, and the noise the robust spread (1.4826 × MAD) of those
-    below halfway to it. A type's range is its profile's span widened by
-    ``spread`` noise, its low end kept at least halfway from void to the
-    profile's dimmest value.
+    below halfway to it. A type's range is its profile's brightest value
+    ± ``spread`` noise (at least 5% of the contrast), the low end kept at least 60% of the way from void
+    to it. The range is the fiber's bright body only: a measured profile's
+    outer samples hold the blurred edge, and a range reaching down to them
+    made every fiber fat, so touching fibers merged (single_type 37 → 21
+    of 40 found). Edges are partial fiber through ``range_image``'s ramp,
+    and a dim core below the range is filled as a hole.
     """
     dimmest = min(float(np.min(p)) for p in profiles)
     below = grey[grey < dimmest]
@@ -55,8 +60,9 @@ def profile_levels(
     noise = 1.4826 * float(np.median(np.abs(quiet - np.median(quiet)))) if quiet.size else 0.0
     ranges = []
     for p in profiles:
-        low, high = float(np.min(p)), float(np.max(p))
-        ranges.append((max(low - spread * noise, 0.5 * (void + low)), high + spread * noise))
+        bright = float(np.max(p))
+        half = max(spread * noise, 0.05 * (bright - void))
+        ranges.append((max(bright - half, void + 0.6 * (bright - void)), bright + half))
     return void, noise, ranges
 
 
