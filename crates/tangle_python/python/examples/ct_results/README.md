@@ -174,7 +174,9 @@ these rows to expect.
 
 ![dense_crossing at three blur levels](images/scenario_dense_crossing_blur.png)
 
-These three pictures come from `make_images.py --blur default=<folder> 0.45=<folder> 0=<folder>`.
+The first column is each example's default blur, 1.05 voxels for `varied_3`
+and `dense_crossing` (the pictures, drawn before that label was fixed, say
+0.9). These three pictures come from `make_images.py --blur default=<folder> 0.45=<folder> 0=<folder>`.
 
 ## What the fits look like
 
