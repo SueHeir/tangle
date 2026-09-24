@@ -100,12 +100,17 @@ class FitSettings:
     # After every solve, fits are cut where their centerline sits in void
     # (the fiber image below this; None turns it off): end stretches are
     # trimmed, interior stretches ``void_gap_radii`` or longer split the fit.
-    # With ``void_rejoin``, the last cut of a fit is followed by a join pass
-    # (the length-prior merge of the topology step), so pieces the cut left
-    # end to end are one fiber again when the scan and the prior agree.
+    # With ``void_rejoin``, the cut after the final and polish solves is
+    # followed by a join pass (the length-prior merge of the topology step)
+    # limited to ends at most ``void_rejoin_gap_radii`` apart and within
+    # ``void_rejoin_angle_degrees``, so pieces the cut left touching end to
+    # end are one fiber again. (With the topology step's 16 radii and 45°,
+    # it joined pieces of different fibers at crossings.)
     void_level: float | None = 0.3
     void_gap_radii: float = 2.0
     void_rejoin: bool = True
+    void_rejoin_gap_radii: float = 1.0
+    void_rejoin_angle_degrees: float = 20.0
     levels: Levels | None = None
     backend: str | None = None
     solver_batches: int = 3
@@ -955,11 +960,12 @@ class _Fitter:
     def rejoin(
         self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray
     ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, list[list[tuple[int, int]]], int]:
-        """Join piece ends the length prior and the scan favor joining, one type at a time.
+        """Join touching, aligned piece ends the length prior and the scan favor joining, one type at a time.
 
         The merge of the topology step alone (``_moves.merge_fragments`` with
-        the length prior), for after the final void cut, where no later
-        topology step would rejoin the pieces. Returns the fit, the input
+        the length prior) within the ``void_rejoin`` gap and angle, for after
+        the final void cut, where no later topology step would rejoin the
+        pieces. Returns the fit, the input
         fibers each output fiber was joined from (``(fiber, entry end)`` in
         order along it) and the number of joins. Types without a length prior
         are left as they are.
@@ -989,7 +995,7 @@ class _Fitter:
                     self.image, group, group_radii, max_gap=s.merge_gap_radii * r,
                     min_bend_radius=float(self.bend[kind]), kink_threshold=s.kink_threshold,
                     end_cost=cost, scale=evidence_scale(self.image, group, group_radii, r),
-                    max_prior_gap=s.prior_merge_gap_radii * r, max_prior_angle_degrees=s.prior_merge_angle_degrees,
+                    max_prior_gap=s.void_rejoin_gap_radii * r, max_prior_angle_degrees=s.void_rejoin_angle_degrees,
                     chains=chains,
                 )
                 joins += merges
@@ -1111,7 +1117,6 @@ class _Fitter:
                 # so only the unpinned settle acts).
                 merged = self.solve(merged, merged_radii, merged_types, anchors=merged)
                 merged, merged_radii, merged_types, _ = self.cut_void(merged, merged_radii, merged_types, final=True)
-                merged, merged_radii, merged_types, _, _ = self.rejoin(merged, merged_radii, merged_types)
             coverage = before_coverage
             residual_change = 0.0
             if kept:
@@ -1311,7 +1316,6 @@ class _Fitter:
             lines = self.solve(lines, radii, types, anchors=cut.anchors)
             lines, radii, types, void = self.cut_void(lines, radii, types, final=True)
             void.pop("source", None)
-            lines, radii, types, _, void["void_rejoined"] = self.rejoin(lines, radii, types)
         info = {
             "unsure_nodes_cut": cut.removed_nodes,
             "fibers_removed": cut.removed_fibers,

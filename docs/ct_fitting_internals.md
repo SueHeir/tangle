@@ -238,11 +238,13 @@ The final batch's solver output is returned as the solver left it
 except that void is cut (step 5), pieces then shorter than the minimum
 length are dropped, and the cut pieces get one more join pass
 (`_Fitter.rejoin`, `FitSettings.void_rejoin`): the length-prior merge of
-the topology step alone, per type, since no later topology step would
-rejoin them. The same cut and rejoin follow the polish solve, the settle
-of each redraw pass's merged fit, and each redraw candidate's last solve.
-(On 083cf7e most leftover split fibers were pieces a late void cut left
-touching end to end, 0 to 0.2 radii apart.) Otherwise the fit is the
+the topology step alone, per type, limited to ends at most 1 radius apart
+and within 20°, since no later topology step would rejoin them. The same
+cut and rejoin follow the polish solve. (On 083cf7e most leftover split
+fibers were pieces a late void cut left touching end to end, 0 to 0.2
+radii apart. With the topology step's own 16 radii and 45°, and after
+every redraw solve too, the rejoin joined pieces of different fibers at
+crossings: two_types 0.894 → 0.871, 48 → 87 s.) Otherwise the fit is the
 state the solver converged to. Measure it with `geometry_report(...,
 spacing=1.25 * diameter)`: finer resampling puts nodes at the polyline's
 corners and roughly doubles the discrete curvature there.
