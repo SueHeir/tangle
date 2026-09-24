@@ -63,6 +63,122 @@ fn final_policy_requires_both_contact_and_bending() {
     assert!(!hard_acceptance_satisfied(acceptance, &relaxation));
 }
 
+fn formation_policy(on_exhaustion: SolveExhaustion) -> SolvePolicy {
+    SolvePolicy {
+        name: "formation".to_string(),
+        solver_targets: RelaxationTargets {
+            penetration: 0.3e-6,
+            curvature_ratio: 1.000_01,
+        },
+        acceptance: RelaxationAcceptance {
+            penetration: AcceptanceLimit::hard(0.3e-6),
+            curvature_ratio: AcceptanceLimit::soft(1.05),
+        },
+        maximum_iterations: 1_000,
+        extra_iterations: SolvePolicy::default_extra_iterations(1_000),
+        on_exhaustion,
+    }
+}
+
+#[test]
+fn exhausted_solve_keeps_going_until_hard_limits_hold() {
+    let policy = formation_policy(SolveExhaustion::ContinueIfHardLimitsSatisfied);
+    assert_eq!(policy.extra_iterations, 500);
+    let mut relaxation = RelaxationState {
+        max_penetration: 0.38e-6,
+        max_curvature_ratio: 1.07,
+        ..RelaxationState::default()
+    };
+
+    // Within the budget the solver simply continues.
+    assert_eq!(
+        policy_gate(&policy, 400, true, &relaxation, usize::MAX),
+        PolicyGate::Solve { remaining: 600 }
+    );
+    // A hard penetration miss at the end of the budget no longer rejects:
+    // the gate grants the extension instead.
+    assert_eq!(
+        policy_gate(&policy, 1_000, true, &relaxation, usize::MAX),
+        PolicyGate::Solve { remaining: 500 }
+    );
+    // The first batch whose hard limits hold ends the extension, deferring
+    // the soft bend limit as before.
+    relaxation.max_penetration = 0.25e-6;
+    assert_eq!(
+        policy_gate(&policy, 1_130, true, &relaxation, usize::MAX),
+        PolicyGate::ContinueWithWarning
+    );
+    // Only when the extension is spent too does the gate reject.
+    relaxation.max_penetration = 0.38e-6;
+    assert_eq!(
+        policy_gate(&policy, 1_500, true, &relaxation, usize::MAX),
+        PolicyGate::Reject
+    );
+    // Meeting every limit is still accepted at any point.
+    relaxation.max_penetration = 0.25e-6;
+    relaxation.max_curvature_ratio = 1.04;
+    assert_eq!(
+        policy_gate(&policy, 1_200, true, &relaxation, usize::MAX),
+        PolicyGate::Accept
+    );
+    assert!(extension_note(&policy, 1_200).contains("200 of them past"));
+    assert!(extension_note(&policy, 900).is_empty());
+}
+
+#[test]
+fn rejecting_policy_extends_until_every_limit_holds() {
+    let policy = formation_policy(SolveExhaustion::Reject);
+    // Hard limits alone do not pass a rejecting gate, so it keeps solving.
+    let relaxation = RelaxationState {
+        max_penetration: 0.25e-6,
+        max_curvature_ratio: 1.07,
+        ..RelaxationState::default()
+    };
+    assert_eq!(
+        policy_gate(&policy, 1_000, true, &relaxation, usize::MAX),
+        PolicyGate::Solve { remaining: 500 }
+    );
+    assert_eq!(
+        policy_gate(&policy, 1_500, true, &relaxation, usize::MAX),
+        PolicyGate::Reject
+    );
+    // Without an extension the old behavior is unchanged.
+    let strict = SolvePolicy {
+        extra_iterations: 0,
+        ..policy.clone()
+    };
+    assert_eq!(
+        policy_gate(&strict, 1_000, true, &relaxation, usize::MAX),
+        PolicyGate::Reject
+    );
+    // The extension never runs into the run's overall iteration cap: it
+    // stops one iteration short so the failure can still be recorded.
+    assert_eq!(
+        policy_gate(&policy, 1_000, true, &relaxation, 201),
+        PolicyGate::Solve { remaining: 200 }
+    );
+    assert_eq!(
+        policy_gate(&policy, 1_200, true, &relaxation, 1),
+        PolicyGate::Reject
+    );
+    // An unbounded extension does not overflow.
+    let unbounded = SolvePolicy {
+        extra_iterations: usize::MAX,
+        ..policy.clone()
+    };
+    assert_eq!(
+        policy_gate(&unbounded, 1_000, true, &relaxation, usize::MAX),
+        PolicyGate::Solve {
+            remaining: usize::MAX - 1_000
+        }
+    );
+    // Nothing is decided before the geometry has been measured once.
+    assert_eq!(
+        policy_gate(&strict, 0, false, &relaxation, usize::MAX),
+        PolicyGate::Solve { remaining: 1_000 }
+    );
+}
+
 #[test]
 fn needling_selection_is_reproducible_internal_and_layer_scoped() {
     let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([1.0; 3], [false; 3]));

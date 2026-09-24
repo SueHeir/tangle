@@ -1,6 +1,5 @@
 # TANGLE
 
-[![CI](https://github.com/SueHeir/tangle/actions/workflows/ci.yml/badge.svg)](https://github.com/SueHeir/tangle/actions/workflows/ci.yml)
 
 **Thread Assembly, Network Generation, Linking, and Equilibration**
 
@@ -188,6 +187,9 @@ See [solver and architecture notes](docs/architecture.md) for details.
   baseline, in-axis vs crossing contacts, contact persistence, and neighbor
   turnover along each fiber. Works on generated assemblies and on CT-tracked
   centerlines added with `Assembly.insert()`.
+- **Fiber shape:** curvature and torsion distributions, tangent correlation and
+  persistence length, curl index, and a Schladitz β orientation fit, from
+  `characterize_shape()` on the same generated or CT-tracked centerlines.
 - **PuMA:** circular-capsule VTI/JSON bundles for direct `pumapy` analysis.
   Occupied voxel volume and nominal fiber volume are different quantities;
   comparisons need matched definitions and resolution checks.

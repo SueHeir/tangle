@@ -68,7 +68,53 @@ fn segment_axis_distance(
     (delta_x * delta_x + delta_y * delta_y + delta_z * delta_z).sqrt()
 }
 
+/// Copies the geometry of every cell-list slot into cell-sorted arrays.
+///
+/// `slot_geometry` holds eight values per slot (first endpoint, radius,
+/// second endpoint, padding) and `slot_topology` three (both vertex ids and
+/// the owning fiber), so the neighbor-list build reads each candidate cell as
+/// one contiguous range instead of chasing segment and vertex indices.
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn gather_cell_slot_geometry(
+    positions: &[f32],
+    segment_vertices: &[u32],
+    segment_fibers: &[u32],
+    segment_radii: &[f32],
+    active_counts: &[Atomic<u32>],
+    cell_segments: &[u32],
+    neighbor_state: &[u32],
+    slot_geometry: &mut [f32],
+    slot_topology: &mut [u32],
+) {
+    let slot = ABSOLUTE_POS;
+    if slot >= active_counts[0].load() as usize || neighbor_state[0] == 0 {
+        terminate!();
+    }
+    let segment = cell_segments[slot] as usize;
+    let first = segment_vertices[2 * segment];
+    let second = segment_vertices[2 * segment + 1];
+    let first_index = first as usize;
+    let second_index = second as usize;
+    slot_geometry[8 * slot] = positions[3 * first_index];
+    slot_geometry[8 * slot + 1] = positions[3 * first_index + 1];
+    slot_geometry[8 * slot + 2] = positions[3 * first_index + 2];
+    slot_geometry[8 * slot + 3] = segment_radii[segment];
+    slot_geometry[8 * slot + 4] = positions[3 * second_index];
+    slot_geometry[8 * slot + 5] = positions[3 * second_index + 1];
+    slot_geometry[8 * slot + 6] = positions[3 * second_index + 2];
+    slot_geometry[8 * slot + 7] = 0.0;
+    slot_topology[3 * slot] = first;
+    slot_topology[3 * slot + 1] = second;
+    slot_topology[3 * slot + 2] = segment_fibers[segment];
+}
+
 /// Builds each active segment's neighbor list from the current cell list.
+///
+/// One thread handles one cell-list slot, reading the cell-sorted copies made
+/// by [`gather_cell_slot_geometry`]: neighboring threads share a home cell, so
+/// they scan the same candidate cells, and each candidate cell is a contiguous
+/// range of slots.
 ///
 /// Segments with more than `capacity` neighbors store their true count, which
 /// tells the contact kernel to fall back to the cell-list traversal around the
@@ -76,11 +122,8 @@ fn segment_axis_distance(
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn build_segment_neighbor_lists(
-    positions: &[f32],
-    segment_vertices: &[u32],
-    segment_fibers: &[u32],
-    segment_radii: &[f32],
-    active_segments: &[u32],
+    slot_geometry: &[f32],
+    slot_topology: &[u32],
     active_counts: &[Atomic<u32>],
     cell_counts: &[u32],
     cell_offsets: &[u32],
@@ -98,25 +141,24 @@ pub fn build_segment_neighbor_lists(
     cells_y: u32,
     cells_z: u32,
 ) {
-    let work = ABSOLUTE_POS;
-    if work >= active_counts[0].load() as usize || neighbor_state[0] == 0 {
+    let slot = ABSOLUTE_POS;
+    if slot >= active_counts[0].load() as usize || neighbor_state[0] == 0 {
         terminate!();
     }
-    let segment = active_segments[work as usize];
-    let segment_index = segment as usize;
-    let first_vertex = segment_vertices[2 * segment_index] as usize;
-    let second_vertex = segment_vertices[2 * segment_index + 1] as usize;
-    let p1x = positions[3 * first_vertex];
-    let p1y = positions[3 * first_vertex + 1];
-    let p1z = positions[3 * first_vertex + 2];
-    let q1x = positions[3 * second_vertex];
-    let q1y = positions[3 * second_vertex + 1];
-    let q1z = positions[3 * second_vertex + 2];
+    let segment_index = cell_segments[slot] as usize;
+    let first_vertex = slot_topology[3 * slot];
+    let second_vertex = slot_topology[3 * slot + 1];
+    let p1x = slot_geometry[8 * slot];
+    let p1y = slot_geometry[8 * slot + 1];
+    let p1z = slot_geometry[8 * slot + 2];
+    let q1x = slot_geometry[8 * slot + 4];
+    let q1y = slot_geometry[8 * slot + 5];
+    let q1z = slot_geometry[8 * slot + 6];
     let d1x = q1x - p1x;
     let d1y = q1y - p1y;
     let d1z = q1z - p1z;
-    let owner = segment_fibers[segment_index];
-    let radius = segment_radii[segment_index];
+    let owner = slot_topology[3 * slot + 2];
+    let radius = slot_geometry[8 * slot + 3];
     let half_length = 0.5 * (d1x * d1x + d1y * d1y + d1z * d1z).sqrt();
     let length_x = cell_upper[0] - cell_lower[0];
     let length_y = cell_upper[1] - cell_lower[1];
@@ -182,22 +224,22 @@ pub fn build_segment_neighbor_lists(
             let cell = ((neighbor_z * cells_y + neighbor_y) * cells_x + neighbor_x) as usize;
             let cell_count = cell_counts[cell];
             let start = cell_offsets[cell];
-            for slot in 0..cell_count {
-                let other = cell_segments[(start + slot) as usize] as usize;
-                let third_vertex = segment_vertices[2 * other] as usize;
-                let fourth_vertex = segment_vertices[2 * other + 1] as usize;
-                let adjacent_same_fiber = segment_fibers[other] == owner
+            for local in 0..cell_count {
+                let other_slot = (start + local) as usize;
+                let third_vertex = slot_topology[3 * other_slot];
+                let fourth_vertex = slot_topology[3 * other_slot + 1];
+                let adjacent_same_fiber = slot_topology[3 * other_slot + 2] == owner
                     && (first_vertex == third_vertex
                         || first_vertex == fourth_vertex
                         || second_vertex == third_vertex
                         || second_vertex == fourth_vertex);
-                if other != segment_index && !adjacent_same_fiber {
-                    let mut p2x = positions[3 * third_vertex];
-                    let mut p2y = positions[3 * third_vertex + 1];
-                    let mut p2z = positions[3 * third_vertex + 2];
-                    let mut q2x = positions[3 * fourth_vertex];
-                    let mut q2y = positions[3 * fourth_vertex + 1];
-                    let mut q2z = positions[3 * fourth_vertex + 2];
+                if other_slot != slot && !adjacent_same_fiber {
+                    let mut p2x = slot_geometry[8 * other_slot];
+                    let mut p2y = slot_geometry[8 * other_slot + 1];
+                    let mut p2z = slot_geometry[8 * other_slot + 2];
+                    let mut q2x = slot_geometry[8 * other_slot + 4];
+                    let mut q2y = slot_geometry[8 * other_slot + 5];
+                    let mut q2z = slot_geometry[8 * other_slot + 6];
                     if cell_periodic[0] != 0 {
                         let image_shift =
                             (0.5 * (p2x + q2x - p1x - q1x) / length_x).round() * length_x;
@@ -221,7 +263,8 @@ pub fn build_segment_neighbor_lists(
                     let d2z = q2z - p2z;
                     // A small relative slack keeps rounding from dropping a
                     // pair that sits exactly on the skin boundary.
-                    let interaction = (radius + segment_radii[other] + skin) * (1.0 + 1.0e-4_f32);
+                    let interaction =
+                        (radius + slot_geometry[8 * other_slot + 3] + skin) * (1.0 + 1.0e-4_f32);
                     let midpoint_dx = 0.5 * (p2x + q2x - p1x - q1x);
                     let midpoint_dy = 0.5 * (p2y + q2y - p1y - q1y);
                     let midpoint_dz = 0.5 * (p2z + q2z - p1z - q1z);
@@ -237,7 +280,8 @@ pub fn build_segment_neighbor_lists(
                         ) <= interaction
                     {
                         if count < capacity {
-                            neighbor_segments[list_start + count as usize] = other as u32;
+                            neighbor_segments[list_start + count as usize] =
+                                cell_segments[other_slot];
                         }
                         count += 1;
                     }

@@ -3,7 +3,8 @@
 use cubecl::prelude::*;
 use tangle_contact::device::{
     build_segment_neighbor_lists, finish_neighbor_list_rebuild, flag_neighbor_list_displacement,
-    request_neighbor_list_rebuild, snapshot_neighbor_reference_positions,
+    gather_cell_slot_geometry, request_neighbor_list_rebuild,
+    snapshot_neighbor_reference_positions,
 };
 
 use super::DeviceFiberWorld;
@@ -24,10 +25,11 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             2,
         );
         let cube_dim = CubeDim::new_1d(64);
+        let segment_cubes = CubeCount::Static(self.active_segment_count.div_ceil(64) as u32, 1, 1);
         unsafe {
-            build_segment_neighbor_lists::launch_unchecked::<R>(
+            gather_cell_slot_geometry::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(self.active_segment_count.div_ceil(64) as u32, 1, 1),
+                segment_cubes.clone(),
                 cube_dim.clone(),
                 BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                 BufferArg::from_raw_parts(
@@ -42,9 +44,29 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     self.segment_radii.clone(),
                     self.packed.segment_radii.len(),
                 ),
+                BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                BufferArg::from_raw_parts(self.cell_segments.clone(), self.packed.segment_count()),
+                BufferArg::from_raw_parts(self.neighbor_state.clone(), 2),
                 BufferArg::from_raw_parts(
-                    self.active_segment_indices.clone(),
-                    self.packed.segment_count(),
+                    self.slot_geometry.clone(),
+                    8 * self.packed.segment_count(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.slot_topology.clone(),
+                    3 * self.packed.segment_count(),
+                ),
+            );
+            build_segment_neighbor_lists::launch_unchecked::<R>(
+                &self.client,
+                segment_cubes,
+                cube_dim.clone(),
+                BufferArg::from_raw_parts(
+                    self.slot_geometry.clone(),
+                    8 * self.packed.segment_count(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.slot_topology.clone(),
+                    3 * self.packed.segment_count(),
                 ),
                 BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
                 BufferArg::from_raw_parts(self.cell_counts.clone(), self.cell_count),

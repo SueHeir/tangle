@@ -1,4 +1,5 @@
 import ast
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -153,6 +154,32 @@ class CollectionTests(unittest.TestCase):
             self.assertTrue(path.is_file())
         with self.assertRaises(ValueError):
             assembly.characterize_neighbors(0.1, neighbor_gap=0.01)
+
+    def test_shape_analysis_measures_a_helix(self):
+        a, c = 1.0, 0.5
+        helix = [
+            [5.0 + a * math.cos(t), 5.0 + a * math.sin(t), 2.0 + c * t]
+            for t in (2 * math.pi * i / 4000 for i in range(8001))
+        ]
+        material = tangle.Material("fiber", diameter=0.02)
+        assembly = tangle.Assembly(tangle.Cell([10.0, 10.0, 10.0]))
+        assembly.insert(tangle.FiberCollection.from_centerlines([helix], material))
+
+        report = assembly.characterize_shape(sample_spacing=0.05, quantile_count=11)
+        self.assertEqual(report.fiber_count, 1)
+        self.assertEqual(len(report.curvature["quantiles"]), 11)
+        self.assertAlmostEqual(report.curvature["mean"], a / (a * a + c * c), delta=0.01)
+        self.assertAlmostEqual(report.torsion["mean"], c / (a * a + c * c), delta=0.01)
+        self.assertEqual(report.orientation_axis, [0.0, 0.0, 1.0])
+        self.assertIsNotNone(report.schladitz_beta)
+        self.assertEqual(report.to_dict()["schema_version"], 1)
+        self.assertEqual(len(report.fiber_curl_indices), 1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nested" / "shape.json"
+            report.write_json(path)
+            self.assertTrue(path.is_file())
+        with self.assertRaises(ValueError):
+            assembly.characterize_shape(orientation_axis=[0.0, 0.0, 0.0])
 
 
 class CellTests(unittest.TestCase):
