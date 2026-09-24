@@ -414,6 +414,10 @@ for exact definitions, supported comparisons, and current limitations.
   centerline metrics with an independently imported PuMA voxel workspace.
 - `native/` mirrors the complete Rust example suite using the same native
   generators and solver. See `native/README.md` for the configuration map.
+- `ct_examples.py` fits Tangle fibers to synthetic CT scans with `tangle.ct`
+  and scores them against the truth. See the
+  [CT fitting guide](../../docs/ct_fitting.md) and the
+  [results, with pictures](python/examples/ct_results/README.md).
 
 ## Topic reference notebooks
 

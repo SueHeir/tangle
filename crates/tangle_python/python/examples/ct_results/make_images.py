@@ -6,7 +6,10 @@ For a few examples, from the files ``ct_examples.py`` writes:
   raw.tif, true.tif, segment.tif and diff.tif side by side;
 * ``<example>_confidence.png``: the same slice of confidence.tif;
 * ``<example>_fibers_3d.png``: the true and the fitted centerlines in 3D,
-  colored as in true.tif and segment.tif.
+  colored as in true.tif and segment.tif;
+* ``<example>_blur.png`` (with ``--blur SIGMA=FOLDER ...``): the scan and the
+  difference on one slice for runs rendered with different blur
+  (``ct_examples.py --blur``).
 
 The TIFFs of most examples are not kept in git, so point ``--source`` at a
 full ``ct_examples.py --output`` folder. The 3D pictures rebuild each
@@ -140,11 +143,54 @@ def fibers_3d(source: Path, name: str, out: Path) -> None:
     plt.close(fig)
 
 
+def blur_comparison(runs: list[tuple[str, Path]], name: str, out: Path) -> None:
+    """Scan and difference on the same slice, one column per blur level."""
+    import json
+
+    z = busiest_slice(tifffile.imread(runs[0][1] / name / "true.tif"))
+    fig, axes = plt.subplots(2, len(runs), figsize=(3.9 * len(runs), 8.2), dpi=DPI, facecolor="white")
+    for column, (sigma, folder) in enumerate(runs):
+        report = json.loads((folder / name / "score.json").read_text())
+        score = report["score"]
+        own = report.get("settings", {}).get("psf_sigma_voxels")  # varied_* record their blur
+        label = f"blur {own:g} voxels" if own is not None else "default blur" if sigma == "default" else f"blur {sigma} voxels"
+        for row, key in enumerate(("raw", "diff")):
+            ax = axes[row, column]
+            image = tifffile.imread(folder / name / f"{key}.tif")[z]
+            ax.imshow(image, cmap="gray" if image.ndim == 2 else None, interpolation="nearest")
+            ax.set_xticks([])
+            ax.set_yticks([])
+        axes[0, column].set_title(label, fontsize=13)
+        axes[1, column].set_title(
+            f"{score['recovered']}/{score['true_fibers_in_volume']} recovered, F1 {score['centerline_f1']:.3f}", fontsize=11
+        )
+    axes[0, 0].set_ylabel("Scan", fontsize=13)
+    axes[1, 0].set_ylabel("Difference", fontsize=13)
+    legend(axes[1, len(runs) // 2], DIFF_LEGEND)
+    fig.suptitle(f"{name}: the same fibers scanned with less blur (slice z = {z})", fontsize=13)
+    fig.tight_layout()
+    fig.savefig(out / f"{name}_blur.png", facecolor="white", bbox_inches="tight")
+    plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--source", type=Path, default=HERE, help="a ct_examples.py --output folder")
     parser.add_argument("--out", type=Path, default=HERE / "images")
+    parser.add_argument(
+        "--blur", nargs="+", metavar="SIGMA=FOLDER", default=None,
+        help="output folders of runs with different --blur, for <example>_blur.png (only these are drawn); "
+        "SIGMA 'default' is a run without --blur",
+    )
+    parser.add_argument("--blur-examples", nargs="+", default=["varied_3", "two_types", "scenario_dense_crossing"])
     args = parser.parse_args()
+    if args.blur:
+        runs = [(item.split("=", 1)[0], Path(item.split("=", 1)[1]).expanduser()) for item in args.blur]
+        args.out.mkdir(parents=True, exist_ok=True)
+        for name in args.blur_examples:
+            blur_comparison(runs, name, args.out)
+            print(f"{name}_blur.png")
+        return
     args.out.mkdir(parents=True, exist_ok=True)
     for name in SLICES:
         print(f"{name}_slices.png (z = {slices(args.source, name, args.out)})")
