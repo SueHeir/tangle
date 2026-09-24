@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Sequence
@@ -115,6 +116,10 @@ class FitSettings:
     # ends along their own direction (``_regrow.grow_cut_ends``).
     redraw_moves: str = "match"
     redraw_plans: int = 3
+    # A region's 2nd and 3rd plans are solved only when their host score is
+    # within this many nats of its best (close calls); clear winners are
+    # built without a GPU comparison.
+    redraw_plan_margin: float = 5.0
     # Shape of the gamma distribution of fiber lengths (mean
     # ``FiberSpec.length``) that prices the ends and joins of a redraw
     # region's combinations: 1 is exponential (every end costs the same
@@ -849,6 +854,7 @@ class _Fitter:
         failures: list[list] = []  # [low, high, count] per region that failed
         step = 2.0 * float(self.radius.max())
         for pass_index in range(s.redraw_passes):
+            started = time.perf_counter()
             widen = [(low, high, count * step) for low, high, count in failures if count < s.redraw_attempts]
             given_up = [(low, high) for low, high, count in failures if count >= s.redraw_attempts]
             cut = _regrow.cut_unsure(
@@ -862,6 +868,7 @@ class _Fitter:
                 new_lines, new_radii, new_types, info = self.pick_plans(cut, radii, types, attempt)
             else:
                 new_lines, new_radii, new_types, info = self.redraw_candidate(cut, radii, types, attempt=attempt)
+                info.pop("plan_scores", None)
             _, new_settled, _ = self.scores(new_lines, new_radii)
             old_map = _confidence.coverage_map(self.foreground, lines, radii, settled)
             new_map = _confidence.coverage_map(self.foreground, new_lines, new_radii, new_settled)
@@ -939,6 +946,7 @@ class _Fitter:
                 regions_given_up=len(given_up), regions_widened=len(widen),
                 sure_coverage=round(coverage if kept else before_coverage, 4),
                 sure_coverage_before=round(before_coverage, 4), residual_change=round(residual_change, 4), kept=kept,
+                seconds=round(time.perf_counter() - started, 2),
             )
             if kept:
                 lines, radii, types = merged, merged_radii, merged_types
@@ -985,35 +993,48 @@ class _Fitter:
         chosen mix is built and solved once more.
         """
         count = self.settings.redraw_plans
-        totals = np.zeros((count, len(cut.regions)))
-        candidates = []
+        margin = self.settings.redraw_plan_margin
+        regions = len(cut.regions)
+        totals = np.full((count, regions), -np.inf)
         upper = np.array(self.image.shape[::-1])
+        candidates: dict[int, tuple] = {}
+        used: dict[int, np.ndarray] = {}
+        close: list[int] = []
         for c in range(count):
-            candidate = self.redraw_candidate(
-                cut, radii, types, attempt=attempt, offsets=np.full(len(cut.regions), c)
-            )
+            offsets = np.zeros(regions, dtype=int)
+            if c > 0:
+                # Only close calls are worth a solve: regions whose c-th plan
+                # scored within ``margin`` nats of their best.
+                scores = candidates[0][3].get("plan_scores", {})
+                close = [k for k, row in scores.items() if len(row) > c and row[c] - row[0] <= margin]
+                if not close:
+                    break
+                offsets[close] = c
+            candidate = self.redraw_candidate(cut, radii, types, attempt=attempt, offsets=offsets)
             lines, cand_radii = candidate[0], candidate[1]
             if self.settings.redraw_score == "mask":
                 cover = -_confidence.residual_map(self.foreground, lines, cand_radii, self.margin)
             else:
                 _, settled, _ = self.scores(lines, cand_radii)
                 cover = _confidence.coverage_map(self.foreground, lines, cand_radii, settled)
-            for k, (low, high) in enumerate(cut.regions):
+            for k in range(regions) if c == 0 else close:
+                low, high = cut.regions[k]
                 a = np.clip(np.floor(low).astype(int), 0, upper)
                 b = np.clip(np.ceil(high).astype(int), 0, upper)
                 totals[c, k] = float(cover[a[2] : b[2], a[1] : b[1], a[0] : b[0]].sum(dtype=np.float64))
-            candidates.append(candidate)
-            if c == 0 and candidate[3].get("plans_scored", 0) <= candidate[3].get("regions_with_ports", 0):
-                break  # every region has a single plan: nothing to compare
+            candidates[c] = candidate
+            used[c] = offsets
         solved = len(candidates)
         choice = np.argmax(totals[:solved], axis=0)  # ties keep the better-ranked plan
-        if len(set(choice.tolist())) <= 1:
-            lines, new_radii, new_types, info = candidates[int(choice[0]) if len(choice) else 0]
+        same = [c for c in candidates if np.array_equal(used[c], choice)]
+        if same:
+            lines, new_radii, new_types, info = candidates[same[0]]
         else:
             lines, new_radii, new_types, info = self.redraw_candidate(
                 cut, radii, types, attempt=attempt, offsets=choice
             )
-        info = {**info, "plans_solved": solved, "plan_choices": np.bincount(choice, minlength=solved).tolist()}
+        info = {key: value for key, value in info.items() if key != "plan_scores"}
+        info.update(plans_solved=solved, plan_choices=np.bincount(choice, minlength=solved).tolist())
         return lines, new_radii, new_types, info
 
     def redraw_candidate(
@@ -1116,6 +1137,7 @@ class _Fitter:
         connections = []
         extensions: dict[tuple[int, int], np.ndarray] = {}
         plans_tried = joins = ends = grown = with_ports = 0
+        plan_scores: dict[int, list[float]] = {}
         diameter = 2.0 * self.radius
         for k, region_ports in enumerate(ports):
             if not region_ports:
@@ -1162,8 +1184,9 @@ class _Fitter:
                 join_costs=join_costs,
             )
             plans_tried += len(plans)
-            rank = int(attempt(0.5 * (low + high))) * self.settings.redraw_plans if attempt else 0
-            rank += int(offsets[k]) if offsets is not None else 0
+            base = int(attempt(0.5 * (low + high))) * self.settings.redraw_plans if attempt else 0
+            plan_scores[k] = [plan.score for plan in plans[base : base + self.settings.redraw_plans]]
+            rank = base + (int(offsets[k]) if offsets is not None else 0)
             plan = plans[min(rank, len(plans) - 1)]
             paired = set()
             for i, j in plan.pairs:
@@ -1182,7 +1205,7 @@ class _Fitter:
         info = {
             "grown": grown, "ports": int(sum(len(p) for p in ports)), "plans_scored": plans_tried,
             "joins": joins, "ends_in_regions": ends, "regions_with_ports": with_ports,
-            "existing_ends_as_ports": len(natural),
+            "existing_ends_as_ports": len(natural), "plan_scores": plan_scores,
         }
         return lines, piece_radii[first], piece_types[first], info
 

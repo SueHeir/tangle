@@ -482,10 +482,13 @@ After the final solve and its confidence, up to `redraw_passes` passes:
    plans are tried `redraw_plans` (3) at a time: `_Fitter.pick_plans`
    builds candidate c from every region's c-th best plan (after the
    attempt × 3 plans spent on earlier failures there), runs steps 3–4 on
-   each, and gives every region the plan whose candidate has the most
-   sure coverage (`coverage_map` summed over the region box); if regions
-   disagree, that mix is built and solved once more. Candidates stop after
-   the first when every region has a single plan. `_junctions.assemble`
+   each, and gives every region the plan whose candidate scores best in
+   the region box by `redraw_score` (fewest `residual_map` voxels, or most
+   `coverage_map`); if regions disagree, that mix is built and solved once
+   more. Only close calls get the extra solves: candidate c changes just
+   the regions whose c-th plan scored within `redraw_plan_margin` (5) nats
+   of their best, and is skipped when there are none. Each pass logs its
+   `seconds`. `_junctions.assemble`
    chains the pieces through the bridges (a link that would close a loop
    is dropped). The history logs `plans_solved` and `plan_choices`.
 3. `_Fitter.trace` seeds new fibers in the foreground still unclaimed;
