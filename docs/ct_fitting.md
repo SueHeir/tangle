@@ -322,9 +322,18 @@ minimum length and a bend near the limit, plus `scenario_missed_fiber`:
 `single_type`'s densest bundle (a fiber touching 11 others at 4–88°,
 which the fit split in two) cut out into its own 150 µm scan.
 
+`varied_1` … `varied_8` are fresh structures for checking that the fitter
+holds up on structures it was not tuned on. Each draws its settings from
+its own seed, so a name is always the same structure: 8–16 µm fibers at
+2.5–4.5 voxels radius, planar, aligned, biaxial and isotropic orientations
+(two each), solid fraction 0.04–0.14, and varied waviness, bend limit, scan
+noise and blur, all in a scan 160 voxels a side. `score.json` records the
+settings. They run only when named, or with `--varied`.
+
 ```
 python ct_examples.py --list
-python ct_examples.py                       # all, into $TANGLE_CT_OUTPUT or examples/output/ct
+python ct_examples.py                       # all but varied_*, into $TANGLE_CT_OUTPUT or examples/output/ct
+python ct_examples.py --varied              # all, including varied_*
 python ct_examples.py two_types scenario_gap_6r --output ~/ct-results
 ```
 

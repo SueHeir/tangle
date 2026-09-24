@@ -32,9 +32,10 @@ are cached in ``<output>/.cache/``.
 
 Usage::
 
-    python ct_examples.py [--output DIR] [--list] [example ...]
+    python ct_examples.py [--output DIR] [--list] [--varied] [example ...]
 
-Without names every example runs. The output folder defaults to
+Without names every example but the ``varied_*`` ones runs (``--varied``
+adds them). The output folder defaults to
 ``$TANGLE_CT_OUTPUT``, else ``examples/output/ct``. ``TANGLE_BACKEND`` picks
 the solver backend (``wgpu``, the GPU, by default).
 
@@ -52,6 +53,12 @@ Examples:
   dim core (the core falls below the grey range, or out of the mask, and
   the hole is filled);
   each fit's type is chosen by its thickness.
+* ``varied_1`` … ``varied_8``: fresh structures drawn from seeds, for
+  checking the fitter on structures it was not tuned on: 8-16 µm fibers
+  at 2.5-4.5 voxels radius, planar, aligned, biaxial and isotropic (two
+  each), solid fraction 0.04-0.14 (single_type is about 0.06), varied waviness, bend limit, scan noise and blur,
+  160 voxels a side. ``score.json`` records each one's settings
+  (``varied_settings``). Not in the default run.
 * ``scenario_*``: one small scan per fitting step, a few 12 µm fibers
   placed by hand in a 150 µm box:
 
@@ -70,6 +77,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -308,6 +316,84 @@ def scenario(centerlines, length: float = 400 * um) -> Callable[[Path], Example]
     return build
 
 
+# -- varied structures ------------------------------------------------------------
+#
+# Fresh structures the fitter was not tuned on (Liz's test loop: generate,
+# fit, find what fails, cut it into a scenario, fix, re-check everything).
+# ``varied_<n>`` draws its settings from seed n, so each name is always the
+# same structure. They are not in the default run; name them, or pass
+# ``--varied``. Each keeps the scan at 160 voxels a side, so a fit costs
+# about what single_type does.
+
+VARIED_COUNT = 8
+VARIED_VOXELS = 160
+
+
+def varied_settings(index: int) -> dict:
+    """The structure and scan settings ``varied_<index>`` uses (lengths in µm)."""
+    rng = np.random.default_rng(1000 + index)
+    diameter = float(rng.choice([8.0, 10.0, 12.0, 14.0, 16.0]))
+    voxel = round(diameter / rng.uniform(5.0, 9.0), 3)  # fiber radius 2.5-4.5 voxels
+    side = VARIED_VOXELS * voxel
+    orientation = ["planar", "aligned", "biaxial", "isotropic"][(index - 1) % 4]  # each twice in 8
+    long = orientation == "planar"
+    shortest = rng.uniform(0.45, 0.65 if long else 0.45) * side
+    longest = min(shortest * rng.uniform(1.1, 1.4), (0.9 if long else 0.6) * side)
+    fraction = rng.uniform(0.04, 0.14 if orientation != "isotropic" else 0.09)  # single_type is ~0.06
+    count = int(round(fraction * side**3 / (np.pi * (diameter / 2) ** 2 * 0.5 * (shortest + longest))))
+    return {
+        "diameter_um": diameter,
+        "min_bend_radius_um": round(float(rng.uniform(3.0, 6.0)) * diameter, 1),
+        "voxel_um": voxel,
+        "side_um": round(side, 1),
+        "orientation": orientation,
+        "tilt": round(float(rng.uniform(0.15, 0.6)), 2),
+        "length_um": [round(shortest, 1), round(longest, 1)],
+        "waviness_um": [round(0.15 * diameter, 1), round(float(rng.uniform(0.3, 1.2)) * diameter, 1)],
+        "solid_fraction": round(float(fraction), 3),
+        "count": min(max(count, 8), 200),
+        "noise": round(float(rng.uniform(0.08, 0.18)), 3),
+        "psf_sigma_voxels": round(float(rng.uniform(0.7, 1.2)), 2),
+        "seed": 1000 + index,
+    }
+
+
+def varied(index: int) -> Callable[[Path], Example]:
+    def build(cache: Path) -> Example:
+        v = varied_settings(index)
+        diameter, bend = v["diameter_um"] * um, v["min_bend_radius_um"] * um
+        side = v["side_um"] * um
+        material = tangle.Material(f"fiber_{v['diameter_um']:g}um", diameter=diameter, min_bend_radius=bend)
+        orientation = {
+            "planar": lambda: tangle.PlanarOrientation(max_tilt=v["tilt"]),
+            "aligned": lambda: tangle.AlignedOrientation("x", max_angle=v["tilt"]),
+            "biaxial": lambda: tangle.LayeredBiaxialOrientation(max_tilt=v["tilt"], seed=v["seed"]),
+            "isotropic": tangle.IsotropicOrientation,
+        }[v["orientation"]]()
+        shortest, longest = (x * um for x in v["length_um"])
+        population = tangle.FiberPopulation(
+            material=material,
+            count=v["count"],
+            segments_per_fiber=max(4, int(shortest / (1.25 * diameter))),  # segments longer than a diameter
+            seed=v["seed"],
+            length=(shortest, longest),
+            curvature_amplitude=tuple(x * um for x in v["waviness_um"]),
+            orientation=orientation,
+        )
+        # The cache is per name; a settings change needs a new one.
+        key = hashlib.sha1(json.dumps(v, sort_keys=True).encode()).hexdigest()[:8]
+        truth = relaxed_truth(cache.with_name(f"{cache.stem}-{key}.json"), tangle.Cell([side] * 3), [population])
+        scan = ct.synthetic_ct(
+            truth, v["voxel_um"] * um, seed=v["seed"], noise=v["noise"], psf_sigma_voxels=v["psf_sigma_voxels"]
+        )
+        spec = ct.FiberSpec(
+            diameter=diameter, min_bend_radius=bend, length=0.5 * (shortest + longest), name=material.name
+        )
+        return Example(scan, spec, bend, lambda fit, scan: {"settings": v, **end_error_report(fit, scan)})
+
+    return build
+
+
 EXAMPLES: dict[str, Callable[[Path], Example]] = {
     "single_type": single_type,
     "long_fibers": long_fibers,
@@ -317,6 +403,8 @@ EXAMPLES: dict[str, Callable[[Path], Example]] = {
         for name, lines in SCENARIOS.items()
     },
 }
+VARIED = [f"varied_{index}" for index in range(1, VARIED_COUNT + 1)]
+EXAMPLES.update({name: varied(index) for index, name in enumerate(VARIED, start=1)})
 
 
 # -- the runner -----------------------------------------------------------------
@@ -632,6 +720,7 @@ def main() -> None:
     parser.add_argument("names", nargs="*", help="examples to run (default: all)")
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--list", action="store_true", help="list the examples and exit")
+    parser.add_argument("--varied", action="store_true", help="also run the varied_* structures")
     parser.add_argument(
         "--redraw-study", action="store_true",
         help="print how well the redraw scores agree with the truth (default single_type two_types)",
@@ -656,7 +745,10 @@ def main() -> None:
     if args.redraw_study:
         redraw_study(args.names or ["single_type", "two_types"], output, args.repeats)
         return
-    rows = [run(name, output) for name in (args.names or list(EXAMPLES))]
+    names = args.names or [name for name in EXAMPLES if name not in VARIED]
+    if args.varied:
+        names += [name for name in VARIED if name not in names]
+    rows = [run(name, output) for name in names]
     write_summary(output, rows)
     print(f"summary: {output / 'summary.md'}")
 
