@@ -220,22 +220,25 @@ pub(crate) fn activate_formation_step(
     }
 }
 
+/// Selects the active segments whose contact has persisted long enough to
+/// split, updating only each segment's own contact count.
+///
+/// The splits themselves are applied by [`apply_refinement_candidates`] in a
+/// separate launch: a split activates its children, and a child thread in the
+/// same launch could otherwise see itself activated before seeing its new
+/// birth epoch and split again, depending on GPU scheduling.
 #[cube(launch_unchecked)]
-pub(crate) fn refine_contact_segments(
-    positions: &mut [f32],
-    segment_vertices: &[u32],
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mark_refinement_candidates(
     segment_radii: &[f32],
     segment_rest_lengths: &[f32],
     segment_children: &[u32],
     segment_max_penetration: &[f32],
-    segment_active: &mut [u32],
-    segment_birth_epochs: &mut [u32],
+    segment_active: &[u32],
+    segment_birth_epochs: &[u32],
     segment_contact_epochs: &mut [u32],
-    segment_quiet_epochs: &mut [u32],
-    vertex_active: &mut [u32],
-    vertex_segments: &mut [u32],
     control: &[u32],
-    refinement_count: &mut [Atomic<u32>],
+    candidates: &mut [u32],
     epoch: u32,
     penetration_threshold: f32,
     contact_length_over_diameter: f32,
@@ -243,10 +246,14 @@ pub(crate) fn refine_contact_segments(
     required_contact_epochs: u32,
 ) {
     let segment = ABSOLUTE_POS;
-    if segment >= segment_active.len() || control[0] == 0 {
+    if segment >= segment_active.len() {
         terminate!();
     }
     let index = segment as usize;
+    candidates[index] = 0;
+    if control[0] == 0 {
+        terminate!();
+    }
     if segment_active[index] == 0 {
         segment_contact_epochs[index] = 0;
         terminate!();
@@ -274,10 +281,43 @@ pub(crate) fn refine_contact_segments(
     }
     let persistence = segment_contact_epochs[index] + 1;
     segment_contact_epochs[index] = persistence;
-    if persistence < required_contact_epochs {
+    if persistence >= required_contact_epochs {
+        candidates[index] = 1;
+    }
+}
+
+/// Splits every segment selected by [`mark_refinement_candidates`].
+///
+/// Candidates are active, so their children are inactive and never
+/// candidates themselves; each split writes only its own midpoint, its own
+/// children and its own endpoint links, so the writes do not overlap.
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_refinement_candidates(
+    positions: &mut [f32],
+    segment_vertices: &[u32],
+    segment_children: &[u32],
+    candidates: &[u32],
+    segment_active: &mut [u32],
+    segment_birth_epochs: &mut [u32],
+    segment_contact_epochs: &mut [u32],
+    segment_quiet_epochs: &mut [u32],
+    vertex_active: &mut [u32],
+    vertex_segments: &mut [u32],
+    control: &[u32],
+    refinement_count: &mut [Atomic<u32>],
+    epoch: u32,
+) {
+    let segment = ABSOLUTE_POS;
+    if segment >= segment_active.len() || control[0] == 0 {
         terminate!();
     }
-
+    let index = segment as usize;
+    if candidates[index] == 0 {
+        terminate!();
+    }
+    let left = segment_children[2 * index];
+    let right = segment_children[2 * index + 1];
     let first = segment_vertices[2 * index] as usize;
     let second = segment_vertices[2 * index + 1] as usize;
     let midpoint = (first + second) / 2;

@@ -1476,3 +1476,78 @@ fn needle_split_midpoints_join_the_relaxation_immediately() {
         &positions[index..index + 3]
     );
 }
+
+#[test]
+fn adaptive_relaxation_is_bitwise_repeatable() {
+    // Refinement and coarsening both fire here. Splits are decided in one
+    // launch and applied in the next, so no thread sees a split from the same
+    // epoch and the topology and positions repeat bit for bit.
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic(
+        [2.4, 2.4, 1.0],
+        [true, true, false],
+    ));
+    let material = assembly.materials.add("fiber");
+    let section = assembly.sections.add(Section::Circular { radius: 0.1 });
+    let mut id = 1;
+    for index in 0..12 {
+        let offset = 0.05 + 0.18 * index as f64;
+        let wobble = 0.03 * (index % 3) as f64;
+        for placed in [
+            [[0.2, offset, 0.45 + wobble], [2.2, offset, 0.45 + wobble]],
+            [
+                [offset + 0.07, 0.2, 0.55 - wobble],
+                [offset + 0.07, 2.2, 0.55 - wobble],
+            ],
+        ] {
+            assembly
+                .add_fiber(FiberId(id), material, section, &placed, &placed)
+                .unwrap();
+            id += 1;
+        }
+    }
+    let adaptive = AdaptiveSegmentationConfig {
+        contact_length_over_diameter: 2.0,
+        minimum_length_over_diameter: 0.5,
+        maximum_refinement_levels: 5,
+        refinement_interval: 4,
+        refinement_persistence: 1,
+        coarsening_persistence: 2,
+        ..AdaptiveSegmentationConfig::default()
+    };
+    let config = RelaxationConfig {
+        adaptive_segmentation: Some(adaptive),
+        penetration_tolerance: 0.0,
+        force_full_iterations: true,
+        max_step: 0.01,
+        max_iterations: 200,
+        iterations_per_batch: 20,
+        ..RelaxationConfig::default()
+    };
+    let run = || {
+        let packed =
+            PackedAssembly::from_assembly_with_options(&assembly, Some(adaptive), false).unwrap();
+        let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+            &WgpuDevice::default(),
+            packed,
+            CellListConfig::default(),
+            config.max_step,
+        );
+        let mut status = BatchStatus::default();
+        for _ in 0..10 {
+            status = world.run_batch(&config, 20);
+        }
+        let bits: Vec<u32> = world
+            .download_positions()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
+        (status, world.download_vertex_active(), bits)
+    };
+    let (first_status, first_active, first_bits) = run();
+    let (second_status, second_active, second_bits) = run();
+    assert!(first_status.segment_splits > 0, "{first_status:?}");
+    assert!(first_status.segment_merges > 0, "{first_status:?}");
+    assert_eq!(first_status, second_status);
+    assert_eq!(first_active, second_active);
+    assert!(first_bits == second_bits, "positions differ between runs");
+}
