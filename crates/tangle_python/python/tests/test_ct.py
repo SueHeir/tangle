@@ -497,7 +497,7 @@ class CtFitTests(unittest.TestCase):
         self.assertGreater(report["voxel_label_accuracy"], 0.9)
         with tempfile.TemporaryDirectory() as tmp:
             reloaded = ct.load_fit(fit.write(tmp)["config"])
-        self.assertEqual(reloaded.specs[0].profile, spec.profile)
+        self.assertEqual(reloaded.spec.profile, spec.profile)  # one type: kept on .spec
 
     def test_outputs_round_trip_into_tangle(self):
         with tempfile.TemporaryDirectory() as tmp:
