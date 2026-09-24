@@ -266,9 +266,9 @@ pub fn build_segment_neighbor_lists(
             let neighbor_z =
                 ((raw_neighbor_z % cells_z as i32 + cells_z as i32) % cells_z as i32) as u32;
             let cell = ((neighbor_z * cells_y + neighbor_y) * cells_x + neighbor_x) as usize;
-            let cell_count = cell_counts[cell];
+            let candidates = cell_counts[cell];
             let start = cell_offsets[cell];
-            for local in 0..cell_count {
+            for local in 0..candidates {
                 let other_slot = (start + local) as usize;
                 let other = cell_segments[other_slot];
                 let third_vertex = slot_topology[5 * other_slot];
@@ -350,7 +350,6 @@ pub fn build_segment_neighbor_lists(
     }
 }
 
-/// Records the positions a freshly built neighbor list is valid for.
 /// Sorts each active segment's neighbor list by segment index.
 ///
 /// A segment split into several proxy pieces is served by several build
@@ -393,6 +392,7 @@ pub fn sort_neighbor_lists(
     }
 }
 
+/// Records the positions a freshly built neighbor list is valid for.
 #[cube(launch_unchecked)]
 pub fn snapshot_neighbor_reference_positions(
     positions: &[f32],
