@@ -102,11 +102,12 @@ class FitSettings:
     # left alone after ``redraw_attempts`` failures.
     redraw_passes: int = 5
     redraw_attempts: int = 3
-    # How a region's redraw is judged: "confidence" (sure coverage, see
-    # ``_confidence.sure_coverage``), "mask" (fewer foreground voxels left
-    # unexplained plus fewer fit voxels over void), or "all" (every redraw
-    # is kept, for comparison).
-    redraw_score: str = "confidence"
+    # How a region's redraw is judged: "mask" (fewer foreground voxels left
+    # unexplained plus fewer fit voxels over void; tracks the truth best in
+    # the redraw study), "confidence" (sure coverage, see
+    # ``_confidence.sure_coverage``), or "all" (every redraw is kept, for
+    # comparison). The same score picks among the ``redraw_plans``.
+    redraw_score: str = "mask"
     # How a region is redrawn: "match" tries every way its loose fiber ends
     # can connect or end (``_junctions``), solves the ``redraw_plans``
     # best-scoring ones and keeps, region by region, the one with the most
@@ -909,17 +910,17 @@ class _Fitter:
                 # so only the unpinned settle acts).
                 merged = self.solve(merged, merged_radii, merged_types, anchors=merged)
             coverage = before_coverage
+            residual_change = 0.0
             if kept:
+                # The groups were judged one by one and are trusted: a
+                # whole-pass check threw away passes whose groups were each
+                # better. The merged fit's totals are only logged.
                 merged_confidence, merged_settled, summary = self.scores(merged, merged_radii, previous=None)
                 coverage = _confidence.sure_coverage(self.foreground, merged, merged_radii, merged_settled)
-                # The groups were judged one by one; the merged fit is only
-                # checked for a clear loss (where kept and reverted groups
-                # meet, or from the settle), not required to gain overall.
-                if s.redraw_score == "confidence":
-                    kept = coverage > before_coverage - 0.005
-                elif s.redraw_score == "mask":
-                    residual = _confidence.residual_map(self.foreground, merged, merged_radii, self.margin)
-                    kept = int(residual.sum()) <= int(old_residual.sum()) + 0.005 * float(self.foreground.sum())
+                residual = _confidence.residual_map(self.foreground, merged, merged_radii, self.margin)
+                residual_change = (float(residual.sum(dtype=np.int64)) - float(old_residual.sum(dtype=np.int64))) / max(
+                    float(self.foreground.sum()), 1.0
+                )
             for k, (low, high) in enumerate(cut.regions):
                 ok = kept and bool(accepted[component[k]])
                 self._record(failures, low, high, ok)
@@ -930,7 +931,8 @@ class _Fitter:
                 groups_better_by_confidence=int(better["confidence"].sum()),
                 groups_better_by_mask=int(better["mask"].sum()),
                 regions_given_up=len(given_up), regions_widened=len(widen),
-                sure_coverage=round(coverage if kept else before_coverage, 4), kept=kept,
+                sure_coverage=round(coverage if kept else before_coverage, 4),
+                sure_coverage_before=round(before_coverage, 4), residual_change=round(residual_change, 4), kept=kept,
             )
             if kept:
                 lines, radii, types = merged, merged_radii, merged_types
@@ -966,13 +968,15 @@ class _Fitter:
     def pick_plans(
         self, cut: _regrow.Cut, radii: np.ndarray, types: np.ndarray, attempt
     ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, dict[str, Any]]:
-        """Solve each region's best ``redraw_plans`` combinations and keep, per region, the surest.
+        """Solve each region's best ``redraw_plans`` combinations and keep, per region, the best.
 
         Candidate ``c`` builds every region with its ``c``-th best plan and
         is solved with the sure pieces pinned. Each region then takes the
-        plan whose candidate has the most sure coverage (foreground voxels
-        weighted by their fiber's confidence) inside the region's box. If
-        the regions disagree, the chosen mix is built and solved once more.
+        plan whose candidate scores best inside the region's box, by
+        ``redraw_score``: the fewest unexplained foreground plus fit-over-void
+        voxels ("mask"), else the most sure coverage (foreground voxels
+        weighted by their fiber's confidence). If the regions disagree, the
+        chosen mix is built and solved once more.
         """
         count = self.settings.redraw_plans
         totals = np.zeros((count, len(cut.regions)))
@@ -983,8 +987,11 @@ class _Fitter:
                 cut, radii, types, attempt=attempt, offsets=np.full(len(cut.regions), c)
             )
             lines, cand_radii = candidate[0], candidate[1]
-            _, settled, _ = self.scores(lines, cand_radii)
-            cover = _confidence.coverage_map(self.foreground, lines, cand_radii, settled)
+            if self.settings.redraw_score == "mask":
+                cover = -_confidence.residual_map(self.foreground, lines, cand_radii, self.margin)
+            else:
+                _, settled, _ = self.scores(lines, cand_radii)
+                cover = _confidence.coverage_map(self.foreground, lines, cand_radii, settled)
             for k, (low, high) in enumerate(cut.regions):
                 a = np.clip(np.floor(low).astype(int), 0, upper)
                 b = np.clip(np.ceil(high).astype(int), 0, upper)

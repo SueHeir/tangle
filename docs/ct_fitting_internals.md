@@ -494,24 +494,24 @@ After the final solve and its confidence, up to `redraw_passes` passes:
    (`changed_regions`; a changed node outside every region joins the
    nearest, whose box grows to hold it). Tying regions by any fiber that
    merely passes through them chained every region of a dense scan into
-   one group. A group is kept
-   if its boxes' sum of `coverage_map` (per foreground voxel, the owning
-   segment's confidence without stability) rises by more than 0.001 per
-   foreground voxel. The merged fit takes the redraw's fibers except those
+   one group. With `redraw_score = "mask"` (the default) a group is kept if
+   its boxes' sum of `residual_map` (foreground farther than r + m from
+   every fit, plus background inside a capsule) falls by more than 0.001
+   per foreground voxel; with `"confidence"`, if the sum of `coverage_map`
+   (per foreground voxel, the owning segment's confidence without
+   stability) rises by that much; `"all"` keeps every group, for
+   comparison. The merged fit takes the redraw's fibers except those
    in reverted groups, and the old fibers of reverted groups, plus any old
    fiber outside every region that no kept fiber follows any more (the
    redraw may have joined it into a reverted one). When old and new fibers
    are mixed, the merged fit gets one settle (every node pinned for the
-   image run, so only the unpinned settle acts). The groups were judged
-   one by one, so the merged fit is only checked for a clear loss: the pass
-   is reverted if its total sure coverage fell by more than 0.005 (an
-   earlier rule that required a total gain vetoed passes whose groups had
-   each improved).
-   `FitSettings.redraw_score` picks the score: `"confidence"` (above),
-   `"mask"` (the drop in `residual_map`: foreground farther than r + m
-   from every fit, plus background inside a capsule; the pass is then kept
-   if the total residual fell), or `"all"` (every group kept, for
-   comparison). `python ct_examples.py --redraw-study` runs one redraw
+   image run, so only the unpinned settle acts). The per-group decisions
+   stand: a whole-pass check (first a total gain, then no loss above
+   0.005) threw away passes with 10–17 accepted groups in two_types. The
+   history logs the merged fit's `sure_coverage`, `sure_coverage_before`
+   and `residual_change` (per foreground voxel). In the study the mask
+   score correlated +0.81 with the truth's gain per group, confidence
+   +0.67. `python ct_examples.py --redraw-study` runs one redraw
    pass with `"all"` and prints, per group, whether the truth got better
    and which score said so (`_fit._REDRAW_PROBE` is its hook).
 6. Failed regions are remembered as boxes with a failure count (a kept

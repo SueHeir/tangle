@@ -251,8 +251,9 @@ The fit then uses it to **redraw the unsure parts**
    by how well it explains the scan in the region, the overlaps it makes,
    and the fiber ends it leaves (priced by the fiber-length prior, at
    least one nat each). The best three are each solved on the GPU with
-   the sure pieces pinned, and every region keeps the one with the most
-   sure coverage; a retry tries the next three
+   the sure pieces pinned, and every region keeps the one that best
+   explains the scan there (by the same score as step 5); a retry tries
+   the next three
    (`FitSettings.redraw_plans`, `FitSettings.redraw_moves = "match"`; `"grow"` instead only grows the
    ends along their own direction);
 3. joins ends that meet and traces new fibers in whatever is still
@@ -261,9 +262,14 @@ The fit then uses it to **redraw the unsure parts**
    everything else fits around them; a short settle without the scan then
    runs unpinned, so fibers that touch can still be pushed apart;
 5. keeps or reverts the redraw **region by region**: a region's redraw is
-   kept only if it raises that region's **sure coverage** (its foreground
-   explained by the fit, each voxel weighted by the confidence of the fit
-   that owns it). Two regions are decided together only when one redrawn stretch spans both.
+   kept only if it leaves fewer voxels wrong there, foreground the fit
+   misses plus fit over void (`FitSettings.redraw_score = "mask"`, which
+   tracked the true improvement best in the redraw study), or with
+   `"confidence"` if it raises that region's **sure coverage** (its
+   foreground explained by the fit, each voxel weighted by the confidence
+   of the fit that owns it). Two regions are decided together only when
+   one redrawn stretch spans both. Each region's decision stands: there is
+   no second check on the whole pass.
 
 A region whose redraw failed gets a different move the next time, with a
 wider cut: the next-best combination (with `"grow"`: the second try
