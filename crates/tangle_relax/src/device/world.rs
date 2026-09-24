@@ -444,7 +444,12 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         // block size shrinks (see `update_neighbor_list_layout`); an
         // overflowing segment only falls back to scanning its cells.
         let neighbor_capacity = cell_list.neighbor_capacity;
-        let total_list_weight: usize = list_weights.iter().map(|&weight| weight as usize).sum();
+        // A parent's weight never exceeds its two children's, so the leaves'
+        // total bounds every active set of an adaptive tree.
+        let total_list_weight: usize = (0..packed.segment_count())
+            .filter(|&segment| packed.segment_children[2 * segment] == u32::MAX)
+            .map(|segment| list_weights[segment] as usize)
+            .sum();
         let neighbor_slots = (neighbor_capacity as usize * total_list_weight)
             .min(MAXIMUM_NEIGHBOR_LIST_BYTES / core::mem::size_of::<u32>())
             .max(1);
@@ -837,6 +842,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             .read_one(self.list_weight_total.clone())
             .expect("CubeCL neighbor-list weight readback failed");
         let total = (u32::from_bytes(&bytes)[0] as usize).max(1);
+        // Zero only past ~31 M active blocks: then every segment takes the
+        // exact overflow scan instead of a list.
         self.neighbor_block = self
             .neighbor_capacity
             .min((self.neighbor_slots / total).min(u32::MAX as usize) as u32);

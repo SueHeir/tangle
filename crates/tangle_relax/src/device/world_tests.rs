@@ -1268,8 +1268,9 @@ fn neighbor_lists_match_rebuilding_every_iteration() {
     );
 }
 
-/// Each segment's built neighbor list, or `None` when it overflowed its room
-/// (`neighbor_block` slots per list weight) and the contact pass scans cells.
+/// Each active segment's built neighbor list, or `None` when it is inactive or
+/// overflowed its room (`neighbor_block` slots per list weight) and the
+/// contact pass scans cells.
 fn neighbor_lists(world: &DeviceFiberWorld<WgpuRuntime>) -> Vec<Option<Vec<u32>>> {
     let read_u32 =
         |handle: &Handle| u32::from_bytes(&world.client.read_one(handle.clone()).unwrap()).to_vec();
@@ -1277,9 +1278,13 @@ fn neighbor_lists(world: &DeviceFiberWorld<WgpuRuntime>) -> Vec<Option<Vec<u32>>
     let lists = read_u32(&world.neighbor_segments);
     let offsets = read_u32(&world.list_offsets);
     let weights = read_u32(&world.list_weights);
+    let active = world.download_segment_active();
     let block = world.neighbor_block as usize;
     (0..counts.len())
         .map(|segment| {
+            if active[segment] == 0 {
+                return None;
+            }
             let count = counts[segment] as usize;
             let start = block * offsets[segment] as usize;
             (count <= block * weights[segment] as usize)
