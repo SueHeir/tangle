@@ -75,6 +75,8 @@ def cut_void(
     *,
     level: float = 0.3,
     min_gap_radii: float = 2.0,
+    bridge_level: float = 0.7,
+    bridge_offset_radii: float = 1.0,
 ) -> tuple[list[np.ndarray], np.ndarray, dict[str, int]]:
     """Cut every fit where its centerline sits in void (image below ``level``).
 
@@ -83,12 +85,14 @@ def cut_void(
     there, and another fit can take the place it left. Void nodes at an end
     are trimmed back to the first supported node. An interior void stretch
     shorter than ``min_gap_radii`` radii is kept (a dip, not a drift); a
-    longer one is bridged when the straight line between its supported
-    neighbors is fiber all the way (the fit bowed off its fiber and back)
-    and runs clear of every other fit's core (within its radius of its
-    centerline: in a dense scan the line can cross a fiber lying across it,
-    and bridging there welded fits across crossings), and otherwise splits
-    the fit (a real fiber has no gap). Nodes outside the
+    longer one is bridged when it is a bow, reaching at least
+    ``bridge_offset_radii`` radii off the straight line between its
+    supported neighbors, and that line reads at least ``bridge_level`` all
+    the way (the fit bowed off its fiber and came back); otherwise it splits
+    the fit. A dim stretch that barely leaves the line is where a fit hops
+    from one fiber to another at a crossing: its chord crosses the gap
+    between touching fibers and reads only 0.4 to 0.6, and bridging it kept
+    the merge. Nodes outside the
     scan are left alone. :func:`end_step` regrows an end where the scan does
     continue.
 
@@ -98,25 +102,6 @@ def cut_void(
     """
     upper = np.array(image.shape[::-1], dtype=np.float64)
     radii = np.asarray(radii, dtype=np.float64)
-    nodes: list = []  # (KD-tree over every fit's nodes, their fits, search reach), built on first use
-
-    def clear_of_others(index: int, points: np.ndarray) -> bool:
-        from scipy.spatial import cKDTree
-
-        from ._confidence import _distance_to_polyline
-
-        if not nodes:
-            lines = [np.asarray(line, dtype=np.float64).reshape(-1, 3) for line in centerlines]
-            owner = np.concatenate([np.full(len(line), i) for i, line in enumerate(lines)])
-            steps = [np.linalg.norm(np.diff(line, axis=0), axis=1) for line in lines if len(line) > 1]
-            longest = max((float(step.max()) for step in steps), default=0.0)
-            nodes.extend([cKDTree(np.vstack(lines)), owner, float(radii.max()) + 0.5 * longest, lines])
-        tree, owner, reach, lines = nodes
-        near = {int(owner[k]) for hits in tree.query_ball_point(points, reach) for k in hits} - {index}
-        return all(
-            len(lines[j]) < 2 or float(_distance_to_polyline(points, lines[j]).min()) >= radii[j] for j in near
-        )
-
     pieces: list[np.ndarray] = []
     source: list[int] = []
     counts = {"trimmed": 0, "splits": 0, "bridged": 0}
@@ -144,7 +129,14 @@ def cut_void(
                         a, b = line[start - 1], line[k]
                         count = max(int(np.ceil(np.linalg.norm(b - a) / spacing)), 2)
                         across = a + (b - a) * np.linspace(0.0, 1.0, count + 1)[1:-1, None]
-                        if float(sample_image(image, across).min()) >= level and clear_of_others(index, across):
+                        chord = b - a
+                        away = line[start:k] - a
+                        along = np.clip(away @ chord / max(float(chord @ chord), 1e-12), 0.0, 1.0)
+                        offset = float(np.linalg.norm(away - along[:, None] * chord, axis=1).max())
+                        if (
+                            offset >= bridge_offset_radii * radii[index]
+                            and float(sample_image(image, across).min()) >= bridge_level
+                        ):
                             bridges.append((start, k, across))
                             keep[start:k] = True
                 start = None

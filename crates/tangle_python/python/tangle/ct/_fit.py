@@ -108,6 +108,11 @@ class FitSettings:
     # it joined pieces of different fibers at crossings.)
     void_level: float | None = 0.3
     void_gap_radii: float = 2.0
+    # An interior void stretch is bridged only when it bows at least
+    # ``void_bridge_offset_radii`` off the straight line under it and that
+    # line reads at least ``void_bridge_level`` (``_refine.cut_void``).
+    void_bridge_level: float = 0.7
+    void_bridge_offset_radii: float = 1.0
     void_rejoin: bool = True
     void_rejoin_gap_radii: float = 1.0
     void_rejoin_angle_degrees: float = 20.0
@@ -938,7 +943,8 @@ class _Fitter:
             extra = {"source": np.arange(len(lines))} if final else {}
             return lines, radii, types, extra
         pieces, source, cut = _refine.cut_void(
-            self.image, lines, radii, level=s.void_level, min_gap_radii=s.void_gap_radii
+            self.image, lines, radii, level=s.void_level, min_gap_radii=s.void_gap_radii,
+            bridge_level=s.void_bridge_level, bridge_offset_radii=s.void_bridge_offset_radii,
         )
         dropped = 0
         if final:

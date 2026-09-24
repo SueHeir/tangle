@@ -445,11 +445,12 @@ class CtToolTests(unittest.TestCase):
         self.assertEqual(pieces[5][-1, 0], 39.0)
         totals = {key: sum(result[2][key] for result in cut) for key in cut[0][2]}
         self.assertEqual(totals, {"trimmed": 4 + 4, "splits": 1, "bridged": 1})
-        # A fit lying across the bow's bridge (a crossing fiber in a dense
-        # scan): the bow is split, not welded across it.
-        crossing = np.array([[33.0, y, 10.0] for y in np.arange(1.0, 20.0)])
-        pieces, source, counts = _refine.cut_void(image, [bowed, crossing], np.array([1.0, 1.5]))
-        np.testing.assert_array_equal(source, [0, 0, 1])
+        # A dim node that barely leaves a straight fit (where a fit hops to
+        # another fiber at a crossing) splits it, though the line under it is
+        # fiber: only a real bow is bridged.
+        hop = np.array([[10.0, 10.0, 10.0], [15.0, 10.0, 10.0], [20.0, 13.5, 10.0], [25.0, 10.0, 10.0], [30.0, 10.0, 10.0]])
+        pieces, source, counts = _refine.cut_void(image, [hop], np.array([4.0]))
+        np.testing.assert_array_equal(source, [0, 0])
         self.assertEqual((counts["splits"], counts["bridged"]), (1, 0))
 
     def test_batched_capsule_drawing_matches_segment_by_segment(self):

@@ -225,13 +225,17 @@ The fibers move only in Tangle's own relaxation, the GPU by default
    reads below 0.3 is void. Void nodes at an end are trimmed back to the
    first supported node. An interior void stretch at least
    `void_gap_radii` (2) radii long is bridged by a straight line between
-   its supported neighbors when that line is fiber all the way (the fit
-   bowed off its fiber and came back) and stays out of every other fit's
-   core (farther than that fit's radius from its centerline), and
-   otherwise splits the fit. (Without the core test, in dense cross-ply
-   the line ran through fibers lying across it and bridged fits across
-   crossings: varied_3 merged 30 → 51, 0.837 → 0.799.)
-   (Splitting every such stretch took varied_3 from 31 to 55 split fibers.) The next batch's end
+   its supported neighbors only when it is a real bow: it reaches at least
+   `void_bridge_offset_radii` (1) radii off that line, and the line reads
+   at least `void_bridge_level` (0.7) all the way (the fit bowed off its
+   fiber and came back). Otherwise it splits the fit. (Audit against the
+   truth on 7b99548: most stretches were one dim node about 0.3 r off a
+   straight fit, where the fit hops from one fiber to another at a
+   crossing. Their chord crosses the gap between touching fibers and reads
+   0.4 to 0.6, and bridging them kept the merge: 82 of 111 wrong in the
+   dense cube, 46 of 70 in two_types. The good bridges, which a test
+   against other fits' cores had blocked, were bows of about 2 r with a
+   chord of 0.9.) The next batch's end
    step regrows an end where the scan continues, and the topology moves
    rejoin pieces where they should be one fiber.
 6. Types and radii are chosen again (7b) and fibers are respaced to the
