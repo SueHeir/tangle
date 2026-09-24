@@ -12,9 +12,10 @@ use super::kernels::{
     clear_reduced_metrics, clear_wall_reactions, compact_active_indices, compact_affine_vertices,
     compact_moving_walls, compact_rigid_fiber_centers, find_internal_corrections,
     finish_adaptation_epoch, initialize_vertex_displacement_targets, mark_coarsening_candidates,
-    mark_refinement_candidates, measure_compaction_metrics, measure_curvature_ratio,
-    measure_layer_target_error, measure_vertex_target_error, project_fiber_curvature_in_place,
-    reduce_active_segment_penetration, reduce_active_vertex_metrics, refine_vertex_paths,
+    mark_refinement_candidates, mask_active_list_weights, measure_compaction_metrics,
+    measure_curvature_ratio, measure_layer_target_error, measure_vertex_target_error,
+    project_fiber_curvature_in_place, reduce_active_segment_penetration,
+    reduce_active_vertex_metrics, refine_vertex_paths, total_active_list_weight,
 };
 use super::{
     AdaptiveSegmentationConfig, FiberMotion, PackedAssembly, PackingError, RelaxationConfig,
@@ -159,7 +160,21 @@ pub struct DeviceFiberWorld<R: Runtime> {
     slot_geometry: Handle,
     slot_topology: Handle,
     neighbor_skin: f32,
+    // Configured slots per list block, and the block size in use: smaller
+    // when the active segments' blocks would not fit in `neighbor_slots`.
     neighbor_capacity: u32,
+    neighbor_block: u32,
+    neighbor_slots: usize,
+    // Static blocks per packed segment, the active ones' weights, their
+    // exclusive-scan offsets (in blocks), and the scan's total and scratch.
+    list_weights: Handle,
+    active_list_weights: Handle,
+    list_offsets: Handle,
+    list_weight_total: Handle,
+    list_scan_block_sums: Vec<Handle>,
+    list_scan_block_offsets: Vec<Handle>,
+    // A control word that is always 1, for scans outside the relaxation loop.
+    always_run: Handle,
     corrections: Handle,
     segment_max: Handle,
     curvature_ratio: Handle,
@@ -315,6 +330,31 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             .fold(0.0_f32, f32::max);
         let maximum_radius = packed.segment_radii.iter().copied().fold(0.0_f32, f32::max);
         let neighbor_skin = cell_list.neighbor_skin_scale * maximum_radius;
+        // Neighbor-list room grows with segment length, counted in blocks of
+        // `neighbor_capacity` slots. A uniform layout's longest segment is a
+        // leaf, so every segment gets one block as before; an adaptive layout
+        // gives an unrefined parent one block per leaf length (or twice the
+        // interaction margin) of its length, since its neighbor count grows
+        // with it.
+        let segment_length = |segment: usize| {
+            let first = packed.segment_vertices[2 * segment] as usize;
+            let second = packed.segment_vertices[2 * segment + 1] as usize;
+            let dx = packed.positions[3 * second] - packed.positions[3 * first];
+            let dy = packed.positions[3 * second + 1] - packed.positions[3 * first + 1];
+            let dz = packed.positions[3 * second + 2] - packed.positions[3 * first + 2];
+            packed.segment_rest_lengths[segment].max((dx * dx + dy * dy + dz * dz).sqrt())
+        };
+        let interaction_margin = 2.0 * maximum_radius + (2.0 * max_step).max(neighbor_skin);
+        let maximum_length = maximum_rest_length.max(maximum_initial_length);
+        let maximum_leaf_length = (0..packed.segment_count())
+            .filter(|segment| packed.segment_children[2 * segment] == u32::MAX)
+            .map(segment_length)
+            .fold(0.0_f32, f32::max);
+        let list_block_length =
+            maximum_length.min(maximum_leaf_length.max(2.0 * interaction_margin));
+        let list_weights: Vec<u32> = (0..packed.segment_count())
+            .map(|segment| ((segment_length(segment) / list_block_length).ceil() as u32).max(1))
+            .collect();
         // Neighbor lists are built from this grid, so a cell must also span
         // the skin around the widest capsule pair.
         let cell_size = (maximum_rest_length.max(maximum_initial_length)
@@ -399,19 +439,42 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             }
             scan_length = blocks;
         }
-        // Keep the list buffer within a single binding on every backend; an
+        // Room for every segment's full lists at once, kept within a single
+        // binding on every backend. When the active segments need more, the
+        // block size shrinks (see `update_neighbor_list_layout`); an
         // overflowing segment only falls back to scanning its cells.
-        let neighbor_capacity = cell_list.neighbor_capacity.min(
-            (MAXIMUM_NEIGHBOR_LIST_BYTES / (core::mem::size_of::<u32>() * packed.segment_count()))
-                .max(1) as u32,
-        );
+        let neighbor_capacity = cell_list.neighbor_capacity;
+        // A parent's weight never exceeds its two children's, so the leaves'
+        // total bounds every active set of an adaptive tree.
+        let total_list_weight: usize = (0..packed.segment_count())
+            .filter(|&segment| packed.segment_children[2 * segment] == u32::MAX)
+            .map(|segment| list_weights[segment] as usize)
+            .sum();
+        let neighbor_slots = (neighbor_capacity as usize * total_list_weight)
+            .min(MAXIMUM_NEIGHBOR_LIST_BYTES / core::mem::size_of::<u32>())
+            .max(1);
         // Lists start stale so the first contact pass builds them.
         let neighbor_state = client.create_from_slice(u32::as_bytes(&[1_u32, 0]));
         let neighbor_counts =
             client.create_from_slice(u32::as_bytes(&vec![0_u32; packed.segment_count()]));
-        let neighbor_segments = client.empty(
-            packed.segment_count() * neighbor_capacity as usize * core::mem::size_of::<u32>(),
-        );
+        let neighbor_segments = client.empty(neighbor_slots * core::mem::size_of::<u32>());
+        let list_weights = client.create_from_slice(u32::as_bytes(&list_weights));
+        let active_list_weights =
+            client.empty(packed.segment_count() * core::mem::size_of::<u32>());
+        let list_offsets = client.empty(packed.segment_count() * core::mem::size_of::<u32>());
+        let list_weight_total = client.create_from_slice(u32::as_bytes(&[0_u32]));
+        let mut list_scan_block_sums = Vec::new();
+        let mut list_scan_block_offsets = Vec::new();
+        let mut scan_length = packed.segment_count();
+        loop {
+            let blocks = scan_length.div_ceil(cell_scan_block_size);
+            list_scan_block_sums.push(client.empty(blocks * core::mem::size_of::<u32>()));
+            list_scan_block_offsets.push(client.empty(blocks * core::mem::size_of::<u32>()));
+            if blocks == 1 {
+                break;
+            }
+            scan_length = blocks;
+        }
         let neighbor_home_cells =
             client.create_from_slice(u32::as_bytes(&vec![0_u32; packed.segment_count()]));
         let neighbor_reference_positions =
@@ -466,7 +529,9 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         let cell_lower_host = packed.cell_lower;
         let cell_upper_host = packed.cell_upper;
 
-        Self {
+        let always_run = client.create_from_slice(u32::as_bytes(&[1_u32]));
+        let mut world = Self {
+            always_run,
             client,
             packed,
             positions,
@@ -515,6 +580,14 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             slot_topology,
             neighbor_skin,
             neighbor_capacity,
+            neighbor_block: neighbor_capacity,
+            neighbor_slots,
+            list_weights,
+            active_list_weights,
+            list_offsets,
+            list_weight_total,
+            list_scan_block_sums,
+            list_scan_block_offsets,
             corrections,
             segment_max,
             curvature_ratio,
@@ -547,7 +620,9 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             cell_count,
             cell_lower_host,
             cell_upper_host,
-        }
+        };
+        world.update_neighbor_list_layout();
+        world
     }
 
     /// Recreates a resident world from a previously downloaded checkpoint.
@@ -720,6 +795,58 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         let counts = u32::from_bytes(&bytes);
         self.active_segment_count = counts[0] as usize;
         self.active_vertex_count = counts[1] as usize;
+        self.update_neighbor_list_layout();
+    }
+
+    /// Places each active segment's neighbor list after the lists of all
+    /// lower-indexed active segments and fits the block size to the buffer.
+    ///
+    /// The offsets follow segment order, not the order of the atomically
+    /// compacted active list, so an unchanged active set keeps its layout.
+    /// Every caller that changes the active set also requests a list rebuild.
+    fn update_neighbor_list_layout(&mut self) {
+        let segments = self.packed.segment_count();
+        let segment_cubes = CubeCount::Static(segments.div_ceil(64) as u32, 1, 1);
+        unsafe {
+            mask_active_list_weights::launch_unchecked::<R>(
+                &self.client,
+                segment_cubes,
+                CubeDim::new_1d(64),
+                BufferArg::from_raw_parts(self.segment_active.clone(), segments),
+                BufferArg::from_raw_parts(self.list_weights.clone(), segments),
+                BufferArg::from_raw_parts(self.active_list_weights.clone(), segments),
+            );
+        }
+        self.scan_u32(
+            self.active_list_weights.clone(),
+            self.list_offsets.clone(),
+            segments,
+            0,
+            self.always_run.clone(),
+            1,
+            &self.list_scan_block_sums,
+            &self.list_scan_block_offsets,
+        );
+        unsafe {
+            total_active_list_weight::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new_1d(1),
+                BufferArg::from_raw_parts(self.active_list_weights.clone(), segments),
+                BufferArg::from_raw_parts(self.list_offsets.clone(), segments),
+                BufferArg::from_raw_parts(self.list_weight_total.clone(), 1),
+            );
+        }
+        let bytes = self
+            .client
+            .read_one(self.list_weight_total.clone())
+            .expect("CubeCL neighbor-list weight readback failed");
+        let total = (u32::from_bytes(&bytes)[0] as usize).max(1);
+        // Zero only past ~31 M active blocks: then every segment takes the
+        // exact overflow scan instead of a list.
+        self.neighbor_block = self
+            .neighbor_capacity
+            .min((self.neighbor_slots / total).min(u32::MAX as usize) as u32);
     }
 
     /// Projects every active fiber back inside its curvature limit with
@@ -833,10 +960,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                         self.neighbor_counts.clone(),
                         self.packed.segment_count(),
                     ),
-                    BufferArg::from_raw_parts(
-                        self.neighbor_segments.clone(),
-                        self.packed.segment_count() * self.neighbor_capacity as usize,
-                    ),
+                    BufferArg::from_raw_parts(self.neighbor_segments.clone(), self.neighbor_slots),
                     BufferArg::from_raw_parts(
                         self.neighbor_home_cells.clone(),
                         self.packed.segment_count(),
@@ -849,7 +973,15 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                         self.segment_max.clone(),
                         self.packed.segment_count(),
                     ),
-                    self.neighbor_capacity,
+                    BufferArg::from_raw_parts(
+                        self.list_offsets.clone(),
+                        self.packed.segment_count(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.list_weights.clone(),
+                        self.packed.segment_count(),
+                    ),
+                    self.neighbor_block,
                     config.correction_fraction,
                     config.contact_aggregation as u32,
                     self.cells_x,

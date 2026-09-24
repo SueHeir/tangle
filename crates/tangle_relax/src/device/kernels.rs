@@ -1648,3 +1648,36 @@ pub(crate) fn measure_step(vertex_step: &[f32], control: &[u32], metrics: &mut [
     }
     metrics[1] = maximum;
 }
+
+/// Writes each packed segment's neighbor-list weight if it is active and
+/// zero otherwise, ready for the exclusive scan that places the lists.
+#[cube(launch_unchecked)]
+pub(crate) fn mask_active_list_weights(
+    segment_active: &[u32],
+    list_weights: &[u32],
+    active_weights: &mut [u32],
+) {
+    let segment = ABSOLUTE_POS;
+    if segment >= segment_active.len() {
+        terminate!();
+    }
+    let mut weight = 0_u32;
+    if segment_active[segment] != 0 {
+        weight = list_weights[segment];
+    }
+    active_weights[segment] = weight;
+}
+
+/// Stores the total active list weight: the scan's last offset plus the
+/// last segment's weight.
+#[cube(launch_unchecked)]
+pub(crate) fn total_active_list_weight(
+    active_weights: &[u32],
+    list_offsets: &[u32],
+    total: &mut [u32],
+) {
+    if ABSOLUTE_POS == 0 {
+        let last = active_weights.len() - 1;
+        total[0] = list_offsets[last] + active_weights[last];
+    }
+}
