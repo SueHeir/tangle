@@ -97,6 +97,11 @@ class FitSettings:
     prior_merge_angle_degrees: float = 45.0
     kink_threshold: float = 2.0
     min_support: float = 0.5
+    # After every solve, fits are cut where their centerline sits in void
+    # (the fiber image below this; None turns it off): end stretches are
+    # trimmed, interior stretches ``void_gap_radii`` or longer split the fit.
+    void_level: float | None = 0.3
+    void_gap_radii: float = 2.0
     levels: Levels | None = None
     backend: str | None = None
     solver_batches: int = 3
@@ -630,15 +635,19 @@ def fit_fibers(
         log("relevel", lines, void=levels.void, fiber=levels.fiber)
 
     for round_index in range(settings.rounds):
+        void_counts: dict[str, int] = {}
         for _ in range(settings.solver_batches):
             if not lines:
                 break
             lines = fitter.solve(lines, radii, types)
+            lines, radii, types, cut = fitter.cut_void(lines, radii, types)
+            for key, value in cut.items():
+                void_counts[key] = void_counts.get(key, 0) + value
             radii, types = fitter.classify(lines)
             lines = _refine.respace(lines, fitter.spacing)
         lines, radii, types, counts = fitter.topology(lines, radii, types)
         log(
-            f"round {round_index + 1}", lines, **counts, thickness_margin=round(fitter.margin, 2),
+            f"round {round_index + 1}", lines, **counts, **void_counts, thickness_margin=round(fitter.margin, 2),
             **fitter.end_summary(lines, radii, types),
         )
         if round_index + 1 < settings.rounds:
@@ -655,7 +664,9 @@ def fit_fibers(
         # types (so bend limits) it was solved with.
         before = lines
         lines = fitter.solve(lines, radii, types)
-        log("final solve", lines, types=fitter.counts(types))
+        lines, radii, types, cut = fitter.cut_void(lines, radii, types, final=True)
+        before = [before[i] for i in cut.pop("source")]
+        log("final solve", lines, types=fitter.counts(types), **cut)
         confidence, settled, summary = fitter.scores(lines, radii, previous=before)
         coverage = _confidence.sure_coverage(fitter.foreground, lines, radii, settled)
         log("confidence", lines, **summary, sure_coverage=round(coverage, 4))
@@ -666,9 +677,11 @@ def fit_fibers(
                 # unpinned solve lets the whole fit settle into the scan together.
                 lines, radii, types = redrawn[0], redrawn[1], redrawn[2]
                 lines = fitter.solve(lines, radii, types)
+                lines, radii, types, cut = fitter.cut_void(lines, radii, types, final=True)
+                cut.pop("source")
                 confidence, settled, summary = fitter.scores(lines, radii, previous=None)
                 coverage = _confidence.sure_coverage(fitter.foreground, lines, radii, settled)
-                log("polish", lines, **summary, sure_coverage=round(coverage, 4))
+                log("polish", lines, **summary, **cut, sure_coverage=round(coverage, 4))
             else:
                 lines, radii, types, confidence = redrawn
 
@@ -896,6 +909,39 @@ class _Fitter:
             reach=np.asarray(radii, dtype=np.float64) + self.margin, log=self.log,
             anchors=anchors, anchor_tolerance=0.3 * float(self.radius.min()),
         )
+
+    def cut_void(
+        self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray, *, final: bool = False
+    ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, dict[str, Any]]:
+        """Trim or split fits where they sit in void (``_refine.cut_void``).
+
+        ``final``: pieces shorter than their type's minimum length are dropped
+        (no later topology step would remove them), and the counts include
+        each piece's source fit (``"source"``).
+        """
+        s = self.settings
+        radii = np.asarray(radii, dtype=np.float64)
+        types = np.asarray(types, dtype=int)
+        if s.void_level is None or not lines:
+            extra = {"source": np.arange(len(lines))} if final else {}
+            return lines, radii, types, extra
+        pieces, source, trimmed, splits = _refine.cut_void(
+            self.image, lines, radii, level=s.void_level, min_gap_radii=s.void_gap_radii
+        )
+        dropped = 0
+        if final:
+            long_enough = [
+                i for i, piece in enumerate(pieces)
+                if polyline_length(piece) >= self.min_length[types[source[i]]] or len(pieces[i]) == len(lines[source[i]])
+            ]
+            dropped = len(pieces) - len(long_enough)
+            pieces = [pieces[i] for i in long_enough]
+            source = source[long_enough]
+        counts: dict[str, Any] = {"void_trimmed_nodes": trimmed, "void_splits": splits}
+        if final:
+            counts["void_dropped"] = dropped
+            counts["source"] = source
+        return pieces, radii[source], types[source], counts
 
     def redraw_loop(
         self,

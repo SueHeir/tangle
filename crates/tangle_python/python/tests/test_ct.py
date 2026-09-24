@@ -382,6 +382,30 @@ class CtToolTests(unittest.TestCase):
         self.assertEqual(report["overlapping_pairs"], 0)
         self.assertAlmostEqual(report["min_segment_diameters"], 1.25, places=6)
 
+    def test_fits_are_cut_where_they_sit_in_void(self):
+        from tangle.ct import _refine
+
+        image = np.zeros((20, 20, 60), dtype=np.float32)
+        image[8:12, 8:12, 5:40] = 1.0  # a fiber along x over voxels 5-39
+        image[8:12, 8:12, 45:] = 1.0  # and another from 45 to the scan's edge
+        # Follows the fiber to x = 37, then drifts off sideways into void.
+        drifted = np.array(
+            [[x, 10.0, 10.0] for x in np.arange(6.0, 38.0)] + [[38.0 + k, 11.5 + 1.5 * k, 10.0] for k in range(1, 5)]
+        )
+        across = np.array([[x, 10.0, 10.0] for x in np.arange(6.0, 57.0)])  # runs over the gap (x 41-44 in void)
+        dip = np.array([[x, 10.0, 10.0] for x in np.arange(30.0, 50.0)])  # the same gap, radius 4: too short to split
+        outside = np.array([[x, 10.0, 10.0] for x in np.arange(50.0, 67.0)])  # leaves the scan: not trimmed there
+        pieces, source, trimmed, splits = _refine.cut_void(
+            image, [drifted, across, dip, outside], np.array([2.0, 2.0, 4.0, 2.0])
+        )
+        np.testing.assert_array_equal(source, [0, 1, 1, 2, 3])
+        self.assertEqual(len(pieces[0]), 32)  # the drifted tail is gone
+        self.assertEqual(pieces[1][-1, 0], 40.0)
+        self.assertEqual(pieces[2][0, 0], 45.0)
+        self.assertEqual(len(pieces[3]), len(dip))
+        self.assertEqual(len(pieces[4]), len(outside))
+        self.assertEqual((trimmed, splits), (4 + 4, 1))
+
     def test_batched_capsule_drawing_matches_segment_by_segment(self):
         from tangle.ct import _geometry, _grey, _moves
 

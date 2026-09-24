@@ -216,12 +216,24 @@ The fibers move only in Tangle's own relaxation, the GPU by default
    off. The image step re-adds a little curvature each iteration before the
    solver removes it; the settle ends on geometry the constraints alone
    accept (it converges in a few dozen iterations).
-5. Types and radii are chosen again (7b) and fibers are respaced to the
+5. **Cut void** (`_refine.cut_void`, `FitSettings.void_level` = 0.3).
+   The image force only pulls toward fiber; void never pushes back, so a
+   fit shoved off its fiber (by contact, or by a fit taking its place) can
+   leave a tail in empty space that no later step notices (Liz, 2026-09-24:
+   fibers "drift off into nothing, and another fiber will take over that
+   location"). Every centerline node inside the scan whose fiber image
+   reads below 0.3 is void. Void nodes at an end are trimmed back to the
+   first supported node; an interior void stretch at least
+   `void_gap_radii` (2) radii long splits the fit. The next batch's end
+   step regrows an end where the scan continues, and the topology moves
+   rejoin pieces where they should be one fiber.
+6. Types and radii are chosen again (7b) and fibers are respaced to the
    fitter's node spacing (r of the smallest type) for the topology moves.
 
-The final batch's solver output is returned unchanged (segments of 1.25
-diameters, the radii and types it was solved with), so the fit is exactly
-the state the solver converged to. Measure it with `geometry_report(...,
+The final batch's solver output is returned as the solver left it
+(segments of 1.25 diameters, the radii and types it was solved with),
+except that void is cut (step 5) and pieces then shorter than the minimum
+length are dropped, so the fit is the state the solver converged to. Measure it with `geometry_report(...,
 spacing=1.25 * diameter)`: finer resampling puts nodes at the polyline's
 corners and roughly doubles the discrete curvature there.
 

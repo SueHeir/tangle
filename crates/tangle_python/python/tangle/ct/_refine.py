@@ -68,6 +68,60 @@ def end_step(
     return adjusted
 
 
+def cut_void(
+    image: np.ndarray,
+    centerlines: list[np.ndarray],
+    radii: np.ndarray,
+    *,
+    level: float = 0.3,
+    min_gap_radii: float = 2.0,
+) -> tuple[list[np.ndarray], np.ndarray, int, int]:
+    """Cut every fit where its centerline sits in void (image below ``level``).
+
+    A fit that has drifted off its fiber into empty space (the solver's image
+    force only pulls toward fiber, so void never pushes back) keeps a tail
+    there, and another fit can take the place it left. Void nodes at an end
+    are trimmed back to the first supported node; an interior void stretch
+    at least ``min_gap_radii`` radii long splits the fit (a real fiber has no
+    gap). Nodes outside the scan are left alone. :func:`end_step` regrows an
+    end where the scan does continue.
+
+    Returns ``(pieces, source, trimmed, splits)``: the pieces, the index of
+    the fit each came from, the number of nodes dropped and of splits.
+    """
+    upper = np.array(image.shape[::-1], dtype=np.float64)
+    radii = np.asarray(radii, dtype=np.float64)
+    pieces: list[np.ndarray] = []
+    source: list[int] = []
+    trimmed = splits = 0
+    for index, line in enumerate(centerlines):
+        line = np.asarray(line, dtype=np.float64)
+        if len(line) < 2:
+            pieces.append(line)
+            source.append(index)
+            continue
+        inside = np.all((line >= 0.5) & (line <= upper - 0.5), axis=1)
+        keep = ~((sample_image(image, line) < level) & inside)
+        arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(line, axis=0), axis=1))])
+        # Interior void runs shorter than the gap are kept (a dip, not a drift).
+        start = None
+        for k in range(len(line) + 1):
+            weak = k < len(line) and not keep[k]
+            if weak and start is None:
+                start = k
+            elif not weak and start is not None:
+                if start > 0 and k < len(line) and arc[k] - arc[start - 1] < min_gap_radii * radii[index]:
+                    keep[start:k] = True
+                start = None
+        trimmed += int((~keep).sum())
+        runs = np.split(np.arange(len(line)), np.flatnonzero(np.diff(keep.astype(int))) + 1)
+        kept = [line[run] for run in runs if keep[run[0]] and len(run) >= 2]
+        splits += max(len(kept) - 1, 0)
+        pieces += kept
+        source += [index] * len(kept)
+    return pieces, np.array(source, dtype=int), trimmed, splits
+
+
 def respace(centerlines: list[np.ndarray], spacing: float) -> list[np.ndarray]:
     return [resample(line, spacing) for line in centerlines]
 
