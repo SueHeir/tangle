@@ -217,10 +217,23 @@ def rank_plans(
     )
     base_count = (base >= 0.5).astype(np.int32)
 
-    def element(line: np.ndarray, radius: float) -> np.ndarray | None:
+    # Each element is drawn over its own sub-box of the region (everything
+    # its capsule and soft edge can reach), so scoring it touches only
+    # those voxels, not the whole region.
+    def reach_box(line: np.ndarray, radius: float) -> tuple[np.ndarray, np.ndarray, tuple[slice, ...]]:
+        pad = radius + max(margin, 0.0) + 2.0 * 1.2 + 1.0
+        sub_low = np.clip(np.floor(line.min(axis=0) - pad).astype(int), low, high)
+        sub_high = np.clip(np.ceil(line.max(axis=0) + pad).astype(int), low, high)
+        where = tuple(slice(int(sub_low[a] - low[a]), int(sub_high[a] - low[a])) for a in (2, 1, 0))
+        return sub_low, sub_high, where
+
+    def element(line: np.ndarray, radius: float) -> tuple[tuple[slice, ...], np.ndarray] | None:
         if len(line) < 2:
             return None
-        return render_occupancy(low, high, [line], np.array([radius + margin]))
+        sub_low, sub_high, where = reach_box(line, radius)
+        if np.any(sub_high <= sub_low):
+            return None  # nothing of it in the region
+        return where, render_occupancy(sub_low, sub_high, [line], np.array([radius + margin]))
 
     bridge_occupancy = {
         key: element(curve, ports[key[0]].radius) for key, curve in pairs.items()
@@ -240,7 +253,10 @@ def rank_plans(
         def drawn(line: np.ndarray, k: int) -> np.ndarray | None:
             if len(line) < 2:
                 return None
-            return render_grey(low, high, [line], [ports[k].radius], [port_profiles[k]], void)
+            sub_low, sub_high, _ = reach_box(line, ports[k].radius)
+            if np.any(sub_high <= sub_low):
+                return None
+            return render_grey(sub_low, sub_high, [line], [ports[k].radius], [port_profiles[k]], void)
 
         bridge_grey = {key: drawn(curve, key[0]) for key, curve in pairs.items()}
         extension_grey = [drawn(tails[k], k) for k in range(len(ports))]
@@ -250,7 +266,7 @@ def rank_plans(
     base_residual = float(((observed - shown_base) ** 2).sum())
 
     def pieces_of(chosen: list[tuple[int, int]], paired: set[int]) -> list[tuple]:
-        """(occupancy, drawn) of every element a plan adds."""
+        """((sub-box, occupancy), drawn) of every element a plan adds."""
         items = [(bridge_occupancy[key], bridge_grey[key] if bridge_grey else None) for key in chosen]
         items += [
             (extension_occupancy[k], extension_grey[k] if extension_grey else None)
@@ -268,11 +284,11 @@ def rank_plans(
     def alone(item: tuple) -> tuple[float, float]:
         key = id(item[0])
         if key not in delta:
-            occupancy, drawn = item
+            (where, occupancy), drawn = item
             shown = drawn if drawn_base is not None else occupancy
-            together = np.maximum(shown_base, shown) if shown is not None else shown_base
-            change = float(((observed - together) ** 2).sum()) - base_residual
-            overlap = float(((occupancy >= 0.5) & (base_count >= 1)).sum())
+            seen, before = observed[where], shown_base[where]
+            change = float(((seen - np.maximum(before, shown)) ** 2).sum() - ((seen - before) ** 2).sum())
+            overlap = float(((occupancy >= 0.5) & (base_count[where] >= 1)).sum())
             delta[key] = (change, overlap)
         return delta[key]
 
@@ -295,9 +311,9 @@ def rank_plans(
             continue
         rendered = shown_base.copy()
         count = base_count.copy()
-        for occupancy, drawn in items:
-            np.maximum(rendered, drawn if drawn_base is not None else occupancy, out=rendered)
-            count += occupancy >= 0.5
+        for (where, occupancy), drawn in items:
+            np.maximum(rendered[where], drawn if drawn_base is not None else occupancy, out=rendered[where])
+            count[where] += occupancy >= 0.5
         residual = float(((observed - rendered) ** 2).sum())
         overlap = float(np.maximum(count - np.maximum(base_count, 1), 0).sum())
         overlap_nats = overlap / area
