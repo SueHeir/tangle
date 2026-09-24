@@ -1778,6 +1778,11 @@ fn long_segments_are_binned_as_proxy_pieces() {
             count,
             "segment {first} lists a neighbor twice"
         );
+        // Lists are sorted after the build, whatever order pieces appended in.
+        assert!(
+            listed.windows(2).all(|pair| pair[0] < pair[1]),
+            "segment {first} list is not ascending: {listed:?}"
+        );
         let (p1, q1) = (
             vertex(packed.segment_vertices[2 * first]),
             vertex(packed.segment_vertices[2 * first + 1]),

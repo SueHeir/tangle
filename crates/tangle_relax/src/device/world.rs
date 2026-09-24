@@ -2112,7 +2112,9 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         assert!(maximum_surface_gap.is_finite() && maximum_surface_gap >= 0.0);
         assert!(capacity > 0);
         self.rebuild_active_indices();
-        let capture_cell_size = self.segment_cell_size + maximum_surface_gap;
+        // Whole segments need the segment-sized grid; never go finer than the
+        // allocated neighbor grid, whose cell buffers the capture reuses.
+        let capture_cell_size = self.segment_cell_size.max(self.cell_size) + maximum_surface_gap;
         let extents = [
             self.packed.cell_upper[0] - self.packed.cell_lower[0],
             self.packed.cell_upper[1] - self.packed.cell_lower[1],
