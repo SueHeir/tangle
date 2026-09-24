@@ -124,7 +124,8 @@ def segment_voxels(
     ids = np.nonzero(np.all(hi > lo, axis=1))[0]
     if len(ids) == 0:
         return
-    ids = ids[np.argsort(np.prod(hi[ids] - lo[ids], axis=1), kind="stable")]  # similar boxes batch together
+    size = hi[ids] - lo[ids]
+    ids = ids[np.lexsort((size[:, 0], size[:, 1], size[:, 2]))]  # similar boxes batch together
     ab = b - a
     denominator = np.einsum("ij,ij->i", ab, ab)
     degenerate = denominator <= 1e-12
@@ -133,15 +134,19 @@ def segment_voxels(
     sizes = (hi[ids] - lo[ids]).tolist()  # plain ints: this loop runs once per segment
     start = 0
     while start < len(ids):
-        # Grow the batch while its padded boxes stay within the budget.
+        # Grow the batch while its padded boxes stay within the budget and
+        # the padding stays under a third of the real boxes' voxels.
         stop = start + 1
         bx, by, bz = sizes[start]
+        real = bx * by * bz
         while stop < len(ids):
             ex, ey, ez = sizes[stop]
             gx, gy, gz = max(bx, ex), max(by, ey), max(bz, ez)
-            if (stop + 1 - start) * gx * gy * gz > budget:
+            padded = (stop + 1 - start) * gx * gy * gz
+            if padded > budget or 3 * padded > 4 * (real + ex * ey * ez):
                 break
             bx, by, bz = gx, gy, gz
+            real += ex * ey * ez
             stop += 1
         dims = (bx, by, bz)
         batch = ids[start:stop]
@@ -186,19 +191,21 @@ def nearest_segments(size: int, chunks, key: np.ndarray | None = None) -> tuple[
     (``inf`` where none) and the segment (``-1``).
     """
     best = np.full(size, np.inf)
-    owner = np.full(size, -1, dtype=np.int32)
+    none = np.iinfo(np.int32).max
+    owner = np.full(size, none, dtype=np.int32)
     for voxel, segment, distance in chunks:
+        # Sort-free: scatter minimums, then the lowest segment among those
+        # at the minimum (a per-chunk lexsort was slower than drawing one
+        # segment at a time).
         value = distance + key[segment] if key is not None else distance
-        order = np.lexsort((segment, value, voxel))
-        voxel, segment, value = voxel[order], segment[order], value[order]
-        first = np.ones(len(voxel), dtype=bool)
-        first[1:] = voxel[1:] != voxel[:-1]
-        voxel, segment, value = voxel[first], segment[first], value[first]
-        current = best[voxel]
-        better = (value < current) | ((value == current) & (segment < owner[voxel]))
-        voxel = voxel[better]
-        best[voxel] = value[better]
-        owner[voxel] = segment[better]
+        before = best[voxel]
+        np.minimum.at(best, voxel, value)
+        after = best[voxel]
+        at_best = value == after
+        voxel, segment = voxel[at_best], segment[at_best]
+        owner[voxel[after[at_best] < before[at_best]]] = none  # a nearer segment: the old owner is out
+        np.minimum.at(owner, voxel, segment.astype(np.int32))
+    owner[owner == none] = -1
     return best, owner
 
 
