@@ -439,8 +439,14 @@ After the final solve and its confidence, up to `redraw_passes` passes:
    says so in the log). The image-off settle after it runs unpinned: two
    pinned stretches in contact could not otherwise be pushed apart, which
    tripled the overlapping pairs.
-5. Keep or revert, per group: regions are grouped when one fiber, before
-   or after the redraw, enters both (`region_components`). A group is kept
+5. Keep or revert, per group: regions are grouped when one fiber the
+   redraw changed spans both (`region_components`): an old fiber through
+   the regions its cut stretches were in (`Cut.fiber_regions`), a new one
+   through the regions of its nodes that are not on a pinned sure piece
+   (`changed_regions`; a changed node outside every region joins the
+   nearest, whose box grows to hold it). Tying regions by any fiber that
+   merely passes through them chained every region of a dense scan into
+   one group. A group is kept
    if its boxes' sum of `coverage_map` (per foreground voxel, the owning
    segment's confidence without stability) rises by more than 0.001 per
    foreground voxel. The merged fit takes the redraw's fibers except those

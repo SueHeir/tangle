@@ -240,7 +240,7 @@ The fit then uses it to **redraw the unsure parts**
 5. keeps or reverts the redraw **region by region**: a region's redraw is
    kept only if it raises that region's **sure coverage** (its foreground
    explained by the fit, each voxel weighted by the confidence of the fit
-   that owns it). Regions joined by a fiber are decided together.
+   that owns it). Two regions are decided together only when one redrawn stretch spans both.
 
 A region whose redraw failed is cut wider the next time, and left alone
 after `FitSettings.redraw_attempts` (3) failures, so every pass can only

@@ -35,6 +35,7 @@ class Cut:
     cut_ends: list[tuple[int, int]]
     anchors: list[np.ndarray]  # the sure pieces, less a free stretch at each cut end
     regions: list[Box]  # one box around each cluster of removed stretches
+    fiber_regions: list[set[int]]  # per cut fiber: the regions of its removed stretches
     removed_nodes: int
     removed_fibers: int
 
@@ -67,6 +68,7 @@ def cut_unsure(
     cut_ends: list[tuple[int, int]] = []
     anchors: list[np.ndarray] = []
     removed: list[np.ndarray] = []
+    removed_owner: list[int] = []
     removed_nodes = 0
     removed_fibers = 0
     for f, (line, value) in enumerate(zip(lines, confidence)):
@@ -109,16 +111,22 @@ def cut_unsure(
         removed_nodes += int((~kept_mask).sum())
         for start, stop in _runs(~kept_mask):
             removed.append(fine[start:stop])
+            removed_owner.append(f)
         if kept == 0:
             removed_fibers += 1
     if removed_nodes == 0:
         return None
+    regions, membership = _cluster_boxes(removed, pad)
+    fiber_regions: list[set[int]] = [set() for _ in lines]
+    for owner, region in zip(removed_owner, membership):
+        fiber_regions[owner].add(int(region))
     return Cut(
         pieces,
         np.array(parent, dtype=int),
         cut_ends,
         anchors,
-        _cluster_boxes(removed, pad),
+        regions,
+        fiber_regions,
         removed_nodes,
         removed_fibers,
     )
@@ -139,8 +147,44 @@ def touched_regions(lines: list[np.ndarray], regions: list[Box]) -> list[set[int
     return touched
 
 
+def changed_regions(
+    lines: list[np.ndarray],
+    anchors: list[np.ndarray],
+    tolerance: float,
+    regions: list[Box],
+    pad: float,
+) -> tuple[list[set[int]], list[Box]]:
+    """For every redrawn fiber, the regions its changed nodes are in, and the regions grown to hold them.
+
+    A node is changed when it is not on an anchor (a sure piece that was
+    pinned). A changed node outside every region belongs to the nearest
+    one, whose box is grown to include it (plus ``pad``), so everything the
+    redraw added is judged with some region.
+    """
+    lows = np.array([low for low, _ in regions], dtype=np.float64).reshape(-1, 3)
+    highs = np.array([high for _, high in regions], dtype=np.float64).reshape(-1, 3)
+    grown_low, grown_high = lows.copy(), highs.copy()
+    flags = pinned_flags(lines, anchors, tolerance)
+    touched: list[set[int]] = []
+    for line, pinned in zip(lines, flags):
+        free = np.asarray(line, dtype=np.float64).reshape(-1, 3)[~pinned]
+        if len(free) == 0 or len(regions) == 0:
+            touched.append(set())
+            continue
+        gap = np.maximum(
+            np.maximum(lows[None] - free[:, None], free[:, None] - highs[None]), 0.0
+        )
+        region = np.argmin(np.linalg.norm(gap, axis=2), axis=1)
+        for k in np.unique(region):
+            points = free[region == k]
+            grown_low[k] = np.minimum(grown_low[k], points.min(axis=0) - pad)
+            grown_high[k] = np.maximum(grown_high[k], points.max(axis=0) + pad)
+        touched.append({int(k) for k in np.unique(region)})
+    return touched, list(zip(grown_low, grown_high))
+
+
 def region_components(region_count: int, *touch_lists: list[set[int]]) -> np.ndarray:
-    """Group regions that share a fiber (before or after the redraw); a component id per region.
+    """Group regions that share a changed fiber (before or after the redraw); a component id per region.
 
     A redraw is kept or reverted one component at a time, so a fiber is
     never half kept.
@@ -237,13 +281,15 @@ def _inside_any(points: np.ndarray, boxes: list[Box]) -> np.ndarray:
     return inside
 
 
-def _cluster_boxes(stretches: list[np.ndarray], pad: float) -> list[Box]:
-    """Boxes around clusters of stretches that come within ``pad`` of each other."""
+def _cluster_boxes(
+    stretches: list[np.ndarray], pad: float
+) -> tuple[list[Box], np.ndarray]:
+    """Boxes around clusters of stretches that come within ``pad`` of each other,
+    and each stretch's cluster (all stretches are non-empty)."""
     from scipy.spatial import cKDTree
 
-    stretches = [s for s in stretches if len(s)]
     if not stretches:
-        return []
+        return [], np.zeros(0, dtype=int)
     points = np.concatenate(stretches)
     owner = np.concatenate([np.full(len(s), k) for k, s in enumerate(stretches)])
     root = list(range(len(stretches)))
@@ -262,10 +308,12 @@ def _cluster_boxes(stretches: list[np.ndarray], pad: float) -> list[Box]:
     for k in range(len(stretches)):
         groups.setdefault(find(k), []).append(k)
     boxes = []
-    for members in groups.values():
+    membership = np.zeros(len(stretches), dtype=int)
+    for index, members in enumerate(groups.values()):
         cluster = np.concatenate([stretches[k] for k in members])
         boxes.append((cluster.min(axis=0) - pad, cluster.max(axis=0) + pad))
-    return boxes
+        membership[members] = index
+    return boxes, membership
 
 
 def grow_cut_ends(

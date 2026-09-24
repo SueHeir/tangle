@@ -781,13 +781,19 @@ class _Fitter:
             _, new_settled, _ = self.scores(new_lines, new_radii)
             old_map = _confidence.coverage_map(self.foreground, lines, radii, settled)
             new_map = _confidence.coverage_map(self.foreground, new_lines, new_radii, new_settled)
-            old_touch = _regrow.touched_regions(lines, cut.regions)
-            new_touch = _regrow.touched_regions(new_lines, cut.regions)
+            # Regions are tied together only through fibers the redraw changed:
+            # an old fiber through the regions its cut stretches were in, a
+            # new one through the regions of its nodes that are not on a sure
+            # (pinned) piece.
+            old_touch = cut.fiber_regions
+            new_touch, boxes = _regrow.changed_regions(
+                new_lines, cut.anchors, 0.3 * float(self.radius.min()), cut.regions, float(self.radius.max()),
+            )
             component = _regrow.region_components(len(cut.regions), old_touch, new_touch)
             count = int(component.max()) + 1 if len(component) else 0
             accepted = np.zeros(count, dtype=bool)
             for c in range(count):
-                mask = self._box_mask([cut.regions[k] for k in np.flatnonzero(component == c)])
+                mask = self._box_mask([boxes[k] for k in np.flatnonzero(component == c)])
                 foreground = float(self.foreground[mask].sum())
                 gain = float(new_map[mask].sum(dtype=np.float64) - old_map[mask].sum(dtype=np.float64))
                 accepted[c] = gain > 1e-3 * max(foreground, 1.0)
