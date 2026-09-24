@@ -428,10 +428,13 @@ class CtToolTests(unittest.TestCase):
             + [[31.0, 14.0, 10.0], [32.0, 15.0, 10.0], [33.0, 15.0, 10.0], [34.0, 14.0, 10.0]]
             + [[x, 10.0, 10.0] for x in np.arange(35.0, 40.0)]
         )
-        pieces, source, counts = _refine.cut_void(
-            image, [drifted, across, dip, outside, bowed], np.array([2.0, 2.0, 4.0, 2.0, 1.0])
-        )
-        np.testing.assert_array_equal(source, [0, 1, 1, 2, 3, 4])
+        # The cases lie on the same fiber, so each is cut on its own (another
+        # fit's core under a bow's bridge blocks it).
+        cut = [_refine.cut_void(image, [line], np.array([r])) for line, r in (
+            (drifted, 2.0), (across, 2.0), (dip, 4.0), (outside, 2.0), (bowed, 1.0)
+        )]
+        pieces = [piece for result in cut for piece in result[0]]
+        self.assertEqual([len(result[0]) for result in cut], [1, 2, 1, 1, 1])
         self.assertEqual(len(pieces[0]), 32)  # the drifted tail is gone
         self.assertEqual(pieces[1][-1, 0], 40.0)
         self.assertEqual(pieces[2][0, 0], 45.0)
@@ -440,7 +443,14 @@ class CtToolTests(unittest.TestCase):
         np.testing.assert_allclose(pieces[5][:, 1], 10.0)  # bridged along the fiber
         self.assertEqual(pieces[5][0, 0], 6.0)
         self.assertEqual(pieces[5][-1, 0], 39.0)
-        self.assertEqual(counts, {"trimmed": 4 + 4, "splits": 1, "bridged": 1})
+        totals = {key: sum(result[2][key] for result in cut) for key in cut[0][2]}
+        self.assertEqual(totals, {"trimmed": 4 + 4, "splits": 1, "bridged": 1})
+        # A fit lying across the bow's bridge (a crossing fiber in a dense
+        # scan): the bow is split, not welded across it.
+        crossing = np.array([[33.0, y, 10.0] for y in np.arange(1.0, 20.0)])
+        pieces, source, counts = _refine.cut_void(image, [bowed, crossing], np.array([1.0, 1.5]))
+        np.testing.assert_array_equal(source, [0, 0, 1])
+        self.assertEqual((counts["splits"], counts["bridged"]), (1, 0))
 
     def test_batched_capsule_drawing_matches_segment_by_segment(self):
         from tangle.ct import _geometry, _grey, _moves
