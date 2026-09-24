@@ -12,6 +12,10 @@ match the scan. It returns:
 - an overlay of the fibers on the raw scan, one color per fiber, as an RGB
   TIFF stack and a PNG with three orthogonal slices.
 
+How well it works, with tables and pictures on synthetic scans:
+[CT fitting results](../crates/tangle_python/python/examples/ct_results/README.md).
+Every step of the method: [ct_fitting_internals.md](ct_fitting_internals.md).
+
 The fibers move in Tangle's own solver (`tangle.ImageRelaxer`), on the GPU
 by default, with the scan as an extra force. Contact, segment lengths and
 the bend limit hold throughout, so every fit comes out as round,
@@ -335,6 +339,7 @@ python ct_examples.py --list
 python ct_examples.py                       # all but varied_*, into $TANGLE_CT_OUTPUT or examples/output/ct
 python ct_examples.py --varied              # all, including varied_*
 python ct_examples.py two_types scenario_gap_6r --output ~/ct-results
+python ct_examples.py --varied --blur 0.45    # every scan with less blur (PSF sigma, voxels)
 ```
 
 Results of the last full run, with pictures and an explanation of the tests: [`examples/ct_results/`](../crates/tangle_python/python/examples/ct_results/README.md) (summary.md, per-example score.json and fit.json; TIFFs for two_types and varied_3; pictures in `images/`, made by `make_images.py`).

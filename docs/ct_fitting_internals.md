@@ -2,7 +2,8 @@
 
 This is the exact procedure in the code. Every step names its file and function
 under `crates/tangle_python/python/tangle/ct/`. [ct_fitting.md](ct_fitting.md)
-is the user guide.
+is the user guide, and the [results page](../crates/tangle_python/python/examples/ct_results/README.md)
+shows how well it works on synthetic scans, with pictures.
 
 ## Conventions
 

@@ -97,7 +97,15 @@ from tangle.units import um
 BACKEND = os.environ.get("TANGLE_BACKEND", "wgpu")
 MASK_LEVEL = 0.35  # of the way from void to fiber grey level: a generous threshold
 INPUT = os.environ.get("TANGLE_CT_INPUT", "grey")  # "grey" (raw scan + ranges) or "mask"
+BLUR = None  # scan blur (PSF sigma, voxels) for every example; None keeps each example's own
 FILES = ("raw.tif", "input.tif", "true.tif", "segment.tif", "diff.tif", "confidence.tif", "fit.json", "score.json")
+
+
+def render_scan(*args, **kwargs) -> ct.SyntheticScan:
+    """``ct.synthetic_ct``, with the scan blur set by ``--blur`` if given."""
+    if BLUR is not None:
+        kwargs["psf_sigma_voxels"] = BLUR
+    return ct.synthetic_ct(*args, **kwargs)
 DIFF_COLORS = {"missed": (230, 50, 50), "extra": (60, 120, 255), "wrong_fiber": (255, 200, 0)}
 
 
@@ -184,7 +192,7 @@ def single_type(cache: Path) -> Example:
     material = tangle.Material("fiber_12um", diameter=diameter, min_bend_radius=bend)
     cell = tangle.Cell([240 * um] * 3)
     truth = relaxed_truth(cache, cell, [planar_population(material, 40, 7, (150 * um, 210 * um), 12)])
-    scan = ct.synthetic_ct(truth, 1.5 * um, seed=7)
+    scan = render_scan(truth, 1.5 * um, seed=7)
     spec = ct.FiberSpec(diameter=diameter, min_bend_radius=bend, length=180 * um, name="fiber_12um")
     return Example(scan, spec, bend, end_error_report)
 
@@ -195,7 +203,7 @@ def long_fibers(cache: Path) -> Example:
     material = tangle.Material("fiber_12um", diameter=diameter, min_bend_radius=bend)
     cell = tangle.Cell([cell_side] * 3, periodic="xy")
     truth = relaxed_truth(cache, cell, [planar_population(material, 154, 11, (300 * um, 450 * um), 24)])
-    full = ct.synthetic_ct(truth, voxel, seed=11)
+    full = render_scan(truth, voxel, seed=11)
     low = int(round((cell_side - crop) / 2 / voxel))
     scan = full.crop((low,) * 3, (low + int(round(crop / voxel)),) * 3)
     spec = ct.FiberSpec(diameter=diameter, min_bend_radius=bend, length=375 * um, name="fiber_12um")
@@ -216,7 +224,7 @@ def two_types(cache: Path) -> Example:
         (7 * um, ct.CrossSection()),
         (19 * um, ct.CrossSection(brightness=0.75, rim=2 * um, core=1 / 3)),
     ]
-    full = ct.synthetic_ct(truth, voxel, seed=21, profiles=profiles)
+    full = render_scan(truth, voxel, seed=21, profiles=profiles)
     low = int(round((cell_side - crop) / 2 / voxel))
     scan = full.crop((low,) * 3, (low + int(round(crop / voxel)),) * 3)
     specs = [
@@ -396,7 +404,7 @@ def scenario(
         material = tangle.Material(name, diameter=diameter, min_bend_radius=0.99 * min_bend_radius)
         assembly = tangle.Assembly(tangle.Cell([box] * 3))
         assembly.insert(tangle.FiberCollection.from_centerlines(centerlines, material), name="scenario")
-        scan = ct.synthetic_ct(assembly, voxel, seed=seed, **render)
+        scan = render_scan(assembly, voxel, seed=seed, **render)
         spec = ct.FiberSpec(diameter=diameter, min_bend_radius=min_bend_radius, length=length, name=name)
         return Example(scan, spec, min_bend_radius, end_error_report)
 
@@ -476,7 +484,7 @@ def varied(index: int) -> Callable[[Path], Example]:
         # The cache is per name; a settings change needs a new one.
         key = hashlib.sha1(json.dumps(v, sort_keys=True).encode()).hexdigest()[:8]
         truth = relaxed_truth(cache.with_name(f"{cache.stem}-{key}.json"), tangle.Cell([side] * 3), [population])
-        scan = ct.synthetic_ct(
+        scan = render_scan(
             truth, v["voxel_um"] * um, seed=v["seed"], noise=v["noise"], psf_sigma_voxels=v["psf_sigma_voxels"]
         )
         spec = ct.FiberSpec(
@@ -755,6 +763,7 @@ def write_summary(output: Path, rows: list[dict]) -> None:
             if INPUT == "mask"
             else "Fitted from the raw scan with a grey profile per fiber type, measured around the true fibers. "
         )
+        + (f"Every scan rendered with a blur of {BLUR:g} voxels (PSF sigma). " if BLUR is not None else "")
         + "Each example's folder holds raw.tif, input.tif, true.tif, segment.tif, diff.tif, confidence.tif, fit.json and score.json. "
         "diff.tif: red = missed, blue = extra, orange = wrong fiber. confidence.tif: green = sure, red = unsure. "
         "Confidence AUC: how well low confidence picks out the wrong voxels (extra or wrong fiber) among fitted "
@@ -773,10 +782,15 @@ def main() -> None:
         "--input", choices=("grey", "mask"), default=None,
         help="fit the raw scan with grey profiles (default) or a generous mask",
     )
+    parser.add_argument(
+        "--blur", type=float, default=None,
+        help="render every scan with this blur (PSF sigma, voxels); default: each example's own (0.9; 0.7-1.2 for varied_*)",
+    )
     args = parser.parse_args()
-    global INPUT
+    global INPUT, BLUR
     if args.input:
         INPUT = args.input
+    BLUR = args.blur
     if args.list:
         print("\n".join(EXAMPLES))
         return

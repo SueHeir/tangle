@@ -196,10 +196,14 @@ See [solver and architecture notes](docs/architecture.md) for details.
 - **CT scans:** `tangle.ct` fits Tangle fibers to a CT scan from the known
   fiber diameter and bend limit, and exports an assembly, a fitted
   population, per-voxel fiber labels and a per-fiber overlay on the scan.
+  See the [CT fitting guide](docs/ct_fitting.md), the
+  [step-by-step method](docs/ct_fitting_internals.md), and the
+  [results on synthetic scans, with pictures](crates/tangle_python/python/examples/ct_results/README.md).
 
 [Results/export tutorial](crates/tangle_python/python/tutorials/14_results_and_exports.ipynb)
 · [PuMA analysis guide](docs/puma_interoperability.md)
 · [CT fitting guide](docs/ct_fitting.md)
+· [CT fitting results](crates/tangle_python/python/examples/ct_results/README.md)
 
 ## Backends and reproducibility
 

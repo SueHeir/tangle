@@ -137,6 +137,45 @@ recall and precision, is in [`summary.md`](summary.md). The truth
 structures are relaxed once and cached, so a rerun on the same machine
 reproduces these numbers exactly.
 
+## How scan blur limits the fit
+
+Every synthetic scan is blurred, like a real one: each fiber is smeared by a
+Gaussian point-spread function of about 0.9 voxels (0.7–1.2 in the varied
+structures) before noise is added. Where fibers touch, the blur fills the
+gap between them, and the fitter can no longer see where one fiber ends and
+the next begins. To see how much this costs, every example was rendered
+again from **the same fibers, with the same noise and grey levels**, and only
+the blur reduced (`python ct_examples.py --varied --blur 0.45`, and
+`--blur 0`):
+
+| Example | Blur 0.9 (default) | Blur 0.45 | No blur |
+| --- | --- | --- | --- |
+| `varied_3` (dense cross-ply) | 128/200, F1 0.863 | 180/200, F1 0.978 | **199/200, F1 0.992** |
+| `dense_crossing` | 34/55, F1 0.810 | 47/55, F1 0.911 | **53/55, F1 0.981** |
+| `two_types` | 96/116, F1 0.886 | 105/116, F1 0.929 | **107/116, F1 0.942** |
+| `varied_4` | 123/152, F1 0.942 | **152/152, F1 0.998** | 151/152, F1 0.991 |
+| `varied_6` | 123/146, F1 0.937 | 137/146, F1 0.972 | **140/146, F1 0.978** |
+| `varied_2` | 110/117, F1 0.966 | **115/117, F1 0.996** | 113/117, F1 0.990 |
+| `varied_1` | 96/105, F1 0.982 | 101/105, F1 0.990 | **104/105, F1 0.993** |
+
+(Recovered fibers and centerline F1. `single_type`, `long_fibers`, the
+scenarios and `varied_5`, `varied_7` and `varied_8` are near 1.0 at every
+blur and change by at most 0.01.)
+
+**Blur, not the method, is what limits the dense cases.** With half the
+blur, the densest structure goes from the worst result to F1 0.98. Without
+blur, 199 of its 200 fibers are recovered. For a real scan, how sharp the
+fiber edges are (how many voxels a fiber-to-void edge takes) says which of
+these rows to expect.
+
+![varied_3 at three blur levels](images/varied_3_blur.png)
+
+![two_types at three blur levels](images/two_types_blur.png)
+
+![dense_crossing at three blur levels](images/scenario_dense_crossing_blur.png)
+
+These three pictures come from `make_images.py --blur 0.9=<folder> 0.45=<folder> 0=<folder>`.
+
 ## What the fits look like
 
 Each row is one slice through the scan: the rendered scan, the true
