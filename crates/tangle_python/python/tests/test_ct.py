@@ -307,6 +307,47 @@ class CtToolTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertTrue(np.array_equal(failures[0][0], far[0]))
 
+    def test_crossing_ends_are_joined_straight_through(self):
+        from tangle.ct._geometry import paint
+        from tangle.ct._junctions import allowed_pairs, assemble, rank_plans, region_ports
+
+        occupied = np.zeros((48, 48, 48), dtype=np.int32)
+        paint(occupied, np.array([[2.0, 24.0, 24.0], [46.0, 24.0, 24.0]]), 3.0, 1)  # along x
+        paint(occupied, np.array([[24.0, 2.0, 24.0], [24.0, 46.0, 24.0]]), 3.0, 2)  # along y
+        image = (occupied > 0).astype(np.float32)
+
+        def piece(start, stop, along_x):
+            t = np.linspace(start, stop, 6)
+            other = np.full(6, 24.0)
+            return np.stack([t, other, other] if along_x else [other, t, other], axis=1)
+
+        # The crossing was cut out of both fibers: four loose ends around it.
+        pieces = [piece(4, 14, True), piece(34, 44, True), piece(4, 14, False), piece(34, 44, False)]
+        cut_ends = [(0, -1), (1, 0), (2, -1), (3, 0)]
+        radii = np.full(4, 3.0)
+        box = (np.array([10.0, 10.0, 18.0]), np.array([38.0, 38.0, 30.0]))
+        ports = region_ports(pieces, cut_ends, np.zeros(4, dtype=int), radii, [box])[0]
+        self.assertEqual(len(ports), 4)
+        pairs = allowed_pairs(ports, np.array([30.0]), 2.0, 60.0)
+        # Only straight through: a 90 degree turn breaks the bend limit.
+        self.assertEqual(sorted(pairs), [(0, 1), (2, 3)])
+        plans = rank_plans(
+            image, box, ports, pairs, [np.zeros((0, 3))] * 4, pieces, radii,
+            margin=0.0, scale=3.0, end_cost=np.array([1.0]), interior=[True] * 4,
+        )
+        self.assertEqual(len(plans), 4)
+        self.assertEqual(sorted(plans[0].pairs), [(0, 1), (2, 3)])
+        self.assertEqual(plans[0].ends, 0)
+        connections = [
+            (ports[i].piece, ports[i].end, ports[j].piece, ports[j].end, pairs[(i, j)]) for i, j in plans[0].pairs
+        ]
+        fibers, first = assemble(pieces, connections, {}, 2.0)
+        self.assertEqual(len(fibers), 2)
+        for fiber in fibers:
+            span = fiber.max(axis=0) - fiber.min(axis=0)
+            self.assertGreater(span.max(), 39.0)
+            self.assertLess(np.sort(span)[1], 0.5)  # straight
+
     def test_geometry_report_finds_overlaps_and_kinks(self):
         straight = np.stack([np.linspace(0, 40, 9), np.zeros(9), np.zeros(9)], axis=1)
         beside = straight + np.array([0.0, 3.0, 0.0])  # radii 2: 1 voxel deep, half a radius

@@ -9,7 +9,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from . import _confidence, _moves, _refine, _regrow
+from . import _confidence, _junctions, _moves, _refine, _regrow
 from ._ends import end_cost, end_statistics, evidence_scale
 from ._geometry import polyline_length, rasterize, tangents
 from ._image import HessianField, Levels, normalize
@@ -99,6 +99,11 @@ class FitSettings:
     # unexplained plus fewer fit voxels over void), or "all" (every redraw
     # is kept, for comparison).
     redraw_score: str = "confidence"
+    # How a region is redrawn: "match" tries every way its loose fiber ends
+    # can connect or end (``_junctions``) and builds the best-scoring one
+    # (the next best on a retry); "grow" grows the ends along their own
+    # direction (``_regrow.grow_cut_ends``).
+    redraw_moves: str = "match"
     confidence_threshold: float = 0.5
 
     def replace(self, **changes: Any) -> "FitSettings":
@@ -505,6 +510,8 @@ def fit_fibers(
         raise ValueError("exclude must have the same shape as volume")
     if settings.redraw_score not in ("confidence", "mask", "all"):
         raise ValueError('redraw_score must be "confidence", "mask" or "all"')
+    if settings.redraw_moves not in ("match", "grow"):
+        raise ValueError('redraw_moves must be "match" or "grow"')
     if not _device.available():
         raise RuntimeError("tangle.ct needs a Tangle build with tangle.ImageRelaxer")
 
@@ -924,11 +931,16 @@ class _Fitter:
                 step=max(0.75, 0.5 * r), claimed=claimed,
             )
 
-        pieces, grown = _regrow.grow_cut_ends(
-            cut.pieces, cut.cut_ends, piece_radii, tracer_for=tracer_for, shape=self.image.shape,
-            spacing=self.spacing, max_length=20.0 * float(self.radius.max()),
-            attempt=(lambda index, end: attempt(cut.pieces[index][end])) if attempt else None,
-        )
+        matched: dict[str, Any] = {}
+        if s.redraw_moves == "match":
+            pieces, piece_radii, piece_types, matched = self._match(cut, piece_radii, piece_types, tracer_for, attempt)
+            grown = matched.pop("grown")
+        else:
+            pieces, grown = _regrow.grow_cut_ends(
+                cut.pieces, cut.cut_ends, piece_radii, tracer_for=tracer_for, shape=self.image.shape,
+                spacing=self.spacing, max_length=20.0 * float(self.radius.max()),
+                attempt=(lambda index, end: attempt(cut.pieces[index][end])) if attempt else None,
+            )
         born = self.trace(pieces, piece_radii)
         born_radii, born_types = self.classify(born)
         lines = pieces + born
@@ -950,8 +962,79 @@ class _Fitter:
             "grown_length_voxels": round(grown, 1),
             "born": len(born),
             "merges": counts.get("merges"),
+            **matched,
         }
         return lines, np.asarray(radii, dtype=np.float64), np.asarray(types, dtype=int), info
+
+    def _match(
+        self, cut: _regrow.Cut, piece_radii: np.ndarray, piece_types: np.ndarray, tracer_for, attempt
+    ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, dict[str, Any]]:
+        """Connect or end every loose fiber end, region by region (see ``_junctions``).
+
+        A region takes its best-scoring combination, or on a retry (``attempt``
+        at the region's center) the next best.
+        """
+        from ._ends import evidence_scale, near_box
+        from ._geometry import paint
+
+        shape = self.image.shape
+        upper = np.array(shape[::-1], dtype=np.float64)
+        ports = _junctions.region_ports(cut.pieces, cut.cut_ends, piece_types, piece_radii, cut.regions)
+        claimed = np.zeros(shape, dtype=np.int32)
+        for index, piece in enumerate(cut.pieces):
+            paint(claimed, piece, 1.1 * float(piece_radii[index]), index + 1)
+        max_length = 20.0 * float(self.radius.max())
+        scale = evidence_scale(self.image, cut.pieces, piece_radii, float(self.radius.min()))
+        end_cost = np.maximum(self.cost, 1.0)
+        connections = []
+        extensions: dict[tuple[int, int], np.ndarray] = {}
+        plans_tried = joins = ends = grown = 0
+        for k, region_ports in enumerate(ports):
+            if not region_ports:
+                continue
+            region_extensions = []
+            interior = []
+            for port in region_ports:
+                tracer = tracer_for(port.piece, claimed)
+                steps = max(int(max_length / tracer.step), 1)
+                extension = tracer.trace_one_way(port.point, port.direction, steps, own_label=port.piece + 1)
+                extension = _regrow._stop_before_others(
+                    np.array(extension).reshape(-1, 3), claimed, port.piece + 1, cut.pieces
+                )
+                region_extensions.append(extension)
+                tip = extension[-1] if len(extension) else port.point
+                edge = 1.5 * port.radius
+                interior.append(bool(np.all(tip >= edge) and np.all(tip <= upper - edge)))
+            pairs = _junctions.allowed_pairs(region_ports, self.bend, self.spacing, max_length)
+            low, high = cut.regions[k]
+            nearby = near_box(cut.pieces, piece_radii, low, high)
+            plans = _junctions.rank_plans(
+                self.image, (low, high), region_ports, pairs, region_extensions,
+                [cut.pieces[i] for i in nearby], piece_radii[nearby],
+                margin=self.margin, scale=scale, end_cost=end_cost, interior=interior,
+            )
+            plans_tried += len(plans)
+            rank = int(attempt(0.5 * (low + high))) if attempt else 0
+            plan = plans[min(rank, len(plans) - 1)]
+            paired = set()
+            for i, j in plan.pairs:
+                a, b = region_ports[i], region_ports[j]
+                connections.append((a.piece, a.end, b.piece, b.end, pairs[(i, j)]))
+                paired |= {i, j}
+                joins += 1
+            for i, port in enumerate(region_ports):
+                if i not in paired:
+                    extensions[(port.piece, port.end)] = region_extensions[i]
+                    ends += int(interior[i])
+                    if len(region_extensions[i]):
+                        grown += polyline_length(np.vstack([port.point[None], region_extensions[i]]))
+        lines, first = _junctions.assemble(cut.pieces, connections, extensions, self.spacing)
+        first = np.asarray(first, dtype=int)
+        info = {
+            "grown": grown, "ports": int(sum(len(p) for p in ports)), "plans_scored": plans_tried,
+            "joins": joins, "ends_in_regions": ends,
+        }
+        return lines, piece_radii[first], piece_types[first], info
 
     def scores(
         self, lines: list[np.ndarray], radii: np.ndarray, *, previous: list[np.ndarray] | None = None

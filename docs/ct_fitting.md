@@ -228,10 +228,16 @@ The fit then uses it to **redraw the unsure parts**
 1. cuts every stretch whose confidence is below
    `FitSettings.confidence_threshold` (0.5) out of its fiber, keeping the
    sure pieces, and groups the cut stretches into regions;
-2. grows each cut end forward along its own direction into the gap, with
-   the tracer: it follows the scan, keeps within the bend limit, keeps its
-   direction through a crossing, and stops where it would run onto another
-   piece;
+2. treats every sure piece that ends in a region as a loose end, and tries
+   **every combination**: each loose end either connects to another loose
+   end of the same fiber type, through a smooth bridge that keeps within
+   the bend limit, or the fiber ends in the region (growing along its own
+   direction until the scan stops being fiber). Each combination is scored
+   by how well it explains the scan in the region, the overlaps it makes,
+   and the fiber ends it leaves (priced by the fiber-length prior, at
+   least one nat each), and the best is built
+   (`FitSettings.redraw_moves = "match"`; `"grow"` instead only grows the
+   ends along their own direction);
 3. joins ends that meet and traces new fibers in whatever is still
    unexplained, with the usual steps;
 4. re-solves with the sure pieces pinned, so they stay where they are and
@@ -243,9 +249,9 @@ The fit then uses it to **redraw the unsure parts**
    that owns it). Two regions are decided together only when one redrawn stretch spans both.
 
 A region whose redraw failed gets a different move the next time, with a
-wider cut: the second try re-traces it from fresh seeds instead of growing
-into it, and the third grows again with the shortest pieces first, so the
-other fiber claims the contested voxels. After
+wider cut: the next-best combination (with `"grow"`: the second try
+re-traces it from fresh seeds instead of growing into it, and the third
+grows again with the shortest pieces first). After
 `FitSettings.redraw_attempts` (3) failures it is left alone, so every
 pass can only improve the fit and the passes end. Keeping or reverting uses the
 confidence without the stability check, since a redrawn stretch moves

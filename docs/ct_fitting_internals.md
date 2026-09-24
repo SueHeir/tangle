@@ -434,6 +434,21 @@ After the final solve and its confidence, up to `redraw_passes` passes:
    kept if it crosses at more than 30° and cut at the entry if it runs
    along it or ends inside it. Every piece is painted into a label volume
    as it grows, so a later end cannot grow over an earlier one.
+   With `redraw_moves = "match"` (the default) step 2 is instead
+   `_Fitter._match` (`_junctions`): every cut end is a port of the nearest
+   region, with its outward tangent. Two ports may be paired when they are
+   the same type, on different pieces, face each other, lie within 20 r_max,
+   and a cubic Hermite bridge between them (tangent magnitude = their
+   distance) has curvature ratio ≤ 1.2 against the bend limit. An unpaired
+   port's fiber ends with its `trace_one_way` extension (cut at entry into
+   another piece, as above). Every matching (up to 1024 per region) is
+   scored in nats over the region box: squared residual of the scan against
+   `render_occupancy` of the nearby pieces plus the chosen bridges and
+   extensions (radius + margin), over `evidence_scale`; plus overlap voxels
+   beyond one fiber over π r²; plus max(ln(L/D), 1) per interior end. The
+   region takes the best plan, or the plan ranked by its failure count on a
+   retry; `_junctions.assemble` chains the pieces through the bridges
+   (a link that would close a loop is dropped).
 3. `_Fitter.trace` seeds new fibers in the foreground still unclaimed;
    then the per-type topology step (§6b) joins the grown ends.
 4. `solver_batches` batches and a final solve, with device nodes within
