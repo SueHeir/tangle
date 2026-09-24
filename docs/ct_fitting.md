@@ -337,6 +337,8 @@ python ct_examples.py --varied              # all, including varied_*
 python ct_examples.py two_types scenario_gap_6r --output ~/ct-results
 ```
 
+Results of the last full run: [`examples/ct_results/`](../crates/tangle_python/python/examples/ct_results/) (summary.md, per-example score.json and fit.json; TIFFs for two_types and varied_3; pictures in `images/`, made by `make_images.py`).
+
 A new example is a function returning an `Example` (scan, specs), added to
 `EXAMPLES`; the runner writes its files, so every example keeps the same
 layout.

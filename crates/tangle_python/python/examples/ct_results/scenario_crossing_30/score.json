@@ -1,0 +1,94 @@
+{
+ "seconds": 0.9948491668328643,
+ "score": {
+  "true_fibers_in_volume": 2,
+  "fitted_fibers": 2,
+  "recovered": 2,
+  "split": 0,
+  "missed": 0,
+  "stubs": 0,
+  "false_fibers": 0,
+  "merged_fibers": 0,
+  "recall": 1.0,
+  "precision": 1.0,
+  "f1": 1.0,
+  "centerline_error_voxels": 0.11647011761418782,
+  "centerline_error_m": 1.7470517642128174e-07,
+  "diameter_bias_m": 0.0,
+  "diameter_rms_error_m": 0.0,
+  "solid_dice": 0.9830267303587763,
+  "voxel_label_accuracy": 0.9738219895287958,
+  "centerline_recall": 1.0,
+  "centerline_precision": 1.0,
+  "centerline_f1": 1.0,
+  "interior_ends_fit": 2,
+  "interior_ends_truth": 2,
+  "implied_mean_length_fit_m": 0.0002703779639712139,
+  "implied_mean_length_truth_m": 0.00027399999999999994,
+  "per_type": null,
+  "per_true_fiber": [
+   {
+    "id": 1,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 2,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   }
+  ],
+  "per_fitted_fiber": [
+   {
+    "id": 1,
+    "true_id": 1,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 2,
+    "true_id": 2,
+    "purity": 1.0,
+    "state": "matched"
+   }
+  ]
+ },
+ "geometry": {
+  "fibers": 2,
+  "curvature_ratio_max": 0.03457236046289889,
+  "curvature_ratio_p95": 0.03433057735633839,
+  "fibers_over_bend_limit": 0,
+  "max_penetration_radii": 0.0,
+  "overlapping_pairs": 0,
+  "min_segment_diameters": 1.1959478137589843,
+  "segment_length_cv": 0.044579207460672385,
+  "total_length": 180.2519758354917
+ },
+ "diff": {
+  "missed_voxels": 260,
+  "extra_voxels": 74,
+  "wrong_fiber_voxels": 0,
+  "missed_fraction_of_true_fiber": 0.02617801047120419,
+  "extra_fraction_of_true_fiber": 0.007450664518727346,
+  "wrong_fiber_fraction_of_true_fiber": 0.0
+ },
+ "confidence": {
+  "voxel_auc": 0.6374146342277527,
+  "voxel_mean_confidence_right": 0.9613490700721741,
+  "voxel_mean_confidence_wrong": 0.9397398233413696,
+  "fiber_auc": null,
+  "fiber_mean_confidence_matched": 0.9601936280512735,
+  "fiber_mean_confidence_merged_or_false": null,
+  "missed_next_to_unsure_fit": 0.0,
+  "missed_next_to_any_fit": 1.0
+ },
+ "end_error_max_voxels": 1.8120957345162043,
+ "end_errors_voxels": [
+  1.8120957345162043,
+  1.4189316119552284
+ ]
+}

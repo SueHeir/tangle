@@ -1,0 +1,6 @@
+# Only two_types' and varied_3's TIFFs are kept in git (see docs/ct_fitting.md).
+*.tif
+*.png
+!two_types/*.tif
+!varied_3/*.tif
+!images/*.png

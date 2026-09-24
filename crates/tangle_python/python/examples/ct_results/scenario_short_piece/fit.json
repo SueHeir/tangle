@@ -1,0 +1,236 @@
+{
+ "schema": "tangle.ct.fit/1",
+ "units": "meters",
+ "voxel_size": 1.5e-06,
+ "shape_zyx": [
+  100,
+  100,
+  100
+ ],
+ "cell_lengths": [
+  0.00015000000000000001,
+  0.00015000000000000001,
+  0.00015000000000000001
+ ],
+ "spec": {
+  "diameter": 1.2e-05,
+  "diameter_tolerance": 0.25,
+  "min_bend_radius": 4.8e-05,
+  "min_length": null,
+  "max_length": null,
+  "length": 0.00039999999999999996,
+  "name": "fiber_12um",
+  "intensity": null,
+  "profile": [
+   65535.0,
+   65535.0,
+   65534.87,
+   65533.85,
+   65511.12,
+   65423.49,
+   65149.02,
+   63364.67,
+   61634.1
+  ]
+ },
+ "levels": {
+  "void": 32143.412109375,
+  "fiber": 65534.445400000004,
+  "threshold": 44315.23016757813
+ },
+ "specs": null,
+ "fibers": [],
+ "population": {
+  "fiber_count": 0,
+  "diameter_mean": null,
+  "diameter_std": null,
+  "length_mean": null,
+  "length_min": null,
+  "length_max": null,
+  "length_uncensored_mean": null,
+  "fibers_touching_boundary": 0,
+  "curvature_amplitude_mean": null,
+  "orientation_tensor": [
+   [
+    0.0,
+    0.0,
+    0.0
+   ],
+   [
+    0.0,
+    0.0,
+    0.0
+   ],
+   [
+    0.0,
+    0.0,
+    0.0
+   ]
+  ],
+  "orientation_eigenvalues": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "orientation_eigenvectors": [
+   [
+    1.0,
+    0.0,
+    0.0
+   ],
+   [
+    0.0,
+    1.0,
+    0.0
+   ],
+   [
+    0.0,
+    0.0,
+    1.0
+   ]
+  ],
+  "volume_fraction": 0.0,
+  "interior_ends": 0,
+  "implied_mean_length": null,
+  "expected_interior_ends": 0.0,
+  "expected_interior_ends_sd": 0.0,
+  "types": null
+ },
+ "history": [
+  {
+   "stage": "profiles",
+   "fibers": 0,
+   "void": 32144.5527,
+   "noise": 3618.737,
+   "ranges": [
+    [
+     56487.0482,
+     74581.8426
+    ]
+   ]
+  },
+  {
+   "stage": "input",
+   "fibers": 0,
+   "mask": false,
+   "source": "grey profiles"
+  },
+  {
+   "stage": "trace",
+   "fibers": 1,
+   "types": null,
+   "thickness_margin": 0.9
+  },
+  {
+   "stage": "solver",
+   "fibers": 1,
+   "converged": true,
+   "max_curvature_ratio": 0.07637409120798111
+  },
+  {
+   "stage": "solver",
+   "fibers": 1,
+   "converged": true,
+   "max_curvature_ratio": 0.07633619755506516
+  },
+  {
+   "stage": "solver",
+   "fibers": 1,
+   "converged": true,
+   "max_curvature_ratio": 0.07633578777313232
+  },
+  {
+   "stage": "round 1",
+   "fibers": 0,
+   "splits": 0,
+   "duplicates": 0,
+   "merges": 0,
+   "explained": 0.0,
+   "types": null,
+   "void_trimmed_nodes": 0,
+   "void_splits": 0,
+   "void_bridged": 0,
+   "thickness_margin": 0.9,
+   "interior_ends": 0,
+   "expected_interior_ends": 0.0
+  },
+  {
+   "stage": "births 1",
+   "fibers": 1,
+   "born": 1,
+   "types": null
+  },
+  {
+   "stage": "solver",
+   "fibers": 1,
+   "converged": true,
+   "max_curvature_ratio": 0.07637409120798111
+  },
+  {
+   "stage": "solver",
+   "fibers": 1,
+   "converged": true,
+   "max_curvature_ratio": 0.07633619755506516
+  },
+  {
+   "stage": "solver",
+   "fibers": 1,
+   "converged": true,
+   "max_curvature_ratio": 0.07633578777313232
+  },
+  {
+   "stage": "round 2",
+   "fibers": 0,
+   "splits": 0,
+   "duplicates": 0,
+   "merges": 0,
+   "explained": 0.0,
+   "types": null,
+   "void_trimmed_nodes": 0,
+   "void_splits": 0,
+   "void_bridged": 0,
+   "thickness_margin": 0.9,
+   "interior_ends": 0,
+   "expected_interior_ends": 0.0
+  },
+  {
+   "stage": "births 2",
+   "fibers": 1,
+   "born": 1,
+   "types": null
+  },
+  {
+   "stage": "solver",
+   "fibers": 1,
+   "converged": true,
+   "max_curvature_ratio": 0.07637409120798111
+  },
+  {
+   "stage": "solver",
+   "fibers": 1,
+   "converged": true,
+   "max_curvature_ratio": 0.07633619755506516
+  },
+  {
+   "stage": "solver",
+   "fibers": 1,
+   "converged": true,
+   "max_curvature_ratio": 0.07633578777313232
+  },
+  {
+   "stage": "round 3",
+   "fibers": 0,
+   "splits": 0,
+   "duplicates": 0,
+   "merges": 0,
+   "explained": 0.0,
+   "types": null,
+   "void_trimmed_nodes": 0,
+   "void_splits": 0,
+   "void_bridged": 0,
+   "thickness_margin": 0.9,
+   "interior_ends": 0,
+   "expected_interior_ends": 0.0
+  }
+ ]
+}
