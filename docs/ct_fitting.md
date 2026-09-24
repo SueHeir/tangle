@@ -249,8 +249,13 @@ The fit then uses it to **redraw the unsure parts**
    the bend limit, or the fiber ends in the region (growing along its own
    direction until the scan stops being fiber). Each combination is scored
    by how well it explains the scan in the region, the overlaps it makes,
-   and the fiber ends it leaves (priced by the fiber-length prior, at
-   least one nat each). The best three are each solved on the GPU with
+   and the fiber ends it leaves, priced by the fiber-length prior for the
+   length the fiber would have: ending a fiber much shorter than the
+   typical length is dear, ending one near or past it cheap, and a join
+   that makes a fiber far longer than typical costs extra
+   (`FitSettings.length_shape`, a gamma length distribution; 1 prices
+   every end the same). A sure piece that already ends inside the region
+   is a loose end too, so it can be joined. The best three are each solved on the GPU with
    the sure pieces pinned, and every region keeps the one that best
    explains the scan there (by the same score as step 5); a retry tries
    the next three

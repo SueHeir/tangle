@@ -307,6 +307,26 @@ class CtToolTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertTrue(np.array_equal(failures[0][0], far[0]))
 
+    def test_fiber_ends_are_priced_by_length(self):
+        from tangle.ct._ends import end_cost, length_end_cost, length_join_cost
+
+        mean, diameter = 400.0, 10.0
+        # Exponential lengths: every end costs ln(L / D), and joins are free.
+        for so_far in (20.0, 400.0, 1200.0):
+            self.assertAlmostEqual(length_end_cost(so_far, mean, diameter, 1.0), end_cost(mean, diameter), places=6)
+        self.assertAlmostEqual(length_join_cost(300.0, 300.0, 0.0, mean, 1.0), 0.0, places=6)
+        # Peaked lengths: ending a short fiber is dear, a long one cheap ...
+        short, typical, long = (length_end_cost(x, mean, diameter, 3.0) for x in (40.0, 400.0, 1200.0))
+        self.assertGreater(short, typical)
+        self.assertGreater(typical, long)
+        self.assertGreaterEqual(long, 1.0)
+        # ... and a join that makes a fiber far longer than L costs more.
+        into_typical = length_join_cost(150.0, 150.0, 10.0, mean, 3.0)
+        into_long = length_join_cost(600.0, 600.0, 10.0, mean, 3.0)
+        self.assertGreaterEqual(into_typical, 0.0)
+        self.assertGreater(into_long, into_typical + 1.0)
+        self.assertEqual(length_end_cost(40.0, None, diameter, 3.0), 1.0)
+
     def test_crossing_ends_are_joined_straight_through(self):
         from tangle.ct._geometry import paint
         from tangle.ct._junctions import allowed_pairs, assemble, rank_plans, region_ports
@@ -333,7 +353,7 @@ class CtToolTests(unittest.TestCase):
         self.assertEqual(sorted(pairs), [(0, 1), (2, 3)])
         plans = rank_plans(
             image, box, ports, pairs, [np.zeros((0, 3))] * 4, pieces, radii,
-            margin=0.0, scale=3.0, end_cost=np.array([1.0]), interior=[True] * 4,
+            margin=0.0, scale=3.0, end_costs=np.ones(4), interior=[True] * 4,
         )
         self.assertEqual(len(plans), 4)
         self.assertEqual(sorted(plans[0].pairs), [(0, 1), (2, 3)])

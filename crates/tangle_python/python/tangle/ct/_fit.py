@@ -115,6 +115,12 @@ class FitSettings:
     # ends along their own direction (``_regrow.grow_cut_ends``).
     redraw_moves: str = "match"
     redraw_plans: int = 3
+    # Shape of the gamma distribution of fiber lengths (mean
+    # ``FiberSpec.length``) that prices the ends and joins of a redraw
+    # region's combinations: 1 is exponential (every end costs the same
+    # ln(L / D)); larger makes ending a short fiber dear and joining into a
+    # fiber far longer than L costly (``_ends.length_end_cost``).
+    length_shape: float = 3.0
     confidence_threshold: float = 0.5
 
     def replace(self, **changes: Any) -> "FitSettings":
@@ -1080,45 +1086,80 @@ class _Fitter:
         score order (``attempt`` at the region's center: how often it failed),
         or the last plan if there are fewer.
         """
-        from ._ends import evidence_scale, near_box
+        from ._ends import evidence_scale, length_end_cost, length_join_cost, near_box
         from ._geometry import paint
 
         shape = self.image.shape
         upper = np.array(shape[::-1], dtype=np.float64)
-        ports = _junctions.region_ports(cut.pieces, cut.cut_ends, piece_types, piece_radii, cut.regions)
+        # A piece's own end inside a region is a loose end too: it may join.
+        cut_set = set(cut.cut_ends)
+        natural = []
+        for index, piece in enumerate(cut.pieces):
+            for end in (0, -1):
+                if (index, end) in cut_set or len(piece) < 2:
+                    continue
+                edge = 1.5 * float(piece_radii[index])
+                tip = piece[end]
+                if np.all(tip >= edge) and np.all(tip <= upper - edge) and _regrow._inside_any(tip[None], cut.regions)[0]:
+                    natural.append((index, end))
+        natural_set = set(natural)
+        ports = _junctions.region_ports(
+            cut.pieces, list(cut.cut_ends) + natural, piece_types, piece_radii, cut.regions
+        )
+        piece_length = np.array([polyline_length(piece) for piece in cut.pieces])
+        shape_k = self.settings.length_shape
         claimed = np.zeros(shape, dtype=np.int32)
         for index, piece in enumerate(cut.pieces):
             paint(claimed, piece, 1.1 * float(piece_radii[index]), index + 1)
         max_length = 20.0 * float(self.radius.max())
         scale = evidence_scale(self.image, cut.pieces, piece_radii, float(self.radius.min()))
-        end_cost = np.maximum(self.cost, 1.0)
         connections = []
         extensions: dict[tuple[int, int], np.ndarray] = {}
         plans_tried = joins = ends = grown = with_ports = 0
+        diameter = 2.0 * self.radius
         for k, region_ports in enumerate(ports):
             if not region_ports:
                 continue
             with_ports += 1
             region_extensions = []
             interior = []
+            end_costs = []
             for port in region_ports:
-                tracer = tracer_for(port.piece, claimed)
-                steps = max(int(max_length / tracer.step), 1)
-                extension = tracer.trace_one_way(port.point, port.direction, steps, own_label=port.piece + 1)
-                extension = _regrow._stop_before_others(
-                    np.array(extension).reshape(-1, 3), claimed, port.piece + 1, cut.pieces
-                )
+                if (port.piece, port.end) in natural_set:
+                    extension = np.zeros((0, 3))  # an end the fit already had stays where it is
+                else:
+                    tracer = tracer_for(port.piece, claimed)
+                    steps = max(int(max_length / tracer.step), 1)
+                    extension = tracer.trace_one_way(port.point, port.direction, steps, own_label=port.piece + 1)
+                    extension = _regrow._stop_before_others(
+                        np.array(extension).reshape(-1, 3), claimed, port.piece + 1, cut.pieces
+                    )
                 region_extensions.append(extension)
                 tip = extension[-1] if len(extension) else port.point
                 edge = 1.5 * port.radius
                 interior.append(bool(np.all(tip >= edge) and np.all(tip <= upper - edge)))
+                grown_here = polyline_length(np.vstack([port.point[None], extension])) if len(extension) else 0.0
+                end_costs.append(
+                    length_end_cost(
+                        piece_length[port.piece] + grown_here, self.length[port.kind], float(diameter[port.kind]),
+                        shape_k,
+                    )
+                )
             pairs = _junctions.allowed_pairs(region_ports, self.bend, self.spacing, max_length)
+            join_costs = {
+                (i, j): length_join_cost(
+                    piece_length[region_ports[i].piece], piece_length[region_ports[j].piece],
+                    polyline_length(curve), self.length[region_ports[i].kind], shape_k,
+                )
+                for (i, j), curve in pairs.items()
+            }
             low, high = cut.regions[k]
             nearby = near_box(cut.pieces, piece_radii, low, high)
             plans = _junctions.rank_plans(
                 self.image, (low, high), region_ports, pairs, region_extensions,
                 [cut.pieces[i] for i in nearby], piece_radii[nearby],
-                margin=self.margin, scale=scale, end_cost=end_cost, interior=interior,
+                margin=self.margin, scale=scale, end_costs=np.array(end_costs), interior=interior,
+                join_costs=join_costs,
             )
             plans_tried += len(plans)
             rank = int(attempt(0.5 * (low + high))) * self.settings.redraw_plans if attempt else 0
@@ -1141,6 +1182,7 @@ class _Fitter:
         info = {
             "grown": grown, "ports": int(sum(len(p) for p in ports)), "plans_scored": plans_tried,
             "joins": joins, "ends_in_regions": ends, "regions_with_ports": with_ports,
+            "existing_ends_as_ports": len(natural),
         }
         return lines, piece_radii[first], piece_types[first], info
 

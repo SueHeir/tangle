@@ -38,6 +38,37 @@ def end_cost(length: float | None, diameter: float) -> float:
     return math.log(length / diameter)
 
 
+def length_end_cost(so_far: float, length: float | None, diameter: float, shape: float) -> float:
+    """Nats for a fiber end after ``so_far`` of fiber, fiber lengths gamma(``shape``) with mean ``length``.
+
+    The price is ``-ln(h(so_far) D)``, ``h`` the chance per unit length that
+    a fiber of that length ends there (the hazard). Shape 1 (exponential
+    lengths) gives the constant ``ln(L / D)`` of :func:`end_cost`; a larger
+    shape makes ending a short fiber dear and ending one near or past ``L``
+    cheap. Always at least one nat (0 without a length: then 1).
+    """
+    if not length or length <= diameter:
+        return 1.0
+    from scipy.stats import gamma
+
+    x = max(float(so_far), diameter)
+    model = gamma(shape, scale=length / shape)
+    return max(float(model.logsf(x) - model.logpdf(x)) - math.log(diameter), 1.0)
+
+
+def length_join_cost(a: float, b: float, bridge: float, length: float | None, shape: float) -> float:
+    """Nats for joining fibers of lengths ``a`` and ``b`` through ``bridge``: the joined fiber's
+    cumulative hazard less the two parts' (0 for exponential lengths, growing as the joined
+    fiber runs past ``length``)."""
+    if not length:
+        return 0.0
+    from scipy.stats import gamma
+
+    model = gamma(shape, scale=length / shape)
+    joined = -float(model.logsf(a + b + bridge))
+    return max(joined + float(model.logsf(a)) + float(model.logsf(b)), 0.0)
+
+
 def interior_end_mask(lines: list[np.ndarray], radii: np.ndarray, shape: tuple[int, int, int], margin_radii: float = 1.5) -> np.ndarray:
     """``(n, 2)`` booleans: is each fiber's start / end away from the scan boundary."""
     upper = np.array(shape[::-1], dtype=np.float64)

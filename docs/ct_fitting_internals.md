@@ -469,7 +469,16 @@ After the final solve and its confidence, up to `redraw_passes` passes:
    scored in nats over the region box: squared residual of the scan against
    `render_occupancy` of the nearby pieces plus the chosen bridges and
    extensions (radius + margin), over `evidence_scale`; plus overlap voxels
-   beyond one fiber over π r²; plus max(ln(L/D), 1) per interior end. The
+   beyond one fiber over π r²; plus, per interior end,
+   max(−ln(h(ℓ) D), 1), h the hazard of a gamma length distribution with
+   mean L and shape `FitSettings.length_shape` (3) and ℓ the piece's
+   length plus its extension (a lower bound when the piece runs on through
+   another region or the scan boundary); plus, per join, the joined
+   fiber's cumulative hazard −ln S(ℓ_a + ℓ_b + bridge) less the two
+   pieces' (`_ends.length_end_cost`, `length_join_cost`). Shape 1 gives
+   the old constant ln(L/D) and free joins. A piece's own (uncut) end
+   inside a region box and away from the scan boundary is a port as well;
+   unjoined it gets no extension and stays where it is. The
    plans are tried `redraw_plans` (3) at a time: `_Fitter.pick_plans`
    builds candidate c from every region's c-th best plan (after the
    attempt × 3 plans spent on earlier failures there), runs steps 3–4 on

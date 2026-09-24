@@ -11,9 +11,15 @@ on the host, in nats, as in ``_ends``:
 * the squared residual between the scan and the rendered fibers over the
   region, divided by the evidence scale ``2 σ² π r²``;
 * the voxels where two fibers overlap, one nat per fiber cross-section;
-* every fiber end inside the scan, at the fiber-length prior's price
-  ``ln(L / D)`` (at least one nat, so a join is preferred when it explains
-  the scan as well).
+* every fiber end inside the scan, at the fiber-length prior's price for a
+  fiber of the length it would have (``_ends.length_end_cost``: dear for a
+  short fiber, cheap near the typical length; at least one nat, so a join
+  is preferred when it explains the scan as well);
+* every join, by how far past the typical length it makes the fiber
+  (``_ends.length_join_cost``).
+
+A piece whose own end already lies in a region is a port too, so it can be
+joined; left unjoined, it stays as it is.
 
 Combinations are ranked by that score; the fitter builds the best one, and
 the next best when a region's first choice fails.
@@ -167,16 +173,18 @@ def rank_plans(
     *,
     margin: float,
     scale: float,
-    end_cost: np.ndarray,
+    end_costs: np.ndarray,
     interior: list[bool],
+    join_costs: dict[tuple[int, int], float] | None = None,
     cap: int = 1024,
 ) -> list[Plan]:
     """Every combination for one region, best (lowest score) first.
 
     ``extensions[k]`` is where port ``k``'s fiber goes if it ends in the
-    region (possibly empty), and ``interior[k]`` whether that end is inside
-    the scan (an end on the scan boundary costs nothing). ``base_lines``
-    are the fixed fibers near the box.
+    region (possibly empty), ``interior[k]`` whether that end is inside
+    the scan (an end on the scan boundary costs nothing) and ``end_costs[k]``
+    its price in nats. ``join_costs`` prices a pair's join (default 0).
+    ``base_lines`` are the fixed fibers near the box.
     """
     from ._moves import render_occupancy
 
@@ -226,8 +234,9 @@ def rank_plans(
         ends = [k for k in range(len(ports)) if k not in paired and interior[k]]
         radius = float(np.mean([p.radius for p in ports])) if ports else 1.0
         overlap_nats = overlap / (np.pi * radius * radius)
-        end_nats = float(sum(end_cost[ports[k].kind] for k in ends))
-        score = residual / scale + overlap_nats + end_nats
+        end_nats = float(sum(end_costs[k] for k in ends))
+        join_nats = float(sum(join_costs.get(pair, 0.0) for pair in chosen)) if join_costs else 0.0
+        score = residual / scale + overlap_nats + end_nats + join_nats
         plans.append(
             Plan(
                 score,
@@ -237,6 +246,7 @@ def rank_plans(
                     "residual_nats": residual / scale,
                     "overlap_nats": overlap_nats,
                     "end_nats": end_nats,
+                    "join_nats": join_nats,
                 },
             )
         )
