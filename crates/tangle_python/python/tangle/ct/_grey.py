@@ -35,23 +35,34 @@ def profile_radii(profile: np.ndarray) -> np.ndarray:
 
 
 def profile_levels(
-    grey: np.ndarray, profiles: list[np.ndarray], *, spread: float = 2.5
+    grey: np.ndarray,
+    profiles: list[np.ndarray],
+    radii: np.ndarray | None = None,
+    *,
+    spread: float = 2.5,
+    core: float = 1.5,
 ) -> tuple[float, float, list[tuple[float, float]]]:
     """The void grey, the noise, and each type's grey range.
 
     The void grey is the median of the voxels darker than every profile's
     dimmest value, and the noise the robust spread (1.4826 × MAD) of those
-    below halfway to it. A type's range runs from its profile's bright body
-    (the values within 80% of the peak contrast) to its brightest value,
-    widened by ``spread`` noise (at least 5% of the contrast), the low end
-    kept at least 60% of the way from void to the peak. (The peak alone was
-    too strict for thin fibers, whose blurred profile only peaks on the
-    axis: two_types lost 28 of 101 fine fibers.) The range is the fiber's
-    bright body only: a measured profile's
-    outer samples hold the blurred edge, and a range reaching down to them
-    made every fiber fat, so touching fibers merged (single_type 37 → 21
-    of 40 found). Edges are partial fiber through ``range_image``'s ramp,
-    and a dim core below the range is filled as a hole.
+    below halfway to it. A type's range is its profile's bright core, the
+    dimmest profile value within ``core`` voxels of the brightest one (given
+    the type's radius in voxels, ``radii``; the brightest value alone
+    without), up to the brightest value, widened by ``spread`` noise (at
+    least 5% of the contrast), the low end kept at least 60% of the way from
+    void to the peak.
+
+    So the core counts as fiber at least ``core`` voxels to each side of
+    the peak. A thin fiber's blurred profile only peaks on the axis, and a
+    range of the peak alone left it about one voxel wide (two_types lost 28
+    of 101 fine fibers); for a thicker fiber the core is near the peak
+    anyway. Reaching further down the profile, to its whole bright body,
+    let the dim contact between touching fibers read as fiber, so they
+    merged (scenario_missed_fiber 12 → 10 of 12; with the whole profile,
+    single_type 37 → 21 of 40). Edges are partial fiber through
+    ``range_image``'s ramp, and a dim core below the range is filled as a
+    hole.
     """
     dimmest = min(float(np.min(p)) for p in profiles)
     below = grey[grey < dimmest]
@@ -63,11 +74,17 @@ def profile_levels(
     quiet = below[below < 0.5 * (void + dimmest)]
     noise = 1.4826 * float(np.median(np.abs(quiet - np.median(quiet)))) if quiet.size else 0.0
     ranges = []
-    for p in profiles:
+    for k, p in enumerate(profiles):
+        p = np.asarray(p, dtype=np.float64)
         bright = float(np.max(p))
-        body = p[p >= void + 0.8 * (bright - void)]
+        floor = bright
+        if radii is not None:
+            at = np.linspace(0.0, 1.0, 101) * float(radii[k])  # voxels from the axis
+            values = np.interp(at, profile_radii(p) * float(radii[k]), p)
+            peak = at[int(np.argmax(values))]
+            floor = float(np.min(values[np.abs(at - peak) <= core]))
         half = max(spread * noise, 0.05 * (bright - void))
-        ranges.append((max(float(np.min(body)) - half, void + 0.6 * (bright - void)), bright + half))
+        ranges.append((max(floor - half, void + 0.6 * (bright - void)), bright + half))
     return void, noise, ranges
 
 

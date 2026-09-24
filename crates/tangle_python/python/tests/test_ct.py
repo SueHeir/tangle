@@ -503,11 +503,14 @@ class CtToolTests(unittest.TestCase):
         self.assertGreater(ranges[1][0], 0.3)
         self.assertLess(ranges[1][0], 0.8)
         self.assertGreater(ranges[1][1], 0.8)
-        # A thin fiber's blurred profile peaks only on the axis; its range spans the bright body, not just the peak.
+        # A thin fiber's blurred profile peaks only on the axis; its range
+        # reaches down to the grey 1.5 voxels out. On a thick fiber that is
+        # still near the peak.
         blurred = np.array([1.0, 0.95, 0.85, 0.7, 0.5])
-        _, _, (thin,) = _grey.profile_levels(grey, [blurred])
+        _, _, (thin, thick) = _grey.profile_levels(grey, [blurred, blurred], np.array([2.0, 8.0]))
         self.assertLess(thin[0], 0.85)
         self.assertGreater(thin[0], 0.7)
+        self.assertGreater(thick[0], 0.9)
         types = _grey.profile_types(grey, lines, radii, [solid, rimmed], void)
         np.testing.assert_array_equal(types, [0, 1])
 

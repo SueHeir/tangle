@@ -593,7 +593,8 @@ def fit_fibers(
             if settings.denoise_sigma_voxels > 0:
                 grey = gaussian_filter(grey, settings.denoise_sigma_voxels)
             profiles = [np.asarray(item.profile, dtype=np.float64) for item in specs]
-            grey_void, noise, derived = _grey.profile_levels(grey, profiles)
+            type_radii = np.array([0.5 * item.diameter / voxel_size for item in specs])
+            grey_void, noise, derived = _grey.profile_levels(grey, profiles, type_radii)
             ranges = [tuple(item.intensity) if item.intensity is not None else derived[k] for k, item in enumerate(specs)]
             grey_model = (grey, profiles, grey_void)
             log("profiles", [], void=round(grey_void, 4), noise=round(noise, 4), ranges=[[round(v, 4) for v in r] for r in ranges])

@@ -44,8 +44,13 @@ for typing (7b).
 With `FiberSpec.profile` on every type (`_grey`), the ranges come from the
 profiles: on the denoised scan the void grey v is the median of voxels
 darker than every profile, the noise σ_n 1.4826 × MAD of those below
-halfway to it, and a type's range is [min p − 2σ_n, max p + 2σ_n], its low
-end kept at least halfway from v to min p (an explicit `intensity` wins).
+halfway to it, and a type's range runs from its bright core (the dimmest
+profile value within 1.5 voxels of the brightest one) to its brightest
+value, widened by 2.5 σ_n (at least 5% of the contrast), with the low end
+kept at least 60% of the way from v to the peak (an explicit `intensity`
+wins). The core is what makes a thin, blurred fiber at least three voxels
+wide; going further down the profile lets the dim contact between
+touching fibers count as fiber, and they merge.
 The denoised scan, profiles and v are kept for scoring: `render_grey`
 draws fibers as the scan should show them (each voxel takes the profile
 of the fiber whose surface is nearest, at d / R, and outside the surface
