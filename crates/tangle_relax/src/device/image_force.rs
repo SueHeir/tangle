@@ -13,6 +13,7 @@
 //! run on the device.
 
 use cubecl::prelude::*;
+use tangle_contact::device::proxy_cell;
 
 /// Entries per ring in the polar sampling table.
 pub(crate) const RING_TABLE_STRIDE: usize = 4;
@@ -175,7 +176,7 @@ fn consider_candidate(
 }
 
 /// Adds the ownership candidates listed around `segment` (its neighbor list,
-/// or the 27 cells around its home cell when the list overflowed).
+/// or the cells around its proxy pieces when the list overflowed).
 #[cube]
 #[allow(clippy::too_many_arguments)]
 fn collect_candidates(
@@ -185,7 +186,10 @@ fn collect_candidates(
     segment_radii: &[f32],
     neighbor_counts: &[u32],
     neighbor_segments: &[u32],
-    neighbor_home_cells: &[u32],
+    neighbor_reference_positions: &[f32],
+    segment_proxies: &[u32],
+    list_offsets: &[u32],
+    list_weights: &[u32],
     cell_counts: &[u32],
     cell_offsets: &[u32],
     cell_segments: &[u32],
@@ -207,8 +211,8 @@ fn collect_candidates(
 ) -> u32 {
     let mut updated = count;
     let listed_count = neighbor_counts[segment];
-    if listed_count <= neighbor_capacity {
-        let start = segment * neighbor_capacity as usize;
+    if listed_count <= neighbor_capacity * list_weights[segment] {
+        let start = (neighbor_capacity * list_offsets[segment]) as usize;
         for slot in 0..listed_count {
             updated = consider_candidate(
                 positions,
@@ -229,11 +233,32 @@ fn collect_candidates(
             );
         }
     } else {
-        let home_cell = neighbor_home_cells[segment];
-        let home_x = home_cell % cells_x;
-        let home_y = (home_cell / cells_x) % cells_y;
-        let home_z = home_cell / (cells_x * cells_y);
-        for neighbor in 0..27_u32 {
+        // As the contact kernel does: the cells around each of the segment's
+        // proxy pieces, located from the positions the lists were built from.
+        let first = segment_vertices[2 * segment] as usize;
+        let second = segment_vertices[2 * segment + 1] as usize;
+        let proxies = segment_proxies[segment];
+        for range in 0..27 * proxies {
+            let neighbor = range % 27;
+            let home_cell = proxy_cell(
+                neighbor_reference_positions[3 * first],
+                neighbor_reference_positions[3 * first + 1],
+                neighbor_reference_positions[3 * first + 2],
+                neighbor_reference_positions[3 * second],
+                neighbor_reference_positions[3 * second + 1],
+                neighbor_reference_positions[3 * second + 2],
+                range / 27,
+                proxies,
+                cell_lower,
+                cell_upper,
+                cell_periodic,
+                cells_x,
+                cells_y,
+                cells_z,
+            );
+            let home_x = home_cell % cells_x;
+            let home_y = (home_cell / cells_x) % cells_y;
+            let home_z = home_cell / (cells_x * cells_y);
             let raw_x = home_x as i32 + (neighbor % 3) as i32 - 1;
             let raw_y = home_y as i32 + ((neighbor / 3) % 3) as i32 - 1;
             let raw_z = home_z as i32 + (neighbor / 9) as i32 - 1;
@@ -274,8 +299,8 @@ fn collect_candidates(
 
 /// Whether a segment of another fiber listed around `segment` has its surface
 /// closer to the sample than `own_gap` (the sample's distance to the vertex
-/// surface). Falls back to the 27 cells around the recorded home cell when
-/// the segment's neighbor list overflowed, as the contact kernel does.
+/// surface). Falls back to the cells around the segment's proxy pieces when
+/// its neighbor list overflowed, as the contact kernel does.
 #[cube]
 #[allow(clippy::too_many_arguments)]
 fn claimed_by_other_fiber(
@@ -285,7 +310,10 @@ fn claimed_by_other_fiber(
     segment_radii: &[f32],
     neighbor_counts: &[u32],
     neighbor_segments: &[u32],
-    neighbor_home_cells: &[u32],
+    neighbor_reference_positions: &[f32],
+    segment_proxies: &[u32],
+    list_offsets: &[u32],
+    list_weights: &[u32],
     cell_counts: &[u32],
     cell_offsets: &[u32],
     cell_segments: &[u32],
@@ -305,8 +333,8 @@ fn claimed_by_other_fiber(
 ) -> bool {
     let mut claimed = false;
     let listed_count = neighbor_counts[segment];
-    if listed_count <= neighbor_capacity {
-        let start = segment * neighbor_capacity as usize;
+    if listed_count <= neighbor_capacity * list_weights[segment] {
+        let start = (neighbor_capacity * list_offsets[segment]) as usize;
         for slot in 0..listed_count {
             if !claimed {
                 let other = neighbor_segments[start + slot as usize] as usize;
@@ -330,11 +358,32 @@ fn claimed_by_other_fiber(
             }
         }
     } else {
-        let home_cell = neighbor_home_cells[segment];
-        let home_x = home_cell % cells_x;
-        let home_y = (home_cell / cells_x) % cells_y;
-        let home_z = home_cell / (cells_x * cells_y);
-        for neighbor in 0..27_u32 {
+        // As the contact kernel does: the cells around each of the segment's
+        // proxy pieces, located from the positions the lists were built from.
+        let first = segment_vertices[2 * segment] as usize;
+        let second = segment_vertices[2 * segment + 1] as usize;
+        let proxies = segment_proxies[segment];
+        for range in 0..27 * proxies {
+            let neighbor = range % 27;
+            let home_cell = proxy_cell(
+                neighbor_reference_positions[3 * first],
+                neighbor_reference_positions[3 * first + 1],
+                neighbor_reference_positions[3 * first + 2],
+                neighbor_reference_positions[3 * second],
+                neighbor_reference_positions[3 * second + 1],
+                neighbor_reference_positions[3 * second + 2],
+                range / 27,
+                proxies,
+                cell_lower,
+                cell_upper,
+                cell_periodic,
+                cells_x,
+                cells_y,
+                cells_z,
+            );
+            let home_x = home_cell % cells_x;
+            let home_y = (home_cell / cells_x) % cells_y;
+            let home_z = home_cell / (cells_x * cells_y);
             let offset_x = (neighbor % 3) as i32 - 1;
             let offset_y = ((neighbor / 3) % 3) as i32 - 1;
             let offset_z = (neighbor / 9) as i32 - 1;
@@ -402,7 +451,10 @@ pub(crate) fn find_image_corrections(
     control: &[u32],
     neighbor_counts: &[u32],
     neighbor_segments: &[u32],
-    neighbor_home_cells: &[u32],
+    neighbor_reference_positions: &[f32],
+    segment_proxies: &[u32],
+    list_offsets: &[u32],
+    list_weights: &[u32],
     cell_counts: &[u32],
     cell_offsets: &[u32],
     cell_segments: &[u32],
@@ -529,7 +581,10 @@ pub(crate) fn find_image_corrections(
             segment_radii,
             neighbor_counts,
             neighbor_segments,
-            neighbor_home_cells,
+            neighbor_reference_positions,
+            segment_proxies,
+            list_offsets,
+            list_weights,
             cell_counts,
             cell_offsets,
             cell_segments,
@@ -558,7 +613,10 @@ pub(crate) fn find_image_corrections(
             segment_radii,
             neighbor_counts,
             neighbor_segments,
-            neighbor_home_cells,
+            neighbor_reference_positions,
+            segment_proxies,
+            list_offsets,
+            list_weights,
             cell_counts,
             cell_offsets,
             cell_segments,
@@ -651,7 +709,10 @@ pub(crate) fn find_image_corrections(
                     segment_radii,
                     neighbor_counts,
                     neighbor_segments,
-                    neighbor_home_cells,
+                    neighbor_reference_positions,
+                    segment_proxies,
+                    list_offsets,
+                    list_weights,
                     cell_counts,
                     cell_offsets,
                     cell_segments,
@@ -678,7 +739,10 @@ pub(crate) fn find_image_corrections(
                     segment_radii,
                     neighbor_counts,
                     neighbor_segments,
-                    neighbor_home_cells,
+                    neighbor_reference_positions,
+                    segment_proxies,
+                    list_offsets,
+                    list_weights,
                     cell_counts,
                     cell_offsets,
                     cell_segments,

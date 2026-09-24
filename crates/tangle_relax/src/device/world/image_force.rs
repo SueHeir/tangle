@@ -287,17 +287,20 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     self.neighbor_counts.clone(),
                     self.packed.segment_count(),
                 ),
+                BufferArg::from_raw_parts(self.neighbor_segments.clone(), self.neighbor_slots),
                 BufferArg::from_raw_parts(
-                    self.neighbor_segments.clone(),
-                    self.packed.segment_count() * self.neighbor_capacity as usize,
+                    self.neighbor_reference_positions.clone(),
+                    self.packed.positions.len(),
                 ),
                 BufferArg::from_raw_parts(
-                    self.neighbor_home_cells.clone(),
+                    self.segment_proxies.clone(),
                     self.packed.segment_count(),
                 ),
+                BufferArg::from_raw_parts(self.list_offsets.clone(), self.packed.segment_count()),
+                BufferArg::from_raw_parts(self.list_weights.clone(), self.packed.segment_count()),
                 BufferArg::from_raw_parts(self.cell_counts.clone(), self.cell_count),
                 BufferArg::from_raw_parts(self.cell_offsets.clone(), self.cell_count),
-                BufferArg::from_raw_parts(self.cell_segments.clone(), self.packed.segment_count()),
+                BufferArg::from_raw_parts(self.cell_segments.clone(), self.proxy_capacity),
                 BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
                 BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
                 BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
@@ -321,7 +324,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 force.settings.rings,
                 force.settings.spokes,
                 gate,
-                self.neighbor_capacity,
+                self.neighbor_block,
                 self.cells_x,
                 self.cells_y,
                 self.cells_z,
@@ -333,10 +336,14 @@ impl<R: Runtime> DeviceFiberWorld<R> {
 #[cfg(all(test, feature = "cpu"))]
 mod tests {
     use cubecl::cpu::{CpuDevice, CpuRuntime};
+    use cubecl::prelude::*;
     use tangle_core::{FiberAssembly, FiberId, PeriodicCell, Section};
 
     use super::ImageForceSettings;
-    use crate::{CellListConfig, DeviceFiberWorld, PackedAssembly, RelaxationConfig};
+    use crate::{
+        AdaptiveSegmentationConfig, CellListConfig, DeviceFiberWorld, PackedAssembly,
+        RelaxationConfig,
+    };
 
     const SIDE: usize = 24;
 
@@ -510,6 +517,102 @@ mod tests {
         }
         for [y, _] in second {
             assert!((y - 14.1).abs() < 0.15, "second fiber y = {y}");
+        }
+    }
+
+    /// Straight two-point fibers along x at the given (y, z).
+    fn two_point_fibers(offsets: &[[f64; 2]], radius: f64) -> FiberAssembly {
+        let mut assembly =
+            FiberAssembly::new(PeriodicCell::orthorhombic([SIDE as f64; 3], [false; 3]));
+        let material = assembly.materials.add("fiber");
+        let section = assembly.sections.add(Section::Circular { radius });
+        for (index, [y, z]) in offsets.iter().copied().enumerate() {
+            let placed = [[2.0, y, z], [22.0, y, z]];
+            assembly
+                .add_fiber(
+                    FiberId(index as u32 + 1),
+                    material,
+                    section,
+                    &placed,
+                    &placed,
+                )
+                .unwrap();
+        }
+        assembly
+    }
+
+    /// Image statistics of every vertex, keyed by its position.
+    fn stats_by_position(world: &DeviceFiberWorld<CpuRuntime>) -> Vec<([f32; 3], [f32; 2])> {
+        let positions = world.download_positions();
+        let stats = world.image_vertex_stats();
+        positions
+            .chunks_exact(3)
+            .zip(stats.chunks_exact(2))
+            .map(|(p, s)| ([p[0], p[1], p[2]], [s[0], s[1]]))
+            .collect()
+    }
+
+    #[test]
+    fn image_force_reads_weighted_neighbor_lists() {
+        // An unrefined adaptive parent gets several blocks of neighbor-list
+        // room, so list offsets no longer follow segment indices. Fiber 1 lies
+        // apart; fibers 2 and 3 touch, and each must see the other in its list
+        // to leave the other's tube alone. The same geometry packed uniformly
+        // (one block per segment) must give the same statistics.
+        let assembly = two_point_fibers(&[[4.0, 4.0], [10.0, 12.0], [14.0, 12.0]], 2.0);
+        let image = tube_image(&[[10.0, 12.0], [14.0, 12.0]], 2.0);
+        let adaptive = AdaptiveSegmentationConfig {
+            contact_length_over_diameter: 100.0,
+            minimum_length_over_diameter: 1.0,
+            maximum_refinement_levels: 2,
+            refinement_interval: 1,
+            refinement_persistence: 1,
+            coarsening_persistence: 2,
+            coarsening_error_over_diameter: 0.1,
+            coarsening_curvature_ratio: 0.25,
+        };
+        let packed_uniform = PackedAssembly::from_assembly(&assembly).unwrap();
+        let packed_adaptive =
+            PackedAssembly::from_assembly_with_options(&assembly, Some(adaptive), false).unwrap();
+        let mut results = Vec::new();
+        for packed in [packed_uniform, packed_adaptive] {
+            let mut world = DeviceFiberWorld::<CpuRuntime>::upload(
+                &CpuDevice::default(),
+                packed,
+                CellListConfig::default(),
+                0.25,
+            );
+            world.set_image(&image, [SIDE; 3], 1.0, [0.0; 3]);
+            world.set_image_force(ImageForceSettings {
+                rate: 0.5,
+                ..ImageForceSettings::default()
+            });
+            results.push((stats_by_position(&world), world));
+        }
+        let (adaptive_stats, adaptive_world) = results.pop().unwrap();
+        let (uniform_stats, _) = results.pop().unwrap();
+        let read = |handle: &cubecl::server::Handle| {
+            u32::from_bytes(&adaptive_world.client.read_one(handle.clone()).unwrap()).to_vec()
+        };
+        let weights = read(&adaptive_world.list_weights);
+        let offsets = read(&adaptive_world.list_offsets);
+        let active = adaptive_world.download_segment_active();
+        assert!(weights.iter().any(|&w| w > 1), "weights {weights:?}");
+        assert!(
+            (0..offsets.len()).any(|s| active[s] != 0 && offsets[s] as usize != s),
+            "offsets {offsets:?} follow segment indices"
+        );
+        for (position, expected) in &uniform_stats {
+            let (_, found) = adaptive_stats
+                .iter()
+                .find(|(p, _)| (0..3).all(|k| (p[k] - position[k]).abs() < 1e-5))
+                .expect("uniform vertex missing from the adaptive packing");
+            for k in 0..2 {
+                assert!(
+                    (found[k] - expected[k]).abs() <= 1e-4 * expected[k].abs().max(1.0),
+                    "vertex at {position:?}: adaptive {found:?}, uniform {expected:?}"
+                );
+            }
         }
     }
 }
