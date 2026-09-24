@@ -128,6 +128,8 @@ class FitSettings:
     # ends along their own direction (``_regrow.grow_cut_ends``).
     redraw_moves: str = "match"
     redraw_plans: int = 3
+    # After redraw passes that kept anything, one unpinned solve of the whole fit.
+    redraw_polish: bool = True
     # A region's 2nd and 3rd plans are solved only when their host score is
     # within this many nats of its best (close calls); clear winners are
     # built without a GPU comparison.
@@ -657,7 +659,17 @@ def fit_fibers(
         coverage = _confidence.sure_coverage(fitter.foreground, lines, radii, settled)
         log("confidence", lines, **summary, sure_coverage=round(coverage, 4))
         if settings.redraw_passes > 0:
-            lines, radii, types, confidence = fitter.redraw_loop(lines, radii, types, confidence, settled)
+            redrawn = fitter.redraw_loop(lines, radii, types, confidence, settled)
+            if redrawn[0] is not lines and settings.redraw_polish and redrawn[0]:
+                # Redrawn stretches were solved around pinned sure pieces; one
+                # unpinned solve lets the whole fit settle into the scan together.
+                lines, radii, types = redrawn[0], redrawn[1], redrawn[2]
+                lines = fitter.solve(lines, radii, types)
+                confidence, settled, summary = fitter.scores(lines, radii, previous=None)
+                coverage = _confidence.sure_coverage(fitter.foreground, lines, radii, settled)
+                log("polish", lines, **summary, sure_coverage=round(coverage, 4))
+            else:
+                lines, radii, types, confidence = redrawn
 
     return FitResult(
         shape=tuple(int(n) for n in volume.shape),

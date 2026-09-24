@@ -551,7 +551,11 @@ After the final solve and its confidence, up to `redraw_passes` passes:
    +0.67. `python ct_examples.py --redraw-study` runs one redraw
    pass with `"all"` and prints, per group, whether the truth got better
    and which score said so (`_fit._REDRAW_PROBE` is its hook).
-6. Failed regions are remembered as boxes with a failure count (a kept
+6. After the passes, if any redraw was kept, the whole fit gets one
+   unpinned solve (`FitSettings.redraw_polish`, logged as `polish`): the
+   redrawn stretches were solved around pinned pieces, and on ca4cb83 they
+   came out ~1 voxel off (single_type line error 0.23 → 0.93).
+7. Failed regions are remembered as boxes with a failure count (a kept
    region clears overlapping ones); at `redraw_attempts` failures the box
    is given up. The passes end when nothing is left to cut.
 
