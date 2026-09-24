@@ -1820,7 +1820,10 @@ fn long_segments_are_binned_as_proxy_pieces() {
     assert!(listed_pairs > 150, "{listed_pairs} neighbor pairs");
 }
 
-fn relax_long_crossing_fibers(cell_list: CellListConfig) -> Vec<f32> {
+/// Relaxes the long crossing fibers and returns the positions, how many
+/// active lists overflowed at the last build, and the most pieces any
+/// segment was binned as.
+fn relax_long_crossing_fibers(cell_list: CellListConfig) -> (Vec<f32>, usize, u32) {
     let (packed, max_step) = long_crossing_fibers();
     let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
         &WgpuDevice::default(),
@@ -1838,22 +1841,47 @@ fn relax_long_crossing_fibers(cell_list: CellListConfig) -> Vec<f32> {
     };
     let status = world.run_batch(&config, 30);
     assert!(status.max_penetration.is_finite(), "{status:?}");
-    world.download_positions()
+    let active = world.download_segment_active();
+    let lists = neighbor_lists(&world);
+    let overflowed = (0..lists.len())
+        .filter(|&segment| active[segment] != 0 && lists[segment].is_none())
+        .count();
+    let proxies = u32::from_bytes(
+        &world
+            .client
+            .read_one(world.segment_proxies.clone())
+            .unwrap(),
+    )
+    .iter()
+    .copied()
+    .max()
+    .unwrap_or(1);
+    (world.download_positions(), overflowed, proxies)
+}
+
+/// Lists far too short for a wide skin: every long root overflows and takes
+/// the per-piece cell scan, with each root still split into several pieces.
+fn overflowing_proxy_lists() -> CellListConfig {
+    CellListConfig {
+        neighbor_capacity: 1,
+        neighbor_skin_scale: 20.0,
+        ..CellListConfig::default()
+    }
 }
 
 #[test]
 fn proxy_overflow_scan_matches_neighbor_lists() {
-    let reference = relax_long_crossing_fibers(CellListConfig {
+    let (reference, _, _) = relax_long_crossing_fibers(CellListConfig {
         neighbor_skin_scale: 0.0,
         ..CellListConfig::default()
     });
-    let listed = relax_long_crossing_fibers(CellListConfig::default());
-    // One slot per segment sends every crossing through the per-proxy cell
-    // scan, which must find each contact exactly once.
-    let overflowed = relax_long_crossing_fibers(CellListConfig {
-        neighbor_capacity: 1,
-        ..CellListConfig::default()
-    });
+    let (listed, listed_overflows, _) = relax_long_crossing_fibers(CellListConfig::default());
+    assert_eq!(listed_overflows, 0);
+    // Overflowing lists send every crossing through the per-piece cell scan,
+    // which must find each contact exactly once.
+    let (overflowed, overflows, proxies) = relax_long_crossing_fibers(overflowing_proxy_lists());
+    assert!(overflows >= 10, "only {overflows} lists overflowed");
+    assert!(proxies >= 2, "roots binned as {proxies} piece(s)");
     let largest_difference = |left: &[f32], right: &[f32]| {
         left.iter()
             .zip(right)
@@ -1871,15 +1899,9 @@ fn proxy_overflow_scan_matches_neighbor_lists() {
 fn proxy_relaxation_is_bitwise_repeatable() {
     // Several proxy pieces append to one neighbor list concurrently; the
     // lists are sorted after the build, so repeated runs stay identical.
-    for cell_list in [
-        CellListConfig::default(),
-        CellListConfig {
-            neighbor_capacity: 1,
-            ..CellListConfig::default()
-        },
-    ] {
-        let first = relax_long_crossing_fibers(cell_list);
-        let second = relax_long_crossing_fibers(cell_list);
+    for cell_list in [CellListConfig::default(), overflowing_proxy_lists()] {
+        let (first, _, _) = relax_long_crossing_fibers(cell_list);
+        let (second, _, _) = relax_long_crossing_fibers(cell_list);
         let bits = |values: &[f32]| {
             values
                 .iter()
