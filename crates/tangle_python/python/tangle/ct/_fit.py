@@ -770,7 +770,7 @@ class _Fitter:
         self.set_image(image)
 
     def set_image(self, image: np.ndarray) -> None:
-        from scipy.ndimage import distance_transform_edt, maximum_filter
+        from ._trace import foreground_depth
 
         self.image = image
         self.foreground = image > 0.5
@@ -779,7 +779,9 @@ class _Fitter:
         # voxel centers reads the axis value rather than an interpolated,
         # lower one. On a fiber axis it is about the radius: the foreground
         # edge sits at the half-maximum, which is the fiber surface.
-        self.depth = maximum_filter(distance_transform_edt(self.foreground), size=3).astype(np.float32)
+        # The distance transform is kept for tracing's ridge seeds, which
+        # every redraw candidate's trace needs.
+        self.edt, self.depth = foreground_depth(self.foreground)
         self.hessians = {}
 
     def hessian(self, kind: int) -> HessianField:
@@ -810,7 +812,7 @@ class _Fitter:
             new = trace_fibers(
                 self.image, self.hessian(kind), radius=r, min_bend_radius=float(self.bend[kind]),
                 min_length=float(self.min_length[kind]), node_spacing=self.spacing, claimed=claimed,
-                foreground=self.foreground, label_offset=len(known),
+                foreground=self.foreground, depth=(self.edt, self.depth), label_offset=len(known),
                 # A larger type is only seeded where the foreground is thicker
                 # than the smaller types could make it.
                 seed_depth_radii=0.7 if r > smallest else 0.5,

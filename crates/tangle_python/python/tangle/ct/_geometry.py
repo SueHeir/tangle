@@ -82,6 +82,132 @@ def _box_segment_distances(low: np.ndarray, high: np.ndarray, a: np.ndarray, b: 
     return np.sqrt(dx * dx + dy * dy + dz * dz)
 
 
+def segment_voxels(
+    lines: list[np.ndarray],
+    pads: np.ndarray,
+    limits: np.ndarray,
+    low: np.ndarray,
+    high: np.ndarray,
+    *,
+    budget: int = 1 << 21,
+):
+    """Every segment's voxels in box ``[low, high)`` (x, y, z), many segments per numpy call.
+
+    A segment's voxels are those in its bounding box grown by its line's
+    ``pads`` value whose center is within its line's ``limits`` value of the
+    segment. Yields chunks ``(voxel, segment, distance)``: the flat index
+    into the box's ``(z, y, x)`` array, the global segment index (segment
+    ``s`` of line ``f`` is ``offsets[f] + s``, offsets from the node counts
+    minus one) and the distance. Segments are batched by box size, so the
+    chunks are not in segment order. Drawing capsules one segment at a time
+    was a third of single_type's fit time, nearly all of it per-call
+    overhead on boxes of a few thousand voxels.
+    """
+    low = np.asarray(low, dtype=int)
+    high = np.asarray(high, dtype=int)
+    starts, ends, pad, limit = [], [], [], []
+    for line, line_pad, line_limit in zip(lines, pads, limits):
+        line = np.asarray(line, dtype=np.float64).reshape(-1, 3)
+        count = max(len(line) - 1, 0)
+        starts.append(line[:count])
+        ends.append(line[1 : count + 1])
+        pad.append(np.full(count, float(line_pad)))
+        limit.append(np.full(count, float(line_limit)))
+    if not starts:
+        return
+    a = np.concatenate(starts)
+    b = np.concatenate(ends)
+    pad = np.concatenate(pad)
+    limit = np.concatenate(limit)
+    lo = np.maximum(np.floor(np.minimum(a, b) - pad[:, None]).astype(int), low)
+    hi = np.minimum(np.ceil(np.maximum(a, b) + pad[:, None]).astype(int), high)
+    ids = np.nonzero(np.all(hi > lo, axis=1))[0]
+    if len(ids) == 0:
+        return
+    ids = ids[np.argsort(np.prod(hi[ids] - lo[ids], axis=1), kind="stable")]  # similar boxes batch together
+    ab = b - a
+    denominator = np.einsum("ij,ij->i", ab, ab)
+    degenerate = denominator <= 1e-12
+    denominator = np.where(degenerate, 1.0, denominator)
+    strides = np.array([1, high[0] - low[0], (high[0] - low[0]) * (high[1] - low[1])])
+    sizes = (hi[ids] - lo[ids]).tolist()  # plain ints: this loop runs once per segment
+    start = 0
+    while start < len(ids):
+        # Grow the batch while its padded boxes stay within the budget.
+        stop = start + 1
+        bx, by, bz = sizes[start]
+        while stop < len(ids):
+            ex, ey, ez = sizes[stop]
+            gx, gy, gz = max(bx, ex), max(by, ey), max(bz, ez)
+            if (stop + 1 - start) * gx * gy * gz > budget:
+                break
+            bx, by, bz = gx, gy, gz
+            stop += 1
+        dims = (bx, by, bz)
+        batch = ids[start:stop]
+        start = stop
+        axes = []
+        for k in range(3):
+            coordinate = lo[batch, k, None] + np.arange(dims[k])[None, :]  # (n, dims[k])
+            axes.append((coordinate, coordinate < hi[batch, k, None]))
+        x = (axes[0][0] + 0.5 - a[batch, 0, None])[:, None, None, :]
+        y = (axes[1][0] + 0.5 - a[batch, 1, None])[:, None, :, None]
+        z = (axes[2][0] + 0.5 - a[batch, 2, None])[:, :, None, None]
+        u = ab[batch]
+        t = (x * u[:, 0, None, None, None] + y * u[:, 1, None, None, None] + z * u[:, 2, None, None, None])
+        t = np.clip(t / denominator[batch, None, None, None], 0.0, 1.0)
+        t = np.where(degenerate[batch, None, None, None], 0.0, t)
+        dx = x - t * u[:, 0, None, None, None]
+        dy = y - t * u[:, 1, None, None, None]
+        dz = z - t * u[:, 2, None, None, None]
+        distance = np.sqrt(dx * dx + dy * dy + dz * dz)
+        keep = (
+            (distance <= limit[batch, None, None, None])
+            & axes[0][1][:, None, None, :]
+            & axes[1][1][:, None, :, None]
+            & axes[2][1][:, :, None, None]
+        )
+        n, i, j, k = np.nonzero(keep)
+        voxel = (
+            (axes[2][0][n, i] - low[2]) * strides[2]
+            + (axes[1][0][n, j] - low[1]) * strides[1]
+            + (axes[0][0][n, k] - low[0])
+        )
+        yield voxel, batch[n], distance[n, i, j, k]
+
+
+def nearest_segments(size: int, chunks, key: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Per voxel of a flat box of ``size``, the nearest segment from :func:`segment_voxels` chunks.
+
+    The distance compared is the segment's distance plus ``key[segment]``
+    (for example minus its radius, to compare surfaces); ties go to the
+    lower segment index, as drawing segments in order with a strict ``<``
+    did. Returns ``(best, segment)`` flat arrays: the compared value
+    (``inf`` where none) and the segment (``-1``).
+    """
+    best = np.full(size, np.inf)
+    owner = np.full(size, -1, dtype=np.int32)
+    for voxel, segment, distance in chunks:
+        value = distance + key[segment] if key is not None else distance
+        order = np.lexsort((segment, value, voxel))
+        voxel, segment, value = voxel[order], segment[order], value[order]
+        first = np.ones(len(voxel), dtype=bool)
+        first[1:] = voxel[1:] != voxel[:-1]
+        voxel, segment, value = voxel[first], segment[first], value[first]
+        current = best[voxel]
+        better = (value < current) | ((value == current) & (segment < owner[voxel]))
+        voxel = voxel[better]
+        best[voxel] = value[better]
+        owner[voxel] = segment[better]
+    return best, owner
+
+
+def segment_lines(lines: list[np.ndarray]) -> np.ndarray:
+    """The line each global segment index (see :func:`segment_voxels`) belongs to."""
+    counts = [max(len(line) - 1, 0) for line in lines]
+    return np.repeat(np.arange(len(lines)), counts)
+
+
 def paint(target: np.ndarray, line: np.ndarray, reach: float, value: int, *, only_empty: bool = False) -> None:
     """Set voxels of ``target`` within ``reach`` of polyline ``line`` to ``value`` in place.
 
@@ -126,24 +252,15 @@ def rasterize(
     labels = np.zeros(shape, dtype=np.int32)
     best = np.full(shape, np.inf, dtype=np.float32)
     segment_ids = np.full(shape, -1, dtype=np.int32)
-    offset = 0
-    upper = np.array(shape[::-1])
-    for index, (line, radius, fiber_reach) in enumerate(zip(centerlines, radii, reaches)):
-        line = np.asarray(line, dtype=np.float64)
-        for s in range(len(line) - 1):
-            a, b = line[s], line[s + 1]
-            low = np.maximum(np.floor(np.minimum(a, b) - fiber_reach - 0.5).astype(int), 0)
-            high = np.minimum(np.ceil(np.maximum(a, b) + fiber_reach + 0.5).astype(int), upper)
-            if np.any(high <= low):
-                continue
-            distance = _box_segment_distances(low, high, a, b)
-            inside = distance <= fiber_reach
-            if signed:
-                distance = distance - radius
-            window = (slice(low[2], high[2]), slice(low[1], high[1]), slice(low[0], high[0]))
-            improve = inside & (distance < best[window])
-            best[window][improve] = distance[improve]
-            labels[window][improve] = index + 1
-            segment_ids[window][improve] = offset + s
-        offset += max(len(line) - 1, 0)
+    if not len(centerlines):
+        return labels, best, segment_ids
+    line_of = segment_lines(centerlines)
+    chunks = segment_voxels(centerlines, reaches + 0.5, reaches, np.zeros(3, dtype=int), np.array(shape[::-1]))
+    value, owner = nearest_segments(
+        int(np.prod(shape)), chunks, key=-radii[line_of] if signed else None
+    )
+    owned = owner >= 0
+    labels.ravel()[owned] = line_of[owner[owned]] + 1
+    best.ravel()[owned] = value[owned]
+    segment_ids.ravel()[owned] = owner[owned]
     return labels, best, segment_ids

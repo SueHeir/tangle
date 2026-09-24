@@ -382,6 +382,72 @@ class CtToolTests(unittest.TestCase):
         self.assertEqual(report["overlapping_pairs"], 0)
         self.assertAlmostEqual(report["min_segment_diameters"], 1.25, places=6)
 
+    def test_batched_capsule_drawing_matches_segment_by_segment(self):
+        from tangle.ct import _geometry, _grey, _moves
+
+        rng = np.random.default_rng(3)
+        shape = (18, 22, 26)
+        lines = [np.cumsum(rng.normal(0.0, 1.6, (6, 3)), axis=0) + [13.0, 11.0, 9.0] for _ in range(5)]
+        lines.append(np.array([[4.0, 4.0, 4.0]]))  # one node: no segments
+        lines.append(np.array([[20.0, 5.0, 5.0], [20.0, 5.0, 5.0], [22.0, 6.0, 5.0]]))  # a zero-length segment
+        radii = np.array([1.5, 2.0, 2.5, 1.0, 3.0, 2.0, 1.2])
+        centers = np.stack(np.meshgrid(*[np.arange(n) + 0.5 for n in shape[::-1]], indexing="ij"), axis=-1)
+        centers = centers.transpose(2, 1, 0, 3).reshape(-1, 3)  # (z, y, x) order, points (x, y, z)
+        distances = []  # per segment, every voxel's distance, drawn one segment at a time
+        for line in lines:
+            distances.append([_geometry._segment_distances(centers, a, b) for a, b in zip(line[:-1], line[1:])])
+
+        def nearest(reach, signed):
+            best = np.full(len(centers), np.inf)
+            labels = np.zeros(len(centers), dtype=int)
+            segments = np.full(len(centers), -1)
+            index = 0
+            for f, per_segment in enumerate(distances):
+                for d in per_segment:
+                    value = d - radii[f] if signed else d
+                    better = (d <= reach[f]) & (value < best)
+                    best[better], labels[better], segments[better] = value[better], f + 1, index
+                    index += 1
+            return best, labels, segments
+
+        for signed in (False, True):
+            reach = radii + 1.0
+            labels, best, segments = _geometry.rasterize(shape, lines, radii, reach=reach, signed=signed)
+            want_best, want_labels, want_segments = nearest(reach, signed)
+            np.testing.assert_array_equal(labels.ravel(), want_labels)
+            np.testing.assert_array_equal(segments.ravel() >= 0, want_segments >= 0)
+            np.testing.assert_allclose(best.ravel(), want_best.astype(np.float32), rtol=1e-6)
+            # Where two segments of a line meet, both are equally near up to
+            # rounding, so either may own a voxel; the owner must be nearest.
+            flat = [d for per_segment in distances for d in per_segment]
+            owned = np.nonzero(segments.ravel() >= 0)[0]
+            chosen = np.array([flat[k][v] for v, k in zip(owned, segments.ravel()[owned])])
+            shift = radii[labels.ravel()[owned] - 1] if signed else 0.0
+            np.testing.assert_allclose(chosen - shift, want_best[owned], atol=1e-9)
+
+        low, high = np.array([3, 2, 1]), np.array([24, 20, 15])  # a sub-box, (x, y, z)
+        inside = np.all((centers >= low) & (centers < high), axis=1)
+        occupancy = np.zeros(len(centers))
+        for f, per_segment in enumerate(distances):
+            for d in per_segment:
+                occupancy = np.maximum(occupancy, np.clip(0.5 - (d - radii[f]) / 2.4, 0.0, 1.0))
+        got = _moves.render_occupancy(low, high, lines, radii)
+        np.testing.assert_allclose(got.ravel(), occupancy[inside].reshape(got.shape).ravel(), atol=1e-12)
+
+        profiles = [np.array([1.0, 0.9, 0.6]), np.array([0.4, 0.8])] * 3 + [np.array([0.7, 0.7, 0.7])]
+        void = 0.1
+        surface, _, owner = nearest(radii + 2.4, True)
+        want = np.full(len(centers), void)
+        segment_line = np.repeat(np.arange(len(lines)), [max(len(line) - 1, 0) for line in lines])
+        for v in np.nonzero((owner >= 0) & (surface < 2.4))[0]:
+            f = segment_line[owner[v]]
+            profile = profiles[f]
+            fraction = min((surface[v] + radii[f]) / radii[f], 1.0)
+            value = np.interp(fraction, np.linspace(0.0, 1.0, len(profile)), profile)
+            want[v] = void + np.clip(1.0 - surface[v] / 2.4, 0.0, 1.0) * (value - void)
+        got = _grey.render_grey(low, high, lines, radii, profiles, void)
+        np.testing.assert_allclose(got.ravel(), want[inside], atol=1e-9)
+
     def test_grey_ranges_decide_what_is_fiber(self):
         from tangle.ct._ranges import range_image, type_fractions
 
@@ -437,6 +503,11 @@ class CtToolTests(unittest.TestCase):
         self.assertGreater(ranges[1][0], 0.3)
         self.assertLess(ranges[1][0], 0.8)
         self.assertGreater(ranges[1][1], 0.8)
+        # A thin fiber's blurred profile peaks only on the axis; its range spans the bright body, not just the peak.
+        blurred = np.array([1.0, 0.95, 0.85, 0.7, 0.5])
+        _, _, (thin,) = _grey.profile_levels(grey, [blurred])
+        self.assertLess(thin[0], 0.85)
+        self.assertGreater(thin[0], 0.7)
         types = _grey.profile_types(grey, lines, radii, [solid, rimmed], void)
         np.testing.assert_array_equal(types, [0, 1])
 

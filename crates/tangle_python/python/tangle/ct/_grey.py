@@ -41,9 +41,13 @@ def profile_levels(
 
     The void grey is the median of the voxels darker than every profile's
     dimmest value, and the noise the robust spread (1.4826 × MAD) of those
-    below halfway to it. A type's range is its profile's brightest value
-    ± ``spread`` noise (at least 5% of the contrast), the low end kept at least 60% of the way from void
-    to it. The range is the fiber's bright body only: a measured profile's
+    below halfway to it. A type's range runs from its profile's bright body
+    (the values within 80% of the peak contrast) to its brightest value,
+    widened by ``spread`` noise (at least 5% of the contrast), the low end
+    kept at least 60% of the way from void to the peak. (The peak alone was
+    too strict for thin fibers, whose blurred profile only peaks on the
+    axis: two_types lost 28 of 101 fine fibers.) The range is the fiber's
+    bright body only: a measured profile's
     outer samples hold the blurred edge, and a range reaching down to them
     made every fiber fat, so touching fibers merged (single_type 37 → 21
     of 40 found). Edges are partial fiber through ``range_image``'s ramp,
@@ -61,8 +65,9 @@ def profile_levels(
     ranges = []
     for p in profiles:
         bright = float(np.max(p))
+        body = p[p >= void + 0.8 * (bright - void)]
         half = max(spread * noise, 0.05 * (bright - void))
-        ranges.append((max(bright - half, void + 0.6 * (bright - void)), bright + half))
+        ranges.append((max(float(np.min(body)) - half, void + 0.6 * (bright - void)), bright + half))
     return void, noise, ranges
 
 
@@ -76,37 +81,29 @@ def render_grey(
     edge: float = EDGE,
 ) -> np.ndarray:
     """The grey the fibers should show over the voxel box ``[low, high)`` (x, y, z)."""
-    from ._geometry import _box_segment_distances
+    from ._geometry import nearest_segments, segment_lines, segment_voxels
 
     low = np.asarray(low, dtype=int)
     high = np.asarray(high, dtype=int)
     shape = tuple(int(n) for n in (high - low)[::-1])
-    best = np.full(shape, np.inf)
     value = np.full(shape, void, dtype=np.float64)
-    for line, radius, profile in zip(lines, radii, profiles):
-        line = np.asarray(line, dtype=np.float64)
-        radius = float(radius)
-        profile = np.asarray(profile, dtype=np.float64)
-        xs = profile_radii(profile)
-        for a, b in zip(line[:-1], line[1:]):
-            lo = np.maximum(np.floor(np.minimum(a, b) - radius - 2 * edge).astype(int), low)
-            hi = np.minimum(np.ceil(np.maximum(a, b) + radius + 2 * edge).astype(int), high)
-            if np.any(hi <= lo):
-                continue
-            distance = _box_segment_distances(lo, hi, a, b)
-            surface = distance - radius
-            window = (
-                slice(lo[2] - low[2], hi[2] - low[2]),
-                slice(lo[1] - low[1], hi[1] - low[1]),
-                slice(lo[0] - low[0], hi[0] - low[0]),
-            )
-            closer = (surface < best[window]) & (surface < 2 * edge)
-            if not closer.any():
-                continue
-            weight = np.clip(1.0 - surface / (2 * edge), 0.0, 1.0)
-            inside = np.interp(np.minimum(distance / max(radius, 1e-6), 1.0), xs, profile)
-            best[window][closer] = surface[closer]
-            value[window][closer] = (void + weight * (inside - void))[closer]
+    if not len(lines):
+        return value
+    radii = np.asarray(radii, dtype=np.float64)
+    line_of = segment_lines(lines)
+    chunks = segment_voxels(lines, radii + 2 * edge, radii + 2 * edge, low, high)
+    surface, owner = nearest_segments(int(np.prod(shape)), chunks, key=-radii[line_of])
+    drawn = np.nonzero((owner >= 0) & (surface < 2 * edge))[0]
+    fiber = line_of[owner[drawn]]
+    radius = radii[fiber]
+    fraction = np.minimum((surface[drawn] + radius) / np.maximum(radius, 1e-6), 1.0)
+    inside = np.empty(len(drawn))
+    for f in np.unique(fiber):
+        mine = fiber == f
+        profile = np.asarray(profiles[f], dtype=np.float64)
+        inside[mine] = np.interp(fraction[mine], profile_radii(profile), profile)
+    weight = np.clip(1.0 - surface[drawn] / (2 * edge), 0.0, 1.0)
+    value.ravel()[drawn] = void + weight * (inside - void)
     return value
 
 

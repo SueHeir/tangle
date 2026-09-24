@@ -462,25 +462,19 @@ def render_occupancy(
     box_low: np.ndarray, box_high: np.ndarray, lines: list[np.ndarray], radii: np.ndarray, edge: float = 1.2
 ) -> np.ndarray:
     """Soft union occupancy of capsules over the voxel box ``[low, high)`` (x, y, z)."""
-    from ._geometry import _box_segment_distances
+    from ._geometry import segment_lines, segment_voxels
 
     box_low = np.asarray(box_low, dtype=int)
     box_high = np.asarray(box_high, dtype=int)
     occupancy = np.zeros(tuple(int(n) for n in (box_high - box_low)[::-1]))
-    for line, radius in zip(lines, radii):
-        for a, b in zip(line[:-1], line[1:]):
-            # Only the part of the box the capsule's soft edge can reach.
-            low = np.maximum(np.floor(np.minimum(a, b) - radius - 2 * edge).astype(int), box_low)
-            high = np.minimum(np.ceil(np.maximum(a, b) + radius + 2 * edge).astype(int), box_high)
-            if np.any(high <= low):
-                continue
-            distance = _box_segment_distances(low, high, a, b)
-            view = occupancy[
-                low[2] - box_low[2] : high[2] - box_low[2],
-                low[1] - box_low[1] : high[1] - box_low[1],
-                low[0] - box_low[0] : high[0] - box_low[0],
-            ]
-            np.maximum(view, np.clip(0.5 - (distance - radius) / (2 * edge), 0.0, 1.0), out=view)
+    if not len(lines):
+        return occupancy
+    radii = np.asarray(radii, dtype=np.float64)
+    radius_of = radii[segment_lines(lines)]
+    flat = occupancy.ravel()
+    # Occupancy is zero from a surface distance of ``edge`` on.
+    for voxel, segment, distance in segment_voxels(lines, radii + 2 * edge, radii + edge, box_low, box_high):
+        np.maximum.at(flat, voxel, np.clip(0.5 - (distance - radius_of[segment]) / (2 * edge), 0.0, 1.0))
     return occupancy
 
 
