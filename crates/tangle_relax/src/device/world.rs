@@ -6,15 +6,15 @@ use cubecl::server::Handle;
 
 use super::kernels::{
     activate_formation_step, apply_coarsening_candidates, apply_contact_corrections,
-    apply_formation_layer_targets, apply_internal_corrections, apply_rigid_contact_corrections,
-    apply_vertex_targets, assess_reduced_metrics, begin_relaxation_batch,
-    clear_active_index_counts, clear_adaptation_epoch, clear_reduced_metrics, clear_wall_reactions,
-    compact_active_indices, compact_affine_vertices, compact_moving_walls,
-    compact_rigid_fiber_centers, find_internal_corrections, finish_adaptation_epoch,
-    initialize_vertex_displacement_targets, mark_coarsening_candidates, measure_compaction_metrics,
-    measure_curvature_ratio, measure_layer_target_error, measure_vertex_target_error,
-    project_fiber_curvature_in_place, reduce_active_segment_penetration,
-    reduce_active_vertex_metrics, refine_contact_segments, refine_vertex_paths,
+    apply_formation_layer_targets, apply_internal_corrections, apply_refinement_candidates,
+    apply_rigid_contact_corrections, apply_vertex_targets, assess_reduced_metrics,
+    begin_relaxation_batch, clear_active_index_counts, clear_adaptation_epoch,
+    clear_reduced_metrics, clear_wall_reactions, compact_active_indices, compact_affine_vertices,
+    compact_moving_walls, compact_rigid_fiber_centers, find_internal_corrections,
+    finish_adaptation_epoch, initialize_vertex_displacement_targets, mark_coarsening_candidates,
+    mark_refinement_candidates, measure_compaction_metrics, measure_curvature_ratio,
+    measure_layer_target_error, measure_vertex_target_error, project_fiber_curvature_in_place,
+    reduce_active_segment_penetration, reduce_active_vertex_metrics, refine_vertex_paths,
 };
 use super::{
     AdaptiveSegmentationConfig, FiberMotion, PackedAssembly, PackingError, RelaxationConfig,
@@ -1257,15 +1257,12 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 CubeDim::new_1d(1),
                 BufferArg::from_raw_parts(self.refinement_count.clone(), 6),
             );
-            refine_contact_segments::launch_unchecked::<R>(
+            // Decide every split before applying any, so no thread sees a
+            // sibling's split from the same epoch.
+            mark_refinement_candidates::launch_unchecked::<R>(
                 &self.client,
                 CubeCount::Static(self.packed.segment_count().div_ceil(64) as u32, 1, 1),
                 CubeDim::new_1d(64),
-                BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                BufferArg::from_raw_parts(
-                    self.segment_vertices.clone(),
-                    self.packed.segment_vertices.len(),
-                ),
                 BufferArg::from_raw_parts(
                     self.segment_radii.clone(),
                     self.packed.segment_radii.len(),
@@ -1279,6 +1276,46 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     self.packed.segment_children.len(),
                 ),
                 BufferArg::from_raw_parts(self.segment_max.clone(), self.packed.segment_count()),
+                BufferArg::from_raw_parts(
+                    self.segment_active.clone(),
+                    self.packed.segment_active.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.segment_birth_epochs.clone(),
+                    self.packed.segment_birth_epochs.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.segment_contact_epochs.clone(),
+                    self.packed.segment_contact_epochs.len(),
+                ),
+                BufferArg::from_raw_parts(self.control.clone(), 4),
+                BufferArg::from_raw_parts(
+                    self.coarsening_candidates.clone(),
+                    self.packed.segment_count(),
+                ),
+                epoch,
+                penetration_threshold,
+                config.contact_length_over_diameter,
+                config.minimum_length_over_diameter,
+                config.refinement_persistence,
+            );
+            apply_refinement_candidates::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::Static(self.packed.segment_count().div_ceil(64) as u32, 1, 1),
+                CubeDim::new_1d(64),
+                BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                BufferArg::from_raw_parts(
+                    self.segment_vertices.clone(),
+                    self.packed.segment_vertices.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.segment_children.clone(),
+                    self.packed.segment_children.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.coarsening_candidates.clone(),
+                    self.packed.segment_count(),
+                ),
                 BufferArg::from_raw_parts(
                     self.segment_active.clone(),
                     self.packed.segment_active.len(),
@@ -1306,10 +1343,6 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 BufferArg::from_raw_parts(self.control.clone(), 4),
                 BufferArg::from_raw_parts(self.refinement_count.clone(), 6),
                 epoch,
-                penetration_threshold,
-                config.contact_length_over_diameter,
-                config.minimum_length_over_diameter,
-                config.refinement_persistence,
             );
 
             if config.coarsening_persistence > 0
