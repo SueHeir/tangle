@@ -119,6 +119,28 @@ class CtToolTests(unittest.TestCase):
         np.testing.assert_allclose(joined[0][-1], line[-1])
         np.testing.assert_array_equal(joined[1], pieces[2])
 
+    def test_centerline_agreement_ignores_capsule_edges(self):
+        from tangle.ct._evaluate import centerline_agreement
+
+        shape = (40, 40, 60)  # (z, y, x)
+        truth = [np.array([[0.0, 10.0, 20.0], [60.0, 10.0, 20.0]]), np.array([[0.0, 30.0, 20.0], [60.0, 30.0, 20.0]])]
+        radii = np.array([4.0, 4.0])
+        # Fiber 0 traced 1.5 voxels off its axis (inside half a radius), fiber 1
+        # only over its first half; a false fit sits in the void between them.
+        fits = [
+            np.array([[0.0, 11.5, 20.0], [60.0, 11.5, 20.0]]),
+            np.array([[0.0, 30.0, 20.0], [30.0, 30.0, 20.0]]),
+            np.array([[10.0, 20.0, 20.0], [30.0, 20.0, 20.0]]),
+        ]
+        result = centerline_agreement(fits, truth, radii, shape)
+        self.assertAlmostEqual(result["recall"], (60.0 + 32.0) / 120.0, delta=0.02)  # 2 past its end
+        self.assertAlmostEqual(result["precision"], 90.0 / 110.0, delta=0.02)
+        # A fit that follows fiber 0 and then jumps to fiber 1 keeps only the
+        # length along fiber 0.
+        hop = [np.array([[0.0, 10.0, 20.0], [40.0, 10.0, 20.0], [42.0, 30.0, 20.0], [60.0, 30.0, 20.0]])]
+        result = centerline_agreement(hop, truth, radii, shape)
+        self.assertAlmostEqual(result["recall"], 42.0 / 120.0, delta=0.03)
+
     def test_end_statistics_ignore_boundary_ends(self):
         from tangle.ct._ends import end_statistics
 

@@ -22,6 +22,75 @@ def _voxel(points: np.ndarray, shape) -> tuple[np.ndarray, ...]:
     return index[:, 2], index[:, 1], index[:, 0]
 
 
+def centerline_agreement(
+    fit_lines: list[np.ndarray],
+    truth_lines: list[np.ndarray],
+    truth_radii: np.ndarray,
+    shape: tuple[int, int, int],
+    *,
+    tolerance_radii: float = 0.5,
+    skip: set[int] | frozenset[int] = frozenset(),
+) -> dict[str, Any]:
+    """How much of the fibers' centerlines the fit traces, fiber by fiber.
+
+    Only the centerlines count, not how the capsule edges fill voxels. Each
+    fitted fiber belongs to the true fiber whose centerline most of its own
+    lies on (within ``tolerance_radii`` of that fiber's radius).
+
+    * **recall**: the fraction of true centerline length (in the volume;
+      true fibers in ``skip``, zero-based, are left out) that the fitted
+      fiber belonging to that true fiber passes within tolerance of;
+    * **precision**: the fraction of fitted centerline length that lies
+      within tolerance of the centerline of the true fiber it belongs to;
+    * **f1**: their harmonic mean.
+
+    A fiber split into pieces still counts where each piece follows it
+    (pieces of one true fiber all belong to it); a fit that follows one
+    fiber and then another loses the length along the second.
+    """
+    from scipy.spatial import cKDTree
+
+    radii = np.asarray(truth_radii, dtype=np.float64)
+    truth_samples = [_samples_inside(line, shape, 0.5) for line in truth_lines]
+    reference = [resample(np.asarray(line, dtype=np.float64), 0.25) for line in truth_lines]
+    all_truth = np.vstack([r for r in reference if len(r)]) if any(len(r) for r in reference) else np.zeros((0, 3))
+    truth_id = np.concatenate([np.full(len(r), g) for g, r in enumerate(reference)]) if len(all_truth) else np.zeros(0, int)
+    fit_samples = [_samples_inside(line, shape, 0.5) for line in fit_lines]
+    owner = np.full(len(fit_lines), -1)
+    on_own = 0
+    fit_total = sum(len(samples) for samples in fit_samples)
+    if len(all_truth) and fit_total:
+        tree = cKDTree(all_truth)
+        for f, samples in enumerate(fit_samples):
+            if not len(samples):
+                continue
+            distance, index = tree.query(samples)
+            nearest = truth_id[index]
+            on = distance <= tolerance_radii * radii[nearest]
+            if not on.any():
+                continue
+            owner[f] = int(np.bincount(nearest[on]).argmax())
+            on_own += int((on & (nearest == owner[f])).sum())
+    traced = total = 0
+    for g, samples in enumerate(truth_samples):
+        if g in skip or not len(samples):
+            continue
+        total += len(samples)
+        mine = [fit_samples[f] for f in np.flatnonzero(owner == g) if len(fit_samples[f])]
+        if not mine:
+            continue
+        distance, _ = cKDTree(np.vstack(mine)).query(samples)
+        traced += int((distance <= tolerance_radii * radii[g]).sum())
+    recall = traced / total if total else 0.0
+    precision = on_own / fit_total if fit_total else 0.0
+    return {
+        "recall": recall,
+        "precision": precision,
+        "f1": 2 * precision * recall / max(precision + recall, 1e-12),
+        "tolerance_radii": tolerance_radii,
+    }
+
+
 def score(fit, truth, *, coverage_threshold: float = 0.8, min_length: float | None = None) -> dict[str, Any]:
     """Fiber-level and voxel-level agreement between ``fit`` and ``truth``.
 
@@ -37,6 +106,11 @@ def score(fit, truth, *, coverage_threshold: float = 0.8, min_length: float | No
       the fit's own minimum length, 3 diameters unless set) are stubs where a
       fiber clips a corner of the scan. The fitter drops fits that short, so
       stubs are counted separately and left out of recall.
+    * ``centerline_*``: :func:`centerline_agreement` (stubs left out), the
+      share of the true centerlines the right fitted fiber traces within
+      half a radius, and of the fitted centerlines that lie on their own
+      fiber. Unlike ``voxel_label_accuracy`` it ignores how the capsule
+      edges fill voxels.
     """
     from scipy.spatial import cKDTree
 
@@ -133,6 +207,10 @@ def score(fit, truth, *, coverage_threshold: float = 0.8, min_length: float | No
                 "fitted": len(mine),
                 "fitted_as_this_type": sum(int(fit.types[f]) == int(kind) for f in mine),
             }
+    stub_ids = {entry["id"] - 1 for entry in per_truth if entry["state"] == "stub"}
+    centerline = centerline_agreement(
+        fit.centerlines, truth.centerlines, np.asarray(truth.radii), shape, skip=stub_ids
+    )
     fit_ends = end_statistics(fit.centerlines, fit.radii, shape)
     truth_ends = end_statistics(truth.centerlines, np.asarray(truth.radii), shape)
     precision = (len(owner) - false_positive) / max(len(owner), 1)
@@ -155,6 +233,9 @@ def score(fit, truth, *, coverage_threshold: float = 0.8, min_length: float | No
         "diameter_rms_error_m": 2 * float(np.sqrt(np.mean(np.square(radius_errors)))) * h if radius_errors else None,
         "solid_dice": dice,
         "voxel_label_accuracy": label_accuracy,
+        "centerline_recall": centerline["recall"],
+        "centerline_precision": centerline["precision"],
+        "centerline_f1": centerline["f1"],
         "interior_ends_fit": fit_ends["interior_ends"],
         "interior_ends_truth": truth_ends["interior_ends"],
         "implied_mean_length_fit_m": fit_ends["implied_length"] * h if fit_ends["implied_length"] else None,
