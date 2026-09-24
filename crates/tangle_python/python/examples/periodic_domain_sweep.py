@@ -14,8 +14,8 @@ image; that interaction is the domain effect under study, not an error.
 Fibers are placed all at once, not deposited layer by layer: each gets a
 random in-plane direction, a random tilt of at most 10 degrees out of the
 plane (the in-plane bias), and a random position anywhere in a cell twice the
-final thickness. The stack is relaxed, trimmed to the fibers, and compacted
-from both z walls to the target volume fraction. Tilted fibers cross the
+final thickness. The stack is relaxed and compacted from both z walls to the
+target volume fraction. Tilted fibers cross the
 thickness, so neighbors interlock instead of lying in separate layers.
 
 Fibers (diameter 0.2) use 25 segments (length 0.4) wherever the cell allows
@@ -328,9 +328,10 @@ def build(
     # Randomly placed fibers overlap; separate them before compaction, which
     # waits for a relaxed baseline and otherwise stops at once.
     contact_stage(recipe, config, "placement/contact", FORMATION_TOLERANCE, 60_000)
-    # Trim the empty space above and below the stack so both walls start on
-    # the fibers.
-    recipe.fit_cell_to_active_fibers(padding=0.05 * config.diameter)
+    # Fibers fill the placement cell, so both walls meet them without
+    # trimming it first. Trimming could leave the few fibers of a small cell
+    # (they settle into less than the target thickness) already past the
+    # target, with no compaction and lopsided grips.
     # Once the fibers touch, the default averaged correction cannot clear a
     # compaction increment within one window; use the contact stages' solver.
     recipe.compact(
