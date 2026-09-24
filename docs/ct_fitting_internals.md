@@ -457,8 +457,11 @@ After the final solve and its confidence, up to `redraw_passes` passes:
    fiber outside every region that no kept fiber follows any more (the
    redraw may have joined it into a reverted one). When old and new fibers
    are mixed, the merged fit gets one settle (every node pinned for the
-   image run, so only the unpinned settle acts). The pass is kept if the
-   merged fit's total sure coverage rose; otherwise everything is reverted.
+   image run, so only the unpinned settle acts). The groups were judged
+   one by one, so the merged fit is only checked for a clear loss: the pass
+   is reverted if its total sure coverage fell by more than 0.005 (an
+   earlier rule that required a total gain vetoed passes whose groups had
+   each improved).
    `FitSettings.redraw_score` picks the score: `"confidence"` (above),
    `"mask"` (the drop in `residual_map`: foreground farther than r + m
    from every fit, plus background inside a capsule; the pass is then kept

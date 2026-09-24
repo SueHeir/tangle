@@ -310,11 +310,13 @@ def residual_map(
     from ._geometry import rasterize
 
     if not lines:
-        return foreground.astype(np.uint8)
+        return foreground.astype(np.int32)
     radii = np.asarray(radii, dtype=np.float64)
     labels, distance, _ = rasterize(
         foreground.shape, lines, radii, reach=radii + margin, signed=True
     )
     unexplained = foreground & (labels == 0)
     extra = ~foreground & (labels > 0) & (distance <= 0.0)
-    return (unexplained | extra).astype(np.uint8)
+    return (unexplained | extra).astype(
+        np.int32
+    )  # int32 so differences of sums cannot wrap

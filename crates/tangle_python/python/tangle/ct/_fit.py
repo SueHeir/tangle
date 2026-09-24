@@ -816,7 +816,9 @@ class _Fitter:
                 confidence_gain[c] = (
                     float(new_map[mask].sum(dtype=np.float64) - old_map[mask].sum(dtype=np.float64)) / foreground
                 )
-                mask_gain[c] = float(old_residual[mask].sum() - new_residual[mask].sum()) / foreground
+                mask_gain[c] = (
+                    float(old_residual[mask].sum(dtype=np.int64)) - float(new_residual[mask].sum(dtype=np.int64))
+                ) / foreground
             better = {"confidence": confidence_gain > 1e-3, "mask": mask_gain > 1e-3, "all": np.ones(count, dtype=bool)}
             accepted = better[s.redraw_score]
             if _REDRAW_PROBE is not None:
@@ -848,17 +850,21 @@ class _Fitter:
             if kept:
                 merged_confidence, merged_settled, summary = self.scores(merged, merged_radii, previous=None)
                 coverage = _confidence.sure_coverage(self.foreground, merged, merged_radii, merged_settled)
+                # The groups were judged one by one; the merged fit is only
+                # checked for a clear loss (where kept and reverted groups
+                # meet, or from the settle), not required to gain overall.
                 if s.redraw_score == "confidence":
-                    kept = coverage > before_coverage
+                    kept = coverage > before_coverage - 0.005
                 elif s.redraw_score == "mask":
                     residual = _confidence.residual_map(self.foreground, merged, merged_radii, self.margin)
-                    kept = int(residual.sum()) < int(old_residual.sum())
+                    kept = int(residual.sum()) <= int(old_residual.sum()) + 0.005 * float(self.foreground.sum())
             for k, (low, high) in enumerate(cut.regions):
                 ok = kept and bool(accepted[component[k]])
                 self._record(failures, low, high, ok)
             self.log(
                 f"redraw {pass_index + 1}", merged if kept else lines, **info, regions=len(cut.regions),
                 groups=count, groups_kept=int(accepted.sum()) if kept else 0,
+                groups_accepted=int(accepted.sum()),
                 groups_better_by_confidence=int(better["confidence"].sum()),
                 groups_better_by_mask=int(better["mask"].sum()),
                 regions_given_up=len(given_up), regions_widened=len(widen),
