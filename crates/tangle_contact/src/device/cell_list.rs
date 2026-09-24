@@ -22,32 +22,40 @@ pub fn clear_cell_list(
     }
 }
 
-#[cube(launch_unchecked)]
-pub fn count_cell_segments(
-    positions: &[f32],
-    segment_vertices: &[u32],
-    active_segments: &[u32],
-    active_counts: &[Atomic<u32>],
-    cell_counts: &mut [Atomic<u32>],
+/// Grid cell holding the midpoint of piece `proxy` when the segment from
+/// `p` to `q` is split into `proxies` equal pieces.
+///
+/// Binning long segments as several short proxies keeps the grid sized for
+/// the short (refined) segments. With one proxy this is the segment midpoint,
+/// computed exactly as before proxies existed. Every kernel that locates a
+/// proxy uses this function, so they agree bit for bit.
+#[cube]
+#[allow(clippy::too_many_arguments)]
+pub fn proxy_cell(
+    px: f32,
+    py: f32,
+    pz: f32,
+    qx: f32,
+    qy: f32,
+    qz: f32,
+    proxy: u32,
+    proxies: u32,
     cell_lower: &[f32],
     cell_upper: &[f32],
     cell_periodic: &[u32],
-    control: &[u32],
     cells_x: u32,
     cells_y: u32,
     cells_z: u32,
-) {
-    let work = ABSOLUTE_POS;
-    if work >= active_counts[0].load() as usize || control[0] == 0 {
-        terminate!();
+) -> u32 {
+    let mut midpoint_x = 0.5 * (px + qx);
+    let mut midpoint_y = 0.5 * (py + qy);
+    let mut midpoint_z = 0.5 * (pz + qz);
+    if proxies > 1 {
+        let fraction = (proxy as f32 + 0.5) / proxies as f32;
+        midpoint_x = px + (qx - px) * fraction;
+        midpoint_y = py + (qy - py) * fraction;
+        midpoint_z = pz + (qz - pz) * fraction;
     }
-    let segment = active_segments[work as usize];
-    let segment_index = segment as usize;
-    let first = segment_vertices[2 * segment_index] as usize;
-    let second = segment_vertices[2 * segment_index + 1] as usize;
-    let midpoint_x = 0.5 * (positions[3 * first] + positions[3 * second]);
-    let midpoint_y = 0.5 * (positions[3 * first + 1] + positions[3 * second + 1]);
-    let midpoint_z = 0.5 * (positions[3 * first + 2] + positions[3 * second + 2]);
     // Make the numerical hash period exactly equal to the physical cell.
     let width_x = (cell_upper[0] - cell_lower[0]) / cells_x as f32;
     let width_y = (cell_upper[1] - cell_lower[1]) / cells_y as f32;
@@ -67,8 +75,68 @@ pub fn count_cell_segments(
     if cell_periodic[2] != 0 {
         z = ((raw_z % cells_z as i32 + cells_z as i32) % cells_z as i32) as u32;
     }
-    let cell = (z * cells_y + y) * cells_x + x;
-    cell_counts[cell as usize].fetch_add(1);
+    (z * cells_y + y) * cells_x + x
+}
+
+/// Proxy piece of a `proxies`-piece segment containing the point at
+/// `parameter` in `[0, 1]` along it.
+#[cube]
+pub fn proxy_of(parameter: f32, proxies: u32) -> u32 {
+    let piece = (parameter * proxies as f32).floor() as u32;
+    piece.min(proxies - 1)
+}
+
+/// Counts the proxies binned into each cell. `use_proxies == 0` bins every
+/// segment whole (one proxy), as the contact-capture grid requires.
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn count_cell_segments(
+    positions: &[f32],
+    segment_vertices: &[u32],
+    segment_proxies: &[u32],
+    active_segments: &[u32],
+    active_counts: &[Atomic<u32>],
+    cell_counts: &mut [Atomic<u32>],
+    cell_lower: &[f32],
+    cell_upper: &[f32],
+    cell_periodic: &[u32],
+    control: &[u32],
+    use_proxies: u32,
+    cells_x: u32,
+    cells_y: u32,
+    cells_z: u32,
+) {
+    let work = ABSOLUTE_POS;
+    if work >= active_counts[0].load() as usize || control[0] == 0 {
+        terminate!();
+    }
+    let segment = active_segments[work as usize];
+    let segment_index = segment as usize;
+    let first = segment_vertices[2 * segment_index] as usize;
+    let second = segment_vertices[2 * segment_index + 1] as usize;
+    let mut proxies = 1_u32;
+    if use_proxies != 0 {
+        proxies = segment_proxies[segment_index];
+    }
+    for proxy in 0..proxies {
+        let cell = proxy_cell(
+            positions[3 * first],
+            positions[3 * first + 1],
+            positions[3 * first + 2],
+            positions[3 * second],
+            positions[3 * second + 1],
+            positions[3 * second + 2],
+            proxy,
+            proxies,
+            cell_lower,
+            cell_upper,
+            cell_periodic,
+            cells_x,
+            cells_y,
+            cells_z,
+        );
+        cell_counts[cell as usize].fetch_add(1);
+    }
 }
 
 /// Scans one 256-element block and emits the block total for recursive scans.
@@ -178,25 +246,28 @@ pub fn add_cell_block_offsets(
     output[index as usize] += block_offsets[CUBE_POS];
 }
 
-/// Places every active segment in its cell's slot range. The atomic cursor
-/// fills a cell in a run-dependent order, so this writes to scratch slots
-/// (`scattered_segments`, with each slot's cell in `slot_cells`) that
-/// [`rank_cell_segments`] then puts in segment order.
+/// Places every proxy in its cell's slot range. The atomic cursor fills a
+/// cell in a run-dependent order, so this writes to scratch slots (the
+/// segment in `scattered_segments`, the piece in `scattered_proxies`, the
+/// cell in `slot_cells`) that [`rank_cell_segments`] then puts in order.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn scatter_cell_segments(
     positions: &[f32],
     segment_vertices: &[u32],
+    segment_proxies: &[u32],
     active_segments: &[u32],
     active_counts: &[Atomic<u32>],
     cell_offsets: &[u32],
     cell_cursors: &mut [Atomic<u32>],
     scattered_segments: &mut [u32],
+    scattered_proxies: &mut [u32],
     slot_cells: &mut [u32],
     cell_lower: &[f32],
     cell_upper: &[f32],
     cell_periodic: &[u32],
     control: &[u32],
+    use_proxies: u32,
     cells_x: u32,
     cells_y: u32,
     cells_z: u32,
@@ -209,62 +280,75 @@ pub fn scatter_cell_segments(
     let segment_index = segment as usize;
     let first = segment_vertices[2 * segment_index] as usize;
     let second = segment_vertices[2 * segment_index + 1] as usize;
-    let midpoint_x = 0.5 * (positions[3 * first] + positions[3 * second]);
-    let midpoint_y = 0.5 * (positions[3 * first + 1] + positions[3 * second + 1]);
-    let midpoint_z = 0.5 * (positions[3 * first + 2] + positions[3 * second + 2]);
-    let width_x = (cell_upper[0] - cell_lower[0]) / cells_x as f32;
-    let width_y = (cell_upper[1] - cell_lower[1]) / cells_y as f32;
-    let width_z = (cell_upper[2] - cell_lower[2]) / cells_z as f32;
-    let raw_x = ((midpoint_x - cell_lower[0]) / width_x).floor() as i32;
-    let raw_y = ((midpoint_y - cell_lower[1]) / width_y).floor() as i32;
-    let raw_z = ((midpoint_z - cell_lower[2]) / width_z).floor() as i32;
-    let mut x = raw_x.clamp(0, cells_x as i32 - 1) as u32;
-    let mut y = raw_y.clamp(0, cells_y as i32 - 1) as u32;
-    let mut z = raw_z.clamp(0, cells_z as i32 - 1) as u32;
-    if cell_periodic[0] != 0 {
-        x = ((raw_x % cells_x as i32 + cells_x as i32) % cells_x as i32) as u32;
+    let mut proxies = 1_u32;
+    if use_proxies != 0 {
+        proxies = segment_proxies[segment_index];
     }
-    if cell_periodic[1] != 0 {
-        y = ((raw_y % cells_y as i32 + cells_y as i32) % cells_y as i32) as u32;
+    for proxy in 0..proxies {
+        let cell = proxy_cell(
+            positions[3 * first],
+            positions[3 * first + 1],
+            positions[3 * first + 2],
+            positions[3 * second],
+            positions[3 * second + 1],
+            positions[3 * second + 2],
+            proxy,
+            proxies,
+            cell_lower,
+            cell_upper,
+            cell_periodic,
+            cells_x,
+            cells_y,
+            cells_z,
+        );
+        let slot = cell_cursors[cell as usize].fetch_add(1);
+        let index = (cell_offsets[cell as usize] + slot) as usize;
+        scattered_segments[index] = segment;
+        scattered_proxies[index] = proxy;
+        slot_cells[index] = cell;
     }
-    if cell_periodic[2] != 0 {
-        z = ((raw_z % cells_z as i32 + cells_z as i32) % cells_z as i32) as u32;
-    }
-    let cell = (z * cells_y + y) * cells_x + x;
-    let slot = cell_cursors[cell as usize].fetch_add(1);
-    let index = (cell_offsets[cell as usize] + slot) as usize;
-    scattered_segments[index] = segment;
-    slot_cells[index] = cell;
 }
 
-/// Writes each cell's segments to `cell_segments` in ascending segment order.
+/// Writes each cell's slots to `cell_segments`/`cell_proxies` in ascending
+/// (segment, piece) order.
 ///
-/// Each scratch slot counts the smaller segment indices in its own cell and
-/// moves to that rank, so neighbor lists, the overflow cell scan and contact
-/// capture see the same candidate order in every run, and float sums over
-/// candidates are bitwise repeatable.
+/// Each scratch slot counts the smaller keys in its own cell and moves to
+/// that rank, so neighbor lists, the overflow cell scan and contact capture
+/// see the same candidate order in every run, and float sums over candidates
+/// are bitwise repeatable. `cell_count` is the allocated cell count; the
+/// filled slots end at its last offset plus count.
 #[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
 pub fn rank_cell_segments(
-    active_counts: &[Atomic<u32>],
     cell_counts: &[u32],
     cell_offsets: &[u32],
     scattered_segments: &[u32],
+    scattered_proxies: &[u32],
     slot_cells: &[u32],
     cell_segments: &mut [u32],
+    cell_proxies: &mut [u32],
     control: &[u32],
+    cell_count: u32,
 ) {
     let slot = ABSOLUTE_POS;
-    if slot >= active_counts[0].load() as usize || control[0] == 0 {
+    let last = (cell_count - 1) as usize;
+    if control[0] == 0 || slot >= (cell_offsets[last] + cell_counts[last]) as usize {
         terminate!();
     }
     let cell = slot_cells[slot] as usize;
     let start = cell_offsets[cell] as usize;
     let segment = scattered_segments[slot];
+    let proxy = scattered_proxies[slot];
     let mut rank = 0_usize;
     for other in 0..cell_counts[cell] {
-        if scattered_segments[start + other as usize] < segment {
+        let other_slot = start + other as usize;
+        let other_segment = scattered_segments[other_slot];
+        if other_segment < segment
+            || (other_segment == segment && scattered_proxies[other_slot] < proxy)
+        {
             rank += 1;
         }
     }
     cell_segments[start + rank] = segment;
+    cell_proxies[start + rank] = proxy;
 }
