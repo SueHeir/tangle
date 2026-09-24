@@ -181,6 +181,7 @@ def rank_plans(
     base_profiles: list[np.ndarray] | None = None,
     void: float = 0.0,
     cap: int = 1024,
+    exact: int = 24,
 ) -> list[Plan]:
     """Every combination for one region, best (lowest score) first.
 
@@ -194,6 +195,12 @@ def rank_plans(
     base fibers, the residual compares the scan's grey with the fibers
     drawn with their profiles (``_grey.render_grey``, brighter fiber where
     two meet) instead of ``image`` with plain occupancy.
+
+    Every combination gets a quick score from each element's own effect
+    (its change to the residual and its overlap with the fixed fibers,
+    measured once); the best ``exact`` are then drawn whole and scored
+    exactly, and come first. The rest keep their quick scores
+    (``details["quick"]``).
     """
     from ._moves import render_occupancy
 
@@ -237,31 +244,63 @@ def rank_plans(
 
         bridge_grey = {key: drawn(curve, key[0]) for key, curve in pairs.items()}
         extension_grey = [drawn(tails[k], k) for k in range(len(ports))]
-    plans = []
+    radius = float(np.mean([p.radius for p in ports])) if ports else 1.0
+    area = np.pi * radius * radius
+    shown_base = drawn_base if drawn_base is not None else base
+    base_residual = float(((observed - shown_base) ** 2).sum())
+
+    def pieces_of(chosen: list[tuple[int, int]], paired: set[int]) -> list[tuple]:
+        """(occupancy, drawn) of every element a plan adds."""
+        items = [(bridge_occupancy[key], bridge_grey[key] if bridge_grey else None) for key in chosen]
+        items += [
+            (extension_occupancy[k], extension_grey[k] if extension_grey else None)
+            for k in range(len(ports))
+            if k not in paired
+        ]
+        return [item for item in items if item[0] is not None]
+
+    # Each element's own change to the residual and its overlap with the fixed
+    # fibers, measured once: a plan's quick score adds them up (exact while its
+    # elements don't overlap one another), and only the best ``exact`` plans
+    # are drawn whole.
+    delta: dict[int, tuple[float, float]] = {}
+
+    def alone(item: tuple) -> tuple[float, float]:
+        key = id(item[0])
+        if key not in delta:
+            occupancy, drawn = item
+            shown = drawn if drawn_base is not None else occupancy
+            together = np.maximum(shown_base, shown) if shown is not None else shown_base
+            change = float(((observed - together) ** 2).sum()) - base_residual
+            overlap = float(((occupancy >= 0.5) & (base_count >= 1)).sum())
+            delta[key] = (change, overlap)
+        return delta[key]
+
+    candidates = []
     for chosen in matchings(len(ports), list(pairs), cap=cap):
         paired = {i for pair in chosen for i in pair}
-        parts = [bridge_occupancy[key] for key in chosen]
-        parts += [extension_occupancy[k] for k in range(len(ports)) if k not in paired]
-        parts = [p for p in parts if p is not None]
-        rendered = base.copy()
-        count = base_count.copy()
-        for part in parts:
-            np.maximum(rendered, part, out=rendered)
-            count += part >= 0.5
-        if drawn_base is not None:
-            rendered = drawn_base.copy()
-            shown = [bridge_grey[key] for key in chosen]
-            shown += [extension_grey[k] for k in range(len(ports)) if k not in paired]
-            for part in shown:
-                if part is not None:
-                    np.maximum(rendered, part, out=rendered)
-        residual = float(((observed - rendered) ** 2).sum())
-        overlap = float(np.maximum(count - np.maximum(base_count, 1), 0).sum())
         ends = [k for k in range(len(ports)) if k not in paired and interior[k]]
-        radius = float(np.mean([p.radius for p in ports])) if ports else 1.0
-        overlap_nats = overlap / (np.pi * radius * radius)
         end_nats = float(sum(end_costs[k] for k in ends))
         join_nats = float(sum(join_costs.get(pair, 0.0) for pair in chosen)) if join_costs else 0.0
+        items = pieces_of(chosen, paired)
+        changes = [alone(item) for item in items]
+        quick = (base_residual + sum(c for c, _ in changes)) / scale + sum(o for _, o in changes) / area
+        candidates.append((quick + end_nats + join_nats, chosen, paired, ends, end_nats, join_nats, items))
+    candidates.sort(key=lambda c: c[0])
+
+    plans = []
+    for rank, (quick, chosen, paired, ends, end_nats, join_nats, items) in enumerate(candidates):
+        if rank >= exact:
+            plans.append(Plan(quick, chosen, len(ends), {"quick": True, "end_nats": end_nats, "join_nats": join_nats}))
+            continue
+        rendered = shown_base.copy()
+        count = base_count.copy()
+        for occupancy, drawn in items:
+            np.maximum(rendered, drawn if drawn_base is not None else occupancy, out=rendered)
+            count += occupancy >= 0.5
+        residual = float(((observed - rendered) ** 2).sum())
+        overlap = float(np.maximum(count - np.maximum(base_count, 1), 0).sum())
+        overlap_nats = overlap / area
         score = residual / scale + overlap_nats + end_nats + join_nats
         plans.append(
             Plan(
@@ -276,8 +315,8 @@ def rank_plans(
                 },
             )
         )
-    plans.sort(key=lambda plan: plan.score)
-    return plans
+    head = sorted(plans[:exact], key=lambda plan: plan.score)
+    return head + plans[exact:]
 
 
 def assemble(

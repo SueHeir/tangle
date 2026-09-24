@@ -496,7 +496,10 @@ After the final solve and its confidence, up to `redraw_passes` passes:
    the residual is instead the denoised scan against the fibers drawn with
    their profiles (`render_grey`, the brighter fiber where two meet), over
    the grey evidence scale 2 σ² π r² (σ² the mean squared grey residual
-   near the fibers). Shape 1 gives
+   near the fibers). Every matching first gets a quick score, the sum of each element's
+   own residual change and overlap with the fixed fibers (measured once
+   per element); only the best 24 are drawn whole and scored exactly.
+   A pass's region ranking is computed once and shared by its candidates. Shape 1 gives
    the old constant ln(L/D) and free joins. A piece's own (uncut) end
    inside a region box and away from the scan boundary is a port as well;
    unjoined it gets no extension and stays where it is. The
