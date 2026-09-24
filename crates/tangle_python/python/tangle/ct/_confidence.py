@@ -294,3 +294,27 @@ def sure_coverage(
         float(coverage_map(foreground, lines, radii, confidence).sum(dtype=np.float64))
         / total
     )
+
+
+def residual_map(
+    foreground: np.ndarray,
+    lines: list[np.ndarray],
+    radii: np.ndarray,
+    margin: float = 0.0,
+) -> np.ndarray:
+    """Per voxel: 1 where the fit disagrees with the foreground, else 0.
+
+    Foreground voxels farther than radius + ``margin`` from every fit are
+    unexplained; background voxels inside a fit's capsule are extra.
+    """
+    from ._geometry import rasterize
+
+    if not lines:
+        return foreground.astype(np.uint8)
+    radii = np.asarray(radii, dtype=np.float64)
+    labels, distance, _ = rasterize(
+        foreground.shape, lines, radii, reach=radii + margin, signed=True
+    )
+    unexplained = foreground & (labels == 0)
+    extra = ~foreground & (labels > 0) & (distance <= 0.0)
+    return (unexplained | extra).astype(np.uint8)

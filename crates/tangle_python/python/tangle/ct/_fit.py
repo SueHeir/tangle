@@ -94,6 +94,11 @@ class FitSettings:
     # left alone after ``redraw_attempts`` failures.
     redraw_passes: int = 5
     redraw_attempts: int = 3
+    # How a region's redraw is judged: "confidence" (sure coverage, see
+    # ``_confidence.sure_coverage``), "mask" (fewer foreground voxels left
+    # unexplained plus fewer fit voxels over void), or "all" (every redraw
+    # is kept, for comparison).
+    redraw_score: str = "confidence"
     confidence_threshold: float = 0.5
 
     def replace(self, **changes: Any) -> "FitSettings":
@@ -447,6 +452,12 @@ def load_fit(path: str | Path) -> FitResult:
     )
 
 
+# Test hook: when set, called once per redraw pass with each group's box
+# mask, the fit before and after, and each group's gains, so a script with
+# ground truth can check how well the scores pick good redraws.
+_REDRAW_PROBE = None
+
+
 def fit_fibers(
     volume: np.ndarray,
     voxel_size: float,
@@ -492,6 +503,8 @@ def fit_fibers(
             )
     if exclude is not None and np.shape(exclude) != volume.shape:
         raise ValueError("exclude must have the same shape as volume")
+    if settings.redraw_score not in ("confidence", "mask", "all"):
+        raise ValueError('redraw_score must be "confidence", "mask" or "all"')
     if not _device.available():
         raise RuntimeError("tangle.ct needs a Tangle build with tangle.ImageRelaxer")
 
@@ -793,12 +806,26 @@ class _Fitter:
             )
             component = _regrow.region_components(len(cut.regions), old_touch, new_touch)
             count = int(component.max()) + 1 if len(component) else 0
-            accepted = np.zeros(count, dtype=bool)
-            for c in range(count):
-                mask = self._box_mask([boxes[k] for k in np.flatnonzero(component == c)])
-                foreground = float(self.foreground[mask].sum())
-                gain = float(new_map[mask].sum(dtype=np.float64) - old_map[mask].sum(dtype=np.float64))
-                accepted[c] = gain > 1e-3 * max(foreground, 1.0)
+            old_residual = _confidence.residual_map(self.foreground, lines, radii, self.margin)
+            new_residual = _confidence.residual_map(self.foreground, new_lines, new_radii, self.margin)
+            masks = [self._box_mask([boxes[k] for k in np.flatnonzero(component == c)]) for c in range(count)]
+            confidence_gain = np.zeros(count)
+            mask_gain = np.zeros(count)
+            for c, mask in enumerate(masks):
+                foreground = max(float(self.foreground[mask].sum()), 1.0)
+                confidence_gain[c] = (
+                    float(new_map[mask].sum(dtype=np.float64) - old_map[mask].sum(dtype=np.float64)) / foreground
+                )
+                mask_gain[c] = float(old_residual[mask].sum() - new_residual[mask].sum()) / foreground
+            better = {"confidence": confidence_gain > 1e-3, "mask": mask_gain > 1e-3, "all": np.ones(count, dtype=bool)}
+            accepted = better[s.redraw_score]
+            if _REDRAW_PROBE is not None:
+                _REDRAW_PROBE(
+                    {
+                        "pass": pass_index + 1, "masks": masks, "old": (lines, radii), "new": (new_lines, new_radii),
+                        "confidence_gain": confidence_gain, "mask_gain": mask_gain, "accepted": accepted.copy(),
+                    }
+                )
             keep_old, keep_new = _regrow.choose(old_touch, new_touch, component, accepted)
             # An old fiber outside every region should be in the redraw too; if
             # the redraw's topology step joined it into a reverted fiber, bring
@@ -821,13 +848,19 @@ class _Fitter:
             if kept:
                 merged_confidence, merged_settled, summary = self.scores(merged, merged_radii, previous=None)
                 coverage = _confidence.sure_coverage(self.foreground, merged, merged_radii, merged_settled)
-                kept = coverage > before_coverage
+                if s.redraw_score == "confidence":
+                    kept = coverage > before_coverage
+                elif s.redraw_score == "mask":
+                    residual = _confidence.residual_map(self.foreground, merged, merged_radii, self.margin)
+                    kept = int(residual.sum()) < int(old_residual.sum())
             for k, (low, high) in enumerate(cut.regions):
                 ok = kept and bool(accepted[component[k]])
                 self._record(failures, low, high, ok)
             self.log(
                 f"redraw {pass_index + 1}", merged if kept else lines, **info, regions=len(cut.regions),
                 groups=count, groups_kept=int(accepted.sum()) if kept else 0,
+                groups_better_by_confidence=int(better["confidence"].sum()),
+                groups_better_by_mask=int(better["mask"].sum()),
                 regions_given_up=len(given_up), regions_widened=len(widen),
                 sure_coverage=round(coverage if kept else before_coverage, 4), kept=kept,
             )

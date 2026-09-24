@@ -289,13 +289,8 @@ EXAMPLES: dict[str, Callable[[Path], Example]] = {
 # -- the runner -----------------------------------------------------------------
 
 
-def label_diff(scan: ct.SyntheticScan, fit_labels: np.ndarray) -> tuple[np.ndarray, dict, dict]:
-    """RGB stack of where the fit and the truth disagree, voxel counts, and the class masks.
-
-    Each fitted fiber is matched to the true fiber it overlaps most; a voxel
-    both call fiber is "wrong_fiber" when its fit is matched to another one.
-    """
-    truth = np.asarray(scan.labels)
+def _truth_mapping(truth: np.ndarray, fit_labels: np.ndarray) -> np.ndarray:
+    """For every fit label, the true fiber it overlaps most (0 = none)."""
     both = (truth > 0) & (fit_labels > 0)
     mapping = np.zeros(int(fit_labels.max()) + 1, dtype=truth.dtype)
     if both.any():
@@ -304,6 +299,18 @@ def label_diff(scan: ct.SyntheticScan, fit_labels: np.ndarray) -> tuple[np.ndarr
         fits, trues = np.divmod(values, int(truth.max()) + 1)
         order = np.lexsort((counts, fits))  # by fit, then count ascending
         mapping[fits[order]] = trues[order]  # the last (largest count) write wins per fit
+    return mapping
+
+
+def label_diff(scan: ct.SyntheticScan, fit_labels: np.ndarray) -> tuple[np.ndarray, dict, dict]:
+    """RGB stack of where the fit and the truth disagree, voxel counts, and the class masks.
+
+    Each fitted fiber is matched to the true fiber it overlaps most; a voxel
+    both call fiber is "wrong_fiber" when its fit is matched to another one.
+    """
+    truth = np.asarray(scan.labels)
+    both = (truth > 0) & (fit_labels > 0)
+    mapping = _truth_mapping(truth, fit_labels)
     classes = {
         "missed": (truth > 0) & (fit_labels == 0),
         "extra": (truth == 0) & (fit_labels > 0),
@@ -489,11 +496,77 @@ def write_summary(output: Path, rows: list[dict]) -> None:
     (output / "summary.md").write_text(header + "\n".join(lines) + "\n")
 
 
+def redraw_study(names: list[str], output: Path, repeats: int) -> None:
+    """Does each redraw group bring the fit closer to the truth, and which score says so?
+
+    Fits every example with one redraw pass in which every group is kept
+    (``redraw_score="all"``), and for every group compares the truth's
+    verdict (the fraction of true fiber voxels in the group's boxes that
+    carry the right fiber, after minus before) with the fitter's two
+    scores. Prints a table; writes nothing.
+    """
+    import tangle.ct._fit as fit_module
+    from tangle.ct._geometry import rasterize
+
+    records = []
+    for name in names:
+        example = EXAMPLES[name](output / ".cache" / f"{name}.json")
+        scan = example.scan
+        truth = np.asarray(scan.labels)
+        solid = truth > 0
+        mask = scan.fiber_mask(level=MASK_LEVEL)
+
+        def correct(lines, radii):
+            labels, _, _ = rasterize(truth.shape, lines, np.asarray(radii), signed=True)
+            return solid & (_truth_mapping(truth, labels)[labels] == truth)
+
+        for repeat in range(repeats):
+
+            def probe(event, name=name, repeat=repeat):
+                before, after = correct(*event["old"]), correct(*event["new"])
+                for c, box in enumerate(event["masks"]):
+                    true_voxels = max(int((solid & box).sum()), 1)
+                    records.append({
+                        "example": name, "repeat": repeat, "pass": event["pass"],
+                        "truth_gain": float((after & box).sum() - (before & box).sum()) / true_voxels,
+                        "confidence_gain": float(event["confidence_gain"][c]),
+                        "mask_gain": float(event["mask_gain"][c]),
+                    })
+
+            fit_module._REDRAW_PROBE = probe
+            try:
+                ct.fit_fibers(
+                    mask, scan.voxel_size, example.spec,
+                    ct.FitSettings(backend=BACKEND, redraw_score="all", redraw_passes=1),
+                )
+            finally:
+                fit_module._REDRAW_PROBE = None
+    truth_gain = np.array([r["truth_gain"] for r in records])
+    better = truth_gain > 0.005
+    worse = truth_gain < -0.005
+    print(f"{len(records)} groups; truth: {int(better.sum())} better, {int(worse.sum())} worse, rest unchanged")
+    print(f"mean truth gain if all kept: {truth_gain.mean():+.4f}")
+    for score in ("confidence_gain", "mask_gain"):
+        gain = np.array([r[score] for r in records])
+        chosen = gain > 1e-3
+        corr = float(np.corrcoef(gain, truth_gain)[0, 1]) if len(records) > 2 and gain.std() > 0 else float("nan")
+        print(
+            f"{score:16s} keeps {int(chosen.sum()):3d}: {int((chosen & better).sum())} of the better, "
+            f"{int((chosen & worse).sum())} of the worse; truth gain of kept {truth_gain[chosen].sum():+.3f}, "
+            f"of reverted {truth_gain[~chosen].sum():+.3f}; correlation {corr:+.2f}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("names", nargs="*", help="examples to run (default: all)")
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--list", action="store_true", help="list the examples and exit")
+    parser.add_argument(
+        "--redraw-study", action="store_true",
+        help="print how well the redraw scores agree with the truth (default single_type two_types)",
+    )
+    parser.add_argument("--repeats", type=int, default=2, help="fits per example for --redraw-study")
     args = parser.parse_args()
     if args.list:
         print("\n".join(EXAMPLES))
@@ -503,6 +576,9 @@ def main() -> None:
         parser.error(f"unknown examples: {', '.join(unknown)} (see --list)")
     output = args.output or Path(os.environ.get("TANGLE_CT_OUTPUT", Path(__file__).with_name("output") / "ct"))
     output.mkdir(parents=True, exist_ok=True)
+    if args.redraw_study:
+        redraw_study(args.names or ["single_type", "two_types"], output, args.repeats)
+        return
     rows = [run(name, output) for name in (args.names or list(EXAMPLES))]
     write_summary(output, rows)
     print(f"summary: {output / 'summary.md'}")

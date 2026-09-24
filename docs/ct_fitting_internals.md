@@ -459,6 +459,13 @@ After the final solve and its confidence, up to `redraw_passes` passes:
    are mixed, the merged fit gets one settle (every node pinned for the
    image run, so only the unpinned settle acts). The pass is kept if the
    merged fit's total sure coverage rose; otherwise everything is reverted.
+   `FitSettings.redraw_score` picks the score: `"confidence"` (above),
+   `"mask"` (the drop in `residual_map`: foreground farther than r + m
+   from every fit, plus background inside a capsule; the pass is then kept
+   if the total residual fell), or `"all"` (every group kept, for
+   comparison). `python ct_examples.py --redraw-study` runs one redraw
+   pass with `"all"` and prints, per group, whether the truth got better
+   and which score said so (`_fit._REDRAW_PROBE` is its hook).
 6. Failed regions are remembered as boxes with a failure count (a kept
    region clears overlapping ones); at `redraw_attempts` failures the box
    is given up. The passes end when nothing is left to cut.
