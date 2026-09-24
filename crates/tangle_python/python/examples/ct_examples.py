@@ -362,7 +362,7 @@ def varied(index: int) -> Callable[[Path], Example]:
     def build(cache: Path) -> Example:
         v = varied_settings(index)
         diameter, bend = v["diameter_um"] * um, v["min_bend_radius_um"] * um
-        side = v["side_um"] * um
+        side = VARIED_VOXELS * v["voxel_um"] * um  # exact: "side_um" is rounded, and the voxels must tile the cell
         material = tangle.Material(f"fiber_{v['diameter_um']:g}um", diameter=diameter, min_bend_radius=bend)
         orientation = {
             "planar": lambda: tangle.PlanarOrientation(max_tilt=v["tilt"]),
