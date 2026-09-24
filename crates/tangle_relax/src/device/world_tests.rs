@@ -1251,8 +1251,9 @@ fn neighbor_lists_match_rebuilding_every_iteration() {
         neighbor_capacity: 1,
         ..CellListConfig::default()
     });
-    // Atomic cell scatter makes the order of each correction sum, and so the
-    // last float bits, run-dependent; the contacts themselves are identical.
+    // Lists built at different iterations visit the same contacts in a
+    // different order, so the last float bits of each correction sum differ;
+    // the contacts themselves are identical.
     let largest_difference = |left: &[f32], right: &[f32]| {
         left.iter()
             .zip(right)
@@ -1391,4 +1392,29 @@ fn neighbor_lists_hold_every_pair_within_the_skin() {
         }
     }
     assert!(checked > segments, "fixture has too few neighbor pairs");
+}
+
+#[test]
+fn relaxation_is_bitwise_repeatable() {
+    // Same input, code and backend give identical positions: the cell list
+    // is ranked into segment order after its atomic scatter, so every
+    // correction sum adds the same terms in the same order.
+    for cell_list in [
+        CellListConfig::default(),
+        // One slot per segment sends crowded segments through the cell scan.
+        CellListConfig {
+            neighbor_capacity: 1,
+            ..CellListConfig::default()
+        },
+    ] {
+        let (first, first_rebuilds) = relax_dense_mat(cell_list);
+        let (second, second_rebuilds) = relax_dense_mat(cell_list);
+        assert_eq!(first_rebuilds, second_rebuilds);
+        let first_bits: Vec<u32> = first.iter().map(|value| value.to_bits()).collect();
+        let second_bits: Vec<u32> = second.iter().map(|value| value.to_bits()).collect();
+        assert!(
+            first_bits == second_bits,
+            "{cell_list:?} relaxed differently"
+        );
+    }
 }
