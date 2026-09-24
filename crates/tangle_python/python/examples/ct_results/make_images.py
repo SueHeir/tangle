@@ -150,14 +150,17 @@ def blur_comparison(runs: list[tuple[str, Path]], name: str, out: Path) -> None:
     z = busiest_slice(tifffile.imread(runs[0][1] / name / "true.tif"))
     fig, axes = plt.subplots(2, len(runs), figsize=(3.9 * len(runs), 8.2), dpi=DPI, facecolor="white")
     for column, (sigma, folder) in enumerate(runs):
-        score = json.loads((folder / name / "score.json").read_text())["score"]
+        report = json.loads((folder / name / "score.json").read_text())
+        score = report["score"]
+        own = report.get("settings", {}).get("psf_sigma_voxels")  # varied_* record their blur
+        label = f"blur {own:g} voxels" if own is not None else "default blur" if sigma == "default" else f"blur {sigma} voxels"
         for row, key in enumerate(("raw", "diff")):
             ax = axes[row, column]
             image = tifffile.imread(folder / name / f"{key}.tif")[z]
             ax.imshow(image, cmap="gray" if image.ndim == 2 else None, interpolation="nearest")
             ax.set_xticks([])
             ax.set_yticks([])
-        axes[0, column].set_title(f"blur {sigma} voxels", fontsize=13)
+        axes[0, column].set_title(label, fontsize=13)
         axes[1, column].set_title(
             f"{score['recovered']}/{score['true_fibers_in_volume']} recovered, F1 {score['centerline_f1']:.3f}", fontsize=11
         )
@@ -176,9 +179,10 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=HERE / "images")
     parser.add_argument(
         "--blur", nargs="+", metavar="SIGMA=FOLDER", default=None,
-        help="output folders of runs with different --blur, for <example>_blur.png (only these are drawn)",
+        help="output folders of runs with different --blur, for <example>_blur.png (only these are drawn); "
+        "SIGMA 'default' is a run without --blur",
     )
-    parser.add_argument("--blur-examples", nargs="+", default=["varied_3", "two_types"])
+    parser.add_argument("--blur-examples", nargs="+", default=["varied_3", "two_types", "scenario_dense_crossing"])
     args = parser.parse_args()
     if args.blur:
         runs = [(item.split("=", 1)[0], Path(item.split("=", 1)[1]).expanduser()) for item in args.blur]

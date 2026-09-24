@@ -98,6 +98,7 @@ BACKEND = os.environ.get("TANGLE_BACKEND", "wgpu")
 MASK_LEVEL = 0.35  # of the way from void to fiber grey level: a generous threshold
 INPUT = os.environ.get("TANGLE_CT_INPUT", "grey")  # "grey" (raw scan + ranges) or "mask"
 BLUR = None  # scan blur (PSF sigma, voxels) for every example; None keeps each example's own
+DIFF_COLORS = {"missed": (230, 50, 50), "extra": (60, 120, 255), "wrong_fiber": (255, 200, 0)}
 FILES = ("raw.tif", "input.tif", "true.tif", "segment.tif", "diff.tif", "confidence.tif", "fit.json", "score.json")
 
 
@@ -106,7 +107,6 @@ def render_scan(*args, **kwargs) -> ct.SyntheticScan:
     if BLUR is not None:
         kwargs["psf_sigma_voxels"] = BLUR
     return ct.synthetic_ct(*args, **kwargs)
-DIFF_COLORS = {"missed": (230, 50, 50), "extra": (60, 120, 255), "wrong_fiber": (255, 200, 0)}
 
 
 @dataclass
@@ -490,7 +490,9 @@ def varied(index: int) -> Callable[[Path], Example]:
         spec = ct.FiberSpec(
             diameter=diameter, min_bend_radius=bend, length=0.5 * (shortest + longest), name=material.name
         )
-        return Example(scan, spec, bend, lambda fit, scan: {"settings": v, **end_error_report(fit, scan)})
+        # A --blur run reports the blur it used, not the structure's own.
+        used = v if BLUR is None else {**v, "psf_sigma_voxels": BLUR}
+        return Example(scan, spec, bend, lambda fit, scan: {"settings": used, **end_error_report(fit, scan)})
 
     return build
 
