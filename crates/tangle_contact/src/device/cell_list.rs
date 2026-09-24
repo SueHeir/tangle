@@ -178,7 +178,12 @@ pub fn add_cell_block_offsets(
     output[index as usize] += block_offsets[CUBE_POS];
 }
 
+/// Places every active segment in its cell's slot range. The atomic cursor
+/// fills a cell in a run-dependent order, so this writes to scratch slots
+/// (`scattered_segments`, with each slot's cell in `slot_cells`) that
+/// [`rank_cell_segments`] then puts in segment order.
 #[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
 pub fn scatter_cell_segments(
     positions: &[f32],
     segment_vertices: &[u32],
@@ -186,7 +191,8 @@ pub fn scatter_cell_segments(
     active_counts: &[Atomic<u32>],
     cell_offsets: &[u32],
     cell_cursors: &mut [Atomic<u32>],
-    cell_segments: &mut [u32],
+    scattered_segments: &mut [u32],
+    slot_cells: &mut [u32],
     cell_lower: &[f32],
     cell_upper: &[f32],
     cell_periodic: &[u32],
@@ -226,6 +232,39 @@ pub fn scatter_cell_segments(
     }
     let cell = (z * cells_y + y) * cells_x + x;
     let slot = cell_cursors[cell as usize].fetch_add(1);
-    let start = cell_offsets[cell as usize];
-    cell_segments[(start + slot) as usize] = segment;
+    let index = (cell_offsets[cell as usize] + slot) as usize;
+    scattered_segments[index] = segment;
+    slot_cells[index] = cell;
+}
+
+/// Writes each cell's segments to `cell_segments` in ascending segment order.
+///
+/// Each scratch slot counts the smaller segment indices in its own cell and
+/// moves to that rank, so neighbor lists, the overflow cell scan and contact
+/// capture see the same candidate order in every run, and float sums over
+/// candidates are bitwise repeatable.
+#[cube(launch_unchecked)]
+pub fn rank_cell_segments(
+    active_counts: &[Atomic<u32>],
+    cell_counts: &[u32],
+    cell_offsets: &[u32],
+    scattered_segments: &[u32],
+    slot_cells: &[u32],
+    cell_segments: &mut [u32],
+    control: &[u32],
+) {
+    let slot = ABSOLUTE_POS;
+    if slot >= active_counts[0].load() as usize || control[0] == 0 {
+        terminate!();
+    }
+    let cell = slot_cells[slot] as usize;
+    let start = cell_offsets[cell] as usize;
+    let segment = scattered_segments[slot];
+    let mut rank = 0_usize;
+    for other in 0..cell_counts[cell] {
+        if scattered_segments[start + other as usize] < segment {
+            rank += 1;
+        }
+    }
+    cell_segments[start + rank] = segment;
 }
