@@ -99,6 +99,7 @@ def merge_fragments(
     scale: float = 1.0,
     max_prior_gap: float | None = None,
     max_prior_angle_degrees: float = 45.0,
+    chains: list[list[tuple[int, int]]] | None = None,
 ) -> tuple[list[np.ndarray], np.ndarray, int]:
     """Join pairs of ends that continue each other across a short gap.
 
@@ -106,14 +107,18 @@ def merge_fragments(
     would cut again is not made.
 
     With an ``end_cost`` (the fiber-length prior, see ``_ends``), the fixed
-    gap, angle and bridge tests are replaced by :func:`_merge_with_prior`.
+    gap, angle and bridge tests are replaced by :func:`_merge_with_prior`,
+    which also fills ``chains`` (not supported without the prior).
     """
     if end_cost > 0.0:
         return _merge_with_prior(
             image, centerlines, radii,
             max_gap=max_prior_gap or 4.0 * max_gap, max_angle_degrees=max_prior_angle_degrees,
             min_bend_radius=min_bend_radius, kink_threshold=kink_threshold, end_cost=end_cost, scale=scale,
+            chains=chains,
         )
+    if chains is not None:
+        raise ValueError("chains needs the length prior (end_cost > 0)")
     lines = [line.copy() for line in centerlines]
     radii = radii.copy()
     cos_limit = np.cos(np.radians(max_angle_degrees))
@@ -200,6 +205,7 @@ def _merge_with_prior(
     kink_threshold: float,
     end_cost: float,
     scale: float,
+    chains: list[list[tuple[int, int]]] | None = None,
 ) -> tuple[list[np.ndarray], np.ndarray, int]:
     """Join aligned end pairs whose join the scan and the length prior favor.
 
@@ -214,6 +220,10 @@ def _merge_with_prior(
     Pairings are chosen together: candidates are taken best first, each end
     joins at most once, and joins that would close a loop are skipped, so
     pieces meeting at a crossing are paired the way the scan supports best.
+
+    ``chains``, when given, is filled with the input fibers each output fiber
+    was joined from, in order along it, as ``(fiber, end it enters by)``: end
+    1 means the fiber runs reversed in the output.
     """
     from scipy.spatial import cKDTree
 
@@ -222,6 +232,8 @@ def _merge_with_prior(
     lines = [np.asarray(line, dtype=np.float64) for line in centerlines]
     radii = np.asarray(radii, dtype=np.float64)
     ends = [(i, e, *_end(line, e)) for i, line in enumerate(lines) if len(line) >= 3 for e in (0, 1)]
+    if chains is not None:
+        chains[:] = [[(i, 0)] for i in range(len(lines))]
     if len(ends) < 2:
         return lines, radii, 0
     cos_limit = np.cos(np.radians(max_angle_degrees))
@@ -307,7 +319,7 @@ def _merge_with_prior(
 
     # Walk each chain from a fiber with a free end.
     used = np.zeros(len(lines), dtype=bool)
-    merged_lines, merged_radii = [], []
+    merged_lines, merged_radii, members = [], [], []
     for start in range(len(lines)):
         if used[start]:
             continue
@@ -318,15 +330,20 @@ def _merge_with_prior(
         path = _oriented(lines[i], entry, at_start=True)
         weight, total = radii[i] * polyline_length(lines[i]), polyline_length(lines[i])
         used[i] = True
+        chain = [(i, entry)]
         while (i, 1 - entry) in link:
             j, ej = link[(i, 1 - entry)]
             path = _join(path, _oriented(lines[j], ej, at_start=True))
             weight += radii[j] * polyline_length(lines[j])
             total += polyline_length(lines[j])
             used[j] = True
+            chain.append((j, ej))
             i, entry = j, ej
         merged_lines.append(path)
         merged_radii.append(weight / max(total, 1e-9))
+        members.append(chain)
+    if chains is not None:
+        chains[:] = members
     return merged_lines, np.array(merged_radii), len(link) // 2
 
 
