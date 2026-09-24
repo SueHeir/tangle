@@ -941,9 +941,16 @@ class _Fitter:
         )
         dropped = 0
         if final:
+            # A fit the cut left whole (at most bridged) is kept at any length.
+            whole = np.bincount(source, minlength=len(lines)) == 1
             long_enough = [
                 i for i, piece in enumerate(pieces)
-                if polyline_length(piece) >= self.min_length[types[source[i]]] or len(pieces[i]) == len(lines[source[i]])
+                if polyline_length(piece) >= self.min_length[types[source[i]]]
+                or (
+                    whole[source[i]]
+                    and np.array_equal(piece[0], lines[source[i]][0])
+                    and np.array_equal(piece[-1], lines[source[i]][-1])
+                )
             ]
             dropped = len(pieces) - len(long_enough)
             pieces = [pieces[i] for i in long_enough]
