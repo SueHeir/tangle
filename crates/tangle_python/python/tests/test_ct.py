@@ -93,32 +93,6 @@ class CtToolTests(unittest.TestCase):
         self.assertEqual(merges, 1)
         self.assertEqual(len(joined), 1)
 
-    def test_rejoin_records_which_pieces_each_fiber_came_from(self):
-        from tangle.ct import _ends, _moves
-        from tangle.ct._geometry import resample
-        from tangle.ct._image import normalize
-
-        # A void cut left two pieces of one fiber touching end to end (the
-        # second stored reversed); the other fiber is a single piece.
-        image, _ = normalize(self.scan.volume, denoise_sigma=0.7)
-        radius = 0.5 * DIAMETER / VOXEL
-        line = resample(self.scan.centerlines[0], 0.5 * radius)
-        middle = len(line) // 2
-        pieces = [line[:middle], line[middle:][::-1], resample(self.scan.centerlines[1], 0.5 * radius)]
-        radii = np.full(3, radius)
-        cost = _ends.end_cost(200 * um, DIAMETER)
-        scale = _ends.evidence_scale(image, pieces, radii, radius)
-        chains = []
-        joined, _, merges = _moves.merge_fragments(
-            image, pieces, radii, max_gap=4 * radius, end_cost=cost, scale=scale, max_prior_gap=16 * radius,
-            chains=chains,
-        )
-        self.assertEqual(merges, 1)
-        self.assertEqual(chains, [[(0, 0), (1, 1)], [(2, 0)]])
-        np.testing.assert_allclose(joined[0][0], line[0])
-        np.testing.assert_allclose(joined[0][-1], line[-1])
-        np.testing.assert_array_equal(joined[1], pieces[2])
-
     def test_centerline_agreement_ignores_capsule_edges(self):
         from tangle.ct._evaluate import centerline_agreement
 

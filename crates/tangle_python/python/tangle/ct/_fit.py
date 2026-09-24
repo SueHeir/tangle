@@ -100,12 +100,6 @@ class FitSettings:
     # After every solve, fits are cut where their centerline sits in void
     # (the fiber image below this; None turns it off): end stretches are
     # trimmed, interior stretches ``void_gap_radii`` or longer split the fit.
-    # With ``void_rejoin``, the cut after the final and polish solves is
-    # followed by a join pass (the length-prior merge of the topology step)
-    # limited to ends at most ``void_rejoin_gap_radii`` apart and within
-    # ``void_rejoin_angle_degrees``, so pieces the cut left touching end to
-    # end are one fiber again. (With the topology step's 16 radii and 45°,
-    # it joined pieces of different fibers at crossings.)
     void_level: float | None = 0.3
     void_gap_radii: float = 2.0
     # An interior void stretch is bridged only when it bows at least
@@ -119,9 +113,6 @@ class FitSettings:
     # this off.
     void_aligned_level: float = 0.5
     void_aligned_angle_degrees: float | None = 15.0
-    void_rejoin: bool = True
-    void_rejoin_gap_radii: float = 1.0
-    void_rejoin_angle_degrees: float = 20.0
     levels: Levels | None = None
     backend: str | None = None
     solver_batches: int = 3
@@ -523,12 +514,6 @@ def load_fit(path: str | Path) -> FitResult:
     )
 
 
-# Test hook: when set, called once per redraw pass with each group's box
-# mask, the fit before and after, and each group's gains, so a script with
-# ground truth can check how well the scores pick good redraws.
-_REDRAW_PROBE = None
-
-
 def fit_fibers(
     volume: np.ndarray,
     voxel_size: float,
@@ -686,8 +671,6 @@ def fit_fibers(
         lines = fitter.solve(lines, radii, types)
         lines, radii, types, cut = fitter.cut_void(lines, radii, types, final=True)
         before = [before[i] for i in cut.pop("source")]
-        lines, radii, types, chains, cut["void_rejoined"] = fitter.rejoin(lines, radii, types)
-        before = [np.vstack([before[i] if end == 0 else before[i][::-1] for i, end in chain]) for chain in chains]
         log("final solve", lines, types=fitter.counts(types), **cut)
         confidence, settled, summary = fitter.scores(lines, radii, previous=before)
         coverage = _confidence.sure_coverage(fitter.foreground, lines, radii, settled)
@@ -701,7 +684,6 @@ def fit_fibers(
                 lines = fitter.solve(lines, radii, types)
                 lines, radii, types, cut = fitter.cut_void(lines, radii, types, final=True)
                 cut.pop("source")
-                lines, radii, types, _, cut["void_rejoined"] = fitter.rejoin(lines, radii, types)
                 confidence, settled, summary = fitter.scores(lines, radii, previous=None)
                 coverage = _confidence.sure_coverage(fitter.foreground, lines, radii, settled)
                 log("polish", lines, **summary, **cut, sure_coverage=round(coverage, 4))
@@ -974,59 +956,6 @@ class _Fitter:
             counts["source"] = source
         return pieces, radii[source], types[source], counts
 
-    def rejoin(
-        self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray
-    ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, list[list[tuple[int, int]]], int]:
-        """Join touching, aligned piece ends the length prior and the scan favor joining, one type at a time.
-
-        The merge of the topology step alone (``_moves.merge_fragments`` with
-        the length prior) within the ``void_rejoin`` gap and angle, for after
-        the final void cut, where no later topology step would rejoin the
-        pieces. Returns the fit, the input
-        fibers each output fiber was joined from (``(fiber, entry end)`` in
-        order along it) and the number of joins. Types without a length prior
-        are left as they are.
-        """
-        s = self.settings
-        radii = np.asarray(radii, dtype=np.float64)
-        types = np.asarray(types, dtype=int)
-        identity = [[(i, 0)] for i in range(len(lines))]
-        if not s.void_rejoin or s.void_level is None or not lines:
-            return lines, radii, types, identity, 0
-        out_lines: list[np.ndarray] = []
-        out_radii: list[np.ndarray] = []
-        out_types: list[np.ndarray] = []
-        out_chains: list[list[tuple[int, int]]] = []
-        joins = 0
-        for kind in range(len(self.specs)):
-            pick = np.flatnonzero(types == kind)
-            if pick.size == 0:
-                continue
-            group = [lines[i] for i in pick]
-            group_radii = radii[pick]
-            cost = float(self.cost[kind])
-            if cost > 0.0:
-                r = float(self.radius[kind])
-                chains: list[list[tuple[int, int]]] = []
-                group, group_radii, merges = _moves.merge_fragments(
-                    self.image, group, group_radii, max_gap=s.merge_gap_radii * r,
-                    min_bend_radius=float(self.bend[kind]), kink_threshold=s.kink_threshold,
-                    end_cost=cost, scale=evidence_scale(self.image, group, group_radii, r),
-                    max_prior_gap=s.void_rejoin_gap_radii * r, max_prior_angle_degrees=s.void_rejoin_angle_degrees,
-                    chains=chains,
-                )
-                joins += merges
-            else:
-                chains = [[(i, 0)] for i in range(len(group))]
-            out_lines += group
-            out_radii.append(np.asarray(group_radii, dtype=np.float64))
-            out_types.append(np.full(len(group), kind, dtype=int))
-            out_chains += [[(int(pick[i]), end) for i, end in chain] for chain in chains]
-        if joins == 0:
-            return lines, radii, types, identity, 0
-        lines = _refine.respace(out_lines, self.spacing)
-        return lines, np.concatenate(out_radii), np.concatenate(out_types), out_chains, joins
-
     def redraw_loop(
         self,
         lines: list[np.ndarray],
@@ -1107,14 +1036,6 @@ class _Fitter:
                 "all": np.ones(count, dtype=bool),
             }
             accepted = better[self.score_name]
-            if _REDRAW_PROBE is not None:
-                _REDRAW_PROBE(
-                    {
-                        "pass": pass_index + 1, "masks": masks, "old": (lines, radii), "new": (new_lines, new_radii),
-                        "confidence_gain": confidence_gain, "mask_gain": mask_gain, "grey_gain": grey_gain,
-                        "accepted": accepted.copy(),
-                    }
-                )
             keep_old, keep_new = _regrow.choose(old_touch, new_touch, component, accepted)
             # An old fiber outside every region should be in the redraw too; if
             # the redraw's topology step joined it into a reverted fiber, bring
