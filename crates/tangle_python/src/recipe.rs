@@ -21,7 +21,8 @@ use tangle_generate::{
 use tangle_relax::{RelaxationPlugin, RelaxationState};
 
 use crate::analysis::{
-    characterize_neighbors, PyAnalysisReport, PyNeighborReport, PyPumaExportReport,
+    characterize_neighbors, characterize_shape, PyAnalysisReport, PyNeighborReport,
+    PyPumaExportReport, PyShapeReport,
 };
 use crate::checkpoint::PyCheckpointSettings;
 use crate::collection::{
@@ -868,6 +869,14 @@ pub(crate) struct PyRunResult {
     pub cell_count: usize,
     #[pyo3(get)]
     pub events: Vec<String>,
+    /// Iterations solve steps spent past their `max_iterations` budgets.
+    #[pyo3(get)]
+    pub extra_iterations: usize,
+    /// Iterations run after the last recipe operation, while the plain
+    /// relaxation settles to its own convergence limits; zero when the recipe
+    /// stopped before its last operation.
+    #[pyo3(get)]
+    pub post_recipe_iterations: usize,
     #[pyo3(get)]
     pub warnings: Vec<String>,
     #[pyo3(get)]
@@ -937,6 +946,29 @@ impl PyRunResult {
             sample_spacing,
             max_lag,
             lag_count,
+        )
+    }
+
+    /// Measures fiber curvature, torsion, tangent correlation, curl and the
+    /// Schladitz orientation fit.
+    #[pyo3(signature = (*, sample_spacing=None, max_lag=None, lag_count=24, quantile_count=101, orientation_axis=[0.0, 0.0, 1.0], min_torsion_curvature=None))]
+    fn characterize_shape(
+        &self,
+        sample_spacing: Option<f64>,
+        max_lag: Option<f64>,
+        lag_count: usize,
+        quantile_count: usize,
+        orientation_axis: [f64; 3],
+        min_torsion_curvature: Option<f64>,
+    ) -> PyResult<PyShapeReport> {
+        characterize_shape(
+            &self.model().assembly,
+            sample_spacing,
+            max_lag,
+            lag_count,
+            quantile_count,
+            orientation_axis,
+            min_torsion_curvature,
         )
     }
 
@@ -1047,6 +1079,7 @@ fn run_native_recipe(
     debug_ovito_config: Option<OvitoTrajectoryConfig>,
     stack_axis: usize,
 ) -> Result<PyRunResult, RunFailure> {
+    let operation_count = recipe.operations.len();
     let mut app = App::new();
     app.add_plugins(TangleWorkflowPlugin {
         initial: TangleStage::Relax,
@@ -1113,6 +1146,23 @@ fn run_native_recipe(
             .iter()
             .map(|event| event.description.clone())
             .collect(),
+        extra_iterations: recipe_state
+            .events
+            .iter()
+            .map(|event| event.extra_iterations)
+            .sum(),
+        // Only a recipe that ran every operation has a post-recipe phase;
+        // otherwise the last event may belong to an unfinished operation.
+        post_recipe_iterations: if recipe_state.next_operation >= operation_count {
+            relaxation.iterations.saturating_sub(
+                recipe_state
+                    .events
+                    .last()
+                    .map_or(relaxation.iterations, |event| event.iteration),
+            )
+        } else {
+            0
+        },
         warnings: recipe_state
             .warnings
             .iter()

@@ -397,13 +397,13 @@ pub fn analyze_neighbors(
 // ---------------------------------------------------------------------------
 // Inputs and settings
 
-struct FiberPath {
-    id: FiberId,
-    radius: f64,
-    points: Vec<Vec3>,
+pub(crate) struct FiberPath {
+    pub(crate) id: FiberId,
+    pub(crate) radius: f64,
+    pub(crate) points: Vec<Vec3>,
     /// Cumulative arc length at each vertex.
-    arc: Vec<f64>,
-    length: f64,
+    pub(crate) arc: Vec<f64>,
+    pub(crate) length: f64,
 }
 
 struct Settings {
@@ -418,7 +418,7 @@ struct Settings {
     seed: u64,
 }
 
-fn collect_fibers(assembly: &FiberAssembly) -> Vec<FiberPath> {
+pub(crate) fn collect_fibers(assembly: &FiberAssembly) -> Vec<FiberPath> {
     assembly
         .topology
         .fibers
@@ -1036,7 +1036,7 @@ fn sorted_overlap(
     }
 }
 
-fn decay_length(lags: &[f64], curve: &[Option<f64>]) -> Option<f64> {
+pub(crate) fn decay_length(lags: &[f64], curve: &[Option<f64>]) -> Option<f64> {
     let target = (-1.0_f64).exp();
     let (mut previous_lag, mut previous_value) = (0.0, 1.0);
     for (lag, value) in lags.iter().zip(curve) {
@@ -1150,23 +1150,23 @@ fn dispersion(values: impl Iterator<Item = f64>) -> Option<f64> {
     Some(variance / mean)
 }
 
-fn add(a: Vec3, b: Vec3) -> Vec3 {
+pub(crate) fn add(a: Vec3, b: Vec3) -> Vec3 {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
-fn sub(a: Vec3, b: Vec3) -> Vec3 {
+pub(crate) fn sub(a: Vec3, b: Vec3) -> Vec3 {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-fn scale(value: Vec3, factor: f64) -> Vec3 {
+pub(crate) fn scale(value: Vec3, factor: f64) -> Vec3 {
     [value[0] * factor, value[1] * factor, value[2] * factor]
 }
 
-fn dot(a: Vec3, b: Vec3) -> f64 {
+pub(crate) fn dot(a: Vec3, b: Vec3) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn norm(value: Vec3) -> f64 {
+pub(crate) fn norm(value: Vec3) -> f64 {
     dot(value, value).sqrt()
 }
 
