@@ -702,7 +702,8 @@ def run(name: str, output: Path) -> dict:
         "diameter bias (um)": summary["diameter_bias_m"] / um if summary["diameter_bias_m"] is not None else None,
         "label accuracy": summary["voxel_label_accuracy"],
         "centerline recall / precision / F1": "/".join(
-            f"{summary[k]:.3f}" for k in ("centerline_recall", "centerline_precision", "centerline_f1")
+            "-" if summary[k] is None else f"{summary[k]:.3f}"
+            for k in ("centerline_recall", "centerline_precision", "centerline_f1")
         ),
         "missed / extra / wrong (% of fiber)": "/".join(
             f"{100 * diff_counts[f'{k}_fraction_of_true_fiber']:.1f}" for k in ("missed", "extra", "wrong_fiber")

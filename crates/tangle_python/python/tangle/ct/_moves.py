@@ -584,15 +584,17 @@ def resolve_side_by_side(
         neighbors = list(np.flatnonzero(overlap))
         context = [lines[k] for k in neighbors]
         context_radii = radii[neighbors]
-        both = render_occupancy(low, high, context + [lines[i], lines[j]], np.concatenate([context_radii, [radii[i], radii[j]]]))
+        # Occupancy is a max-union, so the neighbors are drawn once for both renderings.
+        base = render_occupancy(low, high, context, context_radii)
+        both = np.maximum(base, render_occupancy(low, high, [lines[i], lines[j]], np.array([radii[i], radii[j]])))
         merged_j = lines[j].copy()
         merged_j[theirs] = 0.5 * (lines[j][theirs] + lines[i][mine])
         keep_i = np.ones(len(lines[i]), dtype=bool)
         keep_i[mine] = False
         pieces = _runs(lines[i], keep_i, min_length)
-        one = render_occupancy(
-            low, high, context + [merged_j] + pieces,
-            np.concatenate([context_radii, [radii[j]], np.full(len(pieces), radii[i])]),
+        one = np.maximum(
+            base,
+            render_occupancy(low, high, [merged_j] + pieces, np.concatenate([[radii[j]], np.full(len(pieces), radii[i])])),
         )
         added_ends = 2 * len(pieces) - 2
         gain = (((observed - both) ** 2).sum() - ((observed - one) ** 2).sum()) / scale

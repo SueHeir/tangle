@@ -81,12 +81,12 @@ def centerline_agreement(
             continue
         distance, _ = cKDTree(np.vstack(mine)).query(samples)
         traced += int((distance <= tolerance_radii * radii[g]).sum())
-    recall = traced / total if total else 0.0
-    precision = on_own / fit_total if fit_total else 0.0
+    recall = traced / total if total else None  # None: nothing to trace / nothing fitted
+    precision = on_own / fit_total if fit_total else None
     return {
         "recall": recall,
         "precision": precision,
-        "f1": 2 * precision * recall / max(precision + recall, 1e-12),
+        "f1": 2 * precision * recall / max(precision + recall, 1e-12) if recall is not None and precision is not None else None,
         "tolerance_radii": tolerance_radii,
     }
 
