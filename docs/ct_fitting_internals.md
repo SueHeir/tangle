@@ -235,7 +235,11 @@ The fibers move only in Tangle's own relaxation, the GPU by default
    0.4 to 0.6, and bridging them kept the merge: 82 of 111 wrong in the
    dense cube, 46 of 70 in two_types. The good bridges, which a test
    against other fits' cores had blocked, were bows of about 2 r with a
-   chord of 0.9.) The next batch's end
+   chord of 0.9.) A stretch whose line reads at least `void_aligned_level`
+   (0.5) and lies within `void_aligned_angle_degrees` (15°) of the scan's
+   fiber axis (the type's Hessian) at both supported neighbors is bridged
+   too: in the audit every such stretch was right (15 of 54 right ones, no
+   hops). The next batch's end
    step regrows an end where the scan continues, and the topology moves
    rejoin pieces where they should be one fiber.
 6. Types and radii are chosen again (7b) and fibers are respaced to the

@@ -113,6 +113,12 @@ class FitSettings:
     # line reads at least ``void_bridge_level`` (``_refine.cut_void``).
     void_bridge_level: float = 0.7
     void_bridge_offset_radii: float = 1.0
+    # A stretch is also bridged when the line under it reads at least
+    # ``void_aligned_level`` and runs within ``void_aligned_angle_degrees`` of
+    # the scan's fiber axis (the type's Hessian) at both ends. None turns
+    # this off.
+    void_aligned_level: float = 0.5
+    void_aligned_angle_degrees: float | None = 15.0
     void_rejoin: bool = True
     void_rejoin_gap_radii: float = 1.0
     void_rejoin_angle_degrees: float = 20.0
@@ -945,6 +951,11 @@ class _Fitter:
         pieces, source, cut = _refine.cut_void(
             self.image, lines, radii, level=s.void_level, min_gap_radii=s.void_gap_radii,
             bridge_level=s.void_bridge_level, bridge_offset_radii=s.void_bridge_offset_radii,
+            directions=(
+                (lambda index, points: self.hessian(int(types[index])).directions(points)[0])
+                if s.void_aligned_angle_degrees is not None else None
+            ),
+            aligned_level=s.void_aligned_level, aligned_angle_degrees=s.void_aligned_angle_degrees or 0.0,
         )
         dropped = 0
         if final:

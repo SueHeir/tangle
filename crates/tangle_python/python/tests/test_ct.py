@@ -452,6 +452,13 @@ class CtToolTests(unittest.TestCase):
         pieces, source, counts = _refine.cut_void(image, [hop], np.array([4.0]))
         np.testing.assert_array_equal(source, [0, 0])
         self.assertEqual((counts["splits"], counts["bridged"]), (1, 0))
+        # Unless the scan's fiber axis runs along the line at both ends.
+        along_x = lambda index, points: np.tile([1.0, 0.0, 0.0], (len(points), 1))  # noqa: E731
+        across_y = lambda index, points: np.tile([0.0, 1.0, 0.0], (len(points), 1))  # noqa: E731
+        _, source, counts = _refine.cut_void(image, [hop], np.array([4.0]), directions=along_x)
+        self.assertEqual((len(source), counts["bridged"]), (1, 1))
+        _, source, counts = _refine.cut_void(image, [hop], np.array([4.0]), directions=across_y)
+        self.assertEqual((len(source), counts["bridged"]), (2, 0))
 
     def test_batched_capsule_drawing_matches_segment_by_segment(self):
         from tangle.ct import _geometry, _grey, _moves

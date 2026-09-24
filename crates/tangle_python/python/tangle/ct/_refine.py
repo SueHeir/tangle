@@ -77,6 +77,9 @@ def cut_void(
     min_gap_radii: float = 2.0,
     bridge_level: float = 0.7,
     bridge_offset_radii: float = 1.0,
+    directions=None,
+    aligned_level: float = 0.5,
+    aligned_angle_degrees: float = 15.0,
 ) -> tuple[list[np.ndarray], np.ndarray, dict[str, int]]:
     """Cut every fit where its centerline sits in void (image below ``level``).
 
@@ -92,8 +95,11 @@ def cut_void(
     the fit. A dim stretch that barely leaves the line is where a fit hops
     from one fiber to another at a crossing: its chord crosses the gap
     between touching fibers and reads only 0.4 to 0.6, and bridging it kept
-    the merge. Nodes outside the
-    scan are left alone. :func:`end_step` regrows an end where the scan does
+    the merge. With ``directions`` (``directions(fit, points)``: the scan's
+    local fiber axis at each point), a stretch whose line reads at least
+    ``aligned_level`` and lies within ``aligned_angle_degrees`` of the scan's
+    axis at both supported neighbors is bridged too: the fiber visibly runs
+    on along it. Nodes outside the scan are left alone. :func:`end_step` regrows an end where the scan does
     continue.
 
     Returns ``(pieces, source, counts)``: the pieces, the index of the fit
@@ -133,10 +139,15 @@ def cut_void(
                         away = line[start:k] - a
                         along = np.clip(away @ chord / max(float(chord @ chord), 1e-12), 0.0, 1.0)
                         offset = float(np.linalg.norm(away - along[:, None] * chord, axis=1).max())
-                        if (
-                            offset >= bridge_offset_radii * radii[index]
-                            and float(sample_image(image, across).min()) >= bridge_level
-                        ):
+                        lowest = float(sample_image(image, across).min())
+                        bow = offset >= bridge_offset_radii * radii[index] and lowest >= bridge_level
+                        aligned = False
+                        if not bow and directions is not None and lowest >= aligned_level:
+                            unit = chord / max(float(np.linalg.norm(chord)), 1e-12)
+                            axes = np.asarray(directions(index, np.stack([a, b])), dtype=np.float64)
+                            cosine = float(np.abs(axes @ unit).min())
+                            aligned = cosine >= np.cos(np.radians(aligned_angle_degrees))
+                        if bow or aligned:
                             bridges.append((start, k, across))
                             keep[start:k] = True
                 start = None
