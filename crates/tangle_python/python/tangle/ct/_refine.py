@@ -75,25 +75,29 @@ def cut_void(
     *,
     level: float = 0.3,
     min_gap_radii: float = 2.0,
-) -> tuple[list[np.ndarray], np.ndarray, int, int]:
+) -> tuple[list[np.ndarray], np.ndarray, dict[str, int]]:
     """Cut every fit where its centerline sits in void (image below ``level``).
 
     A fit that has drifted off its fiber into empty space (the solver's image
     force only pulls toward fiber, so void never pushes back) keeps a tail
     there, and another fit can take the place it left. Void nodes at an end
-    are trimmed back to the first supported node; an interior void stretch
-    at least ``min_gap_radii`` radii long splits the fit (a real fiber has no
-    gap). Nodes outside the scan are left alone. :func:`end_step` regrows an
-    end where the scan does continue.
+    are trimmed back to the first supported node. An interior void stretch
+    shorter than ``min_gap_radii`` radii is kept (a dip, not a drift); a
+    longer one is bridged when the straight line between its supported
+    neighbors is fiber all the way (the fit bowed off its fiber and back),
+    and otherwise splits the fit (a real fiber has no gap). Nodes outside the
+    scan are left alone. :func:`end_step` regrows an end where the scan does
+    continue.
 
-    Returns ``(pieces, source, trimmed, splits)``: the pieces, the index of
-    the fit each came from, the number of nodes dropped and of splits.
+    Returns ``(pieces, source, counts)``: the pieces, the index of the fit
+    each came from, and the numbers of nodes dropped (``"trimmed"``), of
+    splits and of stretches bridged (``"bridged"``).
     """
     upper = np.array(image.shape[::-1], dtype=np.float64)
     radii = np.asarray(radii, dtype=np.float64)
     pieces: list[np.ndarray] = []
     source: list[int] = []
-    trimmed = splits = 0
+    counts = {"trimmed": 0, "splits": 0, "bridged": 0}
     for index, line in enumerate(centerlines):
         line = np.asarray(line, dtype=np.float64)
         if len(line) < 2:
@@ -103,23 +107,42 @@ def cut_void(
         inside = np.all((line >= 0.5) & (line <= upper - 0.5), axis=1)
         keep = ~((sample_image(image, line) < level) & inside)
         arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(line, axis=0), axis=1))])
-        # Interior void runs shorter than the gap are kept (a dip, not a drift).
+        spacing = max(arc[-1] / (len(line) - 1), 1e-6)
+        bridges: list[tuple[int, int, np.ndarray]] = []  # (first void node, first node after, new nodes)
         start = None
         for k in range(len(line) + 1):
             weak = k < len(line) and not keep[k]
             if weak and start is None:
                 start = k
             elif not weak and start is not None:
-                if start > 0 and k < len(line) and arc[k] - arc[start - 1] < min_gap_radii * radii[index]:
-                    keep[start:k] = True
+                if start > 0 and k < len(line):
+                    if arc[k] - arc[start - 1] < min_gap_radii * radii[index]:
+                        keep[start:k] = True
+                    else:
+                        a, b = line[start - 1], line[k]
+                        count = max(int(np.ceil(np.linalg.norm(b - a) / spacing)), 2)
+                        across = a + (b - a) * np.linspace(0.0, 1.0, count + 1)[1:-1, None]
+                        if float(sample_image(image, across).min()) >= level:
+                            bridges.append((start, k, across))
+                            keep[start:k] = True
                 start = None
-        trimmed += int((~keep).sum())
+        counts["trimmed"] += int((~keep).sum())
+        if bridges:
+            parts, flags, previous = [], [], 0
+            for first, after, across in bridges:
+                parts += [line[previous:first], across]
+                flags += [keep[previous:first], np.ones(len(across), dtype=bool)]
+                previous = after
+            parts.append(line[previous:])
+            flags.append(keep[previous:])
+            line, keep = np.vstack(parts), np.concatenate(flags)
+            counts["bridged"] += len(bridges)
         runs = np.split(np.arange(len(line)), np.flatnonzero(np.diff(keep.astype(int))) + 1)
         kept = [line[run] for run in runs if keep[run[0]] and len(run) >= 2]
-        splits += max(len(kept) - 1, 0)
+        counts["splits"] += max(len(kept) - 1, 0)
         pieces += kept
         source += [index] * len(kept)
-    return pieces, np.array(source, dtype=int), trimmed, splits
+    return pieces, np.array(source, dtype=int), counts
 
 
 def respace(centerlines: list[np.ndarray], spacing: float) -> list[np.ndarray]:

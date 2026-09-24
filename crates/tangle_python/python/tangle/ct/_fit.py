@@ -925,7 +925,7 @@ class _Fitter:
         if s.void_level is None or not lines:
             extra = {"source": np.arange(len(lines))} if final else {}
             return lines, radii, types, extra
-        pieces, source, trimmed, splits = _refine.cut_void(
+        pieces, source, cut = _refine.cut_void(
             self.image, lines, radii, level=s.void_level, min_gap_radii=s.void_gap_radii
         )
         dropped = 0
@@ -937,7 +937,9 @@ class _Fitter:
             dropped = len(pieces) - len(long_enough)
             pieces = [pieces[i] for i in long_enough]
             source = source[long_enough]
-        counts: dict[str, Any] = {"void_trimmed_nodes": trimmed, "void_splits": splits}
+        counts: dict[str, Any] = {
+            "void_trimmed_nodes": cut["trimmed"], "void_splits": cut["splits"], "void_bridged": cut["bridged"]
+        }
         if final:
             counts["void_dropped"] = dropped
             counts["source"] = source

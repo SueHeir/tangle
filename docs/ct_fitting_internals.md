@@ -223,8 +223,11 @@ The fibers move only in Tangle's own relaxation, the GPU by default
    fibers "drift off into nothing, and another fiber will take over that
    location"). Every centerline node inside the scan whose fiber image
    reads below 0.3 is void. Void nodes at an end are trimmed back to the
-   first supported node; an interior void stretch at least
-   `void_gap_radii` (2) radii long splits the fit. The next batch's end
+   first supported node. An interior void stretch at least
+   `void_gap_radii` (2) radii long is bridged by a straight line between
+   its supported neighbors when that line is fiber all the way (the fit
+   bowed off its fiber and came back), and otherwise splits the fit.
+   (Splitting every such stretch took varied_3 from 31 to 55 split fibers.) The next batch's end
    step regrows an end where the scan continues, and the topology moves
    rejoin pieces where they should be one fiber.
 6. Types and radii are chosen again (7b) and fibers are respaced to the

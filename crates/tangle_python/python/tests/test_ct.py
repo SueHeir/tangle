@@ -395,16 +395,26 @@ class CtToolTests(unittest.TestCase):
         across = np.array([[x, 10.0, 10.0] for x in np.arange(6.0, 57.0)])  # runs over the gap (x 41-44 in void)
         dip = np.array([[x, 10.0, 10.0] for x in np.arange(30.0, 50.0)])  # the same gap, radius 4: too short to split
         outside = np.array([[x, 10.0, 10.0] for x in np.arange(50.0, 67.0)])  # leaves the scan: not trimmed there
-        pieces, source, trimmed, splits = _refine.cut_void(
-            image, [drifted, across, dip, outside], np.array([2.0, 2.0, 4.0, 2.0])
+        # Bows off the fiber into void over x 31-34 and comes back: the straight
+        # line under the bow is fiber, so it is bridged, not split.
+        bowed = np.array(
+            [[x, 10.0, 10.0] for x in np.arange(6.0, 31.0)]
+            + [[31.0, 14.0, 10.0], [32.0, 15.0, 10.0], [33.0, 15.0, 10.0], [34.0, 14.0, 10.0]]
+            + [[x, 10.0, 10.0] for x in np.arange(35.0, 40.0)]
         )
-        np.testing.assert_array_equal(source, [0, 1, 1, 2, 3])
+        pieces, source, counts = _refine.cut_void(
+            image, [drifted, across, dip, outside, bowed], np.array([2.0, 2.0, 4.0, 2.0, 1.0])
+        )
+        np.testing.assert_array_equal(source, [0, 1, 1, 2, 3, 4])
         self.assertEqual(len(pieces[0]), 32)  # the drifted tail is gone
         self.assertEqual(pieces[1][-1, 0], 40.0)
         self.assertEqual(pieces[2][0, 0], 45.0)
         self.assertEqual(len(pieces[3]), len(dip))
         self.assertEqual(len(pieces[4]), len(outside))
-        self.assertEqual((trimmed, splits), (4 + 4, 1))
+        np.testing.assert_allclose(pieces[5][:, 1], 10.0)  # bridged along the fiber
+        self.assertEqual(pieces[5][0, 0], 6.0)
+        self.assertEqual(pieces[5][-1, 0], 39.0)
+        self.assertEqual(counts, {"trimmed": 4 + 4, "splits": 1, "bridged": 1})
 
     def test_batched_capsule_drawing_matches_segment_by_segment(self):
         from tangle.ct import _geometry, _grey, _moves
