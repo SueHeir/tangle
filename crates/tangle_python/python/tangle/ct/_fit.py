@@ -1049,6 +1049,7 @@ class _Fitter:
                 # settle the merged fit (every node pinned for the image run,
                 # so only the unpinned settle acts).
                 merged = self.solve(merged, merged_radii, merged_types, anchors=merged)
+                merged, merged_radii, merged_types, _ = self.cut_void(merged, merged_radii, merged_types, final=True)
             coverage = before_coverage
             residual_change = 0.0
             if kept:
@@ -1240,10 +1241,14 @@ class _Fitter:
             if not lines:
                 break
             lines = self.solve(lines, radii, types, anchors=cut.anchors)
+            lines, radii, types, _ = self.cut_void(lines, radii, types)
             radii, types = self.classify(lines)
             lines = _refine.respace(lines, self.spacing)
+        void: dict[str, Any] = {}
         if lines:
             lines = self.solve(lines, radii, types, anchors=cut.anchors)
+            lines, radii, types, void = self.cut_void(lines, radii, types, final=True)
+            void.pop("source", None)
         info = {
             "unsure_nodes_cut": cut.removed_nodes,
             "fibers_removed": cut.removed_fibers,
@@ -1251,6 +1256,7 @@ class _Fitter:
             "grown_length_voxels": round(grown, 1),
             "born": len(born),
             "merges": counts.get("merges"),
+            **void,
             **matched,
         }
         return lines, np.asarray(radii, dtype=np.float64), np.asarray(types, dtype=int), info
