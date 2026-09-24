@@ -19,6 +19,32 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         control: Handle,
         control_len: usize,
     ) {
+        self.scan_u32(
+            input,
+            output,
+            length,
+            level,
+            control,
+            control_len,
+            &self.cell_scan_block_sums,
+            &self.cell_scan_block_offsets,
+        );
+    }
+
+    /// Exclusive prefix sum of `length` u32 values, recursing over the block
+    /// sums in `block_sums`/`block_offsets` (one buffer per level).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn scan_u32(
+        &self,
+        input: Handle,
+        output: Handle,
+        length: usize,
+        level: usize,
+        control: Handle,
+        control_len: usize,
+        block_sums: &[Handle],
+        block_offsets: &[Handle],
+    ) {
         let blocks = length.div_ceil(self.cell_scan_block_size);
         unsafe {
             exclusive_scan_cell_blocks::launch_unchecked::<R>(
@@ -27,7 +53,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 CubeDim::new_1d(self.cell_scan_block_size as u32),
                 BufferArg::from_raw_parts(input, length),
                 BufferArg::from_raw_parts(output.clone(), length),
-                BufferArg::from_raw_parts(self.cell_scan_block_sums[level].clone(), blocks),
+                BufferArg::from_raw_parts(block_sums[level].clone(), blocks),
                 BufferArg::from_raw_parts(control.clone(), control_len),
                 length as u32,
                 self.cell_scan_block_size,
@@ -37,13 +63,15 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             return;
         }
 
-        self.scan_cell_counts(
-            self.cell_scan_block_sums[level].clone(),
-            self.cell_scan_block_offsets[level].clone(),
+        self.scan_u32(
+            block_sums[level].clone(),
+            block_offsets[level].clone(),
             blocks,
             level + 1,
             control.clone(),
             control_len,
+            block_sums,
+            block_offsets,
         );
         unsafe {
             add_cell_block_offsets::launch_unchecked::<R>(
@@ -51,7 +79,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 CubeCount::Static(blocks as u32, 1, 1),
                 CubeDim::new_1d(self.cell_scan_block_size as u32),
                 BufferArg::from_raw_parts(output, length),
-                BufferArg::from_raw_parts(self.cell_scan_block_offsets[level].clone(), blocks),
+                BufferArg::from_raw_parts(block_offsets[level].clone(), blocks),
                 BufferArg::from_raw_parts(control, control_len),
                 length as u32,
             );

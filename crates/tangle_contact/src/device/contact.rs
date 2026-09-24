@@ -248,6 +248,8 @@ pub fn find_segment_corrections(
     neighbor_home_cells: &[u32],
     corrections: &mut [f32],
     segment_max_penetration: &mut [f32],
+    list_offsets: &[u32],
+    list_weights: &[u32],
     neighbor_capacity: u32,
     correction_fraction: f32,
     contact_aggregation: u32,
@@ -294,7 +296,7 @@ pub fn find_segment_corrections(
     let length_y = cell_upper[1] - cell_lower[1];
     let length_z = cell_upper[2] - cell_lower[2];
     let listed_count = neighbor_counts[segment_index];
-    let listed = listed_count <= neighbor_capacity;
+    let listed = listed_count <= neighbor_capacity * list_weights[segment_index];
     let home_cell = neighbor_home_cells[segment_index];
     let home_x = home_cell % cells_x;
     let home_y = (home_cell / cells_x) % cells_y;
@@ -309,7 +311,7 @@ pub fn find_segment_corrections(
         let mut start = 0_usize;
         if listed {
             count = listed_count;
-            start = segment_index * neighbor_capacity as usize;
+            start = (neighbor_capacity * list_offsets[segment_index]) as usize;
         } else {
             let offset_x = (neighbor % 3) as i32 - 1;
             let offset_y = ((neighbor / 3) % 3) as i32 - 1;

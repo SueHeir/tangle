@@ -116,7 +116,9 @@ pub fn gather_cell_slot_geometry(
 /// they scan the same candidate cells, and each candidate cell is a contiguous
 /// range of slots.
 ///
-/// Segments with more than `capacity` neighbors store their true count, which
+/// Each segment's list holds `capacity * list_weights[segment]` entries starting
+/// at `capacity * list_offsets[segment]`, so long segments get proportionally
+/// more room. Segments with more neighbors than that store their true count, which
 /// tells the contact kernel to fall back to the cell-list traversal around the
 /// recorded home cell for that segment.
 #[cube(launch_unchecked)]
@@ -135,6 +137,8 @@ pub fn build_segment_neighbor_lists(
     neighbor_counts: &mut [u32],
     neighbor_segments: &mut [u32],
     neighbor_home_cells: &mut [u32],
+    list_offsets: &[u32],
+    list_weights: &[u32],
     skin: f32,
     capacity: u32,
     cells_x: u32,
@@ -187,7 +191,8 @@ pub fn build_segment_neighbor_lists(
     }
     neighbor_home_cells[segment_index] = (home_z * cells_y + home_y) * cells_x + home_x;
 
-    let list_start = segment_index * capacity as usize;
+    let list_start = (capacity * list_offsets[segment_index]) as usize;
+    let list_capacity = capacity * list_weights[segment_index];
     let mut count = 0_u32;
     for neighbor in 0..27_u32 {
         let offset_x = (neighbor % 3) as i32 - 1;
@@ -279,7 +284,7 @@ pub fn build_segment_neighbor_lists(
                             p1x, p1y, p1z, d1x, d1y, d1z, p2x, p2y, p2z, d2x, d2y, d2z,
                         ) <= interaction
                     {
-                        if count < capacity {
+                        if count < list_capacity {
                             neighbor_segments[list_start + count as usize] =
                                 cell_segments[other_slot];
                         }
