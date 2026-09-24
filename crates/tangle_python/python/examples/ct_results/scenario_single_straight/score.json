@@ -1,0 +1,78 @@
+{
+ "seconds": 1.665640290826559,
+ "score": {
+  "true_fibers_in_volume": 1,
+  "fitted_fibers": 1,
+  "recovered": 1,
+  "split": 0,
+  "missed": 0,
+  "stubs": 0,
+  "false_fibers": 0,
+  "merged_fibers": 0,
+  "recall": 1.0,
+  "precision": 1.0,
+  "f1": 1.0,
+  "centerline_error_voxels": 0.12401435807799559,
+  "centerline_error_m": 1.860215371169934e-07,
+  "diameter_bias_m": 0.0,
+  "diameter_rms_error_m": 0.0,
+  "solid_dice": 0.9842635128530935,
+  "voxel_label_accuracy": 0.9911417322834646,
+  "centerline_recall": 1.0,
+  "centerline_precision": 0.9900497512437811,
+  "centerline_f1": 0.995,
+  "interior_ends_fit": 0,
+  "interior_ends_truth": 0,
+  "implied_mean_length_fit_m": null,
+  "implied_mean_length_truth_m": null,
+  "per_type": null,
+  "per_true_fiber": [
+   {
+    "id": 1,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   }
+  ],
+  "per_fitted_fiber": [
+   {
+    "id": 1,
+    "true_id": 1,
+    "purity": 1.0,
+    "state": "matched"
+   }
+  ]
+ },
+ "geometry": {
+  "fibers": 1,
+  "curvature_ratio_max": 0.15100692415751643,
+  "curvature_ratio_p95": 0.15100692415751643,
+  "fibers_over_bend_limit": 0,
+  "max_penetration_radii": 0.0,
+  "overlapping_pairs": 0,
+  "min_segment_diameters": 1.2506114250311902,
+  "segment_length_cv": 2.2677098944592786e-08,
+  "total_length": 100.04892073123567
+ },
+ "diff": {
+  "missed_voxels": 45,
+  "extra_voxels": 116,
+  "wrong_fiber_voxels": 0,
+  "missed_fraction_of_true_fiber": 0.008858267716535433,
+  "extra_fraction_of_true_fiber": 0.02283464566929134,
+  "wrong_fiber_fraction_of_true_fiber": 0.0
+ },
+ "confidence": {
+  "voxel_auc": 0.7987955212593079,
+  "voxel_mean_confidence_right": 0.9436094760894775,
+  "voxel_mean_confidence_wrong": 0.833884060382843,
+  "fiber_auc": null,
+  "fiber_mean_confidence_matched": 0.9173845102502999,
+  "fiber_mean_confidence_merged_or_false": null,
+  "missed_next_to_unsure_fit": 0.0,
+  "missed_next_to_any_fit": 1.0
+ },
+ "end_error_max_voxels": null,
+ "end_errors_voxels": []
+}

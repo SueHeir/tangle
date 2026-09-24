@@ -1,0 +1,1439 @@
+{
+ "seconds": 27.190619749948382,
+ "score": {
+  "true_fibers_in_volume": 91,
+  "fitted_fibers": 91,
+  "recovered": 91,
+  "split": 0,
+  "missed": 0,
+  "stubs": 0,
+  "false_fibers": 0,
+  "merged_fibers": 0,
+  "recall": 1.0,
+  "precision": 1.0,
+  "f1": 1.0,
+  "centerline_error_voxels": 0.2760834281082643,
+  "centerline_error_m": 3.7989079707697166e-07,
+  "diameter_bias_m": 1.2392526144509785e-09,
+  "diameter_rms_error_m": 1.0199413979673356e-07,
+  "solid_dice": 0.9519061186967591,
+  "voxel_label_accuracy": 0.943256904202937,
+  "centerline_recall": 0.9947410540756831,
+  "centerline_precision": 0.9973869113291911,
+  "centerline_f1": 0.996062225646483,
+  "interior_ends_fit": 169,
+  "interior_ends_truth": 169,
+  "implied_mean_length_fit_m": 0.00013945065617315254,
+  "implied_mean_length_truth_m": 0.0001416949254016879,
+  "per_type": null,
+  "per_true_fiber": [
+   {
+    "id": 1,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 2,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 3,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 4,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 5,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 6,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 7,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 8,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 9,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 10,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 11,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 12,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 13,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 14,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 15,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 16,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 17,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 18,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 19,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 20,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 21,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 22,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 23,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 24,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 25,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 26,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 27,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 28,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 29,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 30,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 31,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 32,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 33,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 34,
+    "state": "recovered",
+    "coverage": 0.9204545454545454,
+    "union_coverage": 0.9204545454545454,
+    "fitted": 1
+   },
+   {
+    "id": 35,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 36,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 37,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 38,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 39,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 40,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 41,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 42,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 43,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 44,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 45,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 46,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 47,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 48,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 49,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 50,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 51,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 52,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 53,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 54,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 55,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 56,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 57,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 58,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 59,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 60,
+    "state": "recovered",
+    "coverage": 0.8876404494382022,
+    "union_coverage": 0.8876404494382022,
+    "fitted": 1
+   },
+   {
+    "id": 61,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 62,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 63,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 64,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 65,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 66,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 67,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 68,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 69,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 70,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 71,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 72,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 73,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 74,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 75,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 76,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 77,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 78,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 79,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 80,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 81,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 82,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 83,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 84,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 85,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 86,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 87,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 88,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 89,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 90,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 91,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   }
+  ],
+  "per_fitted_fiber": [
+   {
+    "id": 1,
+    "true_id": 38,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 2,
+    "true_id": 14,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 3,
+    "true_id": 71,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 4,
+    "true_id": 73,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 5,
+    "true_id": 61,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 6,
+    "true_id": 72,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 7,
+    "true_id": 74,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 8,
+    "true_id": 37,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 9,
+    "true_id": 91,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 10,
+    "true_id": 16,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 11,
+    "true_id": 40,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 12,
+    "true_id": 46,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 13,
+    "true_id": 11,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 14,
+    "true_id": 88,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 15,
+    "true_id": 54,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 16,
+    "true_id": 31,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 17,
+    "true_id": 62,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 18,
+    "true_id": 44,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 19,
+    "true_id": 5,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 20,
+    "true_id": 24,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 21,
+    "true_id": 56,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 22,
+    "true_id": 85,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 23,
+    "true_id": 7,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 24,
+    "true_id": 21,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 25,
+    "true_id": 68,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 26,
+    "true_id": 79,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 27,
+    "true_id": 81,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 28,
+    "true_id": 77,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 29,
+    "true_id": 49,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 30,
+    "true_id": 6,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 31,
+    "true_id": 9,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 32,
+    "true_id": 2,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 33,
+    "true_id": 59,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 34,
+    "true_id": 75,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 35,
+    "true_id": 47,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 36,
+    "true_id": 17,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 37,
+    "true_id": 18,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 38,
+    "true_id": 83,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 39,
+    "true_id": 84,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 40,
+    "true_id": 30,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 41,
+    "true_id": 82,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 42,
+    "true_id": 26,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 43,
+    "true_id": 27,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 44,
+    "true_id": 80,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 45,
+    "true_id": 89,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 46,
+    "true_id": 52,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 47,
+    "true_id": 20,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 48,
+    "true_id": 36,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 49,
+    "true_id": 19,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 50,
+    "true_id": 76,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 51,
+    "true_id": 87,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 52,
+    "true_id": 33,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 53,
+    "true_id": 64,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 54,
+    "true_id": 43,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 55,
+    "true_id": 67,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 56,
+    "true_id": 57,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 57,
+    "true_id": 66,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 58,
+    "true_id": 70,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 59,
+    "true_id": 4,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 60,
+    "true_id": 78,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 61,
+    "true_id": 90,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 62,
+    "true_id": 51,
+    "purity": 0.9210526315789473,
+    "state": "matched"
+   },
+   {
+    "id": 63,
+    "true_id": 34,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 64,
+    "true_id": 22,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 65,
+    "true_id": 50,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 66,
+    "true_id": 53,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 67,
+    "true_id": 39,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 68,
+    "true_id": 86,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 69,
+    "true_id": 65,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 70,
+    "true_id": 28,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 71,
+    "true_id": 8,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 72,
+    "true_id": 12,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 73,
+    "true_id": 60,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 74,
+    "true_id": 23,
+    "purity": 0.96,
+    "state": "matched"
+   },
+   {
+    "id": 75,
+    "true_id": 1,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 76,
+    "true_id": 63,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 77,
+    "true_id": 48,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 78,
+    "true_id": 13,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 79,
+    "true_id": 69,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 80,
+    "true_id": 58,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 81,
+    "true_id": 42,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 82,
+    "true_id": 55,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 83,
+    "true_id": 10,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 84,
+    "true_id": 41,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 85,
+    "true_id": 29,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 86,
+    "true_id": 25,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 87,
+    "true_id": 45,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 88,
+    "true_id": 15,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 89,
+    "true_id": 32,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 90,
+    "true_id": 3,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 91,
+    "true_id": 35,
+    "purity": 1.0,
+    "state": "matched"
+   }
+  ]
+ },
+ "geometry": {
+  "fibers": 91,
+  "curvature_ratio_max": 1.003680629399645,
+  "curvature_ratio_p95": 1.0009198213031927,
+  "fibers_over_bend_limit": 0,
+  "max_penetration_radii": 0.07818733579599994,
+  "overlapping_pairs": 1,
+  "min_segment_diameters": 1.1707705206496188,
+  "segment_length_cv": 0.03394481375844122,
+  "total_length": 8563.203283535924
+ },
+ "diff": {
+  "missed_voxels": 30342,
+  "extra_voxels": 22288,
+  "wrong_fiber_voxels": 934,
+  "missed_fraction_of_true_fiber": 0.055048567997010085,
+  "extra_fraction_of_true_fiber": 0.04043644069334127,
+  "wrong_fiber_fraction_of_true_fiber": 0.0016945278000529767
+ },
+ "confidence": {
+  "voxel_auc": 0.6038517951965332,
+  "voxel_mean_confidence_right": 0.9172416925430298,
+  "voxel_mean_confidence_wrong": 0.8695611357688904,
+  "fiber_auc": null,
+  "fiber_mean_confidence_matched": 0.9165677587898685,
+  "fiber_mean_confidence_merged_or_false": null,
+  "missed_next_to_unsure_fit": 0.032463252257596734,
+  "missed_next_to_any_fit": 0.9953859336892756
+ },
+ "settings": {
+  "diameter_um": 12.0,
+  "min_bend_radius_um": 71.2,
+  "voxel_um": 1.376,
+  "side_um": 220.2,
+  "orientation": "planar",
+  "tilt": 0.22,
+  "length_um": [
+   111.7,
+   144.3
+  ],
+  "waviness_um": [
+   1.8,
+   9.0
+  ],
+  "solid_fraction": 0.123,
+  "count": 91,
+  "noise": 0.152,
+  "psf_sigma_voxels": 0.87,
+  "seed": 1005
+ },
+ "end_error_max_voxels": 8.130274465355871,
+ "end_errors_voxels": [
+  1.7144207589966542,
+  1.2334266502503075,
+  0.3887323749426194,
+  2.5859994852834545,
+  1.6943887186141955,
+  0.20596898897828836,
+  1.4952685757807884,
+  1.1298668084037764,
+  0.7977900448486283,
+  1.367331918498671,
+  0.24129582542367975,
+  1.5595023634119982,
+  0.9402559110567182,
+  0.40992845998964483,
+  1.3400445087355066,
+  1.6502904635606046,
+  0.19416192068361657,
+  2.138528709873509,
+  2.043898726573696,
+  0.2573046299594359,
+  2.3074950377035712,
+  2.320109198162001,
+  0.7333208095649643,
+  0.3501886774469407,
+  2.1504962494846476,
+  0.1836000131752258,
+  1.5762956710895113,
+  1.49129955156913,
+  0.8447262591820305,
+  1.0556397151781707,
+  0.9545558109123053,
+  1.751572308944322,
+  0.3231099516572736,
+  0.5578043872217711,
+  0.9102085404753181,
+  0.6241865528824896,
+  2.5432816338938276,
+  0.3560757955536193,
+  2.2847510960831867,
+  0.181645751800072,
+  1.3403323551297566,
+  0.499701597421758,
+  8.130274465355871,
+  0.6325837024572998,
+  1.8841595287386015,
+  0.9338202398616626,
+  1.2933222881879725,
+  0.9834773653113451,
+  1.603673791977559,
+  0.3694613201732509,
+  1.0652603199372115,
+  1.0133147695202382,
+  1.6634188691378502,
+  2.7453285920166506,
+  0.8808576879587443,
+  1.576298934121289,
+  0.6428492551349084,
+  1.6194611407273167,
+  0.9793659289419802,
+  2.6598829989378476,
+  1.4345787830172616,
+  4.571280931191938,
+  0.7485597886110203,
+  1.606355002069229,
+  0.6833841165799959,
+  1.9859917501606252,
+  1.1341693732020435,
+  1.6864525457766362,
+  1.1305788440867537,
+  1.3712722453803003,
+  1.4017119924658334,
+  1.353928158738651,
+  1.2372231452088098,
+  2.808839392567275,
+  0.2626906963443359,
+  2.8554376682700227,
+  2.9826134069796733,
+  0.6520694903682553,
+  0.3823830045888255,
+  1.2319078032732482,
+  1.8617651165798237,
+  1.9922440792692606,
+  0.469808703288336,
+  1.3656801013163453,
+  1.822764693507684,
+  0.6629962860991343,
+  1.069593843309965,
+  0.819634984404022,
+  0.6489433306836127,
+  0.5702611623753094,
+  1.151992729326114,
+  1.4304337784870764,
+  3.0332661303505315,
+  1.9234592835993634,
+  2.0981515750419995,
+  0.18805757691461544,
+  0.9978997311440521,
+  0.9688237741920985,
+  3.0347739463956676,
+  2.906054894950165,
+  0.37865504436075104,
+  0.7461780141376301,
+  2.0345643436740133,
+  1.3040098839935408,
+  1.4707429798699119,
+  0.15987651460856214,
+  1.5260040130535606,
+  2.382966477431407,
+  4.395824968785409,
+  0.8915264055368805,
+  0.6992845054848611,
+  0.9286284650660305,
+  0.638117949063392,
+  1.7749248301961145,
+  2.4635016237285683,
+  0.7561981711214785,
+  2.5668830731764603,
+  0.20606988174004093,
+  2.8328288887170108,
+  1.507879473070771,
+  1.0918327641574173,
+  0.49438700209623065,
+  0.45877998354365945,
+  0.7544308822639053,
+  0.7736227619353888,
+  0.8601201164241714,
+  2.4963706598532793,
+  0.5300714625895002,
+  1.1818015815967122,
+  0.13379244493208095,
+  1.3535653862926817,
+  1.683258944785008,
+  1.4086005205555507,
+  1.7054560205009057,
+  2.139430743400007,
+  1.209451280823234,
+  1.5259306349121078,
+  1.8786645009042564,
+  1.5096694470594503,
+  0.776017412930794,
+  2.119812821718254,
+  1.0334302533990605,
+  0.7245703401969373,
+  2.2399048504536676,
+  0.5374863087253298,
+  0.3035440822489008,
+  0.12220567999157234,
+  2.1015349158742573,
+  2.4904368890293185,
+  2.2249559531628282,
+  2.034388765273433,
+  1.0900490724869438,
+  1.0529326707509303,
+  1.2365413085196457,
+  0.32605165542058545,
+  1.717839034619933,
+  1.641792172394651,
+  1.4319957409380142,
+  0.5764092832647301,
+  2.568511688114194,
+  2.1877084612892506,
+  2.191406108374289,
+  2.2050348914854285,
+  0.9220855472431738,
+  0.42984573913468493,
+  1.9732599236785078,
+  1.0384671040624323,
+  1.2682252623967023,
+  2.260342317558819
+ ]
+}

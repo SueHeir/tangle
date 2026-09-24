@@ -1027,3 +1027,42 @@ class RunResult:
         include_interface: bool = ...,
         ambiguity_tolerance: float | None = ...,
     ) -> PumaExportReport: ...
+
+class ImageRelaxer:
+    """Tangle relaxation with a CT image force, for fitting fibers to a scan.
+
+    The world and the image are uploaded once. ``image`` is raw little-endian
+    float32 bytes of a normalized volume (void ~0, fiber ~1) stored
+    ``(z, y, x)``; voxel ``[k, j, i]`` is centered at
+    ``origin + (i + 0.5, j + 0.5, k + 0.5) * voxel_size`` in meters.
+    Adaptive segmentation and rigid motion are not supported, and fiber ends
+    are never pinned.
+    """
+
+    def __init__(
+        self,
+        assembly: Assembly,
+        settings: RelaxationSettings | None,
+        image: bytes,
+        shape_zyx: tuple[int, int, int],
+        voxel_size: float,
+        origin: tuple[float, float, float] = ...,
+    ) -> None: ...
+    def set_image_force(
+        self,
+        rate: float,
+        reach_radii: float = ...,
+        sigma_radii: float = ...,
+        rings: int = ...,
+        spokes: int = ...,
+    ) -> None: ...
+    def set_pinned(self, flags: list[list[bool]]) -> None: ...
+    @property
+    def pinned_count(self) -> int: ...
+    @property
+    def image_force_active(self) -> bool: ...
+    @property
+    def fiber_count(self) -> int: ...
+    def run(self, iterations: int) -> dict[str, int | bool | float]: ...
+    def centerlines(self) -> list[list[list[float]]]: ...
+    def vertex_image_stats(self) -> list[list[tuple[float, float]]]: ...

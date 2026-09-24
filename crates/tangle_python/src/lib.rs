@@ -6,6 +6,7 @@ mod collection;
 mod common;
 mod compaction;
 mod generators;
+mod image;
 mod junctions;
 mod recipe;
 mod settings;
@@ -24,6 +25,7 @@ use generators::{
     PyAlignedOrientation, PyDensityGradientPosition, PyFiberPopulation, PyIsotropicOrientation,
     PyLayeredBiaxialOrientation, PyLayeredPosition, PyPlanarOrientation, PyUniformPosition,
 };
+use image::PyImageRelaxer;
 use junctions::PyJunctionPolicy;
 use recipe::{
     PyCircularFootprint, PyHeldTargets, PyRandomFiberFraction, PyRecipe, PyRunResult, RecipeError,
@@ -98,5 +100,6 @@ fn _tangle(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyHeldTargets>()?;
     module.add_class::<PyRecipe>()?;
     module.add_class::<PyRunResult>()?;
+    module.add_class::<PyImageRelaxer>()?;
     Ok(())
 }

@@ -193,9 +193,13 @@ See [solver and architecture notes](docs/architecture.md) for details.
 - **PuMA:** circular-capsule VTI/JSON bundles for direct `pumapy` analysis.
   Occupied voxel volume and nominal fiber volume are different quantities;
   comparisons need matched definitions and resolution checks.
+- **CT scans:** `tangle.ct` fits Tangle fibers to a CT scan from the known
+  fiber diameter and bend limit, and exports an assembly, a fitted
+  population, per-voxel fiber labels and a per-fiber overlay on the scan.
 
 [Results/export tutorial](crates/tangle_python/python/tutorials/14_results_and_exports.ipynb)
 · [PuMA analysis guide](docs/puma_interoperability.md)
+· [CT fitting guide](docs/ct_fitting.md)
 
 ## Backends and reproducibility
 

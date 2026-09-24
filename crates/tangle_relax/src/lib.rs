@@ -14,8 +14,8 @@ pub use compaction::{CompactionEnergyModel, CompactionKinematics, CompactionMetr
 pub use device::{
     AdaptiveSegmentationConfig, BatchStatus, ContactAggregation, ContactCapture, DeviceFiberWorld,
     DeviceState, DeviceWorld, DeviceWorldCheckpoint, FiberMotion, FormationTargetError,
-    LayerTargetCheckpoint, PackedAssembly, PackingError, RelaxationBackend, RelaxationConfig,
-    RelaxationOverrides, RelaxationPlugin, RelaxationSnapshot, RelaxationState,
+    ImageForceSettings, LayerTargetCheckpoint, PackedAssembly, PackingError, RelaxationBackend,
+    RelaxationConfig, RelaxationOverrides, RelaxationPlugin, RelaxationSnapshot, RelaxationState,
     SegmentContactCandidate, VertexTargetCheckpoint, WorkflowControl,
 };
 pub use tangle_contact::CellListConfig;

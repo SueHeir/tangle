@@ -1,0 +1,361 @@
+{
+ "schema": "tangle.ct.fit/1",
+ "units": "meters",
+ "voxel_size": 1.5e-06,
+ "shape_zyx": [
+  100,
+  100,
+  100
+ ],
+ "cell_lengths": [
+  0.00015000000000000001,
+  0.00015000000000000001,
+  0.00015000000000000001
+ ],
+ "spec": {
+  "diameter": 1.2e-05,
+  "diameter_tolerance": 0.25,
+  "min_bend_radius": 4.8e-05,
+  "min_length": null,
+  "max_length": null,
+  "length": 0.00039999999999999996,
+  "name": "fiber_12um",
+  "intensity": null,
+  "profile": [
+   65534.75,
+   65534.75,
+   65533.7,
+   65505.05,
+   65314.77,
+   64607.5,
+   63065.67,
+   58742.56,
+   54454.0
+  ]
+ },
+ "levels": {
+  "void": 23389.697265625,
+  "fiber": 65520.473,
+  "threshold": 41135.58440478516
+ },
+ "specs": null,
+ "fibers": [
+  {
+   "id": 1,
+   "diameter": 1.2043596982955933e-05,
+   "support": 1.0,
+   "type": 0,
+   "centerline": [
+    [
+     8.887369732791559e-05,
+     8.89282379061915e-05,
+     7.496307772770525e-05
+    ],
+    [
+     0.00010040520247956739,
+     0.00010036148852622137,
+     7.490815152367576e-05
+    ],
+    [
+     0.0001118818250829354,
+     0.00011184982542134822,
+     7.484649505885319e-05
+    ],
+    [
+     0.00012339639180526137,
+     0.00012329944694601,
+     7.498888554936274e-05
+    ],
+    [
+     0.0001349098089262843,
+     0.00013475091656390577,
+     7.492311089253054e-05
+    ],
+    [
+     0.0001462518190378323,
+     0.0001463721633767709,
+     7.484789204271511e-05
+    ]
+   ],
+   "confidence": [
+    0.994,
+    0.994,
+    0.996,
+    0.997,
+    0.996,
+    0.982
+   ]
+  },
+  {
+   "id": 2,
+   "diameter": 1.1956403017044068e-05,
+   "support": 1.0,
+   "type": 0,
+   "centerline": [
+    [
+     3.8425019879359745e-06,
+     3.847205894533544e-06,
+     7.494218845339493e-05
+    ],
+    [
+     1.537988611334004e-05,
+     1.5273486147169027e-05,
+     7.491421239636838e-05
+    ],
+    [
+     2.6850309600820765e-05,
+     2.6765908492496237e-05,
+     7.507140946062282e-05
+    ],
+    [
+     3.834853088436649e-05,
+     3.8231566227739684e-05,
+     7.507605879753829e-05
+    ],
+    [
+     4.97917059105821e-05,
+     4.975165176391602e-05,
+     7.49632669026032e-05
+    ],
+    [
+     6.12482104911469e-05,
+     6.125819310499355e-05,
+     7.510845136083663e-05
+    ]
+   ],
+   "confidence": [
+    0.998,
+    0.998,
+    0.998,
+    0.999,
+    0.979,
+    0.979
+   ]
+  }
+ ],
+ "population": {
+  "fiber_count": 2,
+  "diameter_mean": 1.2e-05,
+  "diameter_std": 4.359698295593275e-08,
+  "length_mean": 8.119194956682026e-05,
+  "length_min": 8.11898340683502e-05,
+  "length_max": 8.119406506529031e-05,
+  "length_uncensored_mean": null,
+  "fibers_touching_boundary": 2,
+  "curvature_amplitude_mean": 1.4195204663139184e-07,
+  "orientation_tensor": [
+   [
+    0.4995157313839351,
+    0.4999710309838346,
+    0.000164625485224
+   ],
+   [
+    0.4999710309838347,
+    0.5004665988313023,
+    0.00015914148198423983
+   ],
+   [
+    0.000164625485224,
+    0.00015914148198423983,
+    1.7669784762668074e-05
+   ]
+  ],
+  "orientation_eigenvalues": [
+   1.4614828392643974e-05,
+   2.2910615321001484e-05,
+   0.9999624745562864
+  ],
+  "orientation_eigenvectors": [
+   [
+    0.4257346567518778,
+    -0.42507149848718384,
+    -0.798789223271209
+   ],
+   [
+    0.5650004321833617,
+    -0.5646581153798179,
+    0.6016109410311012
+   ],
+   [
+    -0.7067704816084042,
+    -0.7074428838496946,
+    -0.0002289485793009724
+   ]
+  ],
+  "volume_fraction": 0.005968,
+  "interior_ends": 2,
+  "implied_mean_length": 0.00016238389913364053,
+  "expected_interior_ends": 0.8119194956682027,
+  "expected_interior_ends_sd": 0.9010657554630531,
+  "types": null
+ },
+ "history": [
+  {
+   "stage": "profiles",
+   "fibers": 0,
+   "void": 23386.1758,
+   "noise": 2649.8898,
+   "ranges": [
+    [
+     58881.4715,
+     72159.4745
+    ]
+   ]
+  },
+  {
+   "stage": "input",
+   "fibers": 0,
+   "mask": false,
+   "source": "grey profiles"
+  },
+  {
+   "stage": "trace",
+   "fibers": 2,
+   "types": null,
+   "thickness_margin": 0.16
+  },
+  {
+   "stage": "solver",
+   "fibers": 2,
+   "converged": true,
+   "max_curvature_ratio": 0.04649229347705841
+  },
+  {
+   "stage": "solver",
+   "fibers": 2,
+   "converged": true,
+   "max_curvature_ratio": 0.047102805227041245
+  },
+  {
+   "stage": "solver",
+   "fibers": 2,
+   "converged": true,
+   "max_curvature_ratio": 0.047080785036087036
+  },
+  {
+   "stage": "round 1",
+   "fibers": 2,
+   "splits": 0,
+   "duplicates": 0,
+   "merges": 0,
+   "explained": 0.7540465351542741,
+   "types": null,
+   "void_trimmed_nodes": 0,
+   "void_splits": 0,
+   "void_bridged": 0,
+   "thickness_margin": 0.21,
+   "interior_ends": 2,
+   "implied_length_m": 0.00016238504622133207,
+   "expected_interior_ends": 0.8
+  },
+  {
+   "stage": "births 1",
+   "fibers": 2,
+   "born": 0,
+   "types": null
+  },
+  {
+   "stage": "solver",
+   "fibers": 2,
+   "converged": true,
+   "max_curvature_ratio": 0.0470808781683445
+  },
+  {
+   "stage": "solver",
+   "fibers": 2,
+   "converged": true,
+   "max_curvature_ratio": 0.04708098620176315
+  },
+  {
+   "stage": "solver",
+   "fibers": 2,
+   "converged": true,
+   "max_curvature_ratio": 0.04707000032067299
+  },
+  {
+   "stage": "round 2",
+   "fibers": 2,
+   "splits": 0,
+   "duplicates": 0,
+   "merges": 0,
+   "explained": 0.7540465351542741,
+   "types": null,
+   "void_trimmed_nodes": 0,
+   "void_splits": 0,
+   "void_bridged": 0,
+   "thickness_margin": 0.21,
+   "interior_ends": 2,
+   "implied_length_m": 0.0001623842081550057,
+   "expected_interior_ends": 0.8
+  },
+  {
+   "stage": "births 2",
+   "fibers": 2,
+   "born": 0,
+   "types": null
+  },
+  {
+   "stage": "solver",
+   "fibers": 2,
+   "converged": true,
+   "max_curvature_ratio": 0.04708119109272957
+  },
+  {
+   "stage": "solver",
+   "fibers": 2,
+   "converged": true,
+   "max_curvature_ratio": 0.047081269323825836
+  },
+  {
+   "stage": "solver",
+   "fibers": 2,
+   "converged": true,
+   "max_curvature_ratio": 0.047081369906663895
+  },
+  {
+   "stage": "round 3",
+   "fibers": 2,
+   "splits": 0,
+   "duplicates": 0,
+   "merges": 0,
+   "explained": 0.7540465351542741,
+   "types": null,
+   "void_trimmed_nodes": 0,
+   "void_splits": 0,
+   "void_bridged": 0,
+   "thickness_margin": 0.21,
+   "interior_ends": 2,
+   "implied_length_m": 0.00016238345687663165,
+   "expected_interior_ends": 0.8
+  },
+  {
+   "stage": "solver",
+   "fibers": 2,
+   "converged": true,
+   "max_curvature_ratio": 0.04708145931363106
+  },
+  {
+   "stage": "final solve",
+   "fibers": 2,
+   "types": null,
+   "void_trimmed_nodes": 0,
+   "void_splits": 0,
+   "void_bridged": 0,
+   "void_dropped": 0
+  },
+  {
+   "stage": "confidence",
+   "fibers": 2,
+   "mean": 0.996,
+   "fibers_below_half": 0,
+   "components": {
+    "image": 1.0,
+    "surround": 1.0,
+    "ownership": 1.0,
+    "thickness": 0.995,
+    "stability": 1.0
+   },
+   "sure_coverage": 0.7491
+  }
+ ]
+}
