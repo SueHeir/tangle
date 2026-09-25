@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
-use crate::math::distance;
-use crate::{maximum_polyline_curvature, FiberAssembly, Section};
+use crate::math::{distance, dot, norm};
+use crate::{maximum_polyline_curvature, polyline_tangents, FiberAssembly, Section};
 
 /// One validation diagnostic.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,10 +206,30 @@ impl FiberAssembly {
             }
         }
 
+        for (label, state) in [
+            ("intrinsic", Some(&self.geometry.intrinsic)),
+            ("placed", Some(&self.geometry.placed)),
+            ("reference", self.geometry.assembled_reference.as_ref()),
+        ] {
+            if let Some(state) = state {
+                if !state.directors.is_empty() && state.directors.len() != state.positions.len() {
+                    issues.push(ValidationIssue::new(
+                        "geometry.director-count",
+                        format!(
+                            "{label} geometry has {} directors for {} positions",
+                            state.directors.len(),
+                            state.positions.len()
+                        ),
+                    ));
+                }
+            }
+        }
+
         for (fiber_index, fiber) in self.topology.fibers.iter().enumerate() {
             let Some(range) = fiber.vertices.as_usize_range() else {
                 continue;
             };
+            self.validate_fiber_directors(fiber_index, range.clone(), issues);
             let Some(points) = self.geometry.intrinsic.positions.get(range.clone()) else {
                 continue;
             };
@@ -298,6 +318,49 @@ impl FiberAssembly {
             }
         }
     }
+    /// Stored directors of a non-circular fiber must be finite unit vectors
+    /// perpendicular to the placed tangent. Round fibers ignore them.
+    fn validate_fiber_directors(
+        &self,
+        fiber_index: usize,
+        range: std::ops::Range<usize>,
+        issues: &mut Vec<ValidationIssue>,
+    ) {
+        let fiber = &self.topology.fibers[fiber_index];
+        let circular = self
+            .sections
+            .entries
+            .get(fiber.section.0 as usize)
+            .map_or(true, Section::is_circular);
+        if circular || self.geometry.placed.directors.len() != self.geometry.placed.positions.len()
+        {
+            return;
+        }
+        let (Some(points), Some(directors)) = (
+            self.geometry.placed.positions.get(range.clone()),
+            self.geometry.placed.directors.get(range),
+        ) else {
+            return;
+        };
+        let tolerance = 1.0e-3;
+        let bad = polyline_tangents(points)
+            .into_iter()
+            .zip(directors)
+            .any(|(tangent, director)| {
+                director.iter().any(|value| !value.is_finite())
+                    || (norm(*director) - 1.0).abs() > tolerance
+                    || dot(tangent, *director).abs() > tolerance
+            });
+        if bad {
+            issues.push(ValidationIssue::new(
+                "fiber.invalid-director",
+                format!(
+                    "fiber {:?} has a director that is not a unit vector perpendicular to its centerline",
+                    fiber.id
+                ),
+            ));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -321,5 +384,72 @@ mod tests {
             .unwrap();
 
         assembly.validate().unwrap();
+    }
+
+    #[test]
+    fn elliptical_fiber_directors_must_be_perpendicular_units() {
+        let mut assembly =
+            FiberAssembly::new(PeriodicCell::orthorhombic([1.0, 1.0, 1.0], [false; 3]));
+        let material = assembly.materials.add("oval fiber");
+        let section = assembly.sections.add(Section::Elliptical {
+            semi_axes: [0.03, 0.02],
+        });
+        let placed = [[0.0, 0.5, 0.5], [0.5, 0.5, 0.5], [1.0, 0.5, 0.5]];
+        assembly
+            .add_fiber(FiberId(1), material, section, &placed, &placed)
+            .unwrap();
+        assembly
+            .set_fiber_directors(FiberId(1), &[[0.0, 0.0, 1.0]; 3])
+            .unwrap();
+        assembly.validate().unwrap();
+        assert_eq!(assembly.geometry.placed.directors[1], [0.0, 0.0, 1.0]);
+
+        assembly.geometry.placed.directors[1] = [1.0, 0.0, 0.0];
+        let report = assembly.validate().unwrap_err();
+        assert_eq!(report.issues[0].code, "fiber.invalid-director");
+
+        assembly.geometry.placed.directors.pop();
+        let report = assembly.validate().unwrap_err();
+        assert_eq!(report.issues[0].code, "geometry.director-count");
+    }
+
+    #[test]
+    fn fibers_added_after_directors_get_defaults() {
+        let mut assembly =
+            FiberAssembly::new(PeriodicCell::orthorhombic([1.0, 1.0, 1.0], [false; 3]));
+        let material = assembly.materials.add("oval fiber");
+        let section = assembly.sections.add(Section::Elliptical {
+            semi_axes: [0.03, 0.02],
+        });
+        let first = [[0.0, 0.5, 0.5], [1.0, 0.5, 0.5]];
+        let second = [[0.5, 0.0, 0.5], [0.5, 1.0, 0.5]];
+        assembly
+            .add_fiber(FiberId(1), material, section, &first, &first)
+            .unwrap();
+        assembly
+            .set_fiber_directors(FiberId(1), &[[0.0, 0.0, 1.0]; 2])
+            .unwrap();
+        assembly
+            .add_fiber(FiberId(2), material, section, &second, &second)
+            .unwrap();
+        assembly.validate().unwrap();
+        assert_eq!(assembly.geometry.placed.directors.len(), 4);
+        assert_eq!(assembly.fiber_directors(1)[0], [-1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn assemblies_without_directors_serialize_as_before() {
+        let mut assembly =
+            FiberAssembly::new(PeriodicCell::orthorhombic([1.0, 1.0, 1.0], [false; 3]));
+        let material = assembly.materials.add("test fiber");
+        let section = assembly.sections.add(Section::Circular { radius: 0.01 });
+        let placed = [[0.0, 0.5, 0.5], [1.0, 0.5, 0.5]];
+        assembly
+            .add_fiber(FiberId(1), material, section, &placed, &placed)
+            .unwrap();
+        let text = serde_json::to_string(&assembly).unwrap();
+        assert!(!text.contains("directors"));
+        let restored: FiberAssembly = serde_json::from_str(&text).unwrap();
+        assert_eq!(restored, assembly);
     }
 }

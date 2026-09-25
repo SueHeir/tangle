@@ -4,6 +4,7 @@ use crate::{
     JunctionTable, MaterialId, MaterialTable, PeriodicCell, Provenance, SectionId, SectionTable,
     Span, Vec3,
 };
+use crate::director::{default_directors, orthonormalize_directors};
 
 /// Canonical, solver-neutral description of a fibrous material assembly.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -102,8 +103,20 @@ impl FiberAssembly {
             .positions
             .extend_from_slice(intrinsic);
         self.geometry.placed.positions.extend_from_slice(placed);
+        let directors = if self.geometry.placed.directors.is_empty() {
+            Vec::new()
+        } else {
+            default_directors(placed)
+        };
+        self.geometry
+            .placed
+            .directors
+            .extend_from_slice(&directors);
         if let Some(reference) = &mut self.geometry.assembled_reference {
             reference.positions.extend_from_slice(placed);
+            if !reference.directors.is_empty() {
+                reference.directors.extend_from_slice(&directors);
+            }
         }
         self.topology.fibers.push(Fiber {
             id,
@@ -115,6 +128,54 @@ impl FiberAssembly {
         });
         self.admissibility.bend_limits.push(None);
         Ok(())
+    }
+
+    /// Sets the placed long-axis directors of one fiber. Each director is
+    /// projected perpendicular to the local tangent and normalized. The first
+    /// call fills every other fiber with [`default_directors`].
+    pub fn set_fiber_directors(&mut self, id: FiberId, directors: &[Vec3]) -> Result<(), BuildError> {
+        let fiber = self
+            .topology
+            .fibers
+            .iter()
+            .find(|fiber| fiber.id == id)
+            .ok_or(BuildError::UnknownFiber(id))?;
+        let range = fiber.vertices.start as usize..(fiber.vertices.start + fiber.vertices.len) as usize;
+        if directors.len() != range.len() {
+            return Err(BuildError::DirectorCountMismatch {
+                vertices: range.len(),
+                directors: directors.len(),
+            });
+        }
+        self.ensure_directors();
+        let mut projected = directors.to_vec();
+        orthonormalize_directors(&self.geometry.placed.positions[range.clone()], &mut projected);
+        self.geometry.placed.directors[range].copy_from_slice(&projected);
+        Ok(())
+    }
+
+    /// Fills the placed directors with [`default_directors`] for every fiber
+    /// when none are stored yet.
+    pub fn ensure_directors(&mut self) {
+        if !self.geometry.placed.directors.is_empty() {
+            return;
+        }
+        let mut directors = Vec::with_capacity(self.geometry.placed.positions.len());
+        for fiber in &self.topology.fibers {
+            let range = fiber.vertices.start as usize..(fiber.vertices.start + fiber.vertices.len) as usize;
+            directors.extend(default_directors(&self.geometry.placed.positions[range]));
+        }
+        self.geometry.placed.directors = directors;
+    }
+
+    /// Placed directors of one fiber, stored or default.
+    pub fn fiber_directors(&self, fiber_index: usize) -> Vec<Vec3> {
+        let fiber = &self.topology.fibers[fiber_index];
+        let range = fiber.vertices.start as usize..(fiber.vertices.start + fiber.vertices.len) as usize;
+        match self.geometry.placed.directors.get(range.clone()) {
+            Some(stored) if !stored.is_empty() => stored.to_vec(),
+            _ => default_directors(&self.geometry.placed.positions[range]),
+        }
     }
 
     /// Assigns the manufacturing recipe step at which a fiber is inserted.

@@ -424,6 +424,7 @@ impl Default for PyFiberPopulation {
                 name: spec.material_name,
                 diameter: mean_diameter,
                 min_bend_radius: spec.minimum_bend_radius,
+                thickness: None,
             },
             count: spec.count,
             segments_per_fiber: spec.segments_per_fiber,
@@ -575,14 +576,21 @@ impl PyFiberPopulation {
 
 // --- Generators --------------------------------------------------------------
 
-fn material_or_default(material: Option<PyRef<'_, PyMaterial>>, diameter: f64) -> PyMaterial {
-    material
+fn material_or_default(
+    material: Option<PyRef<'_, PyMaterial>>,
+    diameter: f64,
+    generator: &str,
+) -> PyResult<PyMaterial> {
+    let material = material
         .map(|material| material.clone())
         .unwrap_or(PyMaterial {
             name: "fiber".to_string(),
             diameter,
             min_bend_radius: None,
-        })
+            thickness: None,
+        });
+    material.require_round(generator)?;
+    Ok(material)
 }
 
 /// Gives every generated fiber the caller's bend limit when the native
@@ -603,7 +611,7 @@ pub(crate) fn generate_point_crossing_py(
     length: f64,
     name: String,
 ) -> PyResult<PyFiberCollection> {
-    let material = material_or_default(material, 0.05);
+    let material = material_or_default(material, 0.05, "generate_point_crossing")?;
     let mut assembly = FiberAssembly::new(cell.inner);
     generate_point_crossing(
         &mut assembly,
@@ -637,7 +645,7 @@ pub(crate) fn generate_multisegment_crossing_py(
     placed_amplitude: f64,
     name: String,
 ) -> PyResult<PyFiberCollection> {
-    let material = material_or_default(material, 0.036);
+    let material = material_or_default(material, 0.036, "generate_multisegment_crossing")?;
     let mut assembly = FiberAssembly::new(cell.inner);
     generate_multisegment_crossing(
         &mut assembly,
@@ -669,7 +677,7 @@ pub(crate) fn generate_fiber_pair_crossing_py(
     crossing_angle_degrees: f64,
     name: String,
 ) -> PyResult<PyFiberCollection> {
-    let material = material_or_default(material, 0.05);
+    let material = material_or_default(material, 0.05, "generate_fiber_pair_crossing")?;
     let mut assembly = FiberAssembly::new(cell.inner);
     generate_fiber_pair_crossing(
         &mut assembly,
@@ -695,6 +703,7 @@ pub(crate) fn generate_fiber_population_py(
     name: String,
 ) -> PyResult<PyFiberCollection> {
     let mut assembly = FiberAssembly::new(cell.inner);
+    population.material.require_round("generate_fiber_population")?;
     population.check_combination()?;
     generate_biased_fiber_population(&mut assembly, &population.to_rust(cell.stack_axis))
         .map_err(|error| PyValueError::new_err(error.to_string()))?;

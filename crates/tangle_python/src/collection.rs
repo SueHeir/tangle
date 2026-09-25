@@ -6,7 +6,10 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 use tangle_characterize::characterize_assembly;
-use tangle_core::{FiberAssembly, FiberBendLimit, FiberId, PeriodicCell, Section, Vec3};
+use tangle_core::{
+    default_directors, orthonormalize_directors, polyline_tangents, FiberAssembly, FiberBendLimit, FiberId,
+    PeriodicCell, Section, Vec3,
+};
 use tangle_export::{write_puma_bundle, PumaVoxelExportConfig};
 
 use crate::analysis::{
@@ -118,13 +121,68 @@ pub(crate) struct PyMaterial {
     pub(crate) diameter: f64,
     #[pyo3(get)]
     pub(crate) min_bend_radius: Option<f64>,
+    /// Short-axis width of an oval section; `None` for a round fiber, whose
+    /// `diameter` is then its only width.
+    #[pyo3(get)]
+    pub(crate) thickness: Option<f64>,
+}
+
+impl PyMaterial {
+    /// The cross-section this material gives each fiber: a circle, or an
+    /// ellipse with `diameter` along the long axis and `thickness` across it.
+    pub(crate) fn section(&self) -> Section {
+        match self.thickness {
+            Some(thickness) if thickness < self.diameter => Section::Elliptical {
+                semi_axes: [0.5 * self.diameter, 0.5 * thickness],
+            },
+            _ => Section::Circular {
+                radius: 0.5 * self.diameter,
+            },
+        }
+    }
+
+    pub(crate) fn from_section(
+        name: String,
+        section: Section,
+        min_bend_radius: Option<f64>,
+    ) -> Self {
+        let (diameter, thickness) = match section {
+            Section::Circular { radius } => (2.0 * radius, None),
+            Section::Elliptical { semi_axes } => {
+                let long = semi_axes[0].max(semi_axes[1]);
+                let short = semi_axes[0].min(semi_axes[1]);
+                (2.0 * long, (short < long).then_some(2.0 * short))
+            }
+        };
+        Self {
+            name,
+            diameter,
+            min_bend_radius,
+            thickness,
+        }
+    }
+
+    /// Generators that only build round fibers call this first.
+    pub(crate) fn require_round(&self, generator: &str) -> PyResult<()> {
+        if self.thickness.is_some() {
+            return Err(PyValueError::new_err(format!(
+                "{generator} does not support oval materials yet; build oval fibers with FiberCollection.add_fiber"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[pymethods]
 impl PyMaterial {
     #[new]
-    #[pyo3(signature = (name, diameter, min_bend_radius=None))]
-    fn new(name: String, diameter: f64, min_bend_radius: Option<f64>) -> PyResult<Self> {
+    #[pyo3(signature = (name, diameter, min_bend_radius=None, *, thickness=None))]
+    fn new(
+        name: String,
+        diameter: f64,
+        min_bend_radius: Option<f64>,
+        thickness: Option<f64>,
+    ) -> PyResult<Self> {
         if name.trim().is_empty() {
             return Err(PyValueError::new_err("material name must not be empty"));
         }
@@ -138,10 +196,17 @@ impl PyMaterial {
                 "min_bend_radius must be positive and finite",
             ));
         }
+        if thickness.is_some_and(|value| !value.is_finite() || value <= 0.0 || value > diameter) {
+            return Err(PyValueError::new_err(
+                "thickness must be positive, finite and no larger than diameter",
+            ));
+        }
         Ok(Self {
             name,
             diameter,
             min_bend_radius,
+            // An oval as thick as it is wide is round.
+            thickness: thickness.filter(|value| *value < diameter),
         })
     }
 
@@ -150,14 +215,21 @@ impl PyMaterial {
         0.5 * self.diameter
     }
 
+    #[getter]
+    fn is_oval(&self) -> bool {
+        self.thickness.is_some()
+    }
+
     fn __repr__(&self) -> String {
-        match self.min_bend_radius {
-            Some(radius) => format!(
-                "Material(name={:?}, diameter={}, min_bend_radius={})",
-                self.name, self.diameter, radius
-            ),
-            None => format!("Material(name={:?}, diameter={})", self.name, self.diameter),
+        let mut text = format!("Material(name={:?}, diameter={}", self.name, self.diameter);
+        if let Some(radius) = self.min_bend_radius {
+            text.push_str(&format!(", min_bend_radius={radius}"));
         }
+        if let Some(thickness) = self.thickness {
+            text.push_str(&format!(", thickness={thickness}"));
+        }
+        text.push(')');
+        text
     }
 }
 
@@ -166,6 +238,8 @@ pub(crate) struct CollectionFiber {
     pub(crate) placed: Vec<Vec3>,
     pub(crate) intrinsic: Vec<Vec3>,
     pub(crate) material: PyMaterial,
+    /// Placed long-axis directions per vertex; `None` uses the defaults.
+    pub(crate) long_axes: Option<Vec<Vec3>>,
     pub(crate) tags: BTreeMap<String, String>,
     pub(crate) formation_layer: Option<u32>,
 }
@@ -192,7 +266,8 @@ impl PyFiberCollection {
         })
     }
 
-    #[pyo3(signature = (centerline, material, *, rest_centerline=None, tags=None, formation_layer=None))]
+    #[pyo3(signature = (centerline, material, *, rest_centerline=None, tags=None, formation_layer=None, long_axis=None))]
+    #[allow(clippy::too_many_arguments)]
     fn add_fiber(
         &mut self,
         centerline: Vec<Vec3>,
@@ -200,6 +275,7 @@ impl PyFiberCollection {
         rest_centerline: Option<Vec<Vec3>>,
         tags: Option<HashMap<String, String>>,
         formation_layer: Option<u32>,
+        long_axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<usize> {
         validate_centerline(&centerline, "centerline")?;
         let intrinsic = rest_centerline.unwrap_or_else(|| centerline.clone());
@@ -209,10 +285,14 @@ impl PyFiberCollection {
                 "centerline and rest_centerline must contain the same number of vertices",
             ));
         }
+        let long_axes = long_axis
+            .map(|value| parse_long_axes(value, centerline.len()))
+            .transpose()?;
         self.fibers.push(CollectionFiber {
             placed: centerline,
             intrinsic,
             material: material.clone(),
+            long_axes,
             tags: tags.unwrap_or_default().into_iter().collect(),
             formation_layer,
         });
@@ -235,6 +315,7 @@ impl PyFiberCollection {
                 intrinsic: centerline.clone(),
                 placed: centerline,
                 material: material.clone(),
+                long_axes: None,
                 tags: BTreeMap::new(),
                 formation_layer,
             });
@@ -254,6 +335,12 @@ impl PyFiberCollection {
             .iter()
             .map(|fiber| fiber.intrinsic.clone())
             .collect()
+    }
+
+    /// Unit long-axis direction at every vertex of every fiber, perpendicular
+    /// to the centerline. Round fibers report the default direction too.
+    fn long_axes(&self) -> Vec<Vec<Vec3>> {
+        self.fibers.iter().map(CollectionFiber::long_axes).collect()
     }
 
     /// Appends clones of every fiber in another detached collection.
@@ -323,23 +410,21 @@ impl PyFiberCollection {
             let material_name = assembly.materials.entries[fiber.material.0 as usize]
                 .name
                 .clone();
-            let diameter = match assembly.sections.entries[fiber.section.0 as usize] {
-                Section::Circular { radius } => 2.0 * radius,
-                Section::Elliptical { .. } => {
-                    return Err(PyValueError::new_err(
-                        "Python FiberCollection currently requires circular generated sections",
-                    ));
-                }
-            };
+            let section = assembly.sections.entries[fiber.section.0 as usize];
+            let placed = &assembly.geometry.placed.positions[start..end];
+            let long_axes = (!section.is_circular()).then(|| {
+                long_axis_directors(section, placed, assembly.fiber_directors(index))
+            });
             fibers.push(CollectionFiber {
                 placed: assembly.geometry.placed.positions[start..end].to_vec(),
                 intrinsic: assembly.geometry.intrinsic.positions[start..end].to_vec(),
-                material: PyMaterial {
-                    name: material_name,
-                    diameter,
-                    min_bend_radius: assembly.admissibility.bend_limits[index]
+                material: PyMaterial::from_section(
+                    material_name,
+                    section,
+                    assembly.admissibility.bend_limits[index]
                         .map(|limit| limit.minimum_bend_radius),
-                },
+                ),
+                long_axes,
                 tags: BTreeMap::new(),
                 formation_layer: fiber.formation_layer,
             });
@@ -429,6 +514,28 @@ impl PyAssembly {
                 let start = fiber.vertices.start as usize;
                 let end = start + fiber.vertices.len as usize;
                 model.assembly.geometry.placed.positions[start..end].to_vec()
+            })
+            .collect()
+    }
+
+    /// Unit long-axis direction at every vertex of every fiber, along the
+    /// section's longer width. Round fibers report the default direction.
+    fn long_axes(&self) -> Vec<Vec<Vec3>> {
+        let model = self.model.lock().expect("assembly lock poisoned");
+        let assembly = &model.assembly;
+        assembly
+            .topology
+            .fibers
+            .iter()
+            .enumerate()
+            .map(|(index, fiber)| {
+                let start = fiber.vertices.start as usize;
+                let end = start + fiber.vertices.len as usize;
+                long_axis_directors(
+                    assembly.sections.entries[fiber.section.0 as usize],
+                    &assembly.geometry.placed.positions[start..end],
+                    assembly.fiber_directors(index),
+                )
             })
             .collect()
     }
@@ -599,9 +706,7 @@ impl AssemblyModel {
         let mut fiber_ids = Vec::with_capacity(collection.fibers.len());
         for input in &collection.fibers {
             let material = self.assembly.materials.add(input.material.name.clone());
-            let section = self.assembly.sections.add(Section::Circular {
-                radius: 0.5 * input.material.diameter,
-            });
+            let section = self.assembly.sections.add(input.material.section());
             let placed = input
                 .placed
                 .iter()
@@ -620,6 +725,15 @@ impl AssemblyModel {
             self.assembly
                 .add_fiber(id, material, section, &intrinsic, &placed)
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            if let Some(long_axes) = &input.long_axes {
+                let rotated = long_axes
+                    .iter()
+                    .map(|axis| transform_point(*axis, rotation, [0.0; 3]))
+                    .collect::<Vec<_>>();
+                self.assembly
+                    .set_fiber_directors(id, &rotated)
+                    .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            }
             self.assembly
                 .set_fiber_formation_step(id, formation_step)
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
@@ -645,6 +759,65 @@ impl AssemblyModel {
             formation_step,
         })
     }
+}
+
+impl CollectionFiber {
+    fn long_axes(&self) -> Vec<Vec3> {
+        match &self.long_axes {
+            Some(axes) => {
+                let mut axes = axes.clone();
+                orthonormalize_directors(&self.placed, &mut axes);
+                axes
+            }
+            None => default_directors(&self.placed),
+        }
+    }
+}
+
+/// A collection fiber's long axis is always the ellipse's longer semi-axis.
+/// When an assembly stores the shorter one first, its directors point across
+/// the fiber, so they are turned a quarter turn about the tangent.
+fn long_axis_directors(section: Section, placed: &[Vec3], directors: Vec<Vec3>) -> Vec<Vec3> {
+    match section {
+        Section::Elliptical { semi_axes } if semi_axes[0] < semi_axes[1] => {
+            polyline_tangents(placed)
+                .into_iter()
+                .zip(directors)
+                .map(|(t, d)| {
+                    [
+                        t[1] * d[2] - t[2] * d[1],
+                        t[2] * d[0] - t[0] * d[2],
+                        t[0] * d[1] - t[1] * d[0],
+                    ]
+                })
+                .collect()
+        }
+        _ => directors,
+    }
+}
+
+/// Reads `long_axis`: one vector for the whole fiber or one per vertex.
+fn parse_long_axes(value: &Bound<'_, PyAny>, vertex_count: usize) -> PyResult<Vec<Vec3>> {
+    let axes = if let Ok(single) = value.extract::<Vec3>() {
+        vec![single; vertex_count]
+    } else {
+        value.extract::<Vec<Vec3>>().map_err(|_| {
+            PyValueError::new_err("long_axis must be one 3-vector or one 3-vector per vertex")
+        })?
+    };
+    if axes.len() != vertex_count {
+        return Err(PyValueError::new_err(format!(
+            "long_axis has {} vectors for {vertex_count} vertices",
+            axes.len()
+        )));
+    }
+    if axes
+        .iter()
+        .any(|axis| axis.iter().any(|value| !value.is_finite()) || axis.iter().all(|value| *value == 0.0))
+    {
+        return Err(PyValueError::new_err("long_axis vectors must be finite and nonzero"));
+    }
+    Ok(axes)
 }
 
 fn transform_point(point: Vec3, rotation: [[f64; 3]; 3], translation: Vec3) -> Vec3 {

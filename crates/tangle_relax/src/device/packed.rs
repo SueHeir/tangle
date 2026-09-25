@@ -536,9 +536,15 @@ impl PackedAssembly {
         }
         assembly.topology.fibers = fibers;
         assembly.admissibility.bend_limits = bend_limits;
-        assembly.geometry.placed = GeometryState { positions: placed };
+        // Adaptive packing only accepts circular sections, so no directors
+        // survive the change of discretization.
+        assembly.geometry.placed = GeometryState {
+            positions: placed,
+            directors: Vec::new(),
+        };
         assembly.geometry.intrinsic = GeometryState {
             positions: intrinsic,
+            directors: Vec::new(),
         };
         assembly.geometry.assembled_reference = None;
         if assembly.topology.fibers.len() != source_fiber_count {
