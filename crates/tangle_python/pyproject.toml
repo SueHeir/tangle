@@ -7,7 +7,7 @@ name = "tangle"
 version = "0.1.0"
 description = "Python interface to TANGLE fiber assembly and CubeCL formation recipes"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT OR Apache-2.0" }
 authors = [{ name = "TANGLE contributors" }]
 classifiers = [

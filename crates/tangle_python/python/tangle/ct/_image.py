@@ -30,11 +30,11 @@ class Levels:
 
 def normalize(volume: np.ndarray, *, denoise_sigma: float, levels: Levels | None = None) -> tuple[np.ndarray, Levels]:
     """Return a float32 copy scaled so void is about 0 and fiber about 1."""
-    from scipy.ndimage import gaussian_filter
+    from . import _native
 
     image = np.asarray(volume, dtype=np.float32)
     if denoise_sigma > 0:
-        image = gaussian_filter(image, denoise_sigma)
+        image = _native.gaussian(image, denoise_sigma)
     if levels is None:
         threshold = otsu_threshold(image[:: max(1, image.shape[0] // 64)])
         void = float(np.median(image[image < threshold]))
@@ -47,48 +47,17 @@ def normalize(volume: np.ndarray, *, denoise_sigma: float, levels: Levels | None
 
 
 class HessianField:
-    """Gaussian-scale Hessian of the normalized image, queried at arbitrary points."""
+    """Gaussian-scale Hessian of the normalized image, queried at arbitrary points (in Rust)."""
 
     def __init__(self, image: np.ndarray, sigma: float) -> None:
-        from scipy.ndimage import gaussian_filter
+        from . import _native
 
         self.sigma = sigma
-        # array axes are (z, y, x); store components in (x, y, z) order
-        orders = {
-            (0, 0): (0, 0, 2),
-            (1, 1): (0, 2, 0),
-            (2, 2): (2, 0, 0),
-            (0, 1): (0, 1, 1),
-            (0, 2): (1, 0, 1),
-            (1, 2): (1, 1, 0),
-        }
-        scale = sigma**2
-        # One (6, z, y, x) stack, so a few points read all six components in
-        # one interpolation call (the tracer asks for one point at a time).
-        self.keys = list(orders)
-        self.stack = np.empty((len(orders),) + image.shape, dtype=np.float32)
-        for k, order in enumerate(orders.values()):
-            self.stack[k] = scale * gaussian_filter(image, sigma, order=order)
+        self._field = _native.Hessian(image, sigma)
 
     def at(self, points: np.ndarray) -> np.ndarray:
-        from scipy.ndimage import map_coordinates
-
-        from ._geometry import sample_image
-
-        points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-        n = len(points)
-        if n <= 64:
-            coordinates = np.empty((4, 6 * n))
-            coordinates[0] = np.repeat(np.arange(6.0), n)
-            coordinates[1:] = np.tile((points[:, ::-1] - 0.5).T, 6)
-            values = map_coordinates(self.stack, coordinates, order=1, mode="constant", cval=0.0).reshape(6, n)
-        else:
-            values = np.stack([sample_image(component, points) for component in self.stack])
-        h = np.zeros((n, 3, 3))
-        for k, (i, j) in enumerate(self.keys):
-            h[:, i, j] = values[k]
-            h[:, j, i] = values[k]
-        return h
+        """The ``(n, 3, 3)`` Hessians (times sigma²) at ``(x, y, z)`` points."""
+        return self._field.at(points)
 
     def directions(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Axis direction (smallest-magnitude eigenvector) and a tubularity score.
@@ -96,14 +65,7 @@ class HessianField:
         The score is ``-(λ2 + λ3) / 2`` for eigenvalues ordered by magnitude,
         positive for a bright tube and near zero off-fiber.
         """
-        values, vectors = np.linalg.eigh(self.at(points))
-        order = np.argsort(np.abs(values), axis=1)
-        rows = np.arange(len(values))[:, None]
-        values = values[rows, order]
-        vectors = np.take_along_axis(vectors, order[:, None, :], axis=2)
-        axis = vectors[:, :, 0]
-        tubularity = -0.5 * (values[:, 1] + values[:, 2])
-        return axis, tubularity
+        return self._field.directions(points)
 
 
 def half_radius(profiles: np.ndarray, distances: np.ndarray, peak_reach: float) -> np.ndarray:

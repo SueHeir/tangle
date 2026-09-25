@@ -12,12 +12,13 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 grass_app.workspace = true
-pyo3 = { version = "0.27", features = ["abi3-py310"] }
+pyo3 = { version = "0.27", features = ["abi3-py311"] }
 serde_json.workspace = true
 tangle_app.workspace = true
 tangle_checkpoint.workspace = true
 tangle_characterize.workspace = true
 tangle_core.workspace = true
+tangle_ct.workspace = true
 tangle_export.workspace = true
 tangle_generate.workspace = true
 tangle_relax.workspace = true

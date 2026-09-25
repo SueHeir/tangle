@@ -599,13 +599,11 @@ def fit_fibers(
         from ._ranges import range_image
 
         if all(profiled):
-            from scipy.ndimage import gaussian_filter
-
-            from . import _grey
+            from . import _grey, _native
 
             grey = np.asarray(volume, dtype=np.float32)
             if settings.denoise_sigma_voxels > 0:
-                grey = gaussian_filter(grey, settings.denoise_sigma_voxels)
+                grey = _native.gaussian(grey, settings.denoise_sigma_voxels)
             profiles = [np.asarray(item.profile, dtype=np.float64) for item in specs]
             type_radii = np.array([0.5 * item.diameter / voxel_size for item in specs])
             grey_void, noise, derived = _grey.profile_levels(grey, profiles, type_radii)
@@ -730,7 +728,7 @@ def _mask_image(
     """A binary fiber mask as a 0/1 image, with fiber cores filled (a
     threshold can miss a dim core) and a light blur, so the image force sees
     a smooth edge."""
-    from scipy.ndimage import gaussian_filter
+    from . import _native
 
     if volume.dtype == bool:
         mask = volume.copy()
@@ -743,7 +741,7 @@ def _mask_image(
         mask &= ~np.asarray(exclude, dtype=bool)
     image = mask.astype(np.float32)
     if settings.denoise_sigma_voxels > 0:
-        image = gaussian_filter(image, settings.denoise_sigma_voxels)
+        image = _native.gaussian(image, settings.denoise_sigma_voxels)
     return image, Levels(void=0.0, fiber=1.0, threshold=0.5)
 
 
@@ -759,33 +757,9 @@ def _core_holes(mask: np.ndarray, max_area: float) -> np.ndarray:
     along each axis. A hollow fiber is a closed ring in the slices across
     it (in 3D it is a tube open at both ends, so a 3D fill misses it); larger
     holes are void between fibers that happen to enclose it in a slice."""
-    from scipy.ndimage import label
+    from . import _native
 
-    # Per axis, one labelling of the void with 4-connectivity inside each
-    # slice and none across slices: every slice's void components at once
-    # (a fill and a label per slice was 2000 calls a tile). A component is a
-    # hole when it does not reach its slice's edge, as binary_fill_holes
-    # decides it.
-    void = ~mask
-    holes = np.zeros(mask.shape, dtype=bool)
-    for axis in range(3):
-        structure = np.zeros((3, 3, 3), dtype=bool)
-        cross = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
-        np.moveaxis(structure, axis, 0)[1] = cross
-        ids, count = label(void, structure=structure)
-        if count == 0:
-            continue
-        sizes = np.bincount(ids.ravel(), minlength=count + 1)
-        small = sizes <= max_area
-        small[0] = False
-        for other in range(3):
-            if other == axis:
-                continue
-            edge = np.moveaxis(ids, other, 0)
-            small[np.unique(edge[0])] = False
-            small[np.unique(edge[-1])] = False
-        holes |= small[ids]
-    return holes
+    return _native.core_holes(mask, max_area)
 
 
 class _Fitter:

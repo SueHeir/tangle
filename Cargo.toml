@@ -10,6 +10,7 @@ repository = "https://github.com/SueHeir/tangle"
 
 [workspace.dependencies]
 tangle_core = { path = "crates/tangle_core", version = "0.1.0" }
+tangle_ct = { path = "crates/tangle_ct", version = "0.1.0" }
 tangle_app  = { path = "crates/tangle_app",  version = "0.1.0" }
 tangle_contact = { path = "crates/tangle_contact", version = "0.1.0", default-features = false }
 tangle_characterize = { path = "crates/tangle_characterize", version = "0.1.0" }

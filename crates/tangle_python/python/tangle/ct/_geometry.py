@@ -60,12 +60,13 @@ def cross_frames(line: np.ndarray, nodes: int) -> tuple[np.ndarray, np.ndarray] 
 
 
 def sample_image(image: np.ndarray, points: np.ndarray, *, fill: float = 0.0) -> np.ndarray:
-    """Trilinear samples of a ``(z, y, x)`` array at voxel coordinates ``(x, y, z)``."""
-    from scipy.ndimage import map_coordinates
+    """Trilinear samples of a ``(z, y, x)`` array at voxel coordinates ``(x, y, z)``.
 
-    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-    coordinates = (points[:, ::-1] - 0.5).T
-    return map_coordinates(image, coordinates, order=1, mode="constant", cval=fill)
+    As ``map_coordinates(order=1, mode="constant", cval=fill)``; in Rust.
+    """
+    from . import _native
+
+    return _native.sample(image, points, fill)
 
 
 def sample_labels(labels: np.ndarray, points: np.ndarray) -> np.ndarray:
@@ -76,29 +77,6 @@ def sample_labels(labels: np.ndarray, points: np.ndarray) -> np.ndarray:
     values = np.zeros(len(points), dtype=labels.dtype)
     values[inside] = labels[index[inside, 0], index[inside, 1], index[inside, 2]]
     return values
-
-
-def _segment_distances(voxels: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    ab = b - a
-    denominator = float(ab @ ab)
-    if denominator <= 1e-12:
-        return np.linalg.norm(voxels - a, axis=1)
-    t = np.clip((voxels - a) @ ab / denominator, 0.0, 1.0)
-    return np.linalg.norm(voxels - (a + t[:, None] * ab), axis=1)
-
-
-def _box_segment_distances(low: np.ndarray, high: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Distances from the voxel centers of box ``[low, high)`` to segment ``ab``, as ``(z, y, x)``."""
-    x = (np.arange(low[0], high[0]) + 0.5 - a[0])[None, None, :]
-    y = (np.arange(low[1], high[1]) + 0.5 - a[1])[None, :, None]
-    z = (np.arange(low[2], high[2]) + 0.5 - a[2])[:, None, None]
-    ab = b - a
-    denominator = float(ab @ ab)
-    if denominator <= 1e-12:
-        return np.sqrt(x * x + y * y + z * z)
-    t = np.clip((x * ab[0] + y * ab[1] + z * ab[2]) / denominator, 0.0, 1.0)
-    dx, dy, dz = x - t * ab[0], y - t * ab[1], z - t * ab[2]
-    return np.sqrt(dx * dx + dy * dy + dz * dz)
 
 
 def segment_voxels(
@@ -238,22 +216,14 @@ def paint(target: np.ndarray, line: np.ndarray, reach: float, value: int, *, onl
     """Set voxels of ``target`` within ``reach`` of polyline ``line`` to ``value`` in place.
 
     Works on per-segment windows, so it costs nothing proportional to the
-    whole volume (unlike :func:`rasterize`).
+    whole volume (unlike :func:`rasterize`); in Rust.
     """
-    line = np.asarray(line, dtype=np.float64).reshape(-1, 3)
-    if len(line) == 1:
-        line = np.vstack([line, line])
-    upper = np.array(target.shape[::-1])
-    for a, b in zip(line[:-1], line[1:]):
-        low = np.maximum(np.floor(np.minimum(a, b) - reach - 0.5).astype(int), 0)
-        high = np.minimum(np.ceil(np.maximum(a, b) + reach + 0.5).astype(int), upper)
-        if np.any(high <= low):
-            continue
-        inside = _box_segment_distances(low, high, a, b) <= reach
-        window = target[low[2] : high[2], low[1] : high[1], low[0] : high[0]]
-        if only_empty:
-            inside &= window == 0
-        window[inside] = value
+    from . import _native
+
+    work = target if target.dtype == np.int32 and target.flags.c_contiguous else np.ascontiguousarray(target, dtype=np.int32)
+    _native.paint(work, line, reach, value, only_empty=only_empty)
+    if work is not target:
+        target[...] = work
 
 
 class OwnerLookup:
@@ -311,20 +281,8 @@ def rasterize(
     ``segment`` is a global segment index (``-1`` = unowned); segment ``s`` of
     fiber ``f`` is ``offsets[f] + s`` with offsets from the node counts minus one.
     """
+    from . import _native
+
     radii = np.asarray(radii, dtype=np.float64)
     reaches = radii if reach is None else np.broadcast_to(np.asarray(reach, dtype=np.float64), radii.shape)
-    labels = np.zeros(shape, dtype=np.int32)
-    best = np.full(shape, np.inf, dtype=np.float32)
-    segment_ids = np.full(shape, -1, dtype=np.int32)
-    if not len(centerlines):
-        return labels, best, segment_ids
-    line_of = segment_lines(centerlines)
-    chunks = segment_voxels(centerlines, reaches + 0.5, reaches, np.zeros(3, dtype=int), np.array(shape[::-1]))
-    value, owner = nearest_segments(
-        int(np.prod(shape)), chunks, key=-radii[line_of] if signed else None
-    )
-    owned = owner >= 0
-    labels.ravel()[owned] = line_of[owner[owned]] + 1
-    best.ravel()[owned] = value[owned]
-    segment_ids.ravel()[owned] = owner[owned]
-    return labels, best, segment_ids
+    return _native.rasterize(shape, centerlines, radii, reaches, signed)

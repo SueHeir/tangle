@@ -166,10 +166,9 @@ def _drop_claimed(line: np.ndarray, claimed: np.ndarray, max_covered: float = 0.
 
 def foreground_depth(foreground: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """The foreground's distance transform (float32) and its 3×3×3 maximum."""
-    from scipy.ndimage import distance_transform_edt, maximum_filter
+    from . import _native
 
-    edt = distance_transform_edt(foreground).astype(np.float32)
-    return edt, maximum_filter(edt, size=3)
+    return _native.foreground_depth(foreground)
 
 
 def ridge_seeds(
