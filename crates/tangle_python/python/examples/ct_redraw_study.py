@@ -13,6 +13,9 @@ better when that count falls.
 For every judge it reports, over the same groups: how often it would keep a
 truly better redraw and revert a truly worse one, and the truth change its
 choices would add up to. So the judges are compared on identical proposals.
+It also scores the whole fit as it stood entering each redraw pass, after
+the loop and at the end (after the polish), to show where a fit gains or
+loses.
 
 Usage::
 
@@ -26,6 +29,7 @@ strings). Writes ``<output>/redraw_study.json`` and prints a table.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -89,6 +93,19 @@ def wrong_samples(fit_lines, truth_lines, truth_radii, shape, boxes, tolerance_r
     return wrong
 
 
+SCORE_KEYS = ("centerline_f1", "split", "merged_fibers", "missed", "false_fibers", "recovered")
+
+
+def _score_state(fit, scan, lines, radii, types) -> dict:
+    """``ct.score`` of the fit as it stood at one step (the state entering a redraw pass, or after the loop)."""
+    state = dataclasses.replace(
+        fit, centerlines=[np.asarray(line, dtype=np.float64) for line in lines],
+        radii=np.asarray(radii, dtype=np.float64),
+        types=None if fit.types is None else np.asarray(types, dtype=int), confidence=None,
+    )
+    return {k: v for k, v in ct.score(state, scan).items() if k in SCORE_KEYS}
+
+
 def study(name: str, output: Path, judge: str, overrides: dict) -> dict:
     example = ct_examples.EXAMPLES[name](output / ".cache" / f"{name}.json")
     scan = example.scan
@@ -103,8 +120,15 @@ def study(name: str, output: Path, judge: str, overrides: dict) -> dict:
     truth_lines = [np.asarray(line, dtype=np.float64) for line in scan.centerlines]
     truth_radii = np.asarray(scan.radii, dtype=np.float64)
     shape = scan.volume.shape
+    passes = []
+    for event in events:
+        if event["pass"] == "end" or not passes or passes[-1]["pass"] != event["pass"]:
+            passes.append({"pass": event["pass"], "score": _score_state(fit, scan, *event["old"], event["types"])})
+    passes.append({"pass": "final", "score": _score_state(fit, scan, fit.centerlines, fit.radii, fit.types)})
     groups = []
     for event in events:
+        if event["pass"] == "end":
+            continue
         old_lines, _ = event["old"]
         new_lines, _ = event["new"]
         for c, boxes in enumerate(event["groups"]):
@@ -130,9 +154,8 @@ def study(name: str, output: Path, judge: str, overrides: dict) -> dict:
             "truth_change_of_its_choices": int(truth[keep].sum()),
             "best_possible": int(truth[truth > 0].sum()),
         }
-    report["score"] = {k: v for k, v in ct.score(fit, scan).items() if k in (
-        "centerline_f1", "split", "merged_fibers", "missed", "false_fibers", "recovered"
-    )}
+    report["score"] = {k: v for k, v in ct.score(fit, scan).items() if k in SCORE_KEYS}
+    report["passes"] = passes
     report["group_details"] = groups
     return report
 
@@ -167,6 +190,9 @@ def main() -> None:
                 f"  {key:<10}  {row['keeps_better']:>6} / {row['keeps_worse']:<6}      {row['reverts_better']:>6} / "
                 f"{row['reverts_worse']:<6}   {row['neutral']:>6}  {row['truth_change_of_its_choices']:>7} / {row['best_possible']}"
             )
+        print("  fit by step (entering each redraw pass, after the loop, final):")
+        for step in report["passes"]:
+            print(f"    {str(step['pass']):<6} {step['score']}")
     (output / "redraw_study.json").write_text(json.dumps(reports, indent=1, default=str) + "\n")
 
 

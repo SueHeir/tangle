@@ -1113,6 +1113,7 @@ class _Fitter:
                 _REDRAW_PROBE(
                     {
                         "pass": pass_index, "judge": self.score_name, "old": (lines, radii), "new": (new_lines, new_radii),
+                        "types": types,
                         "groups": [[boxes[k] for k in np.flatnonzero(component == c)] for c in range(count)],
                         "gains": {
                             "nats": nats_gain, "grey": grey_gain if self.profiles is not None else None,
@@ -1172,6 +1173,8 @@ class _Fitter:
                 lines, radii, types = merged, merged_radii, merged_types
                 confidence, settled = merged_confidence, merged_settled
                 old_misfit = old_nats = None
+        if _REDRAW_PROBE is not None:
+            _REDRAW_PROBE({"pass": "end", "old": (lines, radii), "types": types})
         return lines, radii, types, confidence
 
     @property
