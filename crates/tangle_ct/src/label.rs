@@ -96,42 +96,93 @@ pub fn label(mask: &[bool], shape: Shape, structure: &Structure) -> (Vec<i32>, u
 /// Enclosed holes no larger than `max_area` voxels, slice by slice along
 /// each axis: void components (face-connected within the slice) that do not
 /// reach the slice's edge. A hollow fiber is a closed ring in the slices
-/// across it, which a 3D fill misses.
+/// across it, which a 3D fill misses. Slices are filled independently, spread
+/// over the available cores.
 pub fn core_holes(mask: &[bool], shape: Shape, max_area: f64) -> Vec<bool> {
-    let void: Vec<bool> = mask.iter().map(|&m| !m).collect();
+    assert_eq!(mask.len(), voxel_count(shape));
     let mut holes = vec![false; mask.len()];
     let s = strides(shape);
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     for axis in 0..3 {
-        let mut structure = [[[false; 3]; 3]; 3];
-        for (a, b) in [(1, 1), (0, 1), (2, 1), (1, 0), (1, 2)] {
-            // the in-plane cross, in the two axes other than `axis`
-            let mut offset = [1usize; 3];
-            let others: Vec<usize> = (0..3).filter(|&x| x != axis).collect();
-            offset[others[0]] = a;
-            offset[others[1]] = b;
-            structure[offset[0]][offset[1]][offset[2]] = true;
+        let (p, q) = match axis {
+            0 => (1, 2),
+            1 => (0, 2),
+            _ => (0, 1),
+        };
+        let slices = shape[axis];
+        let per_thread = slices.div_ceil(threads.min(slices).max(1)).max(1);
+        let found: Vec<Vec<usize>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..slices)
+                .step_by(per_thread)
+                .map(|first| {
+                    scope.spawn(move || {
+                        let mut out = Vec::new();
+                        let (rows, cols) = (shape[p], shape[q]);
+                        let mut void = vec![false; rows * cols];
+                        for t in first..(first + per_thread).min(slices) {
+                            let base = t * s[axis];
+                            for r in 0..rows {
+                                for c in 0..cols {
+                                    void[r * cols + c] = !mask[base + r * s[p] + c * s[q]];
+                                }
+                            }
+                            for at in slice_holes(&void, rows, cols, max_area) {
+                                out.push(base + (at / cols) * s[p] + (at % cols) * s[q]);
+                            }
+                        }
+                        out
+                    })
+                })
+                .collect();
+            workers.into_iter().map(|w| w.join().expect("hole worker")).collect()
+        });
+        for index in found.into_iter().flatten() {
+            holes[index] = true;
         }
-        let (ids, count) = label(&void, shape, &structure);
-        if count == 0 {
+    }
+    holes
+}
+
+/// The positions of the `void` components (4-connected) of a `rows × cols`
+/// slice that do not touch its edge and have at most `max_area` pixels.
+fn slice_holes(void: &[bool], rows: usize, cols: usize, max_area: f64) -> Vec<usize> {
+    let mut seen = vec![false; void.len()];
+    let mut holes = Vec::new();
+    let mut stack = Vec::new();
+    let mut component = Vec::new();
+    for start in 0..void.len() {
+        if !void[start] || seen[start] {
             continue;
         }
-        let mut sizes = vec![0usize; count + 1];
-        for &id in &ids {
-            sizes[id as usize] += 1;
-        }
-        let mut small: Vec<bool> = sizes.iter().map(|&n| n as f64 <= max_area).collect();
-        small[0] = false;
-        for other in (0..3).filter(|&x| x != axis) {
-            for edge in [0, shape[other] - 1] {
-                for (index, &id) in ids.iter().enumerate() {
-                    if (index / s[other]) % shape[other] == edge {
-                        small[id as usize] = false;
-                    }
+        seen[start] = true;
+        stack.push(start);
+        component.clear();
+        let mut edge = false;
+        while let Some(at) = stack.pop() {
+            component.push(at);
+            let (r, c) = (at / cols, at % cols);
+            edge |= r == 0 || c == 0 || r + 1 == rows || c + 1 == cols;
+            let mut visit = |next: usize| {
+                if void[next] && !seen[next] {
+                    seen[next] = true;
+                    stack.push(next);
                 }
+            };
+            if r > 0 {
+                visit(at - cols);
+            }
+            if r + 1 < rows {
+                visit(at + cols);
+            }
+            if c > 0 {
+                visit(at - 1);
+            }
+            if c + 1 < cols {
+                visit(at + 1);
             }
         }
-        for (hole, &id) in holes.iter_mut().zip(&ids) {
-            *hole |= small[id as usize];
+        if !edge && component.len() as f64 <= max_area {
+            holes.extend_from_slice(&component);
         }
     }
     holes
@@ -170,5 +221,54 @@ mod tests {
         let holes = core_holes(&mask, shape, 4.0);
         let found: Vec<usize> = (0..75).filter(|&x| holes[x]).collect();
         assert_eq!(found, vec![12, 37, 62]);
+    }
+
+    /// The labeling route the slice fill replaced.
+    fn holes_by_labeling(mask: &[bool], shape: Shape, max_area: f64) -> Vec<bool> {
+        let void: Vec<bool> = mask.iter().map(|&m| !m).collect();
+        let mut holes = vec![false; mask.len()];
+        let s = strides(shape);
+        for axis in 0..3 {
+            let others: Vec<usize> = (0..3).filter(|&x| x != axis).collect();
+            let mut structure = [[[false; 3]; 3]; 3];
+            for (a, b) in [(1, 1), (0, 1), (2, 1), (1, 0), (1, 2)] {
+                let mut offset = [1usize; 3];
+                offset[others[0]] = a;
+                offset[others[1]] = b;
+                structure[offset[0]][offset[1]][offset[2]] = true;
+            }
+            let (ids, count) = label(&void, shape, &structure);
+            let mut sizes = vec![0usize; count + 1];
+            for &id in &ids {
+                sizes[id as usize] += 1;
+            }
+            let mut small: Vec<bool> = sizes.iter().map(|&n| n as f64 <= max_area).collect();
+            small[0] = false;
+            for &other in &others {
+                for edge in [0, shape[other] - 1] {
+                    for (index, &id) in ids.iter().enumerate() {
+                        if (index / s[other]) % shape[other] == edge {
+                            small[id as usize] = false;
+                        }
+                    }
+                }
+            }
+            for (hole, &id) in holes.iter_mut().zip(&ids) {
+                *hole |= small[id as usize];
+            }
+        }
+        holes
+    }
+
+    #[test]
+    fn slice_fill_matches_labeling() {
+        let shape = [23, 31, 29];
+        // A speckled mask: about 60% foreground, with small enclosed voids.
+        let mask: Vec<bool> = (0..voxel_count(shape))
+            .map(|i| (i.wrapping_mul(2654435761) >> 7) % 10 < 6)
+            .collect();
+        for max_area in [1.0, 4.0, 40.0] {
+            assert_eq!(core_holes(&mask, shape, max_area), holes_by_labeling(&mask, shape, max_area));
+        }
     }
 }
