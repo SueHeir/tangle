@@ -126,6 +126,7 @@ def synthetic_ct(
     drift: float = 0.05,
     seed: int = 0,
     profiles=None,
+    noise_correlation: float = 0.0,
 ) -> SyntheticScan:
     """Render ``source`` (an ``Assembly`` or ``RunResult``) as a CT-like volume.
 
@@ -133,6 +134,10 @@ def synthetic_ct(
     occupancy; a Gaussian point-spread blur, void/fiber attenuation contrast,
     Gaussian noise (``noise`` relative to the contrast) and a weak
     low-frequency drift are applied; the result is scaled to ``uint16``.
+    ``noise_correlation`` (voxels) blurs the noise field by that Gaussian
+    sigma, keeping its standard deviation (CT reconstructions often have
+    noise correlated over a voxel or two, so a light denoise removes
+    little of it; 0.9 gives neighbouring voxels a correlation of about 0.75).
     Ground-truth labels come from the exporter's per-voxel fiber ids.
 
     ``profiles`` renders several fiber types with their own brightness:
@@ -161,7 +166,11 @@ def synthetic_ct(
         occupancy, types = _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles, period)
     rng = np.random.default_rng(seed)
     attenuation = void_level + (1.0 - void_level) * gaussian_filter(occupancy, psf_sigma_voxels)
-    attenuation += rng.normal(0.0, noise, size=attenuation.shape).astype(np.float32)
+    if noise_correlation > 0:
+        field = gaussian_filter(rng.normal(0.0, 1.0, size=attenuation.shape).astype(np.float32), noise_correlation)
+        attenuation += noise / max(float(field.std()), 1e-12) * field
+    else:
+        attenuation += rng.normal(0.0, noise, size=attenuation.shape).astype(np.float32)
     if drift:
         z, y, x = np.indices(attenuation.shape, dtype=np.float32)
         ny, nx = attenuation.shape[1:]

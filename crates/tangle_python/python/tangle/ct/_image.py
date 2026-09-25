@@ -93,3 +93,67 @@ class HessianField:
         axis = vectors[:, :, 0]
         tubularity = -0.5 * (values[:, 1] + values[:, 2])
         return axis, tubularity
+
+
+def half_radius(profiles: np.ndarray, distances: np.ndarray, peak_reach: float) -> np.ndarray:
+    """Per row of ``profiles`` (image values at ``distances`` from an axis):
+    where it falls below half its peak, walking outward from the peak (found
+    within ``peak_reach``), so a bright rim around a dim core reads its outer
+    edge. The last distance when it never falls; 0 when the peak is not
+    above void (0)."""
+    profiles = np.atleast_2d(np.asarray(profiles, dtype=np.float64))
+    rows = np.arange(len(profiles))
+    limit = max(int(np.searchsorted(distances, peak_reach, side="right")), 1)
+    top = np.argmax(profiles[:, :limit], axis=1)
+    half = 0.5 * profiles[rows, top]
+    index = np.arange(profiles.shape[1])
+    below = (profiles < half[:, None]) & (index[None, :] > top[:, None])
+    k = np.argmax(below, axis=1)
+    a = profiles[rows, np.maximum(k - 1, 0)]
+    b = profiles[rows, k]
+    step = distances[1] - distances[0] if len(distances) > 1 else 0.0
+    # Interpolate between the last sample above half and the first below.
+    out = distances[np.maximum(k - 1, 0)] + step * (a - half) / np.maximum(a - b, 1e-12)
+    out = np.where(below.any(axis=1), out, distances[-1])
+    return np.where(half > 0.0, out, 0.0)
+
+
+def half_widths(
+    image: np.ndarray,
+    lines: list[np.ndarray],
+    reach: float,
+    *,
+    nodes: int = 24,
+    step: float = 0.25,
+) -> np.ndarray:
+    """Each fiber's radius read from its mean cross-section in ``image`` (void 0), in voxels.
+
+    At up to ``nodes`` interior nodes the image is sampled along four
+    directions across the fiber, out to ``reach``; the median over nodes and
+    directions at each distance is the fiber's cross-section, and its radius
+    is where it falls below half its peak (:func:`half_radius`, the peak
+    looked for within ``reach / 2``). NaN for a line of fewer than 3 nodes.
+
+    This is a thickness that survives noise: the medians pool some hundred
+    samples per distance, whereas the foreground's depth reads one
+    thresholded voxel at a time. In a scan whose fibers sit a few noise
+    sigma above void, a threshold that keeps a dim fiber's core also keeps
+    void speckle, and one that drops the speckle punches holes into the
+    core, so the depth there reads a fraction of the true radius.
+    """
+    from ._geometry import cross_frames, sample_image
+
+    out = np.full(len(lines), np.nan)
+    distances = np.arange(0.0, reach + 0.5 * step, step)
+    frames = [cross_frames(line, nodes) for line in lines]
+    used = [i for i, frame in enumerate(frames) if frame is not None]
+    if not used:
+        return out
+    points = np.concatenate(
+        [(frames[i][0][:, None, None, :] + frames[i][1][:, :, None, :] * distances[None, None, :, None]).reshape(-1, 3) for i in used]
+    )
+    values = sample_image(image, points).reshape(-1, len(distances))
+    sizes = [4 * len(frames[i][0]) for i in used]
+    profiles = np.stack([np.median(part, axis=0) for part in np.split(values, np.cumsum(sizes)[:-1])])
+    out[used] = half_radius(profiles, distances, 0.5 * reach)
+    return out

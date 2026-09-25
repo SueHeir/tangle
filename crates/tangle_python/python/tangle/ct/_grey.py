@@ -177,7 +177,7 @@ def profile_types(
     that type's profile (void beyond the surface). A type is taken when its
     median squared misfit is below ``decisive`` times the next type's.
     """
-    from ._geometry import sample_image, tangents
+    from ._geometry import cross_frames, sample_image
 
     count = len(profiles)
     out = np.full(len(lines), -1, dtype=int)
@@ -190,19 +190,7 @@ def profile_types(
         inside = np.interp(np.minimum(fractions, 1.0), profile_radii(p), p)
         weight = np.clip(1.0 - (fractions - 1.0) * float(r) / (2 * EDGE), 0.0, 1.0)  # as render_grey
         expected.append(void + weight * (inside - void))
-    frames = []  # per fiber: sample centers (n, 3) and the four directions (n, 4, 3)
-    for line in lines:
-        line = np.asarray(line, dtype=np.float64)
-        if len(line) < 3:
-            frames.append(None)
-            continue
-        pick = np.unique(np.linspace(1, len(line) - 2, min(nodes, len(line) - 2)).astype(int))
-        axis = tangents(line)[pick]
-        helper = np.where(np.abs(axis[:, :1]) < 0.9, np.array([[1.0, 0.0, 0.0]]), np.array([[0.0, 1.0, 0.0]]))
-        u = np.cross(axis, helper)
-        u /= np.maximum(np.linalg.norm(u, axis=1, keepdims=True), 1e-9)
-        w = np.cross(axis, u)
-        frames.append((line[pick], np.stack([u, -u, w, -w], axis=1)))
+    frames = [cross_frames(line, nodes) for line in lines]  # per fiber: sample centers and four directions
     used = [i for i, frame in enumerate(frames) if frame is not None]
     if not used:
         return out
