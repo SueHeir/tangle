@@ -328,7 +328,8 @@ is only ever one result per example:
 by the scan), `two_types` (7 µm and 19 µm fibers), `noisy_two_types` (the
 same fibers in a low-contrast, noisy scan: dim solid coarse fibers about
 3 noise sigma above void, and noise correlated over about a voxel, via
-`synthetic_ct(noise_correlation=...)`), and one `scenario_*` per
+`synthetic_ct(noise_correlation=...)`; fitted from the grey alone, as
+`--input plain` does), and one `scenario_*` per
 fitting step: a straight fiber, interior ends, gaps of 2, 6 and 12 radii,
 crossings at 90° and 30°, touching parallel fibers, a piece below the
 minimum length and a bend near the limit, plus `scenario_missed_fiber`:

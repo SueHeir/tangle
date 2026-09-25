@@ -517,7 +517,7 @@ and wrong where a noisy scan's threshold punches holes into dim fibers;
 the pooled cross-section survives noise but reads a fiber packed among
 others too thick. On the true fibers of the examples, depth alone
 misjudged (|e| > 0.3) 95% of the coarse nodes in `noisy_two_types` fitted
-without grey information and the cross-section alone 24–30% of the nodes
+without grey information and the cross-section alone 24% of the nodes
 in `scenario_dense_crossing`; the closer of the two at most 7%. The product
 of the five is median-filtered over three samples, and each stored node
 takes the lowest sample within half a segment of it. Other fits are found

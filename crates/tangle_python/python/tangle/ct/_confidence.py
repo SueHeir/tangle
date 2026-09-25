@@ -99,7 +99,7 @@ def node_confidence(
         # over the ring and neighbouring samples survives the noise, and
         # reads a fiber packed among others too thick (its neighbours fill
         # the ring). On the true fibers of the examples, either one alone
-        # misjudged up to 95% (depth, noisy scan) or 30% (cross-section,
+        # misjudged up to 95% (depth, noisy scan) or 24% (cross-section,
         # dense crossing) of the nodes; the closer one, at most 7%.
         width = _local_thickness(image, points, directions, r) - (margin if thickness_margin is None else thickness_margin)
         deep = sample_image(depth, points) - margin
