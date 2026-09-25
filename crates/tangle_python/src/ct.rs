@@ -310,7 +310,13 @@ pub(crate) fn ct_trace_one_way(
     same_shape(&image, &claimed, "claimed")?;
     let settings = trace_settings(radius, min_bend_radius, step)?;
     let tracer = Tracer::new(read(&image, "image")?, shape, &hessian.field, settings);
-    Ok(tracer.trace_one_way(start, direction, max_steps, read(&claimed, "claimed")?, own_label))
+    Ok(tracer.trace_one_way(
+        start,
+        direction,
+        max_steps,
+        read(&claimed, "claimed")?,
+        own_label,
+    ))
 }
 
 /// Traces fibers from ridge seeds, painting `claimed` in place (see `_trace.trace_fibers`).

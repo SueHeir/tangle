@@ -111,7 +111,11 @@ pub fn resample(points: &[Point], spacing: f64) -> Vec<Point> {
     let mut out = Vec::with_capacity(count);
     let mut j = 0;
     for t in 0..count {
-        let target = if t + 1 == count { total } else { t as f64 * step };
+        let target = if t + 1 == count {
+            total
+        } else {
+            t as f64 * step
+        };
         if target >= total {
             out.push(*kept.last().unwrap());
             continue;
@@ -199,7 +203,13 @@ impl<'a> Tracer<'a> {
 
     /// `center` moved (at most 0.4 radii) to the intensity-weighted centroid
     /// of the cross-section, with voxels of other fibers down-weighted.
-    pub fn recenter(&self, center: Point, direction: Point, claimed: &[i32], own_label: i32) -> Point {
+    pub fn recenter(
+        &self,
+        center: Point,
+        direction: Point,
+        claimed: &[i32],
+        own_label: i32,
+    ) -> Point {
         let points = self.plane(center, direction, &self.window);
         let s = strides(self.shape);
         let spread = 2.0 * (0.8 * self.radius) * (0.8 * self.radius);
@@ -208,7 +218,8 @@ impl<'a> Tracer<'a> {
         let mut weights = Vec::with_capacity(points.len());
         for &p in &points {
             let mut weight = self.sample(p).max(0.0);
-            let owner = voxel_of(self.shape, p).map_or(0, |[k, j, i]| claimed[k * s[0] + j * s[1] + i]);
+            let owner =
+                voxel_of(self.shape, p).map_or(0, |[k, j, i]| claimed[k * s[0] + j * s[1] + i]);
             if owner > 0 && owner != own_label {
                 weight *= 0.15;
             }
@@ -373,9 +384,7 @@ pub fn ridge_seeds(
     let depth = (min_depth_radii * radius).max(1.0) as f32;
     let s = strides(shape);
     let mut seeds: Vec<(usize, f32)> = (0..edt.len())
-        .filter(|&v| {
-            edt[v] >= depth && edt[v] >= peak[v] && exclude.is_none_or(|e| e[v] == 0)
-        })
+        .filter(|&v| edt[v] >= depth && edt[v] >= peak[v] && exclude.is_none_or(|e| e[v] == 0))
         .map(|v| (v, edt[v]))
         .collect();
     seeds.sort_by(|a, b| b.1.total_cmp(&a.1)); // stable
@@ -477,7 +486,14 @@ mod tests {
     fn traces_a_straight_bright_rod_end_to_end() {
         let shape = [24, 24, 64];
         let mut rod = vec![0i32; shape[0] * shape[1] * shape[2]];
-        paint(&mut rod, shape, &[[6.0, 12.0, 12.0], [58.0, 12.0, 12.0]], 3.0, 1, false);
+        paint(
+            &mut rod,
+            shape,
+            &[[6.0, 12.0, 12.0], [58.0, 12.0, 12.0]],
+            3.0,
+            1,
+            false,
+        );
         let image: Vec<f32> = rod.iter().map(|&v| v as f32).collect();
         let hessian = HessianField::new(&image, shape, 1.8);
         let foreground: Vec<bool> = image.iter().map(|&v| v > 0.5).collect();
@@ -499,8 +515,13 @@ mod tests {
         let fibers = trace_fibers(&image, shape, &hessian, &mut claimed, &edt, &peak, search);
         assert_eq!(fibers.len(), 1, "{fibers:?}");
         let xs: Vec<f64> = fibers[0].iter().map(|p| p[0]).collect();
-        let (low, high) = (xs.iter().cloned().fold(f64::MAX, f64::min), xs.iter().cloned().fold(f64::MIN, f64::max));
+        let (low, high) = (
+            xs.iter().cloned().fold(f64::MAX, f64::min),
+            xs.iter().cloned().fold(f64::MIN, f64::max),
+        );
         assert!(low < 12.0 && high > 52.0, "{low} {high}");
-        assert!(fibers[0].iter().all(|p| (p[1] - 12.0).abs() < 1.0 && (p[2] - 12.0).abs() < 1.0));
+        assert!(fibers[0]
+            .iter()
+            .all(|p| (p[1] - 12.0).abs() < 1.0 && (p[2] - 12.0).abs() < 1.0));
     }
 }
