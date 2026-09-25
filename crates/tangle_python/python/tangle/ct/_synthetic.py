@@ -127,6 +127,7 @@ def synthetic_ct(
     seed: int = 0,
     profiles=None,
     noise_correlation: float = 0.0,
+    phase_contrast: float = 0.0,
 ) -> SyntheticScan:
     """Render ``source`` (an ``Assembly`` or ``RunResult``) as a CT-like volume.
 
@@ -139,6 +140,15 @@ def synthetic_ct(
     noise correlated over a voxel or two, so a light denoise removes
     little of it; 0.9 gives neighbouring voxels a correlation of about 0.75).
     Ground-truth labels come from the exporter's per-voxel fiber ids.
+
+    ``phase_contrast`` adds the edge fringe of propagation-based phase
+    contrast: the blurred image minus ``phase_contrast`` times its
+    Laplacian (scaled by the blur's variance, so the setting does not
+    depend on the blur width). Every surface gets a dark band just outside
+    and a bright one just inside; at 1, a lone straight edge's dark band dips
+    about a quarter of the fiber contrast below the void. Where two surfaces
+    come close the fringes add, so the gap between touching fibers reads
+    darkest. 0 (the default) renders plain attenuation.
 
     ``profiles`` renders several fiber types with their own brightness:
     a sequence of ``(diameter, CrossSection)`` pairs. Each fiber gets the
@@ -166,6 +176,11 @@ def synthetic_ct(
         occupancy, types = _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles, period)
     rng = np.random.default_rng(seed)
     attenuation = void_level + (1.0 - void_level) * gaussian_filter(occupancy, psf_sigma_voxels)
+    if phase_contrast:
+        from scipy.ndimage import gaussian_laplace
+
+        sigma = max(psf_sigma_voxels, 0.5)
+        attenuation -= phase_contrast * (1.0 - void_level) * sigma**2 * gaussian_laplace(occupancy, sigma)
     if noise_correlation > 0:
         field = gaussian_filter(rng.normal(0.0, 1.0, size=attenuation.shape).astype(np.float32), noise_correlation)
         attenuation += noise / max(float(field.std()), 1e-12) * field
