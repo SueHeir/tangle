@@ -569,7 +569,9 @@ pub fn find_segment_corrections(
                                 } else {
                                     let b = ld1x * ld2x + ld1y * ld2y + ld1z * ld2z;
                                     let denominator = a * e - b * b;
-                                    if denominator.abs() > parallel_relative_epsilon * a * e {
+                                    let parallel =
+                                        denominator.abs() <= parallel_relative_epsilon * a * e;
+                                    if !parallel {
                                         s = ((b * f - c * e) / denominator).clamp(0.0, 1.0);
                                     }
                                     let projected = (b * s + f) / e;
@@ -580,6 +582,38 @@ pub fn find_segment_corrections(
                                         s = ((b - c) / a).clamp(0.0, 1.0);
                                     } else {
                                         t = projected;
+                                    }
+                                    // Nearly parallel segments (under about a
+                                    // milliradian apart) come closest at one end
+                                    // of their overlap, not necessarily the s = 0
+                                    // end: also try the s = 1 end and keep the
+                                    // closer pair.
+                                    if parallel {
+                                        let mut end_s = 1.0_f32;
+                                        let mut end_t = 0.0_f32;
+                                        let end_projected = (b + f) / e;
+                                        if end_projected < 0.0 {
+                                            end_s = (-c / a).clamp(0.0, 1.0);
+                                        } else if end_projected > 1.0 {
+                                            end_t = 1.0;
+                                            end_s = ((b - c) / a).clamp(0.0, 1.0);
+                                        } else {
+                                            end_t = end_projected;
+                                        }
+                                        let gap_x = rx + ld1x * s - ld2x * t;
+                                        let gap_y = ry + ld1y * s - ld2y * t;
+                                        let gap_z = rz + ld1z * s - ld2z * t;
+                                        let end_gap_x = rx + ld1x * end_s - ld2x * end_t;
+                                        let end_gap_y = ry + ld1y * end_s - ld2y * end_t;
+                                        let end_gap_z = rz + ld1z * end_s - ld2z * end_t;
+                                        if end_gap_x * end_gap_x
+                                            + end_gap_y * end_gap_y
+                                            + end_gap_z * end_gap_z
+                                            < gap_x * gap_x + gap_y * gap_y + gap_z * gap_z
+                                        {
+                                            s = end_s;
+                                            t = end_t;
+                                        }
                                     }
                                 }
                             }
