@@ -17,7 +17,7 @@ Run the two modes as separate commands, so each peak memory is its own.
 Usage::
 
     python ct_tiled_scan.py [--mode tiled|whole] [--side UM] [--tile VOXELS]
-                            [--overlap VOXELS] [--redraw-passes N] [--restart]
+                            [--overlap VOXELS] [--redraw-passes N] [--workers N] [--restart]
 """
 
 from __future__ import annotations
@@ -98,8 +98,9 @@ def wall_ends(fit: ct.FitResult, tile: int, report: dict) -> str:
     return f"{total} / {on_bad}"
 
 
-def peak_memory_gb() -> float:
-    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+def peak_memory_gb(who: int = resource.RUSAGE_SELF) -> float:
+    """Peak resident memory of this process (or, for RUSAGE_CHILDREN, of its largest finished child)."""
+    peak = resource.getrusage(who).ru_maxrss
     return peak / 1e9 if sys.platform == "darwin" else peak / 1e6  # bytes on macOS, KiB on Linux
 
 
@@ -110,6 +111,7 @@ def main() -> None:
     parser.add_argument("--tile", type=int, default=192, help="core size in voxels (default 192)")
     parser.add_argument("--overlap", type=int, default=None, help="padding in voxels (default fit_tiled's)")
     parser.add_argument("--redraw-passes", type=int, default=None, help="FitSettings.redraw_passes (default its own)")
+    parser.add_argument("--workers", type=int, default=1, help="tiles fitted at once, each in its own process (default 1)")
     parser.add_argument("--restart", action="store_true", help="delete the saved tiles first")
     parser.add_argument("--output", type=Path, default=Path(os.environ.get("TANGLE_CT_OUTPUT", Path(__file__).parent / "output" / "ct")))
     args = parser.parse_args()
@@ -130,7 +132,7 @@ def main() -> None:
     if args.mode == "tiled":
         fit = ct.fit_tiled(
             volume, scan.voxel_size, specs, settings, tile=args.tile, overlap=args.overlap,
-            checkpoint=folder / f"checkpoint_{args.side:g}_{args.tile}", restart=args.restart, verbose=True,
+            checkpoint=folder / f"checkpoint_{args.side:g}_{args.tile}", restart=args.restart, workers=args.workers, verbose=True,
         )
     else:
         fit = ct.fit_fibers(volume, scan.voxel_size, specs, settings)
@@ -143,11 +145,12 @@ def main() -> None:
         "mode": args.mode,
         "side (vox)": scan.volume.shape[0],
         "tile / overlap": f"{args.tile} / {tiles['overlap']}" if tiles else "-",
-        "tiles": tiles["tiles"] if tiles else "-",
+        "tiles": f"{tiles['tiles']} ({args.workers} at once)" if tiles else "-",
         "joins (end to end)": f"{tiles['joins']} ({tiles.get('gap_joins', 0)})" if tiles else "-",
         "seconds": round(seconds, 1),
         "tile seconds (sum)": tiles["seconds"] if tiles else "-",
         "peak memory (GB)": round(peak_memory_gb(), 2),
+        "worker peak (GB)": round(peak_memory_gb(resource.RUSAGE_CHILDREN), 2) if args.workers > 1 else "-",
         "true": summary["true_fibers_in_volume"],
         "fitted": summary["fitted_fibers"],
         "recovered": summary["recovered"],

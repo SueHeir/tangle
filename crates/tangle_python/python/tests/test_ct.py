@@ -751,6 +751,11 @@ class CtFitTests(unittest.TestCase):
             self.assertEqual(ct.load_tiles(tmp).fiber_count, fit.fiber_count)
             with self.assertRaises(ValueError):  # another scan in the same checkpoint
                 ct.fit_tiled(self.scan.volume[::-1], VOXEL, spec, fit_settings(), tile=36, checkpoint=tmp)
+        # Tiles fitted side by side in worker processes give the same fit.
+        parallel = ct.fit_tiled(self.scan.volume, VOXEL, spec, fit_settings(), tile=36, workers=3)
+        self.assertEqual(parallel.fiber_count, fit.fiber_count)
+        for mine, theirs in zip(parallel.centerlines, fit.centerlines):
+            np.testing.assert_allclose(mine, theirs, atol=1e-6)
 
     def test_fit_recovers_every_fiber(self):
         report = ct.score(self.fit, self.scan)
