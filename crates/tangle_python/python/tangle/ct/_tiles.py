@@ -513,6 +513,7 @@ def stitch(
 ) -> FitResult:
     """Join the tiles' fits into one :class:`FitResult` (see the module notes)."""
     band = 0.5 * grid.overlap
+    fits = sorted(fits, key=lambda fit: fit.index)  # the same result whatever order the tiles finished in
     stretches: list[dict[str, Any]] = []
     ends: list[_End] = []
     for fit in fits:
