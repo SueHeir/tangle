@@ -74,7 +74,7 @@ Examples:
   resolution, and each fiber moving about 1 µm during the scan. Both types
   are solid, the coarse ones a lighter material a bit over half as dense
   as the fine ones.
-* ``bundled_two_types``: the fine fibers packed in bundles of seven, with
+* ``bundled_two_types``: the fine fibers packed in bundles of nineteen, with
   staggered ends, and the coarse ones loose, scanned as scanner_two_types
   with the noise blotchy (correlated by the scintillator's blur).
 * ``varied_1`` … ``varied_8``: fresh structures drawn from seeds, for
@@ -359,17 +359,18 @@ def bundles(cell: tangle.Cell, material: tangle.Material, count: int, per_bundle
 
 
 def bundled_two_types(cache: Path) -> Example:
-    """two_types with the fine fibers in bundles of seven, scanned by SCANNER with blotchy noise."""
+    """two_types with the fine fibers in bundles of nineteen, scanned by SCANNER with blotchy noise."""
     voxel, cell_side, crop, length = 1.25 * um, 320 * um, 200 * um, (300 * um, 500 * um)
     fine = tangle.Material("fine_7um", diameter=7 * um, min_bend_radius=35 * um)
     coarse = tangle.Material("coarse_19um", diameter=19 * um, min_bend_radius=95 * um)
     cell = tangle.Cell([cell_side] * 3, periodic="xy")
     truth = relaxed_truth(
-        cache, cell, [bundles(cell, fine, 15, 7, 23, length, 16), planar_population(coarse, 14, 22, length, 16)]
+        cache, cell, [bundles(cell, fine, 6, 19, 23, length, 16), planar_population(coarse, 14, 22, length, 16)]
     )
     # The scintillator spreads each counted photon over about a pixel, so the
-    # noise comes out blotchy instead of pixel to pixel.
-    scanner = replace(SCANNER, noise_blur=1.0)
+    # noise comes out blotchy instead of pixel to pixel; that blur also
+    # averages the noise down, so fewer photons keep the same contrast to noise.
+    scanner = replace(SCANNER, noise_blur=1.0, photons=90)
     full = render_scan(truth, voxel, seed=23, profiles=SCANNER_PROFILES, scanner=scanner)
     low = int(round((cell_side - crop) / 2 / voxel))
     scan = full.crop((low,) * 3, (low + int(round(crop / voxel)),) * 3)
