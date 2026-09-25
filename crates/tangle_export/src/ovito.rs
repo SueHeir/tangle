@@ -529,8 +529,8 @@ impl SectionLanes {
             if semi_axes[1] > semi_axes[0] {
                 // The long axis is the second one: turn a quarter turn.
                 let start = fiber.vertices.start as usize;
-                let placed = &assembly.geometry.placed.positions
-                    [start..start + fiber.vertices.len as usize];
+                let placed =
+                    &assembly.geometry.placed.positions[start..start + fiber.vertices.len as usize];
                 for (director, tangent) in directors
                     .iter_mut()
                     .zip(tangle_core::polyline_tangents(placed))
@@ -1069,4 +1069,3 @@ mod tests {
         assert!((widths[2] - 0.02).abs() < 1.0e-12);
     }
 }
-

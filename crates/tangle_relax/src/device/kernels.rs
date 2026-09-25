@@ -1318,7 +1318,6 @@ fn project_curvature_triplet_in_place(
 pub(crate) fn project_fiber_curvature_in_place(
     positions: &mut [f32],
     wall_reactions: &mut [f32],
-    fiber_segment_spans: &[u32],
     fiber_vertex_spans: &[u32],
     vertex_wall_extents: &[f32],
     vertex_max_curvature: &[f32],
@@ -1584,8 +1583,10 @@ pub(crate) fn apply_rigid_contact_corrections(
     let requested_tz = tz;
 
     // Each vertex bounds the translation that keeps it inside the walls.
-    let mut lower_x = cell_lower[0] + vertex_wall_extents[3 * vertex_start] - positions[3 * vertex_start];
-    let mut upper_x = cell_upper[0] - vertex_wall_extents[3 * vertex_start] - positions[3 * vertex_start];
+    let mut lower_x =
+        cell_lower[0] + vertex_wall_extents[3 * vertex_start] - positions[3 * vertex_start];
+    let mut upper_x =
+        cell_upper[0] - vertex_wall_extents[3 * vertex_start] - positions[3 * vertex_start];
     let mut lower_y =
         cell_lower[1] + vertex_wall_extents[3 * vertex_start + 1] - positions[3 * vertex_start + 1];
     let mut upper_y =
@@ -1596,20 +1597,18 @@ pub(crate) fn apply_rigid_contact_corrections(
         cell_upper[2] - vertex_wall_extents[3 * vertex_start + 2] - positions[3 * vertex_start + 2];
     for local in 1..vertex_count {
         let vertex = vertex_start + local;
-        lower_x = lower_x.max(cell_lower[0] + vertex_wall_extents[3 * vertex] - positions[3 * vertex]);
-        upper_x = upper_x.min(cell_upper[0] - vertex_wall_extents[3 * vertex] - positions[3 * vertex]);
-        lower_y = lower_y.max(
-            cell_lower[1] + vertex_wall_extents[3 * vertex + 1] - positions[3 * vertex + 1],
-        );
-        upper_y = upper_y.min(
-            cell_upper[1] - vertex_wall_extents[3 * vertex + 1] - positions[3 * vertex + 1],
-        );
-        lower_z = lower_z.max(
-            cell_lower[2] + vertex_wall_extents[3 * vertex + 2] - positions[3 * vertex + 2],
-        );
-        upper_z = upper_z.min(
-            cell_upper[2] - vertex_wall_extents[3 * vertex + 2] - positions[3 * vertex + 2],
-        );
+        lower_x =
+            lower_x.max(cell_lower[0] + vertex_wall_extents[3 * vertex] - positions[3 * vertex]);
+        upper_x =
+            upper_x.min(cell_upper[0] - vertex_wall_extents[3 * vertex] - positions[3 * vertex]);
+        lower_y = lower_y
+            .max(cell_lower[1] + vertex_wall_extents[3 * vertex + 1] - positions[3 * vertex + 1]);
+        upper_y = upper_y
+            .min(cell_upper[1] - vertex_wall_extents[3 * vertex + 1] - positions[3 * vertex + 1]);
+        lower_z = lower_z
+            .max(cell_lower[2] + vertex_wall_extents[3 * vertex + 2] - positions[3 * vertex + 2]);
+        upper_z = upper_z
+            .min(cell_upper[2] - vertex_wall_extents[3 * vertex + 2] - positions[3 * vertex + 2]);
     }
     if cell_periodic[0] == 0 {
         tx = tx.clamp(lower_x, upper_x);

@@ -532,8 +532,7 @@ pub fn find_segment_corrections(
                     for lane1 in 0..lanes1 {
                         let mut c1 = 0.0_f32;
                         if lanes1 > 1 {
-                            c1 = offset1
-                                * (2.0 * lane1 as f32 / (lanes1 - 1) as f32 - 1.0);
+                            c1 = offset1 * (2.0 * lane1 as f32 / (lanes1 - 1) as f32 - 1.0);
                         }
                         let lp1x = p1x + c1 * a1x;
                         let lp1y = p1y + c1 * a1y;
@@ -544,8 +543,7 @@ pub fn find_segment_corrections(
                         for lane2 in 0..lanes2 {
                             let mut c2 = 0.0_f32;
                             if lanes2 > 1 {
-                                c2 = offset2
-                                    * (2.0 * lane2 as f32 / (lanes2 - 1) as f32 - 1.0);
+                                c2 = offset2 * (2.0 * lane2 as f32 / (lanes2 - 1) as f32 - 1.0);
                             }
                             let lp2x = p2x + c2 * a2x;
                             let lp2y = p2y + c2 * a2y;
@@ -643,8 +641,7 @@ pub fn find_segment_corrections(
                                     } else {
                                         nx = 1.0;
                                     }
-                                    let dominant = if nx.abs() >= ny.abs() && nx.abs() >= nz.abs()
-                                    {
+                                    let dominant = if nx.abs() >= ny.abs() && nx.abs() >= nz.abs() {
                                         nx
                                     } else if ny.abs() >= nz.abs() {
                                         ny
@@ -672,11 +669,14 @@ pub fn find_segment_corrections(
                                 // turn and the shift of a vertex share one
                                 // generalized mass. All four terms are zero for
                                 // round fibers.
-                                let turn_0 = weight_0 * (c1 / gyration1)
+                                let turn_0 = weight_0
+                                    * (c1 / gyration1)
                                     * (nx * ea1x + ny * ea1y + nz * ea1z);
-                                let turn_1 = weight_1 * (c1 / gyration1)
+                                let turn_1 = weight_1
+                                    * (c1 / gyration1)
                                     * (nx * eb1x + ny * eb1y + nz * eb1z);
-                                let other_turn_0 = other_weight_0 * (c2 / gyration2)
+                                let other_turn_0 = other_weight_0
+                                    * (c2 / gyration2)
                                     * (nx * ea2x + ny * ea2y + nz * ea2z);
                                 let other_turn_1 =
                                     t * (c2 / gyration2) * (nx * eb2x + ny * eb2y + nz * eb2z);

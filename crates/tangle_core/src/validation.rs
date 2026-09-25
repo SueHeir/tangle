@@ -331,7 +331,7 @@ impl FiberAssembly {
             .sections
             .entries
             .get(fiber.section.0 as usize)
-            .map_or(true, Section::is_circular);
+            .is_none_or(Section::is_circular);
         if circular || self.geometry.placed.directors.len() != self.geometry.placed.positions.len()
         {
             return;
@@ -343,14 +343,15 @@ impl FiberAssembly {
             return;
         };
         let tolerance = 1.0e-3;
-        let bad = polyline_tangents(points)
-            .into_iter()
-            .zip(directors)
-            .any(|(tangent, director)| {
-                director.iter().any(|value| !value.is_finite())
-                    || (norm(*director) - 1.0).abs() > tolerance
-                    || dot(tangent, *director).abs() > tolerance
-            });
+        let bad =
+            polyline_tangents(points)
+                .into_iter()
+                .zip(directors)
+                .any(|(tangent, director)| {
+                    director.iter().any(|value| !value.is_finite())
+                        || (norm(*director) - 1.0).abs() > tolerance
+                        || dot(tangent, *director).abs() > tolerance
+                });
         if bad {
             issues.push(ValidationIssue::new(
                 "fiber.invalid-director",

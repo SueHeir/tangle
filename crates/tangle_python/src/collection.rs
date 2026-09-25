@@ -7,8 +7,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyType;
 use tangle_characterize::characterize_assembly;
 use tangle_core::{
-    default_directors, orthonormalize_directors, polyline_tangents, FiberAssembly, FiberBendLimit, FiberId,
-    PeriodicCell, Section, Vec3,
+    default_directors, orthonormalize_directors, polyline_tangents, FiberAssembly, FiberBendLimit,
+    FiberId, PeriodicCell, Section, Vec3,
 };
 use tangle_export::{write_puma_bundle, PumaVoxelExportConfig};
 
@@ -412,9 +412,8 @@ impl PyFiberCollection {
                 .clone();
             let section = assembly.sections.entries[fiber.section.0 as usize];
             let placed = &assembly.geometry.placed.positions[start..end];
-            let long_axes = (!section.is_circular()).then(|| {
-                long_axis_directors(section, placed, assembly.fiber_directors(index))
-            });
+            let long_axes = (!section.is_circular())
+                .then(|| long_axis_directors(section, placed, assembly.fiber_directors(index)));
             fibers.push(CollectionFiber {
                 placed: assembly.geometry.placed.positions[start..end].to_vec(),
                 intrinsic: assembly.geometry.intrinsic.positions[start..end].to_vec(),
@@ -811,11 +810,12 @@ fn parse_long_axes(value: &Bound<'_, PyAny>, vertex_count: usize) -> PyResult<Ve
             axes.len()
         )));
     }
-    if axes
-        .iter()
-        .any(|axis| axis.iter().any(|value| !value.is_finite()) || axis.iter().all(|value| *value == 0.0))
-    {
-        return Err(PyValueError::new_err("long_axis vectors must be finite and nonzero"));
+    if axes.iter().any(|axis| {
+        axis.iter().any(|value| !value.is_finite()) || axis.iter().all(|value| *value == 0.0)
+    }) {
+        return Err(PyValueError::new_err(
+            "long_axis vectors must be finite and nonzero",
+        ));
     }
     Ok(axes)
 }

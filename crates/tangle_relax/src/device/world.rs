@@ -139,7 +139,6 @@ pub struct DeviceFiberWorld<R: Runtime> {
     fiber_vertex_spans: Handle,
     fiber_formation_layers: Handle,
     fiber_formation_steps: Handle,
-    vertex_fibers: Handle,
     vertex_segments: Handle,
     vertex_max_curvature: Handle,
     vertex_active: Handle,
@@ -445,7 +444,6 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             client.create_from_slice(u32::as_bytes(&packed.fiber_formation_layers));
         let fiber_formation_steps =
             client.create_from_slice(u32::as_bytes(&packed.fiber_formation_steps));
-        let vertex_fibers = client.create_from_slice(u32::as_bytes(&packed.vertex_fibers));
         let vertex_segments = client.create_from_slice(u32::as_bytes(&packed.vertex_segments));
         let vertex_max_curvature =
             client.create_from_slice(f32::as_bytes(&packed.vertex_max_curvature));
@@ -599,7 +597,6 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             fiber_vertex_spans,
             fiber_formation_layers,
             fiber_formation_steps,
-            vertex_fibers,
             vertex_segments,
             vertex_max_curvature,
             vertex_active,
@@ -924,17 +921,13 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     3 * self.packed.vertex_count(),
                 ),
                 BufferArg::from_raw_parts(
-                    self.fiber_segment_spans.clone(),
-                    self.packed.fiber_segment_spans.len(),
-                ),
-                BufferArg::from_raw_parts(
                     self.fiber_vertex_spans.clone(),
                     self.packed.fiber_vertex_spans.len(),
                 ),
                 BufferArg::from_raw_parts(
-                            self.vertex_wall_extents.clone(),
-                            3 * self.packed.vertex_count(),
-                        ),
+                    self.vertex_wall_extents.clone(),
+                    3 * self.packed.vertex_count(),
+                ),
                 BufferArg::from_raw_parts(
                     self.vertex_max_curvature.clone(),
                     self.packed.vertex_max_curvature.len(),
@@ -1274,9 +1267,9 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                                 3 * self.packed.vertex_count(),
                             ),
                             BufferArg::from_raw_parts(
-                            self.vertex_wall_extents.clone(),
-                            3 * self.packed.vertex_count(),
-                        ),
+                                self.vertex_wall_extents.clone(),
+                                3 * self.packed.vertex_count(),
+                            ),
                             BufferArg::from_raw_parts(
                                 self.active_vertex_indices.clone(),
                                 self.packed.vertex_count(),
@@ -1320,9 +1313,9 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                                 self.packed.vertex_segments.len(),
                             ),
                             BufferArg::from_raw_parts(
-                            self.vertex_wall_extents.clone(),
-                            3 * self.packed.vertex_count(),
-                        ),
+                                self.vertex_wall_extents.clone(),
+                                3 * self.packed.vertex_count(),
+                            ),
                             BufferArg::from_raw_parts(
                                 self.active_vertex_indices.clone(),
                                 self.packed.vertex_count(),
@@ -1373,9 +1366,9 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                                 self.packed.fiber_vertex_spans.len(),
                             ),
                             BufferArg::from_raw_parts(
-                            self.vertex_wall_extents.clone(),
-                            3 * self.packed.vertex_count(),
-                        ),
+                                self.vertex_wall_extents.clone(),
+                                3 * self.packed.vertex_count(),
+                            ),
                             BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
                             BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
                             BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
@@ -2379,12 +2372,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 .any(|step| *step > 0)
         {
             let active = self.download_vertex_active();
-            self.packed.unpack_active_positions(
-                positions,
-                directors.as_deref(),
-                &active,
-                assembly,
-            )
+            self.packed
+                .unpack_active_positions(positions, directors.as_deref(), &active, assembly)
         } else {
             self.packed
                 .unpack_positions(positions, directors.as_deref(), assembly)

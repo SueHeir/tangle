@@ -433,12 +433,12 @@ impl PackedAssembly {
         }
 
         Ok(Self {
+            directors: vec![0.0; positions.len()],
             positions,
             intrinsic_positions,
             segment_vertices,
             segment_fibers,
             segment_lane_offsets: vec![0.0; segment_radii.len()],
-            directors: vec![0.0; positions.len()],
             segment_radii,
             segment_rest_lengths,
             segment_active,
@@ -490,7 +490,11 @@ impl PackedAssembly {
         for fiber in 0..self.fiber_count() {
             let segment = self.fiber_segment_spans[2 * fiber] as usize;
             let radius = self.segment_radii[segment];
-            let offset = self.segment_lane_offsets.get(segment).copied().unwrap_or(0.0);
+            let offset = self
+                .segment_lane_offsets
+                .get(segment)
+                .copied()
+                .unwrap_or(0.0);
             let start = self.fiber_vertex_spans[2 * fiber] as usize;
             let count = self.fiber_vertex_spans[2 * fiber + 1] as usize;
             for vertex in start..start + count {
@@ -559,7 +563,8 @@ impl PackedAssembly {
                     .chunks_exact(3)
                     .map(|xyz| [xyz[0] as f64, xyz[1] as f64, xyz[2] as f64])
                     .collect::<Vec<_>>();
-                let host = lanes.host_directors(&assembly.geometry.placed.positions[range.clone()], device);
+                let host = lanes
+                    .host_directors(&assembly.geometry.placed.positions[range.clone()], device);
                 assembly.geometry.placed.directors[range].copy_from_slice(&host);
             }
         }
@@ -958,7 +963,10 @@ mod tests {
         assert!(!packed.has_ovals);
         assert_eq!(packed.segment_lane_offsets, vec![0.0; 2]);
         assert!(packed.directors.iter().all(|value| *value == 0.0));
-        assert!(packed.vertex_wall_extents().iter().all(|value| *value == 0.03));
+        assert!(packed
+            .vertex_wall_extents()
+            .iter()
+            .all(|value| *value == 0.03));
     }
 
     #[test]

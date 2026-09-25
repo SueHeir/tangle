@@ -772,8 +772,7 @@ fn oval_segment_signed_distance(
     let v = dot(offset, binormal) / across;
     let w = overshoot / cap;
     let level = u * u + v * v + w * w - 1.0;
-    let gradient =
-        2.0 * ((u / long).powi(2) + (v / across).powi(2) + (w / cap).powi(2)).sqrt();
+    let gradient = 2.0 * ((u / long).powi(2) + (v / across).powi(2) + (w / cap).powi(2)).sqrt();
     if gradient <= f64::MIN_POSITIVE {
         return -cap;
     }
@@ -1092,9 +1091,8 @@ mod tests {
         let b = [1.0, 0.0, 0.0];
         let director = [0.0, 1.0, 0.0];
         let flipped = [0.0, -1.0, 0.0];
-        let distance = |point: Vec3| {
-            oval_segment_signed_distance(point, a, b, director, flipped, [0.3, 0.15])
-        };
+        let distance =
+            |point: Vec3| oval_segment_signed_distance(point, a, b, director, flipped, [0.3, 0.15]);
         assert!(distance([0.5, 0.3, 0.0]).abs() < 1.0e-12);
         assert!(distance([0.5, 0.0, 0.15]).abs() < 1.0e-12);
         assert!(distance([0.5, 0.35, 0.0]) > 0.0);
@@ -1133,4 +1131,3 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 }
-
