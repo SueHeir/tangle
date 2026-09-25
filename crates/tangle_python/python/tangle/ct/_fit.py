@@ -877,8 +877,10 @@ class _Fitter:
         ``noisy_two_types`` fitted that way typed every coarse fiber fine and
         packed it with fine fits (centerline F1 0.62; two_types 0.60). The
         cross-section pools some hundred samples per distance and survives
-        the noise (F1 0.81; two_types 0.89). It reads a fiber in a flat bundle too thick, though (its
-        neighbours fill two of the four directions), which is why the
+        the noise (F1 0.81; two_types 0.89). It reads a fiber packed among
+        others too thick, though (its neighbours fill part of the
+        cross-section, as in ``scenario_dense_crossing``; see
+        ``_confidence``), which is why the
         hole-filled fiber image that grey ranges, profiles or a mask give is
         typed by depth.
 
