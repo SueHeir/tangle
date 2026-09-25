@@ -10,7 +10,12 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use tangle_ct::hessian::HessianField;
 use tangle_ct::line::resample;
+use tangle_ct::moves::{
+    merge_fragments, remove_unsupported, resolve_side_by_side, split_kinks, trim_duplicates,
+    MergeSettings, SideBySide, SplitSettings,
+};
 use tangle_ct::refine::{curvature_ratio, cut_void, end_step, support, OwnerLookup, VoidRules};
+use tangle_ct::render::{box_size, local_residual, render_occupancy, Corner};
 use tangle_ct::trace::{trace_fibers, FiberSearch, TraceSettings, Tracer};
 use tangle_ct::Shape;
 
@@ -549,4 +554,226 @@ pub(crate) fn ct_curvature_ratio(
         &lines_of(&nodes, &counts)?,
         min_bend_radius,
     ))
+}
+
+fn line_refs(lines: &[Vec<[f64; 3]>]) -> Vec<&[[f64; 3]]> {
+    lines.iter().map(Vec::as_slice).collect()
+}
+
+/// Soft union occupancy of capsules over box `[low, high)` (x, y, z) into
+/// `out`, a `(z, y, x)` array of the box (see `_moves.render_occupancy`).
+#[pyfunction]
+pub(crate) fn ct_render_occupancy(
+    low: Corner,
+    high: Corner,
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+    radii: Vec<f64>,
+    edge: f64,
+    out: PyBuffer<f64>,
+) -> PyResult<()> {
+    per_line(&radii, &counts, "radius")?;
+    let lines = lines_of(&nodes, &counts)?;
+    let out = write(&out, "out")?;
+    if out.len() != box_size(low, high) {
+        return Err(PyValueError::new_err("out must have the box's shape"));
+    }
+    out.copy_from_slice(&render_occupancy(
+        low,
+        high,
+        &line_refs(&lines),
+        &radii,
+        edge,
+    ));
+    Ok(())
+}
+
+/// Squared residual of rendering the lines (max-union with `base`) against
+/// the scan over box `[low, high)` (see `_ends.local_residual`).
+#[pyfunction]
+#[pyo3(signature = (image, low, high, nodes, counts, radii, edge, base=None))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ct_local_residual(
+    image: PyBuffer<f32>,
+    low: Corner,
+    high: Corner,
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+    radii: Vec<f64>,
+    edge: f64,
+    base: Option<PyBuffer<f64>>,
+) -> PyResult<f64> {
+    let shape = volume_shape(&image, "image")?;
+    per_line(&radii, &counts, "radius")?;
+    let lines = lines_of(&nodes, &counts)?;
+    let base = match &base {
+        Some(buffer) => {
+            let values = read(buffer, "base")?;
+            if values.len() != box_size(low, high) {
+                return Err(PyValueError::new_err("base must have the box's shape"));
+            }
+            Some(values)
+        }
+        None => None,
+    };
+    Ok(local_residual(
+        read(&image, "image")?,
+        shape,
+        low,
+        high,
+        &line_refs(&lines),
+        &radii,
+        base,
+        edge,
+    ))
+}
+
+/// Duplicates removed and trimmed (see `_moves.trim_duplicates`).
+#[pyfunction]
+pub(crate) fn ct_trim_duplicates(
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+    radii: Vec<f64>,
+    min_length: f64,
+    closeness: f64,
+) -> PyResult<(Packed, Vec<f64>)> {
+    per_line(&radii, &counts, "radius")?;
+    let (lines, radii) =
+        trim_duplicates(&lines_of(&nodes, &counts)?, &radii, min_length, closeness);
+    Ok((pack(&lines), radii))
+}
+
+/// Short or unsupported fibers removed (see `_moves.remove_unsupported`).
+#[pyfunction]
+pub(crate) fn ct_remove_unsupported(
+    image: PyBuffer<f32>,
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+    radii: Vec<f64>,
+    min_length: f64,
+    min_support: f64,
+) -> PyResult<(Packed, Vec<f64>)> {
+    let shape = volume_shape(&image, "image")?;
+    per_line(&radii, &counts, "radius")?;
+    let (lines, radii) = remove_unsupported(
+        read(&image, "image")?,
+        shape,
+        &lines_of(&nodes, &counts)?,
+        &radii,
+        min_length,
+        min_support,
+    );
+    Ok((pack(&lines), radii))
+}
+
+/// Fragments joined (see `_moves.merge_fragments`); returns the lines,
+/// radii and number of joins.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ct_merge_fragments(
+    image: PyBuffer<f32>,
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+    radii: Vec<f64>,
+    max_gap: f64,
+    max_angle_degrees: f64,
+    min_bridge_support: f64,
+    min_bend_radius: Option<f64>,
+    kink_threshold: f64,
+    end_cost: f64,
+    scale: f64,
+    max_prior_gap: Option<f64>,
+    max_prior_angle_degrees: f64,
+) -> PyResult<(Packed, Vec<f64>, usize)> {
+    let shape = volume_shape(&image, "image")?;
+    per_line(&radii, &counts, "radius")?;
+    let settings = MergeSettings {
+        max_gap,
+        max_angle_degrees,
+        min_bridge_support,
+        min_bend_radius,
+        kink_threshold,
+        end_cost,
+        scale,
+        max_prior_gap,
+        max_prior_angle_degrees,
+    };
+    let (lines, radii, merges) = merge_fragments(
+        read(&image, "image")?,
+        shape,
+        &lines_of(&nodes, &counts)?,
+        &radii,
+        settings,
+    );
+    Ok((pack(&lines), radii, merges))
+}
+
+/// Kinks split or smoothed, overlong fibers cut (see `_moves.split_kinks`);
+/// returns the lines, radii and number of splits.
+#[pyfunction]
+#[pyo3(signature = (nodes, counts, radii, min_bend_radius, min_length, max_length, threshold, min_angle_degrees, end_cost, scale, image=None))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ct_split_kinks(
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+    radii: Vec<f64>,
+    min_bend_radius: f64,
+    min_length: f64,
+    max_length: Option<f64>,
+    threshold: f64,
+    min_angle_degrees: f64,
+    end_cost: f64,
+    scale: f64,
+    image: Option<PyBuffer<f32>>,
+) -> PyResult<(Packed, Vec<f64>, usize)> {
+    per_line(&radii, &counts, "radius")?;
+    let image = match &image {
+        Some(buffer) => Some((read(buffer, "image")?, volume_shape(buffer, "image")?)),
+        None => None,
+    };
+    let settings = SplitSettings {
+        min_bend_radius,
+        min_length,
+        max_length,
+        threshold,
+        min_angle_degrees,
+        end_cost,
+        scale,
+    };
+    let (lines, radii, splits) = split_kinks(image, &lines_of(&nodes, &counts)?, &radii, settings);
+    Ok((pack(&lines), radii, splits))
+}
+
+/// Side-by-side fits of one fiber merged (see `_moves.resolve_side_by_side`);
+/// returns the lines, radii and number of pairs merged.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ct_resolve_side_by_side(
+    image: PyBuffer<f32>,
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+    radii: Vec<f64>,
+    min_length: f64,
+    reach: f64,
+    end_cost: f64,
+    scale: f64,
+    max_angle_degrees: f64,
+) -> PyResult<(Packed, Vec<f64>, usize)> {
+    let shape = volume_shape(&image, "image")?;
+    per_line(&radii, &counts, "radius")?;
+    let settings = SideBySide {
+        min_length,
+        reach,
+        end_cost,
+        scale,
+        max_angle_degrees,
+    };
+    let (lines, radii, changed) = resolve_side_by_side(
+        read(&image, "image")?,
+        shape,
+        &lines_of(&nodes, &counts)?,
+        &radii,
+        settings,
+    );
+    Ok((pack(&lines), radii, changed))
 }

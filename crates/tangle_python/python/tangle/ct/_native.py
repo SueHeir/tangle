@@ -188,3 +188,77 @@ def support(image, centerlines) -> np.ndarray:
 def curvature_ratio(centerlines, min_bend_radius: float) -> np.ndarray:
     nodes, counts = _pack(centerlines)
     return np.array(_tangle.ct_curvature_ratio(nodes, counts, float(min_bend_radius)))
+
+
+def _box(corner) -> list[int]:
+    return [int(v) for v in corner]
+
+
+def render_occupancy(low, high, centerlines, radii, edge: float) -> np.ndarray:
+    """Soft union occupancy of capsules over box ``[low, high)`` (see ``_moves.render_occupancy``)."""
+    low, high = _box(low), _box(high)
+    out = np.zeros(tuple(max(high[a] - low[a], 0) for a in (2, 1, 0)))
+    if len(centerlines):
+        nodes, counts = _pack(centerlines)
+        _tangle.ct_render_occupancy(low, high, nodes, counts, [float(r) for r in radii], float(edge), out)
+    return out
+
+
+def local_residual(image, low, high, centerlines, radii, base, edge: float) -> float:
+    nodes, counts = _pack(centerlines)
+    if base is not None:
+        base = np.ascontiguousarray(base, dtype=np.float64)
+    return _tangle.ct_local_residual(
+        _f32(image), _box(low), _box(high), nodes, counts, [float(r) for r in radii], float(edge), base
+    )
+
+
+def _lines_and_radii(result) -> tuple:
+    packed, radii, *count = result
+    return (_unpack(packed), np.array(radii, dtype=np.float64), *count)
+
+
+def trim_duplicates(centerlines, radii, *, min_length: float, closeness: float):
+    nodes, counts = _pack(centerlines)
+    return _lines_and_radii(
+        _tangle.ct_trim_duplicates(nodes, counts, [float(r) for r in radii], float(min_length), float(closeness))
+    )
+
+
+def remove_unsupported(image, centerlines, radii, *, min_length: float, min_support: float):
+    nodes, counts = _pack(centerlines)
+    return _lines_and_radii(_tangle.ct_remove_unsupported(
+        _f32(image), nodes, counts, [float(r) for r in radii], float(min_length), float(min_support)
+    ))
+
+
+def _optional(value) -> float | None:
+    return None if value is None else float(value)
+
+
+def merge_fragments(image, centerlines, radii, *, max_gap, max_angle_degrees, min_bridge_support, min_bend_radius,
+                    kink_threshold, end_cost, scale, max_prior_gap, max_prior_angle_degrees):
+    nodes, counts = _pack(centerlines)
+    return _lines_and_radii(_tangle.ct_merge_fragments(
+        _f32(image), nodes, counts, [float(r) for r in radii], float(max_gap), float(max_angle_degrees),
+        float(min_bridge_support), _optional(min_bend_radius), float(kink_threshold), float(end_cost), float(scale),
+        _optional(max_prior_gap or None), float(max_prior_angle_degrees),
+    ))
+
+
+def split_kinks(centerlines, radii, *, min_bend_radius, min_length, max_length, threshold, min_angle_degrees,
+                image, end_cost, scale):
+    nodes, counts = _pack(centerlines)
+    return _lines_and_radii(_tangle.ct_split_kinks(
+        nodes, counts, [float(r) for r in radii], float(min_bend_radius), float(min_length), _optional(max_length),
+        float(threshold), float(min_angle_degrees), float(end_cost), float(scale),
+        None if image is None else _f32(image),
+    ))
+
+
+def resolve_side_by_side(image, centerlines, radii, *, min_length, reach, end_cost, scale, max_angle_degrees):
+    nodes, counts = _pack(centerlines)
+    return _lines_and_radii(_tangle.ct_resolve_side_by_side(
+        _f32(image), nodes, counts, [float(r) for r in radii], float(min_length), float(reach), float(end_cost),
+        float(scale), float(max_angle_degrees),
+    ))

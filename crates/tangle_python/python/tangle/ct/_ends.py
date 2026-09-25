@@ -144,15 +144,11 @@ def local_residual(
     ``base`` is an already-rendered occupancy of the box (for example the
     unchanged neighbors) that ``lines`` are added to.
     """
-    from ._moves import render_occupancy
+    from . import _native
 
-    if np.any(high <= low):
+    if np.any(np.asarray(high) <= np.asarray(low)):
         return 0.0
-    observed = image[low[2] : high[2], low[1] : high[1], low[0] : high[0]]
-    rendered = render_occupancy(low, high, lines, np.asarray(radii, dtype=np.float64))
-    if base is not None:
-        np.maximum(rendered, base, out=rendered)
-    return float(((observed - rendered) ** 2).sum())
+    return _native.local_residual(image, low, high, lines, radii, base, 1.2)
 
 
 def near_box(lines: list[np.ndarray], radii: np.ndarray, low: np.ndarray, high: np.ndarray, skip: tuple[int, ...] = ()) -> list[int]:

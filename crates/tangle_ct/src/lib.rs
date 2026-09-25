@@ -13,8 +13,10 @@ pub mod filter;
 pub mod hessian;
 pub mod label;
 pub mod line;
+pub mod moves;
 pub mod raster;
 pub mod refine;
+pub mod render;
 pub mod sample;
 pub mod trace;
 
