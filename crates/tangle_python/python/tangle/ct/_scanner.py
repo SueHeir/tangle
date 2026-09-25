@@ -21,7 +21,11 @@ and adding noise to it:
 3. The detector blurs by ``detector_blur`` pixels (source size and
    scintillator), counts Poisson photons out of ``photons`` per pixel
    unattenuated, and has a per-column gain error of ``ring_strength``
-   (which reconstructs as rings; 0 by default).
+   (which reconstructs as rings; 0 by default). ``noise_blur`` (pixels)
+   is the part of the blur that comes after the x-rays are counted, as a
+   scintillator spreads each absorbed photon's light over neighbouring
+   pixels: it blurs the noise too, so the noise comes out blotchy
+   (correlated) instead of pixel to pixel.
 4. The log of flat-field-corrected intensity is reconstructed slice by
    slice by filtered back-projection with a Shepp-Logan filter.
 
@@ -65,6 +69,7 @@ class Scanner:
     # physical size whatever the voxel size.
     resolution: float | None = None
     ring_strength: float = 0.0
+    noise_blur: float = 0.0  # pixels, Gaussian sigma of the blur after counting (correlates the noise)
     fiber_motion: float = 0.0  # meters, RMS displacement of each fiber over the scan
     drift: float = 0.0  # meters, RMS displacement of the whole sample over the scan
     motion_steps: int = 8
@@ -123,6 +128,8 @@ def acquire(
         intensity = gaussian_filter(intensity, (0, blur, blur))
     gain = 1.0 + scanner.ring_strength * rng.standard_normal((1, nz, width)).astype(np.float32)
     counts = rng.poisson(np.clip(intensity * gain, 0.0, None) * scanner.photons).astype(np.float32)
+    if scanner.noise_blur > 0:
+        counts = gaussian_filter(counts, (0, scanner.noise_blur, scanner.noise_blur))
     # Flat-field correction with an ideal flat; the gain error stays as rings.
     measured = -np.log(np.maximum(counts, 0.5) / scanner.photons)
 

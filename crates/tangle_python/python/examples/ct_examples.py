@@ -72,7 +72,11 @@ Examples:
   photon noise, filtered back-projection), so the noise texture, blur and
   edge fringes come from the acquisition, as in a real scan: 2 µm
   resolution, and each fiber moving about 1 µm during the scan. Both types
-  are solid, the coarse ones half as dense as the fine ones.
+  are solid, the coarse ones a quarter as dense as the fine ones (a lighter
+  material, so they show a phase rim where the fine ones stay flat).
+* ``bundled_two_types``: the fine fibers packed in bundles of seven, with
+  staggered ends, and the coarse ones loose, scanned as scanner_two_types
+  with the noise blotchy (correlated by the scintillator's blur).
 * ``varied_1`` … ``varied_8``: fresh structures drawn from seeds, for
   checking the fitter on structures it was not tuned on: 8-16 µm fibers
   at 2.5-4.5 voxels radius, planar, aligned, biaxial and isotropic (two
@@ -103,7 +107,7 @@ import json
 import os
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -142,12 +146,20 @@ class Example:
 # -- shared helpers -----------------------------------------------------------
 
 
-def relaxed_truth(cache: Path, cell: tangle.Cell, populations: list[tangle.FiberPopulation]) -> tangle.Assembly:
-    """Relax the populations once and cache the centerlines (the slow step)."""
+def relaxed_truth(cache: Path, cell: tangle.Cell, populations: list) -> tangle.Assembly:
+    """Relax the populations once and cache the centerlines (the slow step).
+
+    Each population is a ``tangle.FiberPopulation`` or a ready-made
+    ``(FiberCollection, Material)`` pair (see bundles).
+    """
     if not cache.exists():
         recipe = tangle.Recipe(cell)
         for index, population in enumerate(populations):
-            recipe.insert(tangle.generate_fiber_population(cell, population), name=f"truth {index}")
+            if isinstance(population, tangle.FiberPopulation):
+                fibers = tangle.generate_fiber_population(cell, population)
+            else:
+                fibers = population[0]
+            recipe.insert(fibers, name=f"truth {index}")
         started = time.perf_counter()
         run = recipe.run(
             tangle.RelaxationSettings(
@@ -156,7 +168,7 @@ def relaxed_truth(cache: Path, cell: tangle.Cell, populations: list[tangle.Fiber
         )
         print(f"  truth relaxed: {run} ({time.perf_counter() - started:.0f} s)")
         cache.parent.mkdir(parents=True, exist_ok=True)
-        counts = [population.count for population in populations]
+        counts = [p.count if isinstance(p, tangle.FiberPopulation) else len(p[0]) for p in populations]
         cache.write_text(json.dumps({"counts": counts, "centerlines": run.centerlines()}) + "\n")
     data = json.loads(cache.read_text())
     data.setdefault("counts", [len(data["centerlines"])])  # single-population caches from older examples
@@ -167,7 +179,7 @@ def relaxed_truth(cache: Path, cell: tangle.Cell, populations: list[tangle.Fiber
         start += count
         # float32 GPU relaxation can end a hair past the bend limit, which
         # export_puma's validator rejects; render with a 1% looser limit.
-        material = population.material
+        material = population.material if isinstance(population, tangle.FiberPopulation) else population[1]
         looser = tangle.Material(
             material.name, diameter=material.diameter, min_bend_radius=0.99 * material.min_bend_radius
         )
@@ -232,6 +244,26 @@ def long_fibers(cache: Path) -> Example:
     return Example(scan, spec, bend, end_error_report)
 
 
+# A simulated scanner (ct.Scanner): photon noise, detector blur and filtered
+# back-projection, with a weakly absorbing, phase-shifting sample and a short
+# propagation distance, so the edges show phase fringes; a 2 µm resolution
+# softens the fibers, and each fiber moves about 1 µm during the scan. Both
+# fiber types are solid. The coarse fibers are a lighter material, a quarter
+# as dense as the fine ones, so the fine fibers stay the brightest thing in
+# the scan; being lighter, the coarse ones also shift the phase more for
+# what they absorb (a higher delta/beta), so they show a rim and a dark band
+# outside it where the dense fine fibers stay flat.
+SCANNER = ct.Scanner(
+    photons=1500,
+    fiber_attenuation=0.005,
+    resolution=2 * um,
+    delta_beta=(2.0, 40.0),
+    propagation=4.0,
+    fiber_motion=1 * um,
+)
+SCANNER_PROFILES = [(7 * um, ct.CrossSection()), (19 * um, ct.CrossSection(brightness=0.25))]
+
+
 def two_types(cache: Path, *, noisy: bool = False, halo: bool = False, scanner: bool = False) -> Example:
     voxel, cell_side, crop, length = 1.25 * um, 320 * um, 200 * um, (300 * um, 500 * um)
     fine = tangle.Material("fine_7um", diameter=7 * um, min_bend_radius=35 * um)
@@ -246,23 +278,8 @@ def two_types(cache: Path, *, noisy: bool = False, halo: bool = False, scanner: 
         profiles = [(7 * um, ct.CrossSection()), (19 * um, ct.CrossSection(brightness=0.45))]
         full = render_scan(truth, voxel, seed=21, profiles=profiles, noise=0.19, noise_correlation=0.9)
     elif scanner:
-        # two_types' fibers scanned by a simulated scanner (ct.Scanner):
-        # photon noise, detector blur and filtered back-projection, with a
-        # weakly absorbing, phase-shifting sample and a short propagation
-        # distance, so the edges show phase fringes; a 2 µm resolution softens
-        # the fibers, and each fiber moves about 1 µm during the scan. Both
-        # fiber types are solid; the coarse ones are half as dense and, being
-        # the lighter material, shift the phase more for what they absorb (a
-        # higher delta/beta), so any bright rim they show comes from the phase
-        # contrast, not the material.
-        profiles = [
-            (7 * um, ct.CrossSection()),
-            (19 * um, ct.CrossSection(brightness=0.5)),
-        ]
-        scanner = ct.Scanner(
-            photons=1500, resolution=2 * um, delta_beta=(5.0, 20.0), propagation=4.0, fiber_motion=1 * um
-        )
-        full = render_scan(truth, voxel, seed=21, profiles=profiles, scanner=scanner)
+        # two_types' fibers scanned by a simulated scanner (see SCANNER).
+        full = render_scan(truth, voxel, seed=21, profiles=SCANNER_PROFILES, scanner=SCANNER)
     elif halo:
         # two_types' scan with a phase-contrast halo at unit strength (a
         # dark band outside every surface, deeper where surfaces face each
@@ -303,6 +320,65 @@ def halo_two_types(cache: Path) -> Example:
 
 def scanner_two_types(cache: Path) -> Example:
     return two_types(cache.with_name("two_types.json"), scanner=True)  # the same fibers as two_types
+
+
+def bundles(cell: tangle.Cell, material: tangle.Material, count: int, per_bundle: int, seed: int, length, segments):
+    """(FiberCollection, material) for relaxed_truth: ``count`` bundles of ``per_bundle`` fibers of ``material``.
+
+    Each bundle follows one fiber drawn like planar_population's, its members
+    hexagonally packed around it (a center and a ring of six, then the next
+    ring), a hair apart, with their ends staggered by up to a fifth of the
+    length, as the filaments of a yarn or tow lie.
+    """
+    leaders = tangle.generate_fiber_population(cell, planar_population(material, count, seed, length, segments))
+    rng = np.random.default_rng(seed)
+    pitch = 1.02 * material.diameter
+    slots = [(0.0, 0.0)]
+    ring = 1
+    while len(slots) < per_bundle:
+        corners = [ring * np.array([np.cos(a), np.sin(a)]) for a in np.arange(6) * np.pi / 3]
+        for k in range(6):
+            for step in range(ring):
+                slots.append(tuple(corners[k] + (corners[(k + 1) % 6] - corners[k]) * step / ring))
+        ring += 1
+    bottom, top = 0.5 * material.diameter, cell.lengths[2] - 0.5 * material.diameter
+    lines = []
+    for leader in leaders.centerlines():
+        path = np.asarray(leader)
+        tangent = np.gradient(path, axis=0)
+        tangent /= np.linalg.norm(tangent, axis=1, keepdims=True)
+        # Across the bundle: one axis toward z (out of the fibers' plane), one in it.
+        up = np.array([0.0, 0.0, 1.0]) - tangent[:, 2:3] * tangent
+        up /= np.linalg.norm(up, axis=1, keepdims=True)
+        side = np.cross(tangent, up)
+        for a, b in slots[:per_bundle]:
+            member = path + pitch * (a * side + b * up)
+            member[:, 2] = np.clip(member[:, 2], bottom, top)
+            cut = rng.integers(0, len(member) // 10 + 1, size=2)
+            lines.append(member[cut[0] : len(member) - cut[1]].tolist())
+    return tangle.FiberCollection.from_centerlines(lines, material), material
+
+
+def bundled_two_types(cache: Path) -> Example:
+    """two_types with the fine fibers in bundles of seven, scanned by SCANNER with blotchy noise."""
+    voxel, cell_side, crop, length = 1.25 * um, 320 * um, 200 * um, (300 * um, 500 * um)
+    fine = tangle.Material("fine_7um", diameter=7 * um, min_bend_radius=35 * um)
+    coarse = tangle.Material("coarse_19um", diameter=19 * um, min_bend_radius=95 * um)
+    cell = tangle.Cell([cell_side] * 3, periodic="xy")
+    truth = relaxed_truth(
+        cache, cell, [bundles(cell, fine, 15, 7, 23, length, 16), planar_population(coarse, 14, 22, length, 16)]
+    )
+    # The scintillator spreads each counted photon over about a pixel, so the
+    # noise comes out blotchy instead of pixel to pixel.
+    scanner = replace(SCANNER, noise_blur=1.0)
+    full = render_scan(truth, voxel, seed=23, profiles=SCANNER_PROFILES, scanner=scanner)
+    low = int(round((cell_side - crop) / 2 / voxel))
+    scan = full.crop((low,) * 3, (low + int(round(crop / voxel)),) * 3)
+    specs = [
+        ct.FiberSpec(diameter=7 * um, min_bend_radius=35 * um, length=400 * um, name="fine_7um"),
+        ct.FiberSpec(diameter=19 * um, min_bend_radius=95 * um, length=400 * um, name="coarse_19um"),
+    ]
+    return Example(scan, specs, 35 * um, lambda fit, scan: {"per_type": ct.score(fit, scan)["per_type"]})
 
 
 BOX = 150 * um
@@ -575,6 +651,7 @@ EXAMPLES: dict[str, Callable[[Path], Example]] = {
     "noisy_two_types": noisy_two_types,
     "halo_two_types": halo_two_types,
     "scanner_two_types": scanner_two_types,
+    "bundled_two_types": bundled_two_types,
     **{
         f"scenario_{name}": scenario(lines, SCENARIO_LENGTH.get(name, 400 * um))
         for name, lines in SCENARIOS.items()

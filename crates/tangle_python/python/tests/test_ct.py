@@ -177,6 +177,19 @@ class CtToolTests(unittest.TestCase):
         far = phase[:, distance > 12].mean()
         self.assertLess(float(rim), float(far) - 0.002)  # dark just outside the surface
 
+    def test_scanner_noise_blur_makes_the_noise_blotchy(self):
+        from tangle.ct._scanner import Scanner, acquire
+
+        empty = np.zeros((4, 40, 40), dtype=np.float32)
+
+        def neighbour_correlation(noise_blur):
+            scanner = Scanner(photons=2000, void_attenuation=0.0, noise_blur=noise_blur)
+            scan = acquire(empty, scanner, np.random.default_rng(0))
+            a = scan[:, 10:30, 10:30]
+            return float(np.corrcoef(a[:, :, :-1].ravel(), a[:, :, 1:].ravel())[0, 1])
+
+        self.assertGreater(neighbour_correlation(1.0), neighbour_correlation(0.0) + 0.2)
+
     def test_cross_section_width_survives_noise_that_breaks_the_depth(self):
         from scipy.ndimage import gaussian_filter
 
