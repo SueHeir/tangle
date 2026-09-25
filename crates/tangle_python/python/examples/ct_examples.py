@@ -253,7 +253,7 @@ def two_types(cache: Path, *, noisy: bool = False, halo: bool = False, scanner: 
             (19 * um, ct.CrossSection(brightness=0.75, rim=2 * um, core=1 / 3)),
         ]
         full = render_scan(
-            truth, voxel, seed=21, profiles=profiles, scanner=ct.Scanner(delta_beta=100.0, propagation=2.0)
+            truth, voxel, seed=21, profiles=profiles, scanner=ct.Scanner(delta_beta=20.0, propagation=1.5)
         )
     elif halo:
         # two_types' scan with a phase-contrast halo at unit strength (a

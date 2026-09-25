@@ -15,7 +15,9 @@ and adding noise to it:
    space before the detector records its intensity. That is what makes
    the phase-contrast fringe at every surface: bright just inside, dark
    just outside, strongest where two surfaces face each other. At 0 the
-   projection is plain absorption.
+   projection is plain absorption. Keep the projected phase to a few
+   radians (``delta_beta`` times half a fiber's attenuation across it):
+   far beyond that the fringes ring instead of edging each surface.
 3. The detector blurs by ``detector_blur`` pixels (source size and
    scintillator), counts Poisson photons out of ``photons`` per pixel
    unattenuated, and has a per-column gain error of ``ring_strength``
