@@ -1989,8 +1989,25 @@ fn flat_oval_rests_on_a_wall_by_its_thickness() {
     for vertex in 0..2 {
         assembly.geometry.placed.positions[vertex][2] = 0.03;
     }
-    let (world, status) = relax_ovals(&assembly);
-    assert!(status.converged, "{status:?}");
+    // Walls are enforced only while the solver iterates, and a layout with
+    // no contacts converges before the first iteration, so force the run.
+    let packed = PackedAssembly::from_assembly(&assembly).unwrap();
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed,
+        CellListConfig::default(),
+        0.05,
+    );
+    let config = RelaxationConfig {
+        penetration_tolerance: 1.0e-5,
+        max_step: 0.05,
+        max_iterations: 400,
+        iterations_per_batch: 400,
+        force_full_iterations: true,
+        ..RelaxationConfig::default()
+    };
+    let status = world.run_batch(&config, 400);
+    assert!(status.max_penetration <= 1.0e-5, "{status:?}");
     let positions = world.download_positions();
     for z in [positions[2], positions[5]] {
         assert!((z - 0.075).abs() < 1.0e-4, "height {z}");
