@@ -150,11 +150,18 @@ class FitSettings:
     redraw_plans: int = 3
     # After redraw passes that kept anything, one unpinned solve of the whole fit.
     redraw_polish: bool = True
-    # Redraw around every fiber end inside the scan too, sure or not (and
-    # the fits its tip touches), so split fibers can be joined and fits
-    # that ran onto another fiber at a crossing re-paired
-    # (``_regrow.end_hotspots``).
-    redraw_ends: bool = True
+    # Redraw around fiber ends inside the scan too, sure or not
+    # (``_regrow.end_hotspots``): "free" around ends that touch no other fit,
+    # so split fibers can be joined; "all" also around ends against another
+    # fit, with that fit, so branches at a crossing can be re-paired; "off".
+    redraw_ends: str = "free"
+    # Price a join by how far it turns, in nats: half the squared turn over
+    # the turn a fiber at its bend limit makes along the bridge (at least
+    # ``join_turn_floor_degrees``). A fiber runs on nearly straight through a
+    # crossing; re-pairing its branches the wrong way turns by the crossing
+    # angle. 0 turns it off.
+    join_turn_weight: float = 1.0
+    join_turn_floor_degrees: float = 10.0
     # A region's 2nd and 3rd plans are solved only when their host score is
     # within this many nats of its best (close calls); clear winners are
     # built without a GPU comparison.
@@ -573,6 +580,8 @@ def fit_fibers(
         raise ValueError('redraw_score must be "auto", "nats", "grey", "confidence", "mask" or "all"')
     if settings.redraw_moves not in ("match", "grow"):
         raise ValueError('redraw_moves must be "match" or "grow"')
+    if settings.redraw_ends not in ("off", "free", "all"):
+        raise ValueError('redraw_ends must be "off", "free" or "all"')
     if settings.redraw_plans < 1:
         raise ValueError("redraw_plans must be at least 1")
     if not _device.available():
@@ -1033,7 +1042,10 @@ class _Fitter:
             cut = _regrow.cut_unsure(
                 lines, confidence if pass_index == 0 else settled, radii, threshold=s.confidence_threshold,
                 spacing=self.spacing, widen=widen, skip=given_up,
-                hotspots=_regrow.end_hotspots(lines, radii, self.image.shape) if s.redraw_ends else None,
+                hotspots=(
+                    _regrow.end_hotspots(lines, radii, self.image.shape, touching=s.redraw_ends == "all")
+                    if s.redraw_ends != "off" else None
+                ),
             )
             if cut is None or not lines:
                 break
@@ -1486,6 +1498,10 @@ class _Fitter:
                 (i, j): length_join_cost(
                     piece_length[region_ports[i].piece], piece_length[region_ports[j].piece],
                     polyline_length(curve), self.length[region_ports[i].kind], shape_k,
+                )
+                + self.settings.join_turn_weight * _junctions.turn_cost(
+                    region_ports[i], region_ports[j], polyline_length(curve), float(self.bend[region_ports[i].kind]),
+                    floor_degrees=self.settings.join_turn_floor_degrees,
                 )
                 for (i, j), curve in pairs.items()
             }

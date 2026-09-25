@@ -300,16 +300,24 @@ def _inside_spheres(points: np.ndarray, spheres: np.ndarray) -> np.ndarray:
 
 
 def end_hotspots(
-    lines: list[np.ndarray], radii: np.ndarray, shape: tuple[int, int, int], *, reach_radii: float = 2.5
+    lines: list[np.ndarray],
+    radii: np.ndarray,
+    shape: tuple[int, int, int],
+    *,
+    reach_radii: float = 2.5,
+    touching: bool = False,
 ) -> np.ndarray:
-    """A sphere around every fiber end inside the scan, rows ``(x, y, z, radius)``.
+    """A sphere around fiber ends inside the scan, rows ``(x, y, z, radius)``.
 
-    Ends are where fits go wrong: a fiber split in two leaves two ends facing
-    each other, and a fit that ran from one fiber onto another at a crossing
-    leaves the rest of each fiber to a fit that ends against it. The sphere
-    reaches ``reach_radii`` of the fiber's radius, plus the radius and
-    ``reach_radii`` of the widest fit its tip touches, so the neighbour's
-    nodes there are redrawn too and the region can pair its branches anew.
+    Ends are where fits go wrong: a fiber split in two leaves two free ends
+    facing each other. The sphere reaches ``reach_radii`` of the fiber's
+    radius. An end whose tip comes within two radii of another fit's surface
+    is left out, unless ``touching``: then the sphere also reaches the
+    radius and ``reach_radii`` of the widest fit it touches, so the region
+    can pair the branches there anew (a fit that ran onto another fiber at a
+    crossing leaves the rest of each fiber to a fit ending against it). In
+    dense crossings that re-paired branches the wrong way (dense_crossing
+    merged 10 -> 25), so it is off by default.
     """
     radii = np.asarray(radii, dtype=np.float64)
     upper = np.array(shape[::-1], dtype=np.float64)
@@ -332,9 +340,11 @@ def end_hotspots(
                 ab = b - a
                 t = np.clip(((tip - a) * ab).sum(axis=1) / np.maximum((ab * ab).sum(axis=1), 1e-12), 0.0, 1.0)
                 gap = np.linalg.norm(tip - (a + t[:, None] * ab), axis=1)
-                touching = segments.radius[near][gap <= segments.radius[near] + 2.0 * r]
-                if len(touching):
-                    reach = max(reach, r + (1.0 + reach_radii) * float(touching.max()))
+                near_radii = segments.radius[near][gap <= segments.radius[near] + 2.0 * r]
+                if len(near_radii):
+                    if not touching:
+                        continue
+                    reach = max(reach, r + (1.0 + reach_radii) * float(near_radii.max()))
             rows.append([*tip, reach])
     return np.array(rows, dtype=np.float64).reshape(-1, 4)
 
