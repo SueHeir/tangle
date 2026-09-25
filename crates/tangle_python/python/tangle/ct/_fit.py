@@ -759,21 +759,32 @@ def _core_holes(mask: np.ndarray, max_area: float) -> np.ndarray:
     along each axis. A hollow fiber is a closed ring in the slices across
     it (in 3D it is a tube open at both ends, so a 3D fill misses it); larger
     holes are void between fibers that happen to enclose it in a slice."""
-    from scipy.ndimage import binary_fill_holes, label
+    from scipy.ndimage import label
 
+    # Per axis, one labelling of the void with 4-connectivity inside each
+    # slice and none across slices: every slice's void components at once
+    # (a fill and a label per slice was 2000 calls a tile). A component is a
+    # hole when it does not reach its slice's edge, as binary_fill_holes
+    # decides it.
+    void = ~mask
     holes = np.zeros(mask.shape, dtype=bool)
     for axis in range(3):
-        planes = np.moveaxis(mask, axis, 0)
-        found = np.moveaxis(holes, axis, 0)  # a view: writes land in ``holes``
-        for k, plane in enumerate(planes):
-            enclosed = binary_fill_holes(plane) & ~plane
-            if not enclosed.any():
+        structure = np.zeros((3, 3, 3), dtype=bool)
+        cross = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
+        np.moveaxis(structure, axis, 0)[1] = cross
+        ids, count = label(void, structure=structure)
+        if count == 0:
+            continue
+        sizes = np.bincount(ids.ravel(), minlength=count + 1)
+        small = sizes <= max_area
+        small[0] = False
+        for other in range(3):
+            if other == axis:
                 continue
-            ids, count = label(enclosed)
-            sizes = np.bincount(ids.ravel(), minlength=count + 1)
-            small = sizes <= max_area
-            small[0] = False
-            found[k] |= small[ids]
+            edge = np.moveaxis(ids, other, 0)
+            small[np.unique(edge[0])] = False
+            small[np.unique(edge[-1])] = False
+        holes |= small[ids]
     return holes
 
 

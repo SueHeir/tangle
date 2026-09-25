@@ -256,6 +256,44 @@ def paint(target: np.ndarray, line: np.ndarray, reach: float, value: int, *, onl
         window[inside] = value
 
 
+class OwnerLookup:
+    """``rasterize(shape, lines, radii, signed=True)``'s label at single voxels.
+
+    For callers that read the labels at a few voxels only: the owner of a
+    voxel is the fiber whose capsule surface is nearest its center among the
+    segments within the fiber's radius of it (0 for none), ties going to the
+    lower segment, as :func:`rasterize` decides it.
+    """
+
+    def __init__(self, shape: tuple[int, int, int], centerlines: list[np.ndarray], radii: np.ndarray) -> None:
+        self.shape = np.array(shape)
+        radii = np.asarray(radii, dtype=np.float64)
+        line_of = segment_lines(centerlines)
+        pieces = [np.asarray(line, dtype=np.float64).reshape(-1, 3) for line in centerlines]
+        self.a = np.concatenate([p[:-1] for p in pieces]) if len(line_of) else np.zeros((0, 3))
+        b = np.concatenate([p[1:] for p in pieces]) if len(line_of) else np.zeros((0, 3))
+        self.ab = b - self.a
+        denominator = np.einsum("ij,ij->i", self.ab, self.ab)
+        self.degenerate = denominator <= 1e-12
+        self.denominator = np.where(self.degenerate, 1.0, denominator)
+        self.label = line_of + 1
+        self.radius = radii[line_of]
+
+    def __call__(self, index_zyx: tuple[int, int, int]) -> int:
+        if not len(self.label):
+            return 0
+        center = np.asarray(index_zyx[::-1], dtype=np.float64) + 0.5
+        offset = center - self.a
+        t = np.clip(np.einsum("ij,ij->i", offset, self.ab) / self.denominator, 0.0, 1.0)
+        t = np.where(self.degenerate, 0.0, t)
+        distance = np.linalg.norm(offset - t[:, None] * self.ab, axis=1)
+        near = np.flatnonzero(distance <= self.radius)
+        if not len(near):
+            return 0
+        surface = distance[near] - self.radius[near]
+        return int(self.label[near[np.argmin(surface)]])  # argmin: first (lowest) segment on ties
+
+
 def rasterize(
     shape: tuple[int, int, int],
     centerlines: list[np.ndarray],

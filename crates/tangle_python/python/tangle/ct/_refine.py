@@ -15,7 +15,7 @@ def end_step(
     radii: np.ndarray,
     *,
     step: float,
-    occupied: np.ndarray,
+    occupied,
     max_moves: int = 3,
     reach: np.ndarray | None = None,
 ) -> list[np.ndarray]:
@@ -27,6 +27,10 @@ def end_step(
     grows while the scan is still fiber half a step past that, and is trimmed
     while it is void half a step short of it, which leaves the tip within
     half a step of the true end.
+
+    ``occupied`` gives each voxel's owning fiber (one-based, 0 for none): a
+    ``(z, y, x)`` label array, or a callable taking a ``(z, y, x)`` index
+    (such as :class:`_geometry.OwnerLookup`).
     """
     upper = np.array(image.shape[::-1], dtype=np.float64)
     reach = np.asarray(radii if reach is None else reach, dtype=np.float64)
@@ -51,11 +55,10 @@ def end_step(
                 direction /= max(np.linalg.norm(direction), 1e-12)
                 ahead = tip + (cap + 0.5 * step) * direction
                 short = tip + max(cap - 0.5 * step, 0.0) * direction
-                owner = (
-                    int(occupied[tuple(np.clip(np.floor(ahead[::-1]).astype(int), 0, np.array(image.shape) - 1))])
-                    if inside(ahead)
-                    else 0
-                )
+                owner = 0
+                if inside(ahead):
+                    voxel = tuple(np.clip(np.floor(ahead[::-1]).astype(int), 0, np.array(image.shape) - 1))
+                    owner = int(occupied(voxel) if callable(occupied) else occupied[voxel])
                 if inside(ahead) and value(ahead) > 0.55 and owner in (0, index + 1):
                     extended = tip + step * direction
                     line = np.vstack([extended[None], line]) if end == 0 else np.vstack([line, extended[None]])

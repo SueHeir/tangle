@@ -384,6 +384,100 @@ class CtToolTests(unittest.TestCase):
         self.assertGreater(into_long, into_typical + 1.0)
         self.assertEqual(length_end_cost(40.0, None, diameter, 3.0), 1.0)
 
+    def test_tiles_are_stitched_where_their_fits_agree(self):
+        from tangle.ct import _tiles
+        from tangle.ct._image import Levels
+
+        grid = _tiles.TileGrid.make((60, 60, 120), 60, 16)  # two cores along x, wall at x = 60
+        self.assertEqual(grid.counts, (1, 1, 2))
+        rng = np.random.default_rng(1)
+
+        def line(x0, x1, y, z):
+            x = np.arange(x0, x1, 2.0)
+            return np.stack([x, y + 0.2 * rng.normal(size=len(x)), z + 0.2 * rng.normal(size=len(x))], axis=1)
+
+        levels = Levels(0.0, 1.0, 0.5)
+
+        def tile(index, lines):
+            n = len(lines)
+            return _tiles.TileFit(index, lines, np.full(n, 3.0), np.zeros(n, dtype=int), np.ones(n), levels, [np.ones(len(l)) for l in lines])
+
+        # Both tiles fit fiber A alike across the wall; they disagree on fiber B
+        # by 6 voxels (twice its radius); C pokes 4 voxels past the wall in the
+        # left tile only, and D is fitted by the right tile only, ending in the
+        # left one's padding. E stops short of the wall in both tiles (at 56
+        # and 62), so they meet end to end.
+        left = tile((0, 0, 0), [line(2, 76, 30, 30), line(2, 76, 10, 10), line(10, 64, 45, 45), line(2, 57, 50, 50)])
+        right = tile((0, 0, 1), [line(44, 118, 30.3, 30), line(44, 118, 16, 10), line(50, 110, 50, 20), line(62, 118, 50, 50)])
+        fit = _tiles.stitch(grid, [left, right], [ct.FiberSpec(diameter=6e-6)], 1e-6, levels)
+        spans = sorted((round(float(l[:, 0].min())), round(float(l[:, 0].max()))) for l in fit.centerlines)
+        # A joined whole, E joined across its gap; B cut at the wall into two;
+        # C and D each their own tile's part.
+        self.assertEqual(fit.history[0]["joins"], 2, fit.history[0])
+        self.assertEqual(fit.history[0]["gap_joins"], 1, fit.history[0])
+        self.assertEqual(spans, [(2, 58), (2, 116), (2, 116), (10, 58), (60, 108), (60, 116)], spans)
+        whole = max(fit.centerlines, key=len)
+        self.assertTrue(np.all(np.diff(whole[:, 0]) > 0))  # one fiber, in order, no doubled stretch
+        self.assertEqual(len(fit.confidence[0]), len(fit.centerlines[0]))
+
+    def test_tile_checkpoints_reload_and_refuse_other_inputs(self):
+        from tangle.ct import _tiles
+        from tangle.ct._image import Levels
+
+        levels = Levels(0.0, 1.0, 0.5)
+        line = np.stack([np.arange(2.0, 40.0, 2.0), np.full(19, 20.0), np.full(19, 20.0)], axis=1)
+        fit = _tiles.TileFit((0, 0, 1), [line], np.array([3.0]), np.array([0]), np.array([0.9]), levels, [np.linspace(0, 1, 19)])
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _tiles.Checkpoint(tmp)
+            store.open({"shape_zyx": [40, 40, 80]})
+            store.save(fit)
+            back = store.load()[(0, 0, 1)]
+            np.testing.assert_allclose(back.centerlines[0], line)
+            np.testing.assert_allclose(back.confidence[0], np.linspace(0, 1, 19), atol=1e-3)
+            store.open({"shape_zyx": [40, 40, 80]})  # same inputs: resumes
+            with self.assertRaises(ValueError):
+                store.open({"shape_zyx": [40, 40, 81]})
+            store.clear()
+            self.assertEqual(store.load(), {})
+
+    def test_owner_lookup_matches_rasterize(self):
+        from tangle.ct._geometry import OwnerLookup, rasterize
+
+        rng = np.random.default_rng(5)
+        shape = (30, 34, 38)
+        lines = [np.cumsum(rng.normal(0.0, 2.0, size=(8, 3)), axis=0) + rng.uniform(5, 25, size=3) for _ in range(12)]
+        radii = rng.uniform(1.5, 4.0, size=12)
+        labels, _, _ = rasterize(shape, lines, radii, signed=True)
+        lookup = OwnerLookup(shape, lines, radii)
+        for index in map(tuple, rng.integers(0, shape, size=(400, 3))):
+            self.assertEqual(lookup(index), labels[index], index)
+
+    def test_hessian_at_one_point_matches_many(self):
+        from tangle.ct._image import HessianField
+
+        image = self.scan.volume.astype(np.float32) / 65535.0
+        field = HessianField(image, 2.0)
+        points = np.random.default_rng(6).uniform(2, 70, size=(80, 3))
+        many = field.at(points)  # one interpolation per component
+        few = np.concatenate([field.at(p) for p in points])  # the stacked single-call path
+        np.testing.assert_allclose(few, many, rtol=1e-6, atol=1e-7)
+
+    def test_core_holes_match_slice_by_slice_fill(self):
+        from scipy.ndimage import binary_fill_holes, label
+
+        from tangle.ct._fit import _core_holes
+
+        mask = np.random.default_rng(7).random((20, 24, 28)) < 0.6
+        expected = np.zeros(mask.shape, dtype=bool)
+        for axis in range(3):
+            planes, found = np.moveaxis(mask, axis, 0), np.moveaxis(expected, axis, 0)
+            for k, plane in enumerate(planes):
+                ids, count = label(binary_fill_holes(plane) & ~plane)
+                small = np.bincount(ids.ravel(), minlength=count + 1) <= 3
+                small[0] = False
+                found[k] |= small[ids]
+        np.testing.assert_array_equal(_core_holes(mask, 3), expected)
+
     def test_crossing_ends_are_joined_straight_through(self):
         from tangle.ct._geometry import paint
         from tangle.ct._junctions import allowed_pairs, assemble, rank_plans, region_ports
@@ -637,6 +731,26 @@ class CtFitTests(unittest.TestCase):
         # One grey-scan fit, with the length prior, serves most tests: the
         # solver is slow on the CPU backend CI uses.
         cls.fit = ct.fit_fibers(cls.scan.volume, VOXEL, ct.FiberSpec(diameter=DIAMETER, length=200 * um), fit_settings())
+
+    def test_tiled_fit_matches_whole_fit_and_resumes(self):
+        from unittest import mock
+
+        spec = ct.FiberSpec(diameter=DIAMETER, length=200 * um)
+        with tempfile.TemporaryDirectory() as tmp:
+            # 2 x 2 x 2 cores of 36 voxels; fiber 2 runs along the x wall.
+            fit = ct.fit_tiled(self.scan.volume, VOXEL, spec, fit_settings(), tile=36, checkpoint=tmp)
+            self.assertEqual(fit.history[0]["tiles"], 8)
+            report = ct.score(fit, self.scan)
+            self.assertEqual(report["recovered"], 3, report)
+            self.assertEqual(report["false_fibers"], 0, report)
+            self.assertEqual(report["split"], 0, report)
+            self.assertGreater(report["voxel_label_accuracy"], 0.9, report)
+            with mock.patch("tangle.ct._tiles.fit_fibers", side_effect=AssertionError("refitted a saved tile")):
+                again = ct.fit_tiled(self.scan.volume, VOXEL, spec, fit_settings(), tile=36, checkpoint=tmp)
+            self.assertEqual(again.fiber_count, fit.fiber_count)
+            self.assertEqual(ct.load_tiles(tmp).fiber_count, fit.fiber_count)
+            with self.assertRaises(ValueError):  # another scan in the same checkpoint
+                ct.fit_tiled(self.scan.volume[::-1], VOXEL, spec, fit_settings(), tile=36, checkpoint=tmp)
 
     def test_fit_recovers_every_fiber(self):
         report = ct.score(self.fit, self.scan)
