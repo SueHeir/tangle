@@ -131,14 +131,15 @@ class FitSettings:
     # left alone after ``redraw_attempts`` failures.
     redraw_passes: int = 5
     redraw_attempts: int = 3
-    # How a region's redraw is judged: "grey" (the scan's grey is matched
-    # better by the fit drawn with its profiles, by more than a nat; needs
+    # How a region's redraw is judged: "nats" (the whole fit's cost over the
+    # region falls by more than a nat: misfit to the scan over the evidence
+    # scale, overlap between fits, and the fiber-length prior's price of
+    # every fiber end; ``_Fitter.nats_map``), "grey" (the misfit alone, with
     # ``FiberSpec.profile``), "mask" (fewer foreground voxels left
-    # unexplained plus fewer fit voxels over void; tracked the truth best of
-    # the voxel scores in the redraw study), "confidence" (sure coverage, see
-    # ``_confidence.sure_coverage``), or "all" (every redraw is kept, for
-    # comparison). "auto" is "grey" with profiles, else "mask". The same
-    # score picks among the ``redraw_plans``.
+    # unexplained plus fewer fit voxels over void), "confidence" (sure
+    # coverage, see ``_confidence.sure_coverage``), or "all" (every redraw is
+    # kept, for comparison). "auto" is "nats". The same score picks among the
+    # ``redraw_plans``.
     redraw_score: str = "auto"
     # How a region is redrawn: "match" tries every way its loose fiber ends
     # can connect or end (``_junctions``), solves the ``redraw_plans``
@@ -563,8 +564,8 @@ def fit_fibers(
             )
     if exclude is not None and np.shape(exclude) != volume.shape:
         raise ValueError("exclude must have the same shape as volume")
-    if settings.redraw_score not in ("auto", "grey", "confidence", "mask", "all"):
-        raise ValueError('redraw_score must be "auto", "grey", "confidence", "mask" or "all"')
+    if settings.redraw_score not in ("auto", "nats", "grey", "confidence", "mask", "all"):
+        raise ValueError('redraw_score must be "auto", "nats", "grey", "confidence", "mask" or "all"')
     if settings.redraw_moves not in ("match", "grow"):
         raise ValueError('redraw_moves must be "match" or "grow"')
     if settings.redraw_plans < 1:
@@ -790,6 +791,7 @@ class _Fitter:
         self.profiles: list[np.ndarray] | None = None
         self.grey_void = 0.0
         self._grey_scale: float | None = None
+        self._plain_scale: float | None = None
         self._match_cache: tuple | None = None  # (cut, ranking): reused by a pass's candidates
         self.set_image(image)
 
@@ -1016,7 +1018,8 @@ class _Fitter:
         types = np.asarray(types, dtype=int)
         failures: list[list] = []  # [low, high, count] per region that failed
         self._grey_scale = None  # measured on the fit the loop starts from
-        old_misfit = None
+        self._plain_scale = None
+        old_misfit = old_nats = None
         step = 2.0 * float(self.radius.max())
         for pass_index in range(s.redraw_passes):
             started = time.perf_counter()
@@ -1054,7 +1057,12 @@ class _Fitter:
                 if old_misfit is None:  # kept from the last pass when nothing changed
                     old_misfit = self.grey_misfit(lines, radii, types)
                 new_misfit = self.grey_misfit(new_lines, new_radii, new_types)
+            if self.score_name == "nats":
+                if old_nats is None:  # kept from the last pass when nothing changed
+                    old_nats = self.nats_map(lines, radii, types)
+                new_nats = self.nats_map(new_lines, new_radii, new_types)
             masks = [self._box_mask([boxes[k] for k in np.flatnonzero(component == c)]) for c in range(count)]
+            nats_gain = np.zeros(count)
             confidence_gain = np.zeros(count)
             mask_gain = np.zeros(count)
             grey_gain = np.zeros(count)
@@ -1066,13 +1074,16 @@ class _Fitter:
                 mask_gain[c] = (
                     float(old_residual[mask].sum(dtype=np.int64)) - float(new_residual[mask].sum(dtype=np.int64))
                 ) / foreground
+                if self.score_name == "nats":
+                    nats_gain[c] = float(old_nats[mask].sum(dtype=np.float64)) - float(new_nats[mask].sum(dtype=np.float64))
                 if self.profiles is not None:
                     # Nats: the drop in squared grey residual over the evidence scale.
                     grey_gain[c] = (
                         float(old_misfit[mask].sum(dtype=np.float64)) - float(new_misfit[mask].sum(dtype=np.float64))
                     ) / scale
             better = {
-                "confidence": confidence_gain > 1e-3, "mask": mask_gain > 1e-3, "grey": grey_gain > 1.0,
+                "nats": nats_gain > 1.0, "confidence": confidence_gain > 1e-3, "mask": mask_gain > 1e-3,
+                "grey": grey_gain > 1.0,
                 "all": np.ones(count, dtype=bool),
             }
             accepted = better[self.score_name]
@@ -1117,6 +1128,7 @@ class _Fitter:
                 groups_better_by_confidence=int(better["confidence"].sum()),
                 groups_better_by_mask=int(better["mask"].sum()),
                 groups_better_by_grey=int(better["grey"].sum()) if self.profiles is not None else None,
+                groups_better_by_nats=int(better["nats"].sum()) if self.score_name == "nats" else None,
                 regions_given_up=len(given_up), regions_widened=len(widen),
                 sure_coverage=round(coverage if kept else before_coverage, 4),
                 sure_coverage_before=round(before_coverage, 4), residual_change=round(residual_change, 4), kept=kept,
@@ -1125,16 +1137,14 @@ class _Fitter:
             if kept:
                 lines, radii, types = merged, merged_radii, merged_types
                 confidence, settled = merged_confidence, merged_settled
-                old_misfit = None
+                old_misfit = old_nats = None
         return lines, radii, types, confidence
 
     @property
     def score_name(self) -> str:
         """``FitSettings.redraw_score`` with "auto" resolved."""
         name = self.settings.redraw_score
-        if name == "auto":
-            return "grey" if self.profiles is not None else "mask"
-        return name
+        return "nats" if name == "auto" else name
 
     def grey_misfit(self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray) -> np.ndarray:
         """Per voxel, (scan grey − the fit drawn with its profiles)²."""
@@ -1142,6 +1152,45 @@ class _Fitter:
 
         profiles = [self.profiles[int(t)] for t in types]
         return _grey.squared_residual_map(self.grey, lines, radii, profiles, self.grey_void)
+
+    def nats_map(self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray) -> np.ndarray:
+        """Per voxel, what the fit costs there in nats; summed over a region, lower is better.
+
+        Three terms, as the junction plans are scored (``_junctions``): the
+        squared misfit between the scan and the fit drawn (with the grey
+        profiles when there are some, else as soft occupancy of the
+        normalized scan) over the evidence scale; one nat per fiber
+        cross-section of voxels where fits overlap; and every fiber end
+        inside the scan at the fiber-length prior's price for a fiber of its
+        length (``_ends.length_end_cost``), on the voxel of its tip.
+        """
+        from . import _native
+        from ._ends import evidence_scale, length_end_cost
+
+        radii = np.asarray(radii, dtype=np.float64)
+        types = np.asarray(types, dtype=int)
+        upper = np.array(self.image.shape[::-1])
+        origin = np.zeros(3, dtype=int)
+        if self.profiles is not None:
+            cost = self.grey_misfit(lines, radii, types).astype(np.float64) / self.grey_scale(lines, radii, types)
+        else:
+            if self._plain_scale is None:
+                self._plain_scale = evidence_scale(self.image, lines, radii, float(self.radius.min()))
+            drawn = _native.render_occupancy(origin, upper, lines, radii, 1.2) if lines else 0.0
+            cost = (self.image.astype(np.float64) - drawn) ** 2 / self._plain_scale
+        if lines:
+            cost += _native.overlap(origin, upper, lines, radii) / (np.pi * float(self.radius.min()) ** 2)
+        for line, r, kind in zip(lines, radii, types):
+            if len(line) < 2:
+                continue
+            price = length_end_cost(
+                polyline_length(line), self.length[kind], 2.0 * float(self.radius[kind]), self.settings.length_shape
+            )
+            for tip in (line[0], line[-1]):
+                if np.all(tip >= 1.5 * r) and np.all(tip <= upper - 1.5 * r):
+                    i, j, k = np.floor(tip).astype(int)
+                    cost[k, j, i] += price
+        return cost
 
     def grey_scale(self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray) -> float:
         """Squared grey residual worth one nat (``_grey.evidence_scale``), measured once per redraw loop."""
@@ -1213,7 +1262,9 @@ class _Fitter:
                 offsets[close] = c
             candidate = self.redraw_candidate(cut, radii, types, attempt=attempt, offsets=offsets)
             lines, cand_radii = candidate[0], candidate[1]
-            if self.score_name == "grey":
+            if self.score_name == "nats":
+                cover = -self.nats_map(lines, cand_radii, candidate[2])
+            elif self.score_name == "grey":
                 cover = -self.grey_misfit(lines, cand_radii, candidate[2])
             elif self.score_name == "mask":
                 cover = -_confidence.residual_map(self.foreground, lines, cand_radii, self.margin)

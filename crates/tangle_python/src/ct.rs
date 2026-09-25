@@ -8,6 +8,8 @@
 use pyo3::buffer::{Element, PyBuffer};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use tangle_ct::confidence::{node_confidence, ConfidenceSettings};
+use tangle_ct::grey::{overlap, render_grey};
 use tangle_ct::hessian::HessianField;
 use tangle_ct::line::resample;
 use tangle_ct::moves::{
@@ -776,4 +778,129 @@ pub(crate) fn ct_resolve_side_by_side(
         settings,
     );
     Ok((pack(&lines), radii, changed))
+}
+
+/// The grey the lines should show over box `[low, high)` into `out`, a
+/// `(z, y, x)` array of the box (see `_grey.render_grey`).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ct_render_grey(
+    low: Corner,
+    high: Corner,
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+    radii: Vec<f64>,
+    profiles: Vec<Vec<f64>>,
+    void: f64,
+    edge: f64,
+    out: PyBuffer<f64>,
+) -> PyResult<()> {
+    per_line(&radii, &counts, "radius")?;
+    if profiles.len() != counts.len() {
+        return Err(PyValueError::new_err("give one profile per line"));
+    }
+    let lines = lines_of(&nodes, &counts)?;
+    let out = write(&out, "out")?;
+    if out.len() != box_size(low, high) {
+        return Err(PyValueError::new_err("out must have the box's shape"));
+    }
+    let profiles: Vec<&[f64]> = profiles.iter().map(Vec::as_slice).collect();
+    out.copy_from_slice(&render_grey(
+        low,
+        high,
+        &line_refs(&lines),
+        &radii,
+        &profiles,
+        void,
+        edge,
+    ));
+    Ok(())
+}
+
+/// Per-line node confidence and the same without stability, per-line
+/// per-sample confidence, and per component per line per sample (see
+/// `_confidence.node_confidence`).
+type ConfidenceOut = (
+    Vec<Vec<f64>>,
+    Vec<Vec<f64>>,
+    Vec<Vec<f64>>,
+    Vec<Vec<Vec<f64>>>,
+);
+
+#[pyfunction]
+#[pyo3(signature = (image, depth, nodes, counts, radii, spacing, margin, thickness_margin, ring, thickness_tolerance, previous_nodes=None, previous_counts=None))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ct_node_confidence(
+    image: PyBuffer<f32>,
+    depth: PyBuffer<f32>,
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+    radii: Vec<f64>,
+    spacing: f64,
+    margin: f64,
+    thickness_margin: f64,
+    ring: usize,
+    thickness_tolerance: f64,
+    previous_nodes: Option<PyBuffer<f64>>,
+    previous_counts: Option<Vec<usize>>,
+) -> PyResult<ConfidenceOut> {
+    let shape = volume_shape(&image, "image")?;
+    same_shape(&image, &depth, "depth")?;
+    per_line(&radii, &counts, "radius")?;
+    if !(spacing > 0.0) || ring == 0 {
+        return Err(PyValueError::new_err("spacing and ring must be positive"));
+    }
+    let lines = lines_of(&nodes, &counts)?;
+    let previous = match (&previous_nodes, &previous_counts) {
+        (Some(nodes), Some(counts)) => {
+            if counts.len() != lines.len() {
+                return Err(PyValueError::new_err("give one previous line per line"));
+            }
+            Some(lines_of(nodes, counts)?)
+        }
+        _ => None,
+    };
+    let settings = ConfidenceSettings {
+        spacing,
+        margin,
+        thickness_margin,
+        ring,
+        thickness_tolerance,
+    };
+    let c = node_confidence(
+        read(&image, "image")?,
+        read(&depth, "depth")?,
+        shape,
+        &lines,
+        &radii,
+        previous.as_deref(),
+        settings,
+    );
+    Ok((
+        c.per_node,
+        c.settled,
+        c.per_sample,
+        c.parts.into_iter().collect(),
+    ))
+}
+
+/// Per voxel of box `[low, high)`, how many fits beyond the first contain it,
+/// into `out` (`uint16`, the box's `(z, y, x)` shape).
+#[pyfunction]
+pub(crate) fn ct_overlap(
+    low: Corner,
+    high: Corner,
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+    radii: Vec<f64>,
+    out: PyBuffer<u16>,
+) -> PyResult<()> {
+    per_line(&radii, &counts, "radius")?;
+    let lines = lines_of(&nodes, &counts)?;
+    let out = write(&out, "out")?;
+    if out.len() != box_size(low, high) {
+        return Err(PyValueError::new_err("out must have the box's shape"));
+    }
+    out.copy_from_slice(&overlap(low, high, &line_refs(&lines), &radii));
+    Ok(())
 }
