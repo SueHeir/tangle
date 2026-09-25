@@ -145,6 +145,41 @@ class CtToolTests(unittest.TestCase):
         self.assertAlmostEqual(solid.center_response(3.0, VOXEL, 0.0), 0.5)
         self.assertLess(rimmed.center_response(radius, VOXEL, 0.5 * radius), 0.75)
 
+    def test_scan_noise_can_be_correlated(self):
+        assembly = tangle.Assembly(tangle.Cell([90 * um] * 3))
+        white = ct.synthetic_ct(assembly, VOXEL, seed=3, drift=0.0).volume.astype(np.float64)
+        blurred = ct.synthetic_ct(assembly, VOXEL, seed=3, drift=0.0, noise_correlation=0.9).volume.astype(np.float64)
+
+        def lag_one(volume):
+            v = volume - volume.mean()
+            return float((v[:, :, 1:] * v[:, :, :-1]).mean() / (v * v).mean())
+
+        self.assertLess(lag_one(white), 0.1)
+        self.assertGreater(lag_one(blurred), 0.6)
+
+    def test_cross_section_width_survives_noise_that_breaks_the_depth(self):
+        from scipy.ndimage import gaussian_filter
+
+        from tangle.ct._geometry import paint, sample_image
+        from tangle.ct._image import half_radius, half_widths
+        from tangle.ct._trace import foreground_depth
+
+        occupied = np.zeros((40, 40, 64), dtype=np.int32)
+        axis = np.array([[4.0, 20.0, 20.0], [60.0, 20.0, 20.0]])
+        paint(occupied, axis, 7.0, 1)  # a dim fiber of radius 7 along x
+        rng = np.random.default_rng(1)
+        noise = gaussian_filter(rng.normal(size=occupied.shape), 0.9)
+        image = (0.6 * gaussian_filter((occupied > 0).astype(np.float64), 0.9) + 0.2 * noise / noise.std()).astype(np.float32)
+        line = np.stack([np.arange(8.0, 57.0, 2.0), np.full(25, 20.0), np.full(25, 20.0)], axis=1)
+        _, depth = foreground_depth(image > 0.3)  # a threshold half way to the fiber's grey
+        self.assertLess(float(np.median(sample_image(depth, line))), 0.6 * 7.0)
+        self.assertAlmostEqual(float(half_widths(image, [line], reach=12.0)[0]), 7.0, delta=1.0)
+        self.assertTrue(np.isnan(half_widths(image, [line[:2]], reach=12.0)[0]))  # too short for a cross-section
+        # A bright rim around a dim core reads its outer edge.
+        distances = np.arange(0.0, 10.0, 0.5)
+        rim = np.where(distances < 4.0, 0.3, np.where(distances < 6.0, 1.0, 0.0))
+        self.assertAlmostEqual(float(half_radius(rim[None], distances, 6.0)[0]), 5.75, delta=0.3)
+
     def test_mask_input_fills_cores_and_applies_exclude(self):
         from tangle.ct._fit import _is_mask, _mask_image
 
@@ -215,7 +250,7 @@ class CtToolTests(unittest.TestCase):
 
         right = mean([along(16.0), along(24.0)])
         self.assertGreater(right, 0.7)
-        # One fit along the contact line of both: too thin a foreground, and
+        # One fit along the contact line of both: the wrong cross-section, and
         # fiber on both sides that no fit explains.
         self.assertLess(mean([along(20.0)]), 0.3)
         # Fits that just moved three voxels are less sure than settled ones.

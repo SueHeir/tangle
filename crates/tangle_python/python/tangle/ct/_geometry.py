@@ -40,6 +40,25 @@ def tangents(points: np.ndarray) -> np.ndarray:
     return t / np.maximum(norm, 1e-12)
 
 
+def cross_frames(line: np.ndarray, nodes: int) -> tuple[np.ndarray, np.ndarray] | None:
+    """Up to ``nodes`` interior nodes of a centerline, and four unit directions across it at each.
+
+    Returns the nodes ``(n, 3)`` and the directions ``(n, 4, 3)``: ``u``,
+    ``-u``, ``w``, ``-w`` for two perpendicular unit normals. None for a line
+    with fewer than 3 nodes.
+    """
+    line = np.asarray(line, dtype=np.float64)
+    if len(line) < 3:
+        return None
+    pick = np.unique(np.linspace(1, len(line) - 2, min(nodes, len(line) - 2)).astype(int))
+    axis = tangents(line)[pick]
+    helper = np.where(np.abs(axis[:, :1]) < 0.9, np.array([[1.0, 0.0, 0.0]]), np.array([[0.0, 1.0, 0.0]]))
+    u = np.cross(axis, helper)
+    u /= np.maximum(np.linalg.norm(u, axis=1, keepdims=True), 1e-9)
+    w = np.cross(axis, u)
+    return line[pick], np.stack([u, -u, w, -w], axis=1)
+
+
 def sample_image(image: np.ndarray, points: np.ndarray, *, fill: float = 0.0) -> np.ndarray:
     """Trilinear samples of a ``(z, y, x)`` array at voxel coordinates ``(x, y, z)``."""
     from scipy.ndimage import map_coordinates

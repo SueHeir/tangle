@@ -13,7 +13,7 @@ import numpy as np
 from . import _confidence, _junctions, _moves, _refine, _regrow
 from ._ends import end_cost, end_statistics, evidence_scale
 from ._geometry import polyline_length, rasterize, tangents
-from ._image import HessianField, Levels, normalize
+from ._image import HessianField, Levels, half_widths, normalize
 from ._trace import trace_fibers
 
 
@@ -84,6 +84,9 @@ class FitSettings:
     """
 
     denoise_sigma_voxels: float = 0.7
+    # Fill enclosed foreground holes up to a fiber's cross-section (a dim
+    # core, or noise speckle in a dim fiber) in a mask, grey ranges or a
+    # plain grey scan.
     fill_mask_holes: bool = True
     # How much thicker (voxels, in radius) the foreground makes every fiber
     # look, as a generous mask threshold does. None estimates it from the
@@ -539,8 +542,9 @@ def fit_fibers(
 
     ``spec`` may be a list of fiber types that differ in diameter. They are
     traced largest first, and every fiber's type is then decided by its
-    size: the local thickness of the foreground along it picks the nearest
-    diameter, after every solver batch, and sets its radius prior, bend
+    size: its thickness (the foreground's depth along it; in a plain grey
+    scan the radius of its mean cross-section) picks the nearest diameter,
+    after every solver batch, and sets its radius prior, bend
     limit and length prior.
     """
     from . import _device
@@ -619,12 +623,15 @@ def fit_fibers(
         source = "grey profiles" if grey_model is not None else "grey ranges"
     else:
         image, levels = normalize(volume, denoise_sigma=settings.denoise_sigma_voxels, levels=settings.levels)
+        if settings.fill_mask_holes:
+            _fill_core_holes(image, largest)
         if exclude is not None:
             image = np.where(np.asarray(exclude, dtype=bool), np.float32(0.0), image)
         source = "grey"
     log("input", [], mask=binary, source=source)
 
     fitter = _Fitter(image, specs, settings, voxel_size, log)
+    fitter.width_typing = source == "grey"
     fitter.type_bits = type_bits
     if grey_model is not None:
         fitter.grey, fitter.profiles, fitter.grey_void = grey_model
@@ -635,6 +642,10 @@ def fit_fibers(
         # Otsu class medians put the fiber level below the fiber core (blurred
         # edge voxels are in the fiber class); re-level on the traced cores.
         image, levels = _relevel(image, levels, lines, float(fitter.radius[0]))
+        if settings.fill_mask_holes:
+            _fill_core_holes(image, largest)
+            if exclude is not None:
+                image[np.asarray(exclude, dtype=bool)] = 0.0
         fitter.set_image(image)
         radii, types = fitter.classify(lines)
         log("relevel", lines, void=levels.void, fiber=levels.fiber)
@@ -736,6 +747,13 @@ def _mask_image(
     return image, Levels(void=0.0, fiber=1.0, threshold=0.5)
 
 
+def _fill_core_holes(image: np.ndarray, largest_radius: float) -> None:
+    """Fill (in place, as fiber: 1) the core-sized holes of a normalized grey
+    scan's foreground, as a mask's and the grey ranges' are: a threshold of a
+    noisy scan leaves speckle holes in dim fibers."""
+    image[_core_holes(image > 0.5, np.pi * (largest_radius + 1.0) ** 2)] = 1.0
+
+
 def _core_holes(mask: np.ndarray, max_area: float) -> np.ndarray:
     """Enclosed holes no larger than a fiber's cross-section, slice by slice
     along each axis. A hollow fiber is a closed ring in the slices across
@@ -778,7 +796,9 @@ class _Fitter:
         self.spacing = settings.node_spacing_radii * float(self.radius.min())
         self.order = [int(k) for k in np.argsort(-self.radius, kind="stable")]  # largest first
         self.hessians: dict[int, HessianField] = {}
-        self.margin = settings.thickness_margin_voxels or 0.0
+        self.margin = settings.thickness_margin_voxels or 0.0  # the foreground's over-reach (see classify)
+        self.width_margin = self.margin  # the cross-section radius's over-reach
+        self.width_typing = False  # type by the cross-section rather than the depth (plain grey scans; see classify)
         self.type_bits: np.ndarray | None = None  # per voxel, one bit per type whose grey range it is in
         # With FiberSpec.profile: the denoised scan, each type's profile and the void grey.
         self.grey: np.ndarray | None = None
@@ -841,34 +861,60 @@ class _Fitter:
         return found
 
     def classify(self, lines: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
-        """Each fiber's type (the diameter nearest its local thickness) and radius.
+        """Each fiber's type (the diameter nearest its thickness) and radius.
 
-        The thickness is the foreground's depth along the centerline, less
-        the margin by which the foreground over-reaches (see
-        ``FitSettings.thickness_margin_voxels``); estimated, the margin is
-        the median excess of the fibers over their nearest type.
+        The thickness is read two ways, each less the margin by which it
+        over-reaches: the foreground's depth along the centerline (distance
+        to the nearest void, median over the interior nodes), and the radius
+        of the fiber's mean cross-section in the fit image
+        (``_image.half_widths``: where it falls to half its peak).
+
+        Fibers are typed and sized by the depth, except in a plain grey scan
+        (no grey ranges, profiles or mask; ``width_typing``). There the
+        foreground is a threshold of the scan itself, and in a scan whose
+        fibers are a few noise sigma above void it punches holes into dim
+        fibers, so their depth reads a fraction of the radius:
+        ``noisy_two_types`` fitted that way typed every coarse fiber fine and
+        packed it with fine fits (centerline F1 0.62; two_types 0.60). The
+        cross-section pools some hundred samples per distance and survives
+        the noise (F1 0.81; two_types 0.89). It reads a fiber in a flat bundle too thick, though (its
+        neighbours fill two of the four directions), which is why the
+        hole-filled fiber image that grey ranges, profiles or a mask give is
+        typed by depth.
+
+        Both margins are estimated (unless
+        ``FitSettings.thickness_margin_voxels`` gives both) as the median
+        excess of each reading over the fibers' type radii: ``margin`` of
+        the depth, which also sets what reads the foreground (the solver's
+        reach at fiber ends, the redraw's residual maps), and
+        ``width_margin`` of the cross-section, which the confidence uses.
         """
         from ._geometry import sample_image
 
         if not lines:
             return np.zeros(0), np.zeros(0, dtype=int)
-        measured = np.empty(len(lines))
-        for i, line in enumerate(lines):
-            inner = line[1:-1] if len(line) > 2 else line
-            measured[i] = max(float(np.median(sample_image(self.depth, inner))), 0.5)
-        margin = self.settings.thickness_margin_voxels
+        depth = np.array([float(np.median(sample_image(self.depth, line[1:-1] if len(line) > 2 else line))) for line in lines])
+        width = half_widths(self.image, lines, reach=1.6 * float(self.radius.max()))
+        width = np.where(np.isfinite(width), width, depth)  # NaN: too few nodes for a cross-section
+        measured = np.maximum(width if self.width_typing else depth, 0.5)
+        given = self.settings.thickness_margin_voxels
         by_grey = self._grey_types(lines)
-        if margin is None:
-            margin = 0.0
+
+        def typed(margin: float) -> np.ndarray:
+            types = self._nearest(measured - margin)
+            return np.where(by_grey >= 0, by_grey, types) if by_grey is not None else types
+
+        def excess(values: np.ndarray, types: np.ndarray) -> float:
+            return float(np.clip(np.median(values - self.radius[types]), -0.5, float(self.radius.min())))
+
+        margin = given if given is not None else 0.0
+        if given is None:
             for _ in range(3):
-                types = self._nearest(measured - margin)
-                if by_grey is not None:
-                    types = np.where(by_grey >= 0, by_grey, types)
-                margin = float(np.clip(np.median(measured - self.radius[types]), -0.5, float(self.radius.min())))
-            self.margin = margin
-        types = self._nearest(measured - margin)
-        if by_grey is not None:
-            types = np.where(by_grey >= 0, by_grey, types)
+                margin = excess(measured, typed(margin))
+        types = typed(margin)
+        if given is None:
+            other = excess(np.maximum(depth if self.width_typing else width, 0.5), types)
+            self.margin, self.width_margin = (other, margin) if self.width_typing else (margin, other)
         prior = self.radius[types]
         w = self.settings.radius_prior_weight
         blended = (np.maximum(measured - margin, 0.5) + w * prior) / (1.0 + w)
@@ -1422,7 +1468,9 @@ class _Fitter:
         if previous is not None and len(previous) != len(lines):
             previous = None
         per_node, summary = _confidence.node_confidence(
-            self.image, self.depth, lines, radii, spacing=self.spacing, margin=self.margin, previous=previous
+            self.image, self.depth, lines, radii, spacing=self.spacing, margin=self.margin,
+            thickness_margin=self.width_margin,
+            previous=previous,
         )
         settled = summary.pop("without_stability")
         summary = {key: value for key, value in summary.items() if key not in ("fiber_mean", "fiber_min", "fibers")}

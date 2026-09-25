@@ -178,7 +178,11 @@ fit = ct.fit_fibers(mask, voxel_size=1.25 * um, spec=[fine, coarse])
 
 - A fiber's thickness is the foreground's depth (distance to the nearest
   void voxel) along its centerline, less the margin by which the mask
-  over-reaches. With grey ranges, a fiber whose centerline is at least
+  over-reaches. In a plain grey scan (no grey ranges, profiles or mask) it
+  is the radius of the fiber's mean cross-section instead (where the grey
+  across it, pooled along the fiber, falls to half its peak): a threshold
+  of a noisy scan leaves dim fibers full of holes, and their depth reads
+  far too thin. With grey ranges, a fiber whose centerline is at least
   60% in one type's range (a dim core ringed by that range counts) takes
   that type; otherwise, and without ranges, its type is the spec whose
   diameter is nearest in ratio. The type sets its radius prior, bend limit, minimum length and
@@ -302,14 +306,16 @@ holds every example, and every example is run the same way. A synthetic
 scan with known true fibers is fitted from the raw scan, with each type's
 grey profile measured around its true fibers (as one would on a few
 fibers of a real scan), with Tangle's solver on the GPU.
-`--input mask` fits a generous thresholded mask instead. Each writes exactly
+`--input mask` fits a generous thresholded mask instead, and `--input plain`
+the raw scan from the diameters alone, with no grey information, as a
+first fit of a new scan would be. Each writes exactly
 these files to `<output>/<example>/`. The folder is emptied first, so there
 is only ever one result per example:
 
 | File | Contents |
 | --- | --- |
 | `raw.tif` | the rendered scan |
-| `input.tif` | what the fit sees, 0 (void) to 255 (fiber): the fiber fraction from the grey ranges, or the mask |
+| `input.tif` | what the fit sees, 0 (void) to 255 (fiber): the fiber fraction from the grey ranges, the normalized scan (`--input plain`), or the mask |
 | `true.tif` | the true fibers, one color per fiber, over the scan (RGB) |
 | `segment.tif` | the fitted fibers, one color per fiber, over the scan (RGB) |
 | `diff.tif` | where fit and truth disagree, over the dimmed scan (RGB): red = true fiber left empty (missed), blue = fit over void (extra), orange = fiber voxel given to the wrong fiber |
@@ -319,7 +325,10 @@ is only ever one result per example:
 
 `<output>/summary.md` has one row per example. The examples are
 `single_type` (40 wavy 12 µm fibers), `long_fibers` (long fibers cropped
-by the scan), `two_types` (7 µm and 19 µm fibers), and one `scenario_*` per
+by the scan), `two_types` (7 µm and 19 µm fibers), `noisy_two_types` (the
+same fibers in a low-contrast, noisy scan: dim solid coarse fibers about
+3 noise sigma above void, and noise correlated over about a voxel, via
+`synthetic_ct(noise_correlation=...)`), and one `scenario_*` per
 fitting step: a straight fiber, interior ends, gaps of 2, 6 and 12 radii,
 crossings at 90° and 30°, touching parallel fibers, a piece below the
 minimum length and a bend near the limit, plus `scenario_missed_fiber`:

@@ -6,7 +6,9 @@ fiber type (``FiberSpec.profile``: its grey at 9 radii from the axis to
 the surface, measured around the true fibers as one would on a few fibers
 of a real scan). With ``--input mask`` a generous binary
 mask is fitted instead (``scan.fiber_mask(level=MASK_LEVEL)``: fibers look
-a little thicker, as with a real threshold). The fibers are fitted with
+a little thicker, as with a real threshold). With ``--input plain`` the raw
+scan is fitted from the diameters alone, with no grey information, as a
+first fit of a new scan would be. The fibers are fitted with
 Tangle's solver on the GPU. Every example writes the same files, and only
 these, to ``<output>/<example>/`` (the folder is emptied first, so a re-run
 replaces the old result):
@@ -53,6 +55,12 @@ Examples:
   dim core (the core falls below the grey range, or out of the mask, and
   the hole is filled);
   each fit's type is chosen by its thickness.
+* ``noisy_two_types``: two_types' fibers in a low-contrast, noisy scan:
+  the coarse fibers solid and dim (0.45 of the fine fibers'
+  contrast, about 3 noise sigma), and the noise correlated over about a
+  voxel (neighbouring voxels correlate about 0.75), so the light denoise
+  removes little of it. A threshold of such a scan leaves the coarse
+  fibers full of holes.
 * ``varied_1`` … ``varied_8``: fresh structures drawn from seeds, for
   checking the fitter on structures it was not tuned on: 8-16 µm fibers
   at 2.5-4.5 voxels radius, planar, aligned, biaxial and isotropic (two
@@ -96,7 +104,7 @@ from tangle.units import um
 
 BACKEND = os.environ.get("TANGLE_BACKEND", "wgpu")
 MASK_LEVEL = 0.35  # of the way from void to fiber grey level: a generous threshold
-INPUT = os.environ.get("TANGLE_CT_INPUT", "grey")  # "grey" (raw scan + ranges) or "mask"
+INPUT = os.environ.get("TANGLE_CT_INPUT", "grey")  # "grey" (raw scan + profiles), "plain" (raw scan alone) or "mask"
 BLUR = None  # scan blur (PSF sigma, voxels) for every example; None keeps each example's own
 DIFF_COLORS = {"missed": (230, 50, 50), "extra": (60, 120, 255), "wrong_fiber": (255, 200, 0)}
 FILES = ("raw.tif", "input.tif", "true.tif", "segment.tif", "diff.tif", "confidence.tif", "fit.json", "score.json")
@@ -210,7 +218,7 @@ def long_fibers(cache: Path) -> Example:
     return Example(scan, spec, bend, end_error_report)
 
 
-def two_types(cache: Path) -> Example:
+def two_types(cache: Path, *, noisy: bool = False) -> Example:
     voxel, cell_side, crop, length = 1.25 * um, 320 * um, 200 * um, (300 * um, 500 * um)
     fine = tangle.Material("fine_7um", diameter=7 * um, min_bend_radius=35 * um)
     coarse = tangle.Material("coarse_19um", diameter=19 * um, min_bend_radius=95 * um)
@@ -218,13 +226,19 @@ def two_types(cache: Path) -> Example:
     truth = relaxed_truth(
         cache, cell, [planar_population(fine, 106, 21, length, 16), planar_population(coarse, 14, 22, length, 16)]
     )
-    # Grey levels as in the scans this imitates: small fibers brightest (1),
-    # large fibers a rim at 0.75 around a core at 0.25.
-    profiles = [
-        (7 * um, ct.CrossSection()),
-        (19 * um, ct.CrossSection(brightness=0.75, rim=2 * um, core=1 / 3)),
-    ]
-    full = render_scan(truth, voxel, seed=21, profiles=profiles)
+    if noisy:
+        # Solid coarse fibers at 0.45 of the fine fibers' contrast, and noise
+        # correlated over about a voxel.
+        profiles = [(7 * um, ct.CrossSection()), (19 * um, ct.CrossSection(brightness=0.45))]
+        full = render_scan(truth, voxel, seed=21, profiles=profiles, noise=0.19, noise_correlation=0.9)
+    else:
+        # Grey levels as in the scans this imitates: small fibers brightest (1),
+        # large fibers a rim at 0.75 around a core at 0.25.
+        profiles = [
+            (7 * um, ct.CrossSection()),
+            (19 * um, ct.CrossSection(brightness=0.75, rim=2 * um, core=1 / 3)),
+        ]
+        full = render_scan(truth, voxel, seed=21, profiles=profiles)
     low = int(round((cell_side - crop) / 2 / voxel))
     scan = full.crop((low,) * 3, (low + int(round(crop / voxel)),) * 3)
     specs = [
@@ -232,6 +246,10 @@ def two_types(cache: Path) -> Example:
         ct.FiberSpec(diameter=19 * um, min_bend_radius=95 * um, length=400 * um, name="coarse_19um"),
     ]
     return Example(scan, specs, 35 * um, lambda fit, scan: {"per_type": ct.score(fit, scan)["per_type"]})
+
+
+def noisy_two_types(cache: Path) -> Example:
+    return two_types(cache.with_name("two_types.json"), noisy=True)  # the same fibers as two_types
 
 
 BOX = 150 * um
@@ -501,6 +519,7 @@ EXAMPLES: dict[str, Callable[[Path], Example]] = {
     "single_type": single_type,
     "long_fibers": long_fibers,
     "two_types": two_types,
+    "noisy_two_types": noisy_two_types,
     **{
         f"scenario_{name}": scenario(lines, SCENARIO_LENGTH.get(name, 400 * um))
         for name, lines in SCENARIOS.items()
@@ -649,6 +668,11 @@ def fit_input(scan: ct.SyntheticScan, spec) -> tuple[np.ndarray, object, np.ndar
     if INPUT == "mask":
         mask = scan.fiber_mask(level=MASK_LEVEL)
         return mask, spec, mask.astype(np.float32)
+    if INPUT == "plain":
+        from tangle.ct._image import normalize
+
+        seen, _ = normalize(scan.volume, denoise_sigma=0.7)
+        return scan.volume, spec, seen
     specs = spec if isinstance(spec, list) else [spec]
     profiles = grey_profiles(scan, len(specs))
     specs = [item.replace(profile=profile) for item, profile in zip(specs, profiles)]
@@ -763,6 +787,8 @@ def write_summary(output: Path, rows: list[dict]) -> None:
         + (
             f"Fitted from binary masks thresholded at {MASK_LEVEL} of the way from void to fiber. "
             if INPUT == "mask"
+            else "Fitted from the raw scan and the fiber diameters alone, with no grey information. "
+            if INPUT == "plain"
             else "Fitted from the raw scan with a grey profile per fiber type, measured around the true fibers. "
         )
         + (f"Every scan rendered with a blur of {BLUR:g} voxels (PSF sigma). " if BLUR is not None else "")
@@ -781,8 +807,8 @@ def main() -> None:
     parser.add_argument("--list", action="store_true", help="list the examples and exit")
     parser.add_argument("--varied", action="store_true", help="also run the varied_* structures")
     parser.add_argument(
-        "--input", choices=("grey", "mask"), default=None,
-        help="fit the raw scan with grey profiles (default) or a generous mask",
+        "--input", choices=("grey", "plain", "mask"), default=None,
+        help="fit the raw scan with grey profiles (default), the raw scan alone, or a generous mask",
     )
     parser.add_argument(
         "--blur", type=float, default=None,

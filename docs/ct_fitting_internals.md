@@ -386,19 +386,43 @@ score.
 `spec` may be a list of types that differ in diameter. With one type the
 same steps size the fibers.
 
-- **Thickness:** the distance transform of the foreground (image > 0.5),
-  taken as the maximum over each 3×3×3 neighborhood and sampled along each
-  fiber's interior nodes; the median is its measured radius m. On an axis
-  the distance is about the radius, because the foreground edge sits at the
-  half-maximum, which is the fiber surface; the neighborhood maximum keeps a
-  centerline between voxel centers from reading an interpolated, lower
-  value. (Subtracting half a voxel, as an earlier version did, made radii
-  5–10% small.)
-- **Margin:** a generous mask makes every fiber look thicker by some δ.
-  With `FitSettings.thickness_margin_voxels` unset, δ is estimated: start
-  at 0, give each fiber the type nearest m − δ, set δ to the median of
-  m − r_type, repeat 3 times; δ is clamped to [−0.5, r_min]. It is logged
-  per round as `thickness_margin`.
+- **Thickness:** read two ways. The **depth**: the distance transform of
+  the foreground (image > 0.5), taken as the maximum over each 3×3×3
+  neighborhood and sampled along each fiber's interior nodes; the median
+  is m. On an axis the distance is about the radius, because the
+  foreground edge sits at the half-maximum, which is the fiber surface;
+  the neighborhood maximum keeps a centerline between voxel centers from
+  reading an interpolated, lower value. The **cross-section**
+  (`_image.half_widths`): at up to 24 interior nodes the image is sampled
+  along four directions normal to the fiber, every 0.25 voxel out to 1.6 ×
+  the largest type radius; the median over nodes and directions at each
+  distance is the fiber's cross-section, and w is where it falls below
+  half its peak, walking outward from the peak (looked for within half
+  that reach, so a bright rim around a dim core reads its outer edge).
+  Fibers are typed and sized by m, except in a plain grey scan (no grey
+  ranges, profiles or mask), where they are typed and sized by w. There
+  the foreground is a threshold of the scan itself, and in a scan whose
+  fibers are a few noise sigma above void (for example noise that is
+  correlated over a voxel or two; the `noisy_two_types` example) it punches
+  holes into dim fibers: m reads a fraction of their radius, every dim
+  coarse fiber was typed fine and packed with fine fits (fitted plain,
+  centerline F1 0.62 on `noisy_two_types` and 0.60 on `two_types`; with w,
+  0.81 and 0.89). The median pools about a
+  hundred samples per distance and survives the noise, but w reads a fiber
+  in a flat bundle too thick (its neighbours fill two of the four
+  directions) and an oval fiber by its wide axis, so the hole-filled fiber
+  image that grey ranges, profiles or a mask give is typed by m. A plain
+  grey scan's core-sized foreground holes are filled too (as a mask's and
+  the ranges'), with `fill_mask_holes`.
+- **Margins:** a generous mask or range makes every fiber look thicker by
+  some δ. With `FitSettings.thickness_margin_voxels` unset, one is
+  estimated for each reading. For the reading that types: start at 0, give
+  each fiber the type nearest m − δ, set δ to the median of m − r_type,
+  repeat 3 times; for the other, the median excess over the resulting
+  types. Both are clamped to [−0.5, r_min]. The depth's margin sets what
+  reads the foreground (the solver's reach at fiber ends, the redraw's
+  residual maps) and is logged per round as `thickness_margin`; the
+  cross-section's is used by the confidence (§9a).
 - **Type:** with profiles and several types, `_grey.profile_types`
   samples the grey across the fiber at up to 24 interior nodes, in four
   directions at 0 … 1.4 of each type's radius, and compares it with that
@@ -408,9 +432,9 @@ same steps size the fibers.
   are sampled at the fiber's interior nodes; a type whose bit is set at
   ≥ 60% of them, with no other type within 0.1 of it, is the fiber's type
   (`_Fitter._grey_types`). Otherwise the spec whose radius is nearest
-  m − δ in log scale (by ratio). The type sets the fiber's radius prior, bend limit, minimum and maximum
+  the thickness less its margin in log scale (by ratio). The type sets the fiber's radius prior, bend limit, minimum and maximum
   length and length prior.
-- **Radius:** (m − δ + r_type) / 2, clamped to `diameter × (1 ±
+- **Radius:** (thickness − δ + r_type) / 2, clamped to `diameter × (1 ±
   diameter_tolerance) / 2` of the type.
 - Types are chosen after every solver batch and for new traces. Topology
   moves (6b) run per type, with that type's parameters: splits and joins
@@ -471,17 +495,30 @@ same steps size the fibers.
 
 After the final solve, each fiber is resampled every `spacing` (the node
 spacing, one smallest radius) and read on a ring of 8 directions normal to
-its tangent. With `r` the fiber's radius and `m` the thickness margin:
+its tangent. With `r` the fiber's radius, `m` the foreground margin and
+`δ` the width margin (§7b):
 
 | Component | Read at | Score |
 | --- | --- | --- |
 | image | the axis and the ring at 0.5 r | mean of clip((I − 0.5)/0.4, 0, 1) |
 | ownership | the same 9 points | 1 − fraction inside another fit's capsule |
 | surround | the ring at r + m + 1 | 1 − fraction that is foreground (I > 0.5) and not within r + m + 0.5 of another fit |
-| thickness | the axis | exp(−½((depth − m)/r − 1)² / 0.3²) |
+| thickness | the axis, and the ring out to 1.6 r | exp(−½ e² / 0.3²), e = min(\|(depth − m)/r − 1\|, \|(w − δ)/r − 1\|) |
 | stability | the axis | exp(−½(d / 0.5 r)²), d = distance to the fiber before the final solve |
 
-`depth` is the same local thickness the classifier uses (§7b). The product
+`depth` is the foreground's local thickness (§7b) at the axis, and `w`
+the radius of the local cross-section, as the classifier's thickness
+(§7b) but per sample: the ring is read every half voxel out to 1.6 r, the
+median at each distance is taken over the ring and two samples to either
+side (40 values), and w is where it falls below half its peak
+(`_image.half_radius`, the peak looked for within 0.8 r). The reading
+closer to the radius counts. Depth is right where the foreground is clean
+and wrong where a noisy scan's threshold punches holes into dim fibers;
+the pooled cross-section survives noise but reads a fiber packed among
+others too thick. On the true fibers of the examples, depth alone
+misjudged (|e| > 0.3) 95% of the coarse nodes in `noisy_two_types` fitted
+without grey information and the cross-section alone 24–30% of the nodes
+in `scenario_dense_crossing`; the closer of the two at most 7%. The product
 of the five is median-filtered over three samples, and each stored node
 takes the lowest sample within half a segment of it. Other fits are found
 with a KD-tree over segment midpoints and exact point-to-segment
