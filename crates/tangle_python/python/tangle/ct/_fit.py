@@ -159,6 +159,11 @@ class FitSettings:
     # so split fibers can be joined; "all" also around ends against another
     # fit, with that fit, so branches at a crossing can be re-paired; "off".
     redraw_ends: str = "free"
+    # How a pass's merged fit (kept redraws plus reverted old fibers) settles
+    # where they meet: "unpinned" solves with every node pinned, then settles
+    # unpinned with the image force off; "pinned" skips that settle (touching
+    # fits stay touching); "off" does not solve the merged fit.
+    redraw_merge_settle: str = "unpinned"
     # Price a join by how far it turns, in nats: half the squared turn over
     # the turn a fiber at its bend limit makes along the bridge (at least
     # ``join_turn_floor_degrees``). A fiber runs on nearly straight through a
@@ -586,6 +591,8 @@ def fit_fibers(
         raise ValueError('redraw_moves must be "match" or "grow"')
     if settings.redraw_ends not in ("off", "free", "all"):
         raise ValueError('redraw_ends must be "off", "free" or "all"')
+    if settings.redraw_merge_settle not in ("unpinned", "pinned", "off"):
+        raise ValueError('redraw_merge_settle must be "unpinned", "pinned" or "off"')
     if settings.redraw_plans < 1:
         raise ValueError("redraw_plans must be at least 1")
     if not _device.available():
@@ -955,7 +962,12 @@ class _Fitter:
         return np.argmin(np.abs(np.log(radius[:, None]) - np.log(self.radius[None, :])), axis=1).astype(int)
 
     def solve(
-        self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray, anchors: list[np.ndarray] | None = None
+        self,
+        lines: list[np.ndarray],
+        radii: np.ndarray,
+        types: np.ndarray,
+        anchors: list[np.ndarray] | None = None,
+        settle: bool = True,
     ) -> list[np.ndarray]:
         from . import _device
 
@@ -963,7 +975,7 @@ class _Fitter:
         return _device.relax(
             self.image, lines, radii, self.bend[np.asarray(types, dtype=int)], voxel_size=self.h,
             spacing=self.spacing, rate=s.solver_image_rate, reach_radii=s.solver_reach_radii,
-            iterations=s.solver_iterations, settle=s.solver_settle_iterations, backend=s.backend,
+            iterations=s.solver_iterations, settle=s.solver_settle_iterations if settle else 0, backend=s.backend,
             reach=np.asarray(radii, dtype=np.float64) + self.margin, log=self.log,
             anchors=anchors, anchor_tolerance=0.3 * float(self.radius.min()),
         )
@@ -1137,11 +1149,13 @@ class _Fitter:
             kept = bool(accepted.any()) and bool(merged)
             if _REDRAW_PROBE is not None:
                 _REDRAW_PROBE({"pass": pass_index, "step": "merged", "lines": merged, "radii": merged_radii})
-            if kept and keep_old:
+            if kept and keep_old and s.redraw_merge_settle != "off":
                 # Old and new fibers meet at the edges of reverted regions:
                 # settle the merged fit (every node pinned for the image run,
-                # so only the unpinned settle acts).
-                merged = self.solve(merged, merged_radii, merged_types, anchors=merged)
+                # so only the unpinned settle acts, if any).
+                merged = self.solve(
+                    merged, merged_radii, merged_types, anchors=merged, settle=s.redraw_merge_settle == "unpinned"
+                )
                 merged, merged_radii, merged_types, _ = self.cut_void(merged, merged_radii, merged_types, final=True)
             coverage = before_coverage
             residual_change = 0.0
