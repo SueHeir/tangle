@@ -50,7 +50,10 @@ pub fn trilinear(values: &[f32], shape: Shape, point: [f64; 3], fill: f64) -> f6
 
 /// [`trilinear`] at every point.
 pub fn trilinear_many(values: &[f32], shape: Shape, points: &[[f64; 3]], fill: f64) -> Vec<f64> {
-    points.iter().map(|&p| trilinear(values, shape, p, fill)).collect()
+    points
+        .iter()
+        .map(|&p| trilinear(values, shape, p, fill))
+        .collect()
 }
 
 /// The voxel `[k, j, i]` containing point `(x, y, z)`, or `None` outside the volume.

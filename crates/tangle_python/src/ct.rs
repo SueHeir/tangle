@@ -11,9 +11,11 @@ use pyo3::prelude::*;
 use tangle_ct::hessian::HessianField;
 use tangle_ct::Shape;
 
-fn read<T: Element>(buffer: &PyBuffer<T>, name: &str) -> PyResult<&[T]> {
+fn read<'a, T: Element>(buffer: &'a PyBuffer<T>, name: &str) -> PyResult<&'a [T]> {
     if !buffer.is_c_contiguous() {
-        return Err(PyValueError::new_err(format!("{name} must be C-contiguous")));
+        return Err(PyValueError::new_err(format!(
+            "{name} must be C-contiguous"
+        )));
     }
     // SAFETY: the buffer is C-contiguous with item_count elements of T, and
     // the exporting array outlives this call.
@@ -21,12 +23,14 @@ fn read<T: Element>(buffer: &PyBuffer<T>, name: &str) -> PyResult<&[T]> {
 }
 
 #[allow(clippy::mut_from_ref)]
-fn write<T: Element>(buffer: &PyBuffer<T>, name: &str) -> PyResult<&mut [T]> {
+fn write<'a, T: Element>(buffer: &'a PyBuffer<T>, name: &str) -> PyResult<&'a mut [T]> {
     if buffer.readonly() {
         return Err(PyValueError::new_err(format!("{name} must be writable")));
     }
     if !buffer.is_c_contiguous() {
-        return Err(PyValueError::new_err(format!("{name} must be C-contiguous")));
+        return Err(PyValueError::new_err(format!(
+            "{name} must be C-contiguous"
+        )));
     }
     // SAFETY: as in `read`; the caller passes a distinct output array.
     Ok(unsafe { std::slice::from_raw_parts_mut(buffer.buf_ptr() as *mut T, buffer.item_count()) })
@@ -35,13 +39,22 @@ fn write<T: Element>(buffer: &PyBuffer<T>, name: &str) -> PyResult<&mut [T]> {
 fn volume_shape<T: Element>(buffer: &PyBuffer<T>, name: &str) -> PyResult<Shape> {
     match buffer.shape() {
         [nz, ny, nx] => Ok([*nz, *ny, *nx]),
-        _ => Err(PyValueError::new_err(format!("{name} must be a 3D (z, y, x) array"))),
+        _ => Err(PyValueError::new_err(format!(
+            "{name} must be a 3D (z, y, x) array"
+        ))),
     }
 }
 
-fn same_shape<A: Element, B: Element>(a: &PyBuffer<A>, b: &PyBuffer<B>, name: &str) -> PyResult<()> {
+fn same_shape<A: Element, B: Element>(
+    a: &PyBuffer<A>,
+    b: &PyBuffer<B>,
+    name: &str,
+) -> PyResult<()> {
     if a.shape() != b.shape() {
-        return Err(PyValueError::new_err(format!("{name} must have the input's shape {:?}", a.shape())));
+        return Err(PyValueError::new_err(format!(
+            "{name} must have the input's shape {:?}",
+            a.shape()
+        )));
     }
     Ok(())
 }
@@ -49,7 +62,9 @@ fn same_shape<A: Element, B: Element>(a: &PyBuffer<A>, b: &PyBuffer<B>, name: &s
 fn points(buffer: &PyBuffer<f64>, name: &str) -> PyResult<Vec<[f64; 3]>> {
     let values = read(buffer, name)?;
     if values.len() % 3 != 0 {
-        return Err(PyValueError::new_err(format!("{name} must be (n, 3) points")));
+        return Err(PyValueError::new_err(format!(
+            "{name} must be (n, 3) points"
+        )));
     }
     Ok(values.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect())
 }
@@ -64,14 +79,24 @@ pub(crate) fn ct_gaussian_filter(
 ) -> PyResult<()> {
     let shape = volume_shape(&image, "image")?;
     same_shape(&image, &out, "out")?;
-    let result = tangle_ct::filter::gaussian_filter(read(&image, "image")?, shape, sigma, [orders.0, orders.1, orders.2]);
+    let result = tangle_ct::filter::gaussian_filter(
+        read(&image, "image")?,
+        shape,
+        sigma,
+        [orders.0, orders.1, orders.2],
+    );
     write(&out, "out")?.copy_from_slice(&result);
     Ok(())
 }
 
 /// Trilinear samples of a float32 volume at (x, y, z) points into `out`.
 #[pyfunction]
-pub(crate) fn ct_sample(image: PyBuffer<f32>, points_xyz: PyBuffer<f64>, out: PyBuffer<f64>, fill: f64) -> PyResult<()> {
+pub(crate) fn ct_sample(
+    image: PyBuffer<f32>,
+    points_xyz: PyBuffer<f64>,
+    out: PyBuffer<f64>,
+    fill: f64,
+) -> PyResult<()> {
     let shape = volume_shape(&image, "image")?;
     let values = read(&image, "image")?;
     let pts = points(&points_xyz, "points")?;
@@ -87,11 +112,18 @@ pub(crate) fn ct_sample(image: PyBuffer<f32>, points_xyz: PyBuffer<f64>, out: Py
 
 /// The foreground's distance transform and its 3×3×3 maximum.
 #[pyfunction]
-pub(crate) fn ct_foreground_depth(foreground: PyBuffer<u8>, edt: PyBuffer<f32>, peak: PyBuffer<f32>) -> PyResult<()> {
+pub(crate) fn ct_foreground_depth(
+    foreground: PyBuffer<u8>,
+    edt: PyBuffer<f32>,
+    peak: PyBuffer<f32>,
+) -> PyResult<()> {
     let shape = volume_shape(&foreground, "foreground")?;
     same_shape(&foreground, &edt, "edt")?;
     same_shape(&foreground, &peak, "peak")?;
-    let mask: Vec<bool> = read(&foreground, "foreground")?.iter().map(|&v| v != 0).collect();
+    let mask: Vec<bool> = read(&foreground, "foreground")?
+        .iter()
+        .map(|&v| v != 0)
+        .collect();
     let distance = tangle_ct::edt::distance_transform(&mask, shape);
     let maximum = tangle_ct::filter::maximum_filter3(&distance, shape);
     write(&edt, "edt")?.copy_from_slice(&distance);
@@ -114,7 +146,9 @@ pub(crate) fn ct_core_holes(mask: PyBuffer<u8>, out: PyBuffer<u8>, max_area: f64
 
 fn split_lines(nodes: &[[f64; 3]], counts: &[usize]) -> PyResult<Vec<Vec<[f64; 3]>>> {
     if counts.iter().sum::<usize>() != nodes.len() {
-        return Err(PyValueError::new_err("counts must add up to the number of nodes"));
+        return Err(PyValueError::new_err(
+            "counts must add up to the number of nodes",
+        ));
     }
     let mut start = 0;
     Ok(counts
@@ -144,7 +178,9 @@ pub(crate) fn ct_rasterize(
     same_shape(&labels, &distance, "distance")?;
     same_shape(&labels, &segment, "segment")?;
     if radii.len() != counts.len() || reach.len() != counts.len() {
-        return Err(PyValueError::new_err("give one radius and one reach per line"));
+        return Err(PyValueError::new_err(
+            "give one radius and one reach per line",
+        ));
     }
     let lines = split_lines(&points(&nodes, "nodes")?, &counts)?;
     let raster = tangle_ct::raster::rasterize(shape, &lines, &radii, &reach, signed);
@@ -156,13 +192,26 @@ pub(crate) fn ct_rasterize(
 
 /// Sets `target`'s voxels within `reach` of polyline `line` to `value`, in place.
 #[pyfunction]
-pub(crate) fn ct_paint(target: PyBuffer<i32>, line: PyBuffer<f64>, reach: f64, value: i32, only_empty: bool) -> PyResult<()> {
+pub(crate) fn ct_paint(
+    target: PyBuffer<i32>,
+    line: PyBuffer<f64>,
+    reach: f64,
+    value: i32,
+    only_empty: bool,
+) -> PyResult<()> {
     let shape = volume_shape(&target, "target")?;
     let line = points(&line, "line")?;
     if line.is_empty() {
         return Ok(());
     }
-    tangle_ct::raster::paint(write(&target, "target")?, shape, &line, reach, value, only_empty);
+    tangle_ct::raster::paint(
+        write(&target, "target")?,
+        shape,
+        &line,
+        reach,
+        value,
+        only_empty,
+    );
     Ok(())
 }
 
@@ -180,7 +229,9 @@ impl PyCtHessian {
         if !(sigma.is_finite() && sigma > 0.0) {
             return Err(PyValueError::new_err("sigma must be positive"));
         }
-        Ok(Self { field: HessianField::new(read(&image, "image")?, shape, sigma) })
+        Ok(Self {
+            field: HessianField::new(read(&image, "image")?, shape, sigma),
+        })
     }
 
     #[getter]
@@ -205,12 +256,19 @@ impl PyCtHessian {
     }
 
     /// Fills `axis` (n, 3) with the tube direction and `tubularity` (n) at each point.
-    fn directions(&self, points_xyz: PyBuffer<f64>, axis: PyBuffer<f64>, tubularity: PyBuffer<f64>) -> PyResult<()> {
+    fn directions(
+        &self,
+        points_xyz: PyBuffer<f64>,
+        axis: PyBuffer<f64>,
+        tubularity: PyBuffer<f64>,
+    ) -> PyResult<()> {
         let pts = points(&points_xyz, "points")?;
         let axis = write(&axis, "axis")?;
         let tubularity = write(&tubularity, "tubularity")?;
         if axis.len() != 3 * pts.len() || tubularity.len() != pts.len() {
-            return Err(PyValueError::new_err("axis must be (n, 3) and tubularity (n,)"));
+            return Err(PyValueError::new_err(
+                "axis must be (n, 3) and tubularity (n,)",
+            ));
         }
         for (k, p) in pts.iter().enumerate() {
             let (direction, score) = self.field.direction(*p);

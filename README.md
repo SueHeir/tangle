@@ -30,7 +30,7 @@ solver as the native applications; relaxation does not run as a Python loop.
 Start with the [installation guide](crates/tangle_python/README.md) or
 [tutorial 00](crates/tangle_python/python/tutorials/00_installation_and_environment.ipynb).
 This is currently a **source install**, not a published-wheel installation.
-You need Python 3.10+, Rust/Cargo, and a native compiler/linker. CubeCL downloads
+You need Python 3.11+, Rust/Cargo, and a native compiler/linker. CubeCL downloads
 its matching LLVM build dependency; a system `llvm-config` is not required.
 
 After installing those prerequisites, from the repository root (macOS/Linux):

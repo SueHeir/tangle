@@ -18,7 +18,12 @@ pub fn segment_distance(p: [f64; 3], a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 /// Voxel index box `[low, high)` (`x, y, z`) around segment `ab` grown by `pad`, clipped to the volume.
-fn segment_box(shape: Shape, a: [f64; 3], b: [f64; 3], pad: f64) -> Option<([usize; 3], [usize; 3])> {
+fn segment_box(
+    shape: Shape,
+    a: [f64; 3],
+    b: [f64; 3],
+    pad: f64,
+) -> Option<([usize; 3], [usize; 3])> {
     let mut low = [0usize; 3];
     let mut high = [0usize; 3];
     for axis in 0..3 {
@@ -50,7 +55,13 @@ pub struct Raster {
 /// distance to the voxel center (minus the fiber's radius when `signed`, so
 /// the nearest capsule surface wins) is smallest among segments within their
 /// fiber's `reach`; ties go to the lower segment.
-pub fn rasterize(shape: Shape, lines: &[Vec<[f64; 3]>], radii: &[f64], reach: &[f64], signed: bool) -> Raster {
+pub fn rasterize(
+    shape: Shape,
+    lines: &[Vec<[f64; 3]>],
+    radii: &[f64],
+    reach: &[f64],
+    signed: bool,
+) -> Raster {
     let n = voxel_count(shape);
     let s = strides(shape);
     let mut best = vec![f64::INFINITY; n];
@@ -85,12 +96,23 @@ pub fn rasterize(shape: Shape, lines: &[Vec<[f64; 3]>], radii: &[f64], reach: &[
             segment += 1;
         }
     }
-    Raster { labels, distance: best.iter().map(|&v| v as f32).collect(), segment: owner }
+    Raster {
+        labels,
+        distance: best.iter().map(|&v| v as f32).collect(),
+        segment: owner,
+    }
 }
 
 /// Sets the voxels of `target` within `reach` of `line` to `value` (only
 /// where `target` is 0 when `only_empty`), as `tangle.ct._geometry.paint`.
-pub fn paint(target: &mut [i32], shape: Shape, line: &[[f64; 3]], reach: f64, value: i32, only_empty: bool) {
+pub fn paint(
+    target: &mut [i32],
+    shape: Shape,
+    line: &[[f64; 3]],
+    reach: f64,
+    value: i32,
+    only_empty: bool,
+) {
     let s = strides(shape);
     let doubled;
     let line = if line.len() == 1 {
@@ -125,7 +147,10 @@ mod tests {
     #[test]
     fn the_nearer_surface_owns_the_voxel() {
         let shape = [1, 1, 10];
-        let lines = vec![vec![[1.5, 0.5, 0.5], [1.5, 0.5, 0.5]], vec![[7.5, 0.5, 0.5], [7.5, 0.5, 0.5]]];
+        let lines = vec![
+            vec![[1.5, 0.5, 0.5], [1.5, 0.5, 0.5]],
+            vec![[7.5, 0.5, 0.5], [7.5, 0.5, 0.5]],
+        ];
         let raster = rasterize(shape, &lines, &[1.0, 4.0], &[6.0, 6.0], true);
         // voxel 3 (center 3.5): 2 − 1 = 1 from fiber 1, 4 − 4 = 0 from fiber 2
         assert_eq!(raster.labels[3], 2);

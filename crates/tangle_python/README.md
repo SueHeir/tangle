@@ -4,7 +4,7 @@ Python is the primary user path for TANGLE. Python constructs fiber
 collections and manufacturing recipes; the existing Rust implementation owns
 validation, CubeCL device residency, relaxation, refinement, and export.
 
-The extension is compiled code. A development install requires Python 3.10 or
+The extension is compiled code. A development install requires Python 3.11 or
 newer, a stable [Rust toolchain](https://rustup.rs/) including Cargo, a native
 C/C++ compiler/linker, and network access for the first dependency build.
 CubeCL's build dependency downloads its matching bundled LLVM automatically;

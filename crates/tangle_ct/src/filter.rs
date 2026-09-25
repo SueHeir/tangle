@@ -11,7 +11,9 @@ use crate::{strides, voxel_count, Shape};
 pub fn gaussian_kernel(sigma: f64, order: usize, radius: usize) -> Vec<f64> {
     let sigma2 = sigma * sigma;
     let r = radius as i64;
-    let mut phi: Vec<f64> = (-r..=r).map(|x| (-0.5 / sigma2 * (x * x) as f64).exp()).collect();
+    let mut phi: Vec<f64> = (-r..=r)
+        .map(|x| (-0.5 / sigma2 * (x * x) as f64).exp())
+        .collect();
     let total: f64 = phi.iter().sum();
     phi.iter_mut().for_each(|v| *v /= total);
     if order == 0 {
@@ -24,7 +26,11 @@ pub fn gaussian_kernel(sigma: f64, order: usize, radius: usize) -> Vec<f64> {
     for _ in 0..order {
         let mut next = vec![0.0; order + 1];
         for i in 0..=order {
-            let derivative = if i < order { (i + 1) as f64 * q[i + 1] } else { 0.0 };
+            let derivative = if i < order {
+                (i + 1) as f64 * q[i + 1]
+            } else {
+                0.0
+            };
             let product = if i > 0 { -q[i - 1] / sigma2 } else { 0.0 };
             next[i] = derivative + product;
         }

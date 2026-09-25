@@ -35,7 +35,11 @@ impl HessianField {
                 values
             })
             .collect();
-        Self { sigma, shape, components }
+        Self {
+            sigma,
+            shape,
+            components,
+        }
     }
 
     /// The symmetric Hessian at `point` (`(x, y, z)` rows and columns).
@@ -56,7 +60,11 @@ impl HessianField {
         let (values, vectors) = symmetric_eigen(self.at(point));
         let mut order = [0usize, 1, 2];
         order.sort_by(|&a, &b| values[a].abs().total_cmp(&values[b].abs()));
-        let axis = [vectors[0][order[0]], vectors[1][order[0]], vectors[2][order[0]]];
+        let axis = [
+            vectors[0][order[0]],
+            vectors[1][order[0]],
+            vectors[2][order[0]],
+        ];
         (axis, -0.5 * (values[order[1]] + values[order[2]]))
     }
 }

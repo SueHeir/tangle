@@ -628,9 +628,17 @@ class CtToolTests(unittest.TestCase):
         radii = np.array([1.5, 2.0, 2.5, 1.0, 3.0, 2.0, 1.2])
         centers = np.stack(np.meshgrid(*[np.arange(n) + 0.5 for n in shape[::-1]], indexing="ij"), axis=-1)
         centers = centers.transpose(2, 1, 0, 3).reshape(-1, 3)  # (z, y, x) order, points (x, y, z)
+        def segment_distances(voxels, a, b):
+            ab = b - a
+            denominator = float(ab @ ab)
+            if denominator <= 1e-12:
+                return np.linalg.norm(voxels - a, axis=1)
+            t = np.clip((voxels - a) @ ab / denominator, 0.0, 1.0)
+            return np.linalg.norm(voxels - (a + t[:, None] * ab), axis=1)
+
         distances = []  # per segment, every voxel's distance, drawn one segment at a time
         for line in lines:
-            distances.append([_geometry._segment_distances(centers, a, b) for a, b in zip(line[:-1], line[1:])])
+            distances.append([segment_distances(centers, a, b) for a, b in zip(line[:-1], line[1:])])
 
         def nearest(reach, signed):
             best = np.full(len(centers), np.inf)

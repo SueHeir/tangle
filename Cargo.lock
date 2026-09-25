@@ -3535,6 +3535,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tangle_ct"
+version = "0.1.0"
+
+[[package]]
 name = "tangle_example_support"
 version = "0.1.0"
 dependencies = [
@@ -3578,6 +3582,7 @@ dependencies = [
  "tangle_characterize",
  "tangle_checkpoint",
  "tangle_core",
+ "tangle_ct",
  "tangle_export",
  "tangle_generate",
  "tangle_relax",

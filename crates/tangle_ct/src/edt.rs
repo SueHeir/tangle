@@ -11,9 +11,13 @@ use crate::{strides, voxel_count, Shape};
 pub fn distance_transform(foreground: &[bool], shape: Shape) -> Vec<f32> {
     assert_eq!(foreground.len(), voxel_count(shape));
     let far = f64::INFINITY;
-    let mut squared: Vec<f64> = foreground.iter().map(|&f| if f { far } else { 0.0 }).collect();
+    let mut squared: Vec<f64> = foreground
+        .iter()
+        .map(|&f| if f { far } else { 0.0 })
+        .collect();
     if !foreground.iter().any(|&f| !f) {
-        let diagonal = ((shape[0] * shape[0] + shape[1] * shape[1] + shape[2] * shape[2]) as f64).sqrt();
+        let diagonal =
+            ((shape[0] * shape[0] + shape[1] * shape[1] + shape[2] * shape[2]) as f64).sqrt();
         return vec![diagonal as f32; squared.len()];
     }
     let s = strides(shape);
@@ -62,7 +66,8 @@ fn lower_envelope(f: &[f64], d: &mut [f64], v: &mut [usize], z: &mut [f64]) {
         }
         loop {
             let p = v[k];
-            let s = ((f[q] + (q * q) as f64) - (f[p] + (p * p) as f64)) / (2.0 * (q as f64 - p as f64));
+            let s =
+                ((f[q] + (q * q) as f64) - (f[p] + (p * p) as f64)) / (2.0 * (q as f64 - p as f64));
             if s <= z[k] {
                 if k == 0 {
                     // Cannot happen: z[0] is −∞.

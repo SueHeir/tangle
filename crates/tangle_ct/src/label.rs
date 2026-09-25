@@ -57,12 +57,16 @@ pub fn label(mask: &[bool], shape: Shape, structure: &Structure) -> (Vec<i32>, u
                 }
                 for &(dz, dy, dx) in &earlier {
                     let (kk, jj, ii) = (k as i64 + dz, j as i64 + dy, i as i64 + dx);
-                    if kk < 0 || jj < 0 || ii < 0 || jj >= shape[1] as i64 || ii >= shape[2] as i64 {
+                    if kk < 0 || jj < 0 || ii < 0 || jj >= shape[1] as i64 || ii >= shape[2] as i64
+                    {
                         continue;
                     }
                     let other = kk as usize * s[0] + jj as usize * s[1] + ii as usize;
                     if mask[other] {
-                        let (a, b) = (find(&mut parent, index as u32), find(&mut parent, other as u32));
+                        let (a, b) = (
+                            find(&mut parent, index as u32),
+                            find(&mut parent, other as u32),
+                        );
                         if a != b {
                             let (low, high) = if a < b { (a, b) } else { (b, a) };
                             parent[high as usize] = low;
