@@ -70,7 +70,8 @@ Examples:
 * ``scanner_two_types``: two_types' fibers scanned by a simulated scanner
   (``ct.Scanner``: projections, propagation phase contrast, detector blur,
   photon noise, filtered back-projection), so the noise texture, blur and
-  edge fringes come from the acquisition, as in a real scan.
+  edge fringes come from the acquisition, as in a real scan. Both types are
+  solid, the coarse ones half as dense as the fine ones.
 * ``varied_1`` … ``varied_8``: fresh structures drawn from seeds, for
   checking the fitter on structures it was not tuned on: 8-16 µm fibers
   at 2.5-4.5 voxels radius, planar, aligned, biaxial and isotropic (two
@@ -244,13 +245,15 @@ def two_types(cache: Path, *, noisy: bool = False, halo: bool = False, scanner: 
         profiles = [(7 * um, ct.CrossSection()), (19 * um, ct.CrossSection(brightness=0.45))]
         full = render_scan(truth, voxel, seed=21, profiles=profiles, noise=0.19, noise_correlation=0.9)
     elif scanner:
-        # two_types' fibers and grey levels scanned by a simulated scanner
-        # (ct.Scanner): photon noise, detector blur and filtered
-        # back-projection, with a weakly absorbing, phase-shifting sample and
-        # a short propagation distance, so the edges show phase fringes.
+        # two_types' fibers scanned by a simulated scanner (ct.Scanner):
+        # photon noise, detector blur and filtered back-projection, with a
+        # weakly absorbing, phase-shifting sample and a short propagation
+        # distance, so the edges show phase fringes. Both fiber types are
+        # solid; the coarse ones are half as dense, and any bright rim they
+        # show comes from the phase contrast, not the material.
         profiles = [
             (7 * um, ct.CrossSection()),
-            (19 * um, ct.CrossSection(brightness=0.75, rim=2 * um, core=1 / 3)),
+            (19 * um, ct.CrossSection(brightness=0.5)),
         ]
         full = render_scan(
             truth, voxel, seed=21, profiles=profiles, scanner=ct.Scanner(delta_beta=20.0, propagation=1.5)
