@@ -1164,8 +1164,8 @@ class _Fitter:
 
         Three terms, as the junction plans are scored (``_junctions``): the
         squared misfit between the scan and the fit drawn (with the grey
-        profiles when there are some, else as soft occupancy of the
-        normalized scan) over the evidence scale; one nat per fiber
+        profiles when there are some, else as soft occupancy against the
+        foreground) over the evidence scale; one nat per fiber
         cross-section of voxels where fits overlap; and every fiber end
         inside the scan at the fiber-length prior's price for a fiber of its
         length (``_ends.length_end_cost``), on the voxel of its tip.
@@ -1180,10 +1180,15 @@ class _Fitter:
         if self.profiles is not None:
             cost = self.grey_misfit(lines, radii, types).astype(np.float64) / self.grey_scale(lines, radii, types)
         else:
+            # Without profiles the misfit is to the foreground, not the grey:
+            # in a noisy scan a fit laid over a bright noise blob matches its
+            # grey partly, and the misfit to the grey paid for false fibers
+            # (noisy_two_types: 50 -> 67 false with the grey).
+            target = self.foreground.astype(np.float32)
             if self._plain_scale is None:
-                self._plain_scale = evidence_scale(self.image, lines, radii, float(self.radius.min()))
+                self._plain_scale = evidence_scale(target, lines, radii, float(self.radius.min()))
             drawn = _native.render_occupancy(origin, upper, lines, radii, 1.2) if lines else 0.0
-            cost = (self.image.astype(np.float64) - drawn) ** 2 / self._plain_scale
+            cost = (target.astype(np.float64) - drawn) ** 2 / self._plain_scale
         if lines:
             cost += _native.overlap(origin, upper, lines, radii) / (np.pi * float(self.radius.min()) ** 2)
         for line, r, kind in zip(lines, radii, types):
