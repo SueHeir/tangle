@@ -158,12 +158,12 @@ class FitSettings:
     # (``_regrow.end_hotspots``): "free" around ends that touch no other fit,
     # so split fibers can be joined; "all" also around ends against another
     # fit, with that fit, so branches at a crossing can be re-paired; "off".
-    redraw_ends: str = "free"
+    redraw_ends: str = "off"
     # How a pass's merged fit (kept redraws plus reverted old fibers) settles
     # where they meet: "unpinned" solves with every node pinned, then settles
     # unpinned with the image force off; "pinned" skips that settle (touching
     # fits stay touching); "off" does not solve the merged fit.
-    redraw_merge_settle: str = "unpinned"
+    redraw_merge_settle: str = "pinned"
     # Price a join by how far it turns, in nats: half the squared turn over
     # the turn a fiber at its bend limit makes along the bridge (at least
     # ``join_turn_floor_degrees``). A fiber runs on nearly straight through a
