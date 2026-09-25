@@ -50,11 +50,21 @@ class Scanner:
     delta_beta: float = 0.0
     propagation: float = 0.0  # wavelength x distance / pixel², in pixels²
     detector_blur: float = 0.6  # pixels
+    # The scanner's spatial resolution in meters: the full width at half
+    # maximum of its blur (source, scintillator and detector together).
+    # When set it replaces ``detector_blur``, so the blur stays the same
+    # physical size whatever the voxel size.
+    resolution: float | None = None
     ring_strength: float = 0.0
 
 
-def acquire(attenuation: np.ndarray, scanner: Scanner, rng: np.random.Generator) -> np.ndarray:
-    """The reconstructed attenuation per voxel of ``attenuation`` (``(z, y, x)``, per voxel) scanned by ``scanner``."""
+def acquire(
+    attenuation: np.ndarray, scanner: Scanner, rng: np.random.Generator, voxel_size: float | None = None
+) -> np.ndarray:
+    """The reconstructed attenuation per voxel of ``attenuation`` (``(z, y, x)``, per voxel) scanned by ``scanner``.
+
+    ``voxel_size`` (meters) is needed only for ``scanner.resolution``.
+    """
     from scipy.ndimage import gaussian_filter, rotate
 
     nz, ny, nx = attenuation.shape
@@ -84,8 +94,13 @@ def acquire(attenuation: np.ndarray, scanner: Scanner, rng: np.random.Generator)
     intensity = np.exp(-line)
     if scanner.propagation > 0 and scanner.delta_beta > 0:
         intensity = _propagate(line, scanner.delta_beta, scanner.propagation)
-    if scanner.detector_blur > 0:
-        intensity = gaussian_filter(intensity, (0, scanner.detector_blur, scanner.detector_blur))
+    blur = scanner.detector_blur
+    if scanner.resolution is not None:
+        if voxel_size is None:
+            raise ValueError("Scanner.resolution needs the voxel size")
+        blur = scanner.resolution / (2.0 * np.sqrt(2.0 * np.log(2.0)) * voxel_size)
+    if blur > 0:
+        intensity = gaussian_filter(intensity, (0, blur, blur))
     gain = 1.0 + scanner.ring_strength * rng.standard_normal((1, nz, width)).astype(np.float32)
     counts = rng.poisson(np.clip(intensity * gain, 0.0, None) * scanner.photons).astype(np.float32)
     # Flat-field correction with an ideal flat; the gain error stays as rings.

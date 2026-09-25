@@ -191,7 +191,7 @@ def synthetic_ct(
         from ._scanner import acquire
 
         sample = scanner.void_attenuation + (scanner.fiber_attenuation - scanner.void_attenuation) * occupancy
-        attenuation = acquire(sample.astype(np.float32), scanner, rng)
+        attenuation = acquire(sample.astype(np.float32), scanner, rng, voxel_size)
         attenuation /= scanner.fiber_attenuation  # fiber 1, void about 0, as below
         if drift:
             z, y, x = np.indices(attenuation.shape, dtype=np.float32)
