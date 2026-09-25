@@ -26,7 +26,6 @@ from typing import Any
 
 import numpy as np
 
-from ._geometry import resample, sample_image, tangents
 
 COMPONENTS = ("image", "surround", "ownership", "thickness", "stability")
 
@@ -54,90 +53,17 @@ def node_confidence(
     one array per fiber with a value in [0, 1] per node, and a summary with
     each fiber's mean and minimum and the mean of every component.
     """
+    from . import _native
+
     radii = np.asarray(radii, dtype=np.float64)
     if not lines:
         return [], {"fibers": 0}
-    samples = [
-        resample(line, spacing) if len(line) > 1 else np.asarray(line, dtype=np.float64)
-        for line in lines
-    ]
-    segments = _Segments(lines, radii)
-
-    angles = 2.0 * np.pi * np.arange(ring) / ring
-    parts: dict[str, list[np.ndarray]] = {name: [] for name in COMPONENTS}
-    for f, points in enumerate(samples):
-        r = float(radii[f])
-        n = len(points)
-        u, v = _normals(points)
-        directions = (
-            np.cos(angles)[None, :, None] * u[:, None, :]
-            + np.sin(angles)[None, :, None] * v[:, None, :]
-        )
-
-        core = np.concatenate(
-            [points[:, None, :], points[:, None, :] + 0.5 * r * directions], axis=1
-        )
-        values = sample_image(image, core.reshape(-1, 3)).reshape(n, ring + 1)
-        parts["image"].append(np.clip((values - 0.5) / 0.4, 0.0, 1.0).mean(axis=1))
-
-        shared = segments.covered(core.reshape(-1, 3), f, extra=0.0).reshape(
-            n, ring + 1
-        )
-        parts["ownership"].append(1.0 - shared.mean(axis=1))
-
-        outside = (points[:, None, :] + (r + margin + 1.0) * directions).reshape(-1, 3)
-        fiber = sample_image(image, outside) > 0.5
-        explained = segments.covered(outside, f, extra=margin + 0.5)
-        parts["surround"].append(
-            1.0 - (fiber & ~explained).reshape(n, ring).mean(axis=1)
-        )
-
-        # Two readings of the thickness, and the one closer to the radius
-        # counts: the foreground's depth (distance to the nearest void) is
-        # right where the foreground is clean, and wrong in a noisy scan whose
-        # threshold punches holes into dim fibers; the cross-section pooled
-        # over the ring and neighbouring samples survives the noise, and
-        # reads a fiber packed among others too thick (its neighbours fill
-        # the ring). On the true fibers of the examples, either one alone
-        # misjudged up to 95% (depth, noisy scan) or 24% (cross-section,
-        # dense crossing) of the nodes; the closer one, at most 7%.
-        width = _local_thickness(image, points, directions, r) - (margin if thickness_margin is None else thickness_margin)
-        deep = sample_image(depth, points) - margin
-        ratio = np.minimum(np.abs(width / r - 1.0), np.abs(deep / r - 1.0))
-        parts["thickness"].append(np.exp(-0.5 * (ratio / thickness_tolerance) ** 2))
-
-        if previous is not None and len(previous[f]) > 1:
-            moved = _distance_to_polyline(
-                points, np.asarray(previous[f], dtype=np.float64)
-            )
-            parts["stability"].append(np.exp(-0.5 * (moved / (0.5 * r)) ** 2))
-        else:
-            parts["stability"].append(np.ones(n))
-
-    per_sample = []
-    for f in range(len(samples)):
-        value = np.prod([parts[name][f] for name in COMPONENTS], axis=0)
-        per_sample.append(_smooth(value))
-    per_node = [
-        _to_nodes(line, points, value)
-        for line, points, value in zip(lines, samples, per_sample)
-    ]
-    # The same without stability: a stretch that was just redrawn moved in
-    # its solve because it was redrawn, not because it is wrong, so keeping
-    # or reverting a redraw is judged on this.
-    settled = [
-        _to_nodes(
-            line,
-            points,
-            _smooth(
-                np.prod(
-                    [parts[name][f] for name in COMPONENTS if name != "stability"],
-                    axis=0,
-                )
-            ),
-        )
-        for f, (line, points) in enumerate(zip(lines, samples))
-    ]
+    per_node, settled, per_sample, component_parts = _native.node_confidence(
+        image, depth, lines, radii, spacing=spacing, margin=margin,
+        thickness_margin=margin if thickness_margin is None else thickness_margin, ring=ring,
+        thickness_tolerance=thickness_tolerance, previous=previous,
+    )
+    parts = dict(zip(COMPONENTS, component_parts))
 
     fiber_mean = np.array(
         [float(value.mean()) if len(value) else 0.0 for value in per_sample]
@@ -208,79 +134,6 @@ class _Segments:
         inside = distance <= self.radius[segment] + extra
         result[point[inside]] = True
         return result
-
-
-def _local_thickness(image: np.ndarray, points: np.ndarray, directions: np.ndarray, radius: float, window: int = 2) -> np.ndarray:
-    """The radius of the cross-section around each sample (``_image.half_radius``).
-
-    The image is read along the ring's directions out to 1.6 radii, and at
-    each distance the median is taken over the ring and ``window`` samples
-    to either side, so the thickness pools some 40 values per distance
-    rather than reading one thresholded voxel (see ``_image.half_widths``).
-    """
-    from ._image import half_radius
-
-    step = 0.5
-    distances = np.arange(0.0, 1.6 * radius + 0.5 * step, step)
-    n, ring = directions.shape[:2]
-    rays = points[:, None, None, :] + directions[:, :, None, :] * distances[None, None, :, None]
-    values = sample_image(image, rays.reshape(-1, 3)).reshape(n, ring, len(distances))
-    padded = np.concatenate([values[:1].repeat(window, axis=0), values, values[-1:].repeat(window, axis=0)])
-    pooled = np.concatenate([padded[k : k + n] for k in range(2 * window + 1)], axis=1)
-    return half_radius(np.median(pooled, axis=1), distances, 0.8 * radius)
-
-
-def _normals(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    t = (
-        tangents(points)
-        if len(points) > 1
-        else np.tile([1.0, 0.0, 0.0], (len(points), 1))
-    )
-    helper = np.where(np.abs(t[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
-    u = np.cross(t, helper)
-    u /= np.maximum(np.linalg.norm(u, axis=1, keepdims=True), 1e-12)
-    return u, np.cross(t, u)
-
-
-def _distance_to_polyline(points: np.ndarray, line: np.ndarray) -> np.ndarray:
-    a, b = line[:-1], line[1:]
-    ab = b - a
-    denominator = np.maximum((ab * ab).sum(axis=1), 1e-12)
-    ap = points[:, None, :] - a[None, :, :]
-    t = np.clip((ap * ab[None]).sum(axis=2) / denominator[None], 0.0, 1.0)
-    distance = np.linalg.norm(ap - t[..., None] * ab[None], axis=2)
-    return distance.min(axis=1)
-
-
-def _smooth(value: np.ndarray) -> np.ndarray:
-    """Median over three neighbors, so one noisy ring does not flag a node."""
-    if len(value) < 3:
-        return value
-    padded = np.concatenate([value[:1], value, value[-1:]])
-    return np.median(np.stack([padded[:-2], padded[1:-1], padded[2:]]), axis=0)
-
-
-def _to_nodes(line: np.ndarray, points: np.ndarray, value: np.ndarray) -> np.ndarray:
-    """Each node's confidence: the lowest sample within half a segment of it."""
-    line = np.asarray(line, dtype=np.float64)
-    if len(line) < 2 or len(points) < 2:
-        return np.full(len(line), float(value.min()) if len(value) else 0.0)
-    node_arc = np.concatenate(
-        [[0.0], np.cumsum(np.linalg.norm(np.diff(line, axis=0), axis=1))]
-    )
-    sample_arc = np.linspace(0.0, node_arc[-1], len(points))
-    middles = 0.5 * (node_arc[:-1] + node_arc[1:])
-    low = np.concatenate([[-np.inf], middles])
-    high = np.concatenate([middles, [np.inf]])
-    out = np.empty(len(line))
-    for i in range(len(line)):
-        pick = (sample_arc >= low[i]) & (sample_arc <= high[i])
-        out[i] = (
-            float(value[pick].min())
-            if pick.any()
-            else float(np.interp(node_arc[i], sample_arc, value))
-        )
-    return out
 
 
 def coverage_map(

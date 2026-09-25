@@ -63,6 +63,10 @@ Examples:
   voxel, so the light denoise
   removes little of it. A threshold of such a scan leaves the coarse
   fibers full of holes. Fitted from the grey alone (``plain``) by default.
+* ``halo_two_types``: two_types' fibers and grey levels with a
+  phase-contrast halo (``synthetic_ct(phase_contrast=...)``): a shallow dark
+  band outside every surface that noise breaks into spots, darkest in the
+  gaps between touching fibers.
 * ``varied_1`` … ``varied_8``: fresh structures drawn from seeds, for
   checking the fitter on structures it was not tuned on: 8-16 µm fibers
   at 2.5-4.5 voxels radius, planar, aligned, biaxial and isotropic (two
@@ -222,7 +226,7 @@ def long_fibers(cache: Path) -> Example:
     return Example(scan, spec, bend, end_error_report)
 
 
-def two_types(cache: Path, *, noisy: bool = False) -> Example:
+def two_types(cache: Path, *, noisy: bool = False, halo: bool = False) -> Example:
     voxel, cell_side, crop, length = 1.25 * um, 320 * um, 200 * um, (300 * um, 500 * um)
     fine = tangle.Material("fine_7um", diameter=7 * um, min_bend_radius=35 * um)
     coarse = tangle.Material("coarse_19um", diameter=19 * um, min_bend_radius=95 * um)
@@ -235,6 +239,15 @@ def two_types(cache: Path, *, noisy: bool = False) -> Example:
         # correlated over about a voxel.
         profiles = [(7 * um, ct.CrossSection()), (19 * um, ct.CrossSection(brightness=0.45))]
         full = render_scan(truth, voxel, seed=21, profiles=profiles, noise=0.19, noise_correlation=0.9)
+    elif halo:
+        # two_types' scan with a phase-contrast halo at unit strength (a
+        # dark band outside every surface, deeper where surfaces face each
+        # other).
+        profiles = [
+            (7 * um, ct.CrossSection()),
+            (19 * um, ct.CrossSection(brightness=0.75, rim=2 * um, core=1 / 3)),
+        ]
+        full = render_scan(truth, voxel, seed=21, profiles=profiles, phase_contrast=1.0)
     else:
         # Grey levels as in the scans this imitates: small fibers brightest (1),
         # large fibers a rim at 0.75 around a core at 0.25.
@@ -258,6 +271,10 @@ def noisy_two_types(cache: Path) -> Example:
     # holes into the dim coarse fibers (see _fit._Fitter.classify).
     example.input = "plain"
     return example
+
+
+def halo_two_types(cache: Path) -> Example:
+    return two_types(cache.with_name("two_types.json"), halo=True)  # the same fibers as two_types
 
 
 BOX = 150 * um
@@ -528,6 +545,7 @@ EXAMPLES: dict[str, Callable[[Path], Example]] = {
     "long_fibers": long_fibers,
     "two_types": two_types,
     "noisy_two_types": noisy_two_types,
+    "halo_two_types": halo_two_types,
     **{
         f"scenario_{name}": scenario(lines, SCENARIO_LENGTH.get(name, 400 * um))
         for name, lines in SCENARIOS.items()

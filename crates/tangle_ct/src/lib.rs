@@ -8,8 +8,10 @@
 //! `label`, `maximum_filter`) closely enough that fits do not change beyond
 //! floating-point rounding.
 
+pub mod confidence;
 pub mod edt;
 pub mod filter;
+pub mod grey;
 pub mod hessian;
 pub mod label;
 pub mod line;

@@ -124,5 +124,8 @@ fn _tangle(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(ct::ct_merge_fragments, module)?)?;
     module.add_function(wrap_pyfunction!(ct::ct_split_kinks, module)?)?;
     module.add_function(wrap_pyfunction!(ct::ct_resolve_side_by_side, module)?)?;
+    module.add_function(wrap_pyfunction!(ct::ct_render_grey, module)?)?;
+    module.add_function(wrap_pyfunction!(ct::ct_node_confidence, module)?)?;
+    module.add_function(wrap_pyfunction!(ct::ct_overlap, module)?)?;
     Ok(())
 }

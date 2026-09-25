@@ -108,6 +108,22 @@ def bridge(a: Port, b: Port, spacing: float) -> np.ndarray:
     )
 
 
+def turn_cost(a: Port, b: Port, length: float, bend_radius: float, *, floor_degrees: float = 10.0) -> float:
+    """Nats for how far a join from port ``a`` to port ``b`` turns.
+
+    The turn is the angle between ``a``'s outward direction and the
+    direction ``b``'s fiber arrives in (0 for a straight continuation). It
+    is priced as a half-normal: half its square over the turn a fiber at the
+    bend limit makes along a bridge of ``length`` (at least
+    ``floor_degrees``), so a join that turns by a crossing angle costs
+    several nats while a gentle continuation costs almost none.
+    """
+    cosine = float(np.clip(-a.direction @ b.direction, -1.0, 1.0))
+    turn = float(np.arccos(cosine))
+    allowed = max(length / max(bend_radius, 1e-9), np.radians(floor_degrees))
+    return 0.5 * (turn / allowed) ** 2
+
+
 def allowed_pairs(
     ports: list[Port],
     bends: np.ndarray,

@@ -51,13 +51,16 @@ def cut_unsure(
     free_radii: float = 2.0,
     widen: list[tuple[np.ndarray, np.ndarray, float]] | None = None,
     skip: list[Box] | None = None,
+    hotspots: np.ndarray | None = None,
 ) -> Cut | None:
     """Split every fiber at its unsure stretches; ``None`` when nothing is unsure.
 
     ``widen`` lists boxes ``(low, high, extra)``: an unsure node inside one
     also removes the nodes within ``extra`` (arc length) of it, for a region
     whose earlier redraw failed. Nodes inside a ``skip`` box (a region given
-    up on) are left as they are. The removed stretches are clustered (those
+    up on) are left as they are. ``hotspots`` rows ``(x, y, z, radius)``
+    mark spheres whose nodes are cut as if unsure (fiber ends, for
+    example). The removed stretches are clustered (those
     within two radii of each other) into ``regions``, each a box padded by
     two radii.
     """
@@ -77,6 +80,8 @@ def cut_unsure(
             np.asarray(line, dtype=np.float64), np.asarray(value), spacing
         )
         unsure = fine_value < threshold
+        if hotspots is not None and len(hotspots):
+            unsure |= _inside_spheres(fine, hotspots)
         if widen and unsure.any():
             unsure = _widen(fine, unsure, widen)
         if skip and unsure.any():
@@ -279,6 +284,69 @@ def _inside_any(points: np.ndarray, boxes: list[Box]) -> np.ndarray:
     for low, high in boxes:
         inside |= np.all((points >= low) & (points <= high), axis=1)
     return inside
+
+
+def _inside_spheres(points: np.ndarray, spheres: np.ndarray) -> np.ndarray:
+    """Whether each point lies in any sphere, rows ``(x, y, z, radius)``."""
+    from scipy.spatial import cKDTree
+
+    inside = np.zeros(len(points), dtype=bool)
+    if not len(points) or not len(spheres):
+        return inside
+    tree = cKDTree(points)
+    for hits in tree.query_ball_point(spheres[:, :3], spheres[:, 3]):
+        inside[hits] = True
+    return inside
+
+
+def end_hotspots(
+    lines: list[np.ndarray],
+    radii: np.ndarray,
+    shape: tuple[int, int, int],
+    *,
+    reach_radii: float = 2.5,
+    touching: bool = False,
+) -> np.ndarray:
+    """A sphere around fiber ends inside the scan, rows ``(x, y, z, radius)``.
+
+    Ends are where fits go wrong: a fiber split in two leaves two free ends
+    facing each other. The sphere reaches ``reach_radii`` of the fiber's
+    radius. An end whose tip comes within two radii of another fit's surface
+    is left out, unless ``touching``: then the sphere also reaches the
+    radius and ``reach_radii`` of the widest fit it touches, so the region
+    can pair the branches there anew (a fit that ran onto another fiber at a
+    crossing leaves the rest of each fiber to a fit ending against it). In
+    dense crossings that re-paired branches the wrong way (dense_crossing
+    merged 10 -> 25), so it is off by default.
+    """
+    radii = np.asarray(radii, dtype=np.float64)
+    upper = np.array(shape[::-1], dtype=np.float64)
+    live = [k for k, line in enumerate(lines) if len(line) >= 2]
+    if not live:
+        return np.zeros((0, 4))
+    segments = _Segments([lines[k] for k in live], radii[live])
+    rows = []
+    for index, k in enumerate(live):
+        line, r = lines[k], float(radii[k])
+        for tip in (line[0], line[-1]):
+            if not (np.all(tip >= 1.5 * r) and np.all(tip <= upper - 1.5 * r)):
+                continue
+            reach = reach_radii * r
+            # The widest other fit whose capsule surface the tip comes within two radii of.
+            near = np.array(segments.tree.query_ball_point(tip, float(segments.radius.max() + segments.half.max()) + 2.0 * r), dtype=int)
+            near = near[segments.fiber[near] != index] if len(near) else near
+            if len(near):
+                a, b = segments.a[near], segments.b[near]
+                ab = b - a
+                t = np.clip(((tip - a) * ab).sum(axis=1) / np.maximum((ab * ab).sum(axis=1), 1e-12), 0.0, 1.0)
+                gap = np.linalg.norm(tip - (a + t[:, None] * ab), axis=1)
+                near_radii = segments.radius[near][gap <= segments.radius[near] + 2.0 * r]
+                if len(near_radii):
+                    if not touching:
+                        continue
+                    reach = max(reach, r + (1.0 + reach_radii) * float(near_radii.max()))
+            rows.append([*tip, reach])
+    return np.array(rows, dtype=np.float64).reshape(-1, 4)
 
 
 def _cluster_boxes(
