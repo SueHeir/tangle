@@ -98,8 +98,9 @@ def wall_ends(fit: ct.FitResult, tile: int, report: dict) -> str:
     return f"{total} / {on_bad}"
 
 
-def peak_memory_gb() -> float:
-    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+def peak_memory_gb(who: int = resource.RUSAGE_SELF) -> float:
+    """Peak resident memory of this process (or, for RUSAGE_CHILDREN, of its largest finished child)."""
+    peak = resource.getrusage(who).ru_maxrss
     return peak / 1e9 if sys.platform == "darwin" else peak / 1e6  # bytes on macOS, KiB on Linux
 
 
@@ -149,6 +150,7 @@ def main() -> None:
         "seconds": round(seconds, 1),
         "tile seconds (sum)": tiles["seconds"] if tiles else "-",
         "peak memory (GB)": round(peak_memory_gb(), 2),
+        "worker peak (GB)": round(peak_memory_gb(resource.RUSAGE_CHILDREN), 2) if args.workers > 1 else "-",
         "true": summary["true_fibers_in_volume"],
         "fitted": summary["fitted_fibers"],
         "recovered": summary["recovered"],

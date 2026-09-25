@@ -343,8 +343,10 @@ fit.write("scan_fit/result")
   `FitSettings(levels=...)` to set them yourself.
 - **Tiles side by side.** `workers=N` fits N tiles at once, each in its own
   process. Most of a tile's fit is single-threaded Python and the GPU solve
-  is a small share of it, so this scales with the CPU cores; memory grows
-  with N. Workers are spawned processes, so a script that calls it needs
+  is a small share of it, so this scales with the CPU cores: on a 6+12-core
+  laptop, 4 workers fit a 384-voxel scan in 8 tiles 2.5 times faster than
+  one. Memory grows with N, about 2 GB per worker for 223-voxel padded
+  tiles, so keep N within free memory. Workers are spawned processes, so a script that calls it needs
   the `if __name__ == "__main__":` guard.
 
 Tile size trades memory and time per tile against the share of each tile
