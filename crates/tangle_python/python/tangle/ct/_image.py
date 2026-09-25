@@ -55,6 +55,11 @@ class HessianField:
         self.sigma = sigma
         self._field = _native.Hessian(image, sigma)
 
+    @property
+    def native(self):
+        """The Rust field (``_native.Hessian``) the tracer reads."""
+        return self._field
+
     def at(self, points: np.ndarray) -> np.ndarray:
         """The ``(n, 3, 3)`` Hessians (times sigma²) at ``(x, y, z)`` points."""
         return self._field.at(points)

@@ -83,6 +83,11 @@ class Hessian:
         self._field = _tangle.CtHessian(_f32(image), float(sigma))
         self.sigma = float(sigma)
 
+    @property
+    def native(self):
+        """The ``tangle._tangle.CtHessian`` itself."""
+        return self._field
+
     def at(self, points) -> np.ndarray:
         points = _points(points)
         out = np.empty((len(points), 3, 3))
@@ -95,3 +100,35 @@ class Hessian:
         tubularity = np.empty(len(points))
         self._field.directions(points, axis, tubularity)
         return axis, tubularity
+
+
+def _claimed(claimed: np.ndarray) -> np.ndarray:
+    if claimed.dtype != np.int32 or not claimed.flags.c_contiguous:
+        raise ValueError("claimed must be a C-contiguous int32 array")
+    return claimed
+
+
+def trace_one_way(
+    image: np.ndarray, hessian: Hessian, claimed: np.ndarray, *, radius: float, min_bend_radius: float,
+    step: float, start, direction, max_steps: int, own_label: int = 0,
+) -> np.ndarray:
+    """The points of a one-way trace (see ``_trace.Tracer.trace_one_way``), ``(n, 3)``."""
+    points = _tangle.ct_trace_one_way(
+        _f32(image), hessian.native, _claimed(claimed), float(radius), float(min_bend_radius), float(step),
+        [float(v) for v in start], [float(v) for v in direction], int(max_steps), int(own_label),
+    )
+    return np.array(points, dtype=np.float64).reshape(-1, 3)
+
+
+def trace_fibers(
+    image: np.ndarray, hessian: Hessian, claimed: np.ndarray, edt: np.ndarray, peak: np.ndarray, *,
+    radius: float, min_bend_radius: float, step: float, min_length: float, node_spacing: float,
+    label_offset: int, max_fibers: int | None, seed_depth_radii: float,
+) -> list[np.ndarray]:
+    """Fibers traced from ridge seeds, painting ``claimed`` in place (see ``_trace.trace_fibers``)."""
+    lines = _tangle.ct_trace_fibers(
+        _f32(image), hessian.native, _claimed(claimed), _f32(edt), _f32(peak), float(radius),
+        float(min_bend_radius), float(step), float(min_length), float(node_spacing), int(label_offset),
+        None if max_fibers is None else int(max_fibers), float(seed_depth_radii),
+    )
+    return [np.array(line, dtype=np.float64).reshape(-1, 3) for line in lines]
