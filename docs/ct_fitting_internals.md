@@ -409,8 +409,8 @@ same steps size the fibers.
   centerline F1 0.62 on `noisy_two_types` and 0.60 on `two_types`; with w,
   0.81 and 0.89). The median pools about a
   hundred samples per distance and survives the noise, but w reads a fiber
-  in a flat bundle too thick (its neighbours fill two of the four
-  directions) and an oval fiber by its wide axis, so the hole-filled fiber
+  packed among others too thick (its neighbours fill part of the
+  cross-section; see §9a), so the hole-filled fiber
   image that grey ranges, profiles or a mask give is typed by m. A plain
   grey scan's core-sized foreground holes are filled too (as a mask's and
   the ranges'), with `fill_mask_holes`.

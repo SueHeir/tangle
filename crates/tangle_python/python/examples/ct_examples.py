@@ -59,8 +59,8 @@ Examples:
   each fit's type is chosen by its thickness.
 * ``noisy_two_types``: two_types' fibers in a low-contrast, noisy scan:
   the coarse fibers solid and dim (0.45 of the fine fibers'
-  contrast, about 3 noise sigma), and the noise correlated over about a
-  voxel (neighbouring voxels correlate about 0.75), so the light denoise
+  contrast), and the noise correlated over about a
+  voxel, so the light denoise
   removes little of it. A threshold of such a scan leaves the coarse
   fibers full of holes. Fitted from the grey alone (``plain``) by default.
 * ``varied_1`` … ``varied_8``: fresh structures drawn from seeds, for
