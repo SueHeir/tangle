@@ -45,7 +45,10 @@ class Scanner:
     angles: int | None = None  # default: the padded slice width
     fiber_attenuation: float = 0.02  # per voxel, for occupancy 1
     void_attenuation: float = 0.0005  # per voxel
-    delta_beta: float = 0.0
+    # One ratio for the whole sample, or one per fiber type (in the order of
+    # ``synthetic_ct``'s ``profiles``): a denser, more absorbing material has
+    # a lower ratio and shows less fringe.
+    delta_beta: float | tuple[float, ...] = 0.0
     propagation: float = 0.0  # wavelength x distance / pixel², in pixels²
     detector_blur: float = 0.6  # pixels
     # The scanner's spatial resolution in meters: the full width at half
@@ -57,11 +60,18 @@ class Scanner:
 
 
 def acquire(
-    attenuation: np.ndarray, scanner: Scanner, rng: np.random.Generator, voxel_size: float | None = None
+    attenuation: np.ndarray,
+    scanner: Scanner,
+    rng: np.random.Generator,
+    voxel_size: float | None = None,
+    phase: np.ndarray | None = None,
 ) -> np.ndarray:
     """The reconstructed attenuation per voxel of ``attenuation`` (``(z, y, x)``, per voxel) scanned by ``scanner``.
 
     ``voxel_size`` (meters) is needed only for ``scanner.resolution``.
+    ``phase`` is the phase shift per voxel times two (``delta_beta`` times
+    the attenuation, voxel by voxel, for a sample of several materials);
+    by default ``scanner.delta_beta`` (a single ratio) times ``attenuation``.
     """
     from scipy.ndimage import gaussian_filter
 
@@ -75,8 +85,14 @@ def acquire(
     line = _native.project(attenuation, angles, width)  # (angle, z, u)
 
     intensity = np.exp(-line)
-    if scanner.propagation > 0 and scanner.delta_beta > 0:
-        intensity = _propagate(line, scanner.delta_beta, scanner.propagation)
+    if phase is not None:
+        phase_line = _native.project(phase, angles, width)
+    elif np.ndim(scanner.delta_beta) == 0 and scanner.delta_beta > 0:
+        phase_line = float(scanner.delta_beta) * line
+    else:
+        phase_line = None
+    if scanner.propagation > 0 and phase_line is not None:
+        intensity = _propagate(line, phase_line, scanner.propagation)
     blur = scanner.detector_blur
     if scanner.resolution is not None:
         if voxel_size is None:
@@ -95,18 +111,22 @@ def acquire(
     return volume
 
 
-def _propagate(line: np.ndarray, delta_beta: float, distance: float) -> np.ndarray:
-    """Intensity after the exit wave of each projection travels ``distance`` (pixels²)."""
+def _propagate(line: np.ndarray, phase_line: np.ndarray, distance: float) -> np.ndarray:
+    """Intensity after the exit wave of each projection travels ``distance`` (pixels²).
+
+    The wave's amplitude is ``exp(-line / 2)`` and its phase ``-phase_line / 2``.
+    """
     count, nz, width = line.shape
     # Pad against wrap-around, with the edge values (the field keeps going).
     pz, pu = nz // 2 + 8, width // 2 + 8
     padded = np.pad(line, ((0, 0), (pz, pz), (pu, pu)), mode="edge")
+    padded_phase = np.pad(phase_line, ((0, 0), (pz, pz), (pu, pu)), mode="edge")
     fz = np.fft.fftfreq(padded.shape[1])[:, None]
     fu = np.fft.fftfreq(padded.shape[2])[None, :]
     kernel = np.exp(-1j * np.pi * distance * (fz**2 + fu**2))
     out = np.empty_like(line)
     for k in range(count):
-        field = np.exp(-0.5 * padded[k] * (1.0 + 1j * delta_beta))
+        field = np.exp(-0.5 * (padded[k] + 1j * padded_phase[k]))
         wave = np.fft.ifft2(np.fft.fft2(field) * kernel)
         out[k] = (np.abs(wave) ** 2)[pz : pz + nz, pu : pu + width]
     return out

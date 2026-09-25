@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -184,6 +184,7 @@ def synthetic_ct(
     if cell is not None:
         period = np.array([n / voxel_size if p else 0.0 for n, p in zip(cell.lengths, cell.periodic)])
     types = None
+    base = occupancy
     if profiles:
         occupancy, types = _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles, period)
     rng = np.random.default_rng(seed)
@@ -191,7 +192,17 @@ def synthetic_ct(
         from ._scanner import acquire
 
         sample = scanner.void_attenuation + (scanner.fiber_attenuation - scanner.void_attenuation) * occupancy
-        attenuation = acquire(sample.astype(np.float32), scanner, rng, voxel_size)
+        phase = None
+        if np.ndim(scanner.delta_beta) > 0:
+            # One ratio per fiber type: the fibers' attenuation, type by type,
+            # times its ratio (the void shifts no phase).
+            ratios = [float(r) for r in scanner.delta_beta]
+            if not profiles or len(ratios) != len(profiles):
+                raise ValueError("give one Scanner.delta_beta per profile")
+            scaled = [(d, replace(p, brightness=p.brightness * r)) for (d, p), r in zip(profiles, ratios)]
+            weighted, _ = _apply_profiles(base, centerlines, radii, voxel_size, scaled, period)
+            phase = (scanner.fiber_attenuation * weighted).astype(np.float32)
+        attenuation = acquire(sample.astype(np.float32), scanner, rng, voxel_size, phase)
         attenuation /= scanner.fiber_attenuation  # fiber 1, void about 0, as below
         if drift:
             z, y, x = np.indices(attenuation.shape, dtype=np.float32)
