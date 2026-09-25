@@ -16,11 +16,17 @@ from ._geometry import paint, polyline_length, resample, sample_image, sample_la
 from ._image import HessianField
 
 
+def _cross(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    # np.cross costs some 15 µs a call in axis handling; the tracer makes
+    # hundreds of thousands of calls on single vectors.
+    return np.array([a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]])
+
+
 def _perpendicular_basis(direction: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     helper = np.array([1.0, 0.0, 0.0]) if abs(direction[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-    e1 = np.cross(direction, helper)
-    e1 /= np.linalg.norm(e1)
-    return e1, np.cross(direction, e1)
+    e1 = _cross(direction, helper)
+    e1 /= np.sqrt(e1 @ e1)
+    return e1, _cross(direction, e1)
 
 
 def _disk_offsets(radius: float, spacing: float = 0.5) -> np.ndarray:

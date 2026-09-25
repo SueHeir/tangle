@@ -440,6 +440,28 @@ class CtToolTests(unittest.TestCase):
             store.clear()
             self.assertEqual(store.load(), {})
 
+    def test_owner_lookup_matches_rasterize(self):
+        from tangle.ct._geometry import OwnerLookup, rasterize
+
+        rng = np.random.default_rng(5)
+        shape = (30, 34, 38)
+        lines = [np.cumsum(rng.normal(0.0, 2.0, size=(8, 3)), axis=0) + rng.uniform(5, 25, size=3) for _ in range(12)]
+        radii = rng.uniform(1.5, 4.0, size=12)
+        labels, _, _ = rasterize(shape, lines, radii, signed=True)
+        lookup = OwnerLookup(shape, lines, radii)
+        for index in map(tuple, rng.integers(0, shape, size=(400, 3))):
+            self.assertEqual(lookup(index), labels[index], index)
+
+    def test_hessian_at_one_point_matches_many(self):
+        from tangle.ct._image import HessianField
+
+        image = self.scan.volume.astype(np.float32) / 65535.0
+        field = HessianField(image, 2.0)
+        points = np.random.default_rng(6).uniform(2, 70, size=(80, 3))
+        many = field.at(points)  # one interpolation per component
+        few = np.concatenate([field.at(p) for p in points])  # the stacked single-call path
+        np.testing.assert_allclose(few, many, rtol=1e-6, atol=1e-7)
+
     def test_crossing_ends_are_joined_straight_through(self):
         from tangle.ct._geometry import paint
         from tangle.ct._junctions import allowed_pairs, assemble, rank_plans, region_ports

@@ -63,20 +63,31 @@ class HessianField:
             (1, 2): (1, 1, 0),
         }
         scale = sigma**2
-        self.components = {
-            key: (scale * gaussian_filter(image, sigma, order=order)).astype(np.float32)
-            for key, order in orders.items()
-        }
+        # One (6, z, y, x) stack, so a few points read all six components in
+        # one interpolation call (the tracer asks for one point at a time).
+        self.keys = list(orders)
+        self.stack = np.empty((len(orders),) + image.shape, dtype=np.float32)
+        for k, order in enumerate(orders.values()):
+            self.stack[k] = scale * gaussian_filter(image, sigma, order=order)
 
     def at(self, points: np.ndarray) -> np.ndarray:
+        from scipy.ndimage import map_coordinates
+
         from ._geometry import sample_image
 
         points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-        h = np.zeros((len(points), 3, 3))
-        for (i, j), component in self.components.items():
-            values = sample_image(component, points)
-            h[:, i, j] = values
-            h[:, j, i] = values
+        n = len(points)
+        if n <= 64:
+            coordinates = np.empty((4, 6 * n))
+            coordinates[0] = np.repeat(np.arange(6.0), n)
+            coordinates[1:] = np.tile((points[:, ::-1] - 0.5).T, 6)
+            values = map_coordinates(self.stack, coordinates, order=1, mode="constant", cval=0.0).reshape(6, n)
+        else:
+            values = np.stack([sample_image(component, points) for component in self.stack])
+        h = np.zeros((n, 3, 3))
+        for k, (i, j) in enumerate(self.keys):
+            h[:, i, j] = values[k]
+            h[:, j, i] = values[k]
         return h
 
     def directions(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
