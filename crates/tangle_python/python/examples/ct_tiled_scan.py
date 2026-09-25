@@ -35,6 +35,8 @@ import tangle
 import tangle.ct as ct
 from tangle.units import um
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ct_examples import BACKEND, fit_input, planar_population, relaxed_truth, render_scan  # noqa: E402
 
@@ -67,6 +69,33 @@ def large_two_types(cache: Path, side_um: float) -> tuple[ct.SyntheticScan, list
         ct.FiberSpec(diameter=19 * um, min_bend_radius=95 * um, length=400 * um, name="coarse_19um"),
     ]
     return scan, specs
+
+
+def wall_ends(fit: ct.FitResult, tile: int, report: dict) -> str:
+    """Interior fit ends within a radius of a tile wall: all / on fits of split true fibers, merged or false.
+
+    Uses the tile grid ``--tile`` gives in both modes, so a whole fit shows
+    how many ends fall there anyway; more in the tiled fit are stitching's."""
+    from tangle.ct._tiles import TileGrid
+
+    grid = TileGrid.make(fit.shape, tile, 0)
+    walls = [np.asarray(edges[1:-1], dtype=np.float64) for edges in grid.edges[::-1]]  # x, y, z
+    upper = np.array(fit.shape[::-1], dtype=np.float64)
+    split_truth = {entry["id"] for entry in report["per_true_fiber"] if entry["state"] == "split"}
+    bad = {
+        entry["id"] - 1
+        for entry in report["per_fitted_fiber"]
+        if entry["state"] != "matched" or entry["true_id"] in split_truth
+    }
+    total = on_bad = 0
+    for index, (line, radius) in enumerate(zip(fit.centerlines, fit.radii)):
+        for point in (line[0], line[-1]):
+            if np.any(point < 1.5 * radius) or np.any(point > upper - 1.5 * radius):
+                continue  # at the scan boundary
+            if any(len(w) and np.min(np.abs(w - point[a])) < radius for a, w in enumerate(walls)):
+                total += 1
+                on_bad += index in bad
+    return f"{total} / {on_bad}"
 
 
 def peak_memory_gb() -> float:
@@ -128,6 +157,7 @@ def main() -> None:
         "merged": summary["merged_fibers"],
         "label accuracy": round(summary["voxel_label_accuracy"], 3),
         "centerline F1": round(summary["centerline_f1"], 3) if summary["centerline_f1"] is not None else None,
+        "fit ends at walls": wall_ends(fit, args.tile, report),
     }
     print("  " + ", ".join(f"{k} {v}" for k, v in row.items()))
     (folder / f"{args.mode}.json").write_text(
