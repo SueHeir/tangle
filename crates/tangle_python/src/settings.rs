@@ -274,6 +274,8 @@ pub(crate) struct PyRelaxationSettings {
     #[pyo3(get, set)]
     pub curvature_cleanup_sweeps: usize,
     #[pyo3(get, set)]
+    pub twist_stiffness: f64,
+    #[pyo3(get, set)]
     pub max_step: f64,
     #[pyo3(get, set)]
     pub max_iterations: usize,
@@ -311,6 +313,7 @@ impl Default for PyRelaxationSettings {
             curvature_ratio_tolerance: widen(config.curvature_ratio_tolerance),
             constraint_iterations: config.constraint_iterations,
             curvature_cleanup_sweeps: config.curvature_cleanup_sweeps,
+            twist_stiffness: widen(config.twist_stiffness),
             max_step: widen(config.max_step),
             max_iterations: config.max_iterations,
             iterations_per_batch: config.iterations_per_batch,
@@ -428,6 +431,7 @@ impl PyRelaxationSettings {
         output.set_item("curvature_ratio_tolerance", self.curvature_ratio_tolerance)?;
         output.set_item("constraint_iterations", self.constraint_iterations)?;
         output.set_item("curvature_cleanup_sweeps", self.curvature_cleanup_sweeps)?;
+        output.set_item("twist_stiffness", self.twist_stiffness)?;
         output.set_item("max_step", self.max_step)?;
         output.set_item("max_iterations", self.max_iterations)?;
         output.set_item("iterations_per_batch", self.iterations_per_batch)?;
@@ -459,6 +463,7 @@ impl PyRelaxationSettings {
             ("stretch_stiffness", self.stretch_stiffness),
             ("bend_stiffness", self.bend_stiffness),
             ("curvature_limit_stiffness", self.curvature_limit_stiffness),
+            ("twist_stiffness", self.twist_stiffness),
         ] {
             if !value.is_finite()
                 || !(0.0..=1.0).contains(&value)
@@ -541,6 +546,7 @@ impl PyRelaxationSettings {
             curvature_ratio_tolerance: self.curvature_ratio_tolerance as f32,
             constraint_iterations: self.constraint_iterations,
             curvature_cleanup_sweeps: self.curvature_cleanup_sweeps,
+            twist_stiffness: self.twist_stiffness as f32,
             max_step: self.max_step as f32,
             max_iterations: self.max_iterations,
             iterations_per_batch: self.iterations_per_batch,

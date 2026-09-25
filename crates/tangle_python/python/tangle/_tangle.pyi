@@ -677,6 +677,7 @@ class RelaxationSettings:
     curvature_ratio_tolerance: float
     constraint_iterations: int
     curvature_cleanup_sweeps: int
+    twist_stiffness: float
     max_step: float
     max_iterations: int
     iterations_per_batch: int
@@ -703,6 +704,7 @@ class RelaxationSettings:
         curvature_ratio_tolerance: float = ...,
         constraint_iterations: int = ...,
         curvature_cleanup_sweeps: int = ...,
+        twist_stiffness: float = ...,
         max_step: float = ...,
         max_iterations: int = ...,
         iterations_per_batch: int = ...,

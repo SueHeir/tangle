@@ -1914,3 +1914,114 @@ fn proxy_relaxation_is_bitwise_repeatable() {
         );
     }
 }
+
+/// Two flat ovals (long semi-axis 0.15, short 0.075) crossing at right angles,
+/// or lying side by side, in a closed 4-unit box.
+fn oval_pair(second: [[f64; 3]; 2], periodic: [bool; 3]) -> FiberAssembly {
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([4.0; 3], periodic));
+    let material = assembly.materials.add("oval");
+    let section = assembly.sections.add(Section::Elliptical {
+        semi_axes: [0.15, 0.075],
+    });
+    for (id, placed) in [(1, [[1.0, 2.0, 2.0], [3.0, 2.0, 2.0]]), (2, second)] {
+        assembly
+            .add_fiber(FiberId(id), material, section, &placed, &placed)
+            .unwrap();
+    }
+    assembly
+}
+
+fn relax_ovals(assembly: &FiberAssembly) -> (DeviceFiberWorld<WgpuRuntime>, BatchStatus) {
+    let packed = PackedAssembly::from_assembly(assembly).unwrap();
+    assert!(packed.has_ovals);
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed,
+        CellListConfig::default(),
+        0.05,
+    );
+    let config = RelaxationConfig {
+        penetration_tolerance: 1.0e-5,
+        max_step: 0.05,
+        max_iterations: 400,
+        iterations_per_batch: 400,
+        ..RelaxationConfig::default()
+    };
+    let status = world.run_batch(&config, 400);
+    (world, status)
+}
+
+#[test]
+fn stacked_flat_ovals_separate_by_their_thickness() {
+    // The second oval crosses 0.1 above the first: closer than the two
+    // thicknesses (0.15) but the lanes, not the bounding radii (0.3), decide.
+    let assembly = oval_pair([[2.0, 1.0, 2.1], [2.0, 3.0, 2.1]], [false; 3]);
+    let (world, status) = relax_ovals(&assembly);
+    assert!(status.converged, "{status:?}");
+    let positions = world.download_positions();
+    let first_z = 0.5 * (positions[2] + positions[5]);
+    let second_z = 0.5 * (positions[8] + positions[11]);
+    let separation = second_z - first_z;
+    assert!(
+        (0.15 - 2.0e-4..0.17).contains(&separation),
+        "separation {separation}"
+    );
+}
+
+#[test]
+fn side_by_side_flat_ovals_separate_by_their_width() {
+    let assembly = oval_pair([[1.0, 2.2, 2.0], [3.0, 2.2, 2.0]], [false; 3]);
+    let (world, status) = relax_ovals(&assembly);
+    assert!(status.converged, "{status:?}");
+    let positions = world.download_positions();
+    let separation = 0.5 * (positions[7] + positions[10]) - 0.5 * (positions[1] + positions[4]);
+    assert!(
+        (0.3 - 2.0e-4..0.32).contains(&separation),
+        "separation {separation}"
+    );
+}
+
+#[test]
+fn flat_oval_rests_on_a_wall_by_its_thickness() {
+    // Start partly through the floor; the wall pushes the oval out to its
+    // short semi-axis, not its long one.
+    let mut assembly = oval_pair([[2.0, 1.0, 3.0], [2.0, 3.0, 3.0]], [false; 3]);
+    for vertex in 0..2 {
+        assembly.geometry.placed.positions[vertex][2] = 0.03;
+    }
+    let (world, status) = relax_ovals(&assembly);
+    assert!(status.converged, "{status:?}");
+    let positions = world.download_positions();
+    for z in [positions[2], positions[5]] {
+        assert!((z - 0.075).abs() < 1.0e-4, "height {z}");
+    }
+}
+
+#[test]
+fn off_center_contact_turns_an_oval() {
+    // A round fiber presses on one edge of a flat oval, so the oval tips
+    // about its axis instead of only sliding away.
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([4.0; 3], [true; 3]));
+    let material = assembly.materials.add("fiber");
+    let oval = assembly.sections.add(Section::Elliptical {
+        semi_axes: [0.15, 0.075],
+    });
+    let round = assembly.sections.add(Section::Circular { radius: 0.05 });
+    let axis = [[1.0, 2.0, 2.0], [3.0, 2.0, 2.0]];
+    let edge = [[1.0, 2.12, 2.1], [3.0, 2.12, 2.1]];
+    assembly
+        .add_fiber(FiberId(1), material, oval, &axis, &axis)
+        .unwrap();
+    assembly
+        .add_fiber(FiberId(2), material, round, &edge, &edge)
+        .unwrap();
+    let (world, status) = relax_ovals(&assembly);
+    assert!(status.converged, "{status:?}");
+    let directors = world.download_directors();
+    assert!(directors[2].abs() > 0.01, "director {:?}", &directors[0..3]);
+
+    let mut relaxed = assembly.clone();
+    world.download_into(&mut relaxed).unwrap();
+    relaxed.validate().unwrap();
+    assert!(relaxed.geometry.placed.directors[0][2].abs() > 0.01);
+}

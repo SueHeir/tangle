@@ -109,6 +109,10 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         );
         assert!(voxel_size.is_finite() && voxel_size > 0.0);
         assert!(origin.iter().all(|value| value.is_finite()));
+        assert!(
+            !self.packed.has_ovals,
+            "the image force samples round cross-sections and does not support oval fibers yet"
+        );
         let settings = self
             .image_force
             .as_ref()

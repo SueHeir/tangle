@@ -136,7 +136,7 @@ fn record_device_trajectory(
             frame_assembly = snapshot_assembly.clone();
         } else {
             packed
-                .unpack_positions(&snapshot.positions, &mut frame_assembly)
+                .unpack_positions(&snapshot.positions, None, &mut frame_assembly)
                 .unwrap_or_else(|error| panic!("CubeCL OVITO snapshot was invalid: {error}"));
         }
         write_ovito_assembly_frame(&frame_assembly, &config, state.next_frame_index, true)

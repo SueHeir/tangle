@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
-use tangle_core::{FiberAssembly, GeometryState, Section, Span};
+use tangle_core::{polyline_tangents, FiberAssembly, GeometryState, Section, Span, Vec3};
 
 /// Device-resident midpoint subdivision parameters.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -55,8 +55,19 @@ pub struct PackedAssembly {
     pub segment_vertices: Vec<u32>,
     /// Dense owner-fiber index per segment.
     pub segment_fibers: Vec<u32>,
-    /// Capsule radius per segment.
+    /// Bounding radius per segment: the capsule radius of a round fiber, or
+    /// the long semi-axis of an oval one.
     pub segment_radii: Vec<f32>,
+    /// Oval sections only: distance from the centerline to the outermost of
+    /// the round lanes that model the oval in contact, along the vertex
+    /// director. Each lane's radius is `segment_radii - segment_lane_offsets`.
+    /// Zero for round fibers; empty in checkpoints written before ovals.
+    #[serde(default)]
+    pub segment_lane_offsets: Vec<f32>,
+    /// Oval sections only: unit long-axis direction per vertex, interleaved
+    /// xyz. Zero for round fibers; empty in checkpoints written before ovals.
+    #[serde(default)]
+    pub directors: Vec<f32>,
     /// Intrinsic length per segment.
     pub segment_rest_lengths: Vec<f32>,
     /// One for active leaf segments and zero for inactive tree nodes.
@@ -101,6 +112,9 @@ pub struct PackedAssembly {
     pub cell_periodic: [u32; 3],
     /// Whether this layout contains inactive adaptive tree capacity.
     pub adaptive: bool,
+    /// Whether any fiber has an oval section, so directors are updated.
+    #[serde(default)]
+    pub has_ovals: bool,
     /// Whether adaptive coarsening is safe for this topology.
     ///
     /// Assemblies containing persistent junctions remain refined because the
@@ -159,6 +173,9 @@ impl PackedAssembly {
         let mut segment_vertices = Vec::new();
         let mut segment_fibers = Vec::new();
         let mut segment_radii = Vec::new();
+        let mut segment_lane_offsets = Vec::new();
+        let mut directors = vec![0.0_f32; 3 * assembly.geometry.placed.positions.len()];
+        let mut has_ovals = false;
         let mut segment_rest_lengths = Vec::new();
         let mut fiber_segment_spans = Vec::with_capacity(2 * assembly.topology.fibers.len());
         let mut fiber_vertex_spans = Vec::with_capacity(2 * assembly.topology.fibers.len());
@@ -178,12 +195,21 @@ impl PackedAssembly {
                 .entries
                 .get(fiber.section.0 as usize)
                 .ok_or(PackingError::MissingSection(fiber.id.0))?;
-            let radius = match section {
-                Section::Circular { radius } => *radius as f32,
-                Section::Elliptical { .. } => {
-                    return Err(PackingError::NonCircularSection(fiber.id.0));
+            let lanes = LaneSection::from_section(section);
+            let radius = lanes.radius;
+            if lanes.offset > 0.0 {
+                has_ovals = true;
+                let start = fiber.vertices.start as usize;
+                let placed =
+                    &assembly.geometry.placed.positions[start..start + fiber.vertices.len as usize];
+                let fiber_directors =
+                    lanes.device_directors(placed, assembly.fiber_directors(fiber_index));
+                for (local, director) in fiber_directors.iter().enumerate() {
+                    for axis in 0..3 {
+                        directors[3 * (start + local) + axis] = director[axis] as f32;
+                    }
                 }
-            };
+            }
             let segment_start = segment_fibers.len() as u32;
             let vertex_start = fiber.vertices.start;
             let vertex_count = fiber.vertices.len;
@@ -204,6 +230,7 @@ impl PackedAssembly {
                 segment_vertices.push(vertex_start + local + 1);
                 segment_fibers.push(fiber_index as u32);
                 segment_radii.push(radius);
+                segment_lane_offsets.push(lanes.offset);
                 let intrinsic = &assembly.geometry.intrinsic.positions;
                 segment_rest_lengths.push(distance(
                     intrinsic[(vertex_start + local) as usize],
@@ -234,6 +261,8 @@ impl PackedAssembly {
             segment_vertices,
             segment_fibers,
             segment_radii,
+            segment_lane_offsets,
+            directors,
             segment_rest_lengths,
             segment_active: vec![1; segment_count],
             segment_children: vec![u32::MAX; 2 * segment_count],
@@ -260,6 +289,7 @@ impl PackedAssembly {
             ],
             cell_periodic: assembly.cell.periodic.map(u32::from),
             adaptive: false,
+            has_ovals,
             coarsening_safe: assembly.junctions.junctions.is_empty(),
         })
     }
@@ -301,12 +331,10 @@ impl PackedAssembly {
                 .entries
                 .get(fiber.section.0 as usize)
                 .ok_or(PackingError::MissingSection(fiber.id.0))?;
-            let radius = match section {
-                Section::Circular { radius } => *radius as f32,
-                Section::Elliptical { .. } => {
-                    return Err(PackingError::NonCircularSection(fiber.id.0));
-                }
-            };
+            if !section.is_circular() {
+                return Err(PackingError::NonCircularSection(fiber.id.0));
+            }
+            let radius = LaneSection::from_section(section).radius;
             let diameter = 2.0 * radius;
             let minimum_length = config.minimum_length_over_diameter * diameter;
             let vertex_start = positions.len() as u32 / 3;
@@ -409,6 +437,8 @@ impl PackedAssembly {
             intrinsic_positions,
             segment_vertices,
             segment_fibers,
+            segment_lane_offsets: vec![0.0; segment_radii.len()],
+            directors: vec![0.0; positions.len()],
             segment_radii,
             segment_rest_lengths,
             segment_active,
@@ -436,8 +466,44 @@ impl PackedAssembly {
             ],
             cell_periodic: assembly.cell.periodic.map(u32::from),
             adaptive: true,
+            has_ovals: false,
             coarsening_safe: assembly.junctions.junctions.is_empty(),
         })
+    }
+
+    /// Fills lane offsets and directors with zeros (round fibers) when a
+    /// checkpoint written before oval sections lacks them.
+    pub fn ensure_lane_buffers(&mut self) {
+        if self.segment_lane_offsets.len() != self.segment_count() {
+            self.segment_lane_offsets = vec![0.0; self.segment_count()];
+        }
+        if self.directors.len() != self.positions.len() {
+            self.directors = vec![0.0; self.positions.len()];
+        }
+    }
+
+    /// Per-vertex, per-axis distance from the centerline to a wall the fiber
+    /// touches: the radius for round fibers, and for ovals the lane radius
+    /// plus the outer lane's offset along that axis.
+    pub fn vertex_wall_extents(&self) -> Vec<f32> {
+        let mut extents = vec![0.0_f32; self.positions.len()];
+        for fiber in 0..self.fiber_count() {
+            let segment = self.fiber_segment_spans[2 * fiber] as usize;
+            let radius = self.segment_radii[segment];
+            let offset = self.segment_lane_offsets.get(segment).copied().unwrap_or(0.0);
+            let start = self.fiber_vertex_spans[2 * fiber] as usize;
+            let count = self.fiber_vertex_spans[2 * fiber + 1] as usize;
+            for vertex in start..start + count {
+                for axis in 0..3 {
+                    extents[3 * vertex + axis] = if offset > 0.0 {
+                        radius - offset + offset * self.directors[3 * vertex + axis].abs()
+                    } else {
+                        radius
+                    };
+                }
+            }
+        }
+        extents
     }
 
     /// Number of vertices in the packed representation.
@@ -456,13 +522,17 @@ impl PackedAssembly {
     }
 
     /// Replaces an assembly's placed positions with a downloaded device state.
+    /// Downloaded directors, given for layouts with oval fibers, replace the
+    /// placed directors.
     pub fn unpack_positions(
         &self,
         positions: &[f32],
+        directors: Option<&[f32]>,
         assembly: &mut FiberAssembly,
     ) -> Result<(), PackingError> {
         if positions.len() != self.positions.len()
             || assembly.geometry.placed.positions.len() != self.vertex_count()
+            || directors.is_some_and(|directors| directors.len() != positions.len())
         {
             return Err(PackingError::PositionLengthMismatch);
         }
@@ -475,6 +545,24 @@ impl PackedAssembly {
         {
             *target = [xyz[0] as f64, xyz[1] as f64, xyz[2] as f64];
         }
+        if let Some(directors) = directors.filter(|_| self.has_ovals) {
+            assembly.ensure_directors();
+            for fiber in &assembly.topology.fibers {
+                let section = assembly.sections.entries[fiber.section.0 as usize];
+                let lanes = LaneSection::from_section(&section);
+                if lanes.offset <= 0.0 {
+                    continue;
+                }
+                let start = fiber.vertices.start as usize;
+                let range = start..start + fiber.vertices.len as usize;
+                let device = directors[3 * range.start..3 * range.end]
+                    .chunks_exact(3)
+                    .map(|xyz| [xyz[0] as f64, xyz[1] as f64, xyz[2] as f64])
+                    .collect::<Vec<_>>();
+                let host = lanes.host_directors(&assembly.geometry.placed.positions[range.clone()], device);
+                assembly.geometry.placed.directors[range].copy_from_slice(&host);
+            }
+        }
         Ok(())
     }
 
@@ -482,12 +570,20 @@ impl PackedAssembly {
     pub fn unpack_active_positions(
         &self,
         positions: &[f32],
+        directors: Option<&[f32]>,
         active: &[u32],
         assembly: &mut FiberAssembly,
     ) -> Result<(), PackingError> {
-        if positions.len() != self.positions.len() || active.len() != self.vertex_count() {
+        if positions.len() != self.positions.len()
+            || active.len() != self.vertex_count()
+            || directors.is_some_and(|directors| directors.len() != positions.len())
+        {
             return Err(PackingError::PositionLengthMismatch);
         }
+        // Staged fibers of a uniform layout may be oval; keep their directors.
+        // Adaptive layouts hold round fibers only.
+        let directors = directors.filter(|_| self.has_ovals);
+        let mut placed_directors = Vec::new();
         let mut placed = Vec::new();
         let mut intrinsic = Vec::new();
         let source_fibers = std::mem::take(&mut assembly.topology.fibers);
@@ -515,11 +611,26 @@ impl PackedAssembly {
                     self.intrinsic_positions[3 * vertex + 1] as f64,
                     self.intrinsic_positions[3 * vertex + 2] as f64,
                 ]);
+                if let Some(directors) = directors {
+                    placed_directors.push([
+                        directors[3 * vertex] as f64,
+                        directors[3 * vertex + 1] as f64,
+                        directors[3 * vertex + 2] as f64,
+                    ]);
+                }
             }
             let len = u32::try_from(placed.len() - new_start as usize)
                 .map_err(|_| PackingError::IndexOverflow)?;
             if len == 0 {
                 continue;
+            }
+            if directors.is_some() {
+                let section = assembly.sections.entries[fiber.section.0 as usize];
+                let range = new_start as usize..placed.len();
+                let device = placed_directors[range.clone()].to_vec();
+                placed_directors[range.clone()].copy_from_slice(
+                    &LaneSection::from_section(&section).host_directors(&placed[range], device),
+                );
             }
             if len < 2 {
                 return Err(PackingError::ActiveFiberTooShort {
@@ -536,11 +647,9 @@ impl PackedAssembly {
         }
         assembly.topology.fibers = fibers;
         assembly.admissibility.bend_limits = bend_limits;
-        // Adaptive packing only accepts circular sections, so no directors
-        // survive the change of discretization.
         assembly.geometry.placed = GeometryState {
             positions: placed,
-            directors: Vec::new(),
+            directors: placed_directors,
         };
         assembly.geometry.intrinsic = GeometryState {
             positions: intrinsic,
@@ -563,7 +672,7 @@ pub enum PackingError {
     NonOrthorhombicCellUnsupported,
     /// A fiber referenced a missing section.
     MissingSection(u32),
-    /// The first capsule backend accepts only circular sections.
+    /// Adaptive segmentation accepts only circular sections.
     NonCircularSection(u32),
     /// Downloaded and host geometry lengths differ.
     PositionLengthMismatch,
@@ -588,9 +697,10 @@ impl fmt::Display for PackingError {
             Self::MissingSection(id) => {
                 write!(formatter, "fiber {id} references a missing section")
             }
-            Self::NonCircularSection(id) => {
-                write!(formatter, "fiber {id} uses a non-circular section")
-            }
+            Self::NonCircularSection(id) => write!(
+                formatter,
+                "fiber {id} has an oval section, which adaptive segmentation does not support yet"
+            ),
             Self::PositionLengthMismatch => {
                 formatter.write_str("downloaded position buffer has the wrong length")
             }
@@ -612,6 +722,92 @@ fn distance(first: [f64; 3], second: [f64; 3]) -> f32 {
     let y = second[1] - first[1];
     let z = second[2] - first[2];
     (x * x + y * y + z * z).sqrt() as f32
+}
+
+/// Most lanes one oval is split into for contact.
+pub const MAXIMUM_OVAL_LANES: u32 = 5;
+/// Largest spacing between neighbouring lanes, as a fraction of the lane
+/// radius. At 0.6 the boundary between two lanes dips at most 4.6 % of the
+/// lane radius below a flat side.
+pub const OVAL_LANE_SPACING: f32 = 0.6;
+
+/// Number of round lanes that model an oval of the given outer lane offset
+/// and lane radius; one for a round fiber. The contact kernel computes the
+/// same count.
+pub fn oval_lane_count(offset: f32, lane_radius: f32) -> u32 {
+    if offset <= 0.0 {
+        return 1;
+    }
+    let gaps = (2.0 * offset / (OVAL_LANE_SPACING * lane_radius)).ceil() as u32;
+    (gaps + 1).clamp(2, MAXIMUM_OVAL_LANES)
+}
+
+/// How one section is packed: a bounding radius plus, for an oval, the
+/// offset of its outermost lane and which semi-axis is the long one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LaneSection {
+    radius: f32,
+    offset: f32,
+    /// The long axis is the second semi-axis, so device directors are the
+    /// stored directors turned a quarter turn about the tangent.
+    turned: bool,
+}
+
+impl LaneSection {
+    fn from_section(section: &Section) -> Self {
+        match *section {
+            Section::Circular { radius } => Self {
+                radius: radius as f32,
+                offset: 0.0,
+                turned: false,
+            },
+            Section::Elliptical { semi_axes } => {
+                let long = semi_axes[0].max(semi_axes[1]);
+                let short = semi_axes[0].min(semi_axes[1]);
+                Self {
+                    radius: long as f32,
+                    offset: (long - short) as f32,
+                    turned: semi_axes[1] > semi_axes[0],
+                }
+            }
+        }
+    }
+
+    /// Stored directors point along the first semi-axis; device directors
+    /// always point along the long one.
+    fn device_directors(&self, placed: &[Vec3], directors: Vec<Vec3>) -> Vec<Vec3> {
+        if self.turned {
+            quarter_turn(placed, directors)
+        } else {
+            directors
+        }
+    }
+
+    fn host_directors(&self, placed: &[Vec3], directors: Vec<Vec3>) -> Vec<Vec3> {
+        let mut directors = if self.turned {
+            quarter_turn(placed, directors)
+        } else {
+            directors
+        };
+        tangle_core::orthonormalize_directors(placed, &mut directors);
+        directors
+    }
+}
+
+/// Turns each director a quarter turn about the local tangent. Ellipses are
+/// symmetric, so turning either way swaps the two semi-axes.
+fn quarter_turn(placed: &[Vec3], directors: Vec<Vec3>) -> Vec<Vec3> {
+    polyline_tangents(placed)
+        .into_iter()
+        .zip(directors)
+        .map(|(t, d)| {
+            [
+                t[1] * d[2] - t[2] * d[1],
+                t[2] * d[0] - t[0] * d[2],
+                t[0] * d[1] - t[1] * d[0],
+            ]
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -721,5 +917,70 @@ mod tests {
         assert_eq!(packed.fiber_vertex_spans, vec![0, 17]);
         assert_eq!(packed.vertex_segments[2 * 8], 0);
         assert_eq!(packed.vertex_segments[2 * 8 + 1], 15);
+    }
+
+    fn oval_assembly(semi_axes: [f64; 2]) -> FiberAssembly {
+        let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([1.0; 3], [false; 3]));
+        let material = assembly.materials.add("oval");
+        let section = assembly.sections.add(Section::Elliptical { semi_axes });
+        let points = [[0.2, 0.5, 0.5], [0.5, 0.5, 0.5], [0.8, 0.5, 0.5]];
+        assembly
+            .add_fiber(FiberId(1), material, section, &points, &points)
+            .unwrap();
+        assembly
+    }
+
+    #[test]
+    fn packs_ovals_as_lanes_along_the_long_axis() {
+        let packed = PackedAssembly::from_assembly(&oval_assembly([0.03, 0.02])).unwrap();
+        assert!(packed.has_ovals);
+        assert_eq!(packed.segment_radii, vec![0.03; 2]);
+        assert!((packed.segment_lane_offsets[0] - 0.01).abs() < 1.0e-7);
+        // Default long axis lies flat, across the fiber.
+        assert_eq!(&packed.directors[0..3], &[0.0, 1.0, 0.0]);
+        let extents = packed.vertex_wall_extents();
+        assert!((extents[1] - 0.03).abs() < 1.0e-7);
+        assert!((extents[2] - 0.02).abs() < 1.0e-7);
+
+        // Listing the short semi-axis first turns the device director so it
+        // still points along the long axis.
+        let turned = PackedAssembly::from_assembly(&oval_assembly([0.02, 0.03])).unwrap();
+        assert_eq!(turned.segment_radii, packed.segment_radii);
+        assert!(turned.directors[1].abs() < 1.0e-7);
+        assert!((turned.directors[2].abs() - 1.0).abs() < 1.0e-7);
+    }
+
+    #[test]
+    fn round_fibers_pack_without_lanes() {
+        let mut assembly = oval_assembly([0.03, 0.03]);
+        assembly.sections.entries[0] = Section::Circular { radius: 0.03 };
+        let packed = PackedAssembly::from_assembly(&assembly).unwrap();
+        assert!(!packed.has_ovals);
+        assert_eq!(packed.segment_lane_offsets, vec![0.0; 2]);
+        assert!(packed.directors.iter().all(|value| *value == 0.0));
+        assert!(packed.vertex_wall_extents().iter().all(|value| *value == 0.03));
+    }
+
+    #[test]
+    fn lane_count_grows_with_flatness() {
+        assert_eq!(oval_lane_count(0.0, 1.0), 1);
+        assert_eq!(oval_lane_count(0.1, 1.0), 2);
+        assert_eq!(oval_lane_count(0.5, 1.0), 3);
+        assert_eq!(oval_lane_count(1.0, 1.0), 5);
+        assert_eq!(oval_lane_count(3.0, 1.0), MAXIMUM_OVAL_LANES);
+    }
+
+    #[test]
+    fn unpacking_turns_device_directors_back() {
+        let mut assembly = oval_assembly([0.02, 0.03]);
+        let packed = PackedAssembly::from_assembly(&assembly).unwrap();
+        let directors = packed.directors.clone();
+        packed
+            .unpack_positions(&packed.positions, Some(&directors), &mut assembly)
+            .unwrap();
+        // Stored directors point along the first (short) semi-axis again.
+        let stored = assembly.geometry.placed.directors[1];
+        assert!(stored[0].abs() < 1.0e-7 && stored[2].abs() < 1.0e-7);
+        assert!((stored[1].abs() - 1.0).abs() < 1.0e-7);
     }
 }
