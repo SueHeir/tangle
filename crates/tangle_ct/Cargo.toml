@@ -1,0 +1,9 @@
+[package]
+name = "tangle_ct"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Volume operations for fitting TANGLE fibers to CT scans"
+
+[dependencies]

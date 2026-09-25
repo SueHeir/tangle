@@ -478,6 +478,38 @@ class CtToolTests(unittest.TestCase):
                 found[k] |= small[ids]
         np.testing.assert_array_equal(_core_holes(mask, 3), expected)
 
+    def test_native_volume_operations_match_scipy(self):
+        from scipy.ndimage import distance_transform_edt, gaussian_filter, map_coordinates, maximum_filter
+
+        from tangle.ct import _native
+        from tangle.ct._geometry import nearest_segments, rasterize, segment_lines, segment_voxels
+
+        rng = np.random.default_rng(8)
+        image = gaussian_filter(rng.random((17, 20, 23)).astype(np.float32), 1.0)
+        for order in [(0, 0, 0), (0, 0, 1), (0, 2, 0), (1, 1, 0)]:
+            np.testing.assert_allclose(
+                _native.gaussian(image, 1.3, order), gaussian_filter(image, 1.3, order=order), atol=1e-6
+            )
+        points = rng.uniform(-1.0, 24.0, size=(500, 3))
+        reference = map_coordinates(image, (points[:, ::-1] - 0.5).T, order=1, mode="constant", cval=0.25)
+        np.testing.assert_allclose(_native.sample(image, points, 0.25), reference, atol=1e-6)
+        foreground = image > np.median(image)
+        edt, peak = _native.foreground_depth(foreground)
+        np.testing.assert_allclose(edt, distance_transform_edt(foreground), atol=1e-5)
+        np.testing.assert_allclose(peak, maximum_filter(distance_transform_edt(foreground).astype(np.float32), size=3), atol=1e-5)
+
+        # Rasterizing, against the NumPy drawing it replaced.
+        lines = [np.cumsum(rng.normal(0.0, 2.0, size=(8, 3)), axis=0) + rng.uniform(5, 15, size=3) for _ in range(10)]
+        radii = rng.uniform(1.5, 4.0, size=10)
+        shape = (20, 22, 24)
+        labels, distance, segment = rasterize(shape, lines, radii, signed=True)
+        line_of = segment_lines(lines)
+        chunks = segment_voxels(lines, radii + 0.5, radii, np.zeros(3, dtype=int), np.array(shape[::-1]))
+        value, owner = nearest_segments(int(np.prod(shape)), chunks, key=-radii[line_of])
+        expected = np.where(owner >= 0, line_of[np.maximum(owner, 0)] + 1, 0).reshape(shape)
+        self.assertGreater(np.mean(labels == expected), 0.999)
+        np.testing.assert_array_equal(segment.ravel() >= 0, owner >= 0)
+
     def test_crossing_ends_are_joined_straight_through(self):
         from tangle.ct._geometry import paint
         from tangle.ct._junctions import allowed_pairs, assemble, rank_plans, region_ports

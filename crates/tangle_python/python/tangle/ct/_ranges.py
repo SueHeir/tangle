@@ -38,13 +38,13 @@ def range_image(
     below its range) are filled as fiber, and a hole enclosed by one type's
     grey gets that type's bit.
     """
-    from scipy.ndimage import gaussian_filter
+    from . import _native
 
     from ._fit import _core_holes
 
     grey = np.asarray(volume, dtype=np.float32)
     if denoise_sigma > 0:
-        grey = gaussian_filter(grey, denoise_sigma)
+        grey = _native.gaussian(grey, denoise_sigma)
     lows = np.array([low for low, _ in ranges], dtype=np.float64)
     highs = np.array([high for _, high in ranges], dtype=np.float64)
     if np.any(highs <= lows):

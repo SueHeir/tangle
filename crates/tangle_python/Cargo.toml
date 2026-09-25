@@ -18,6 +18,7 @@ tangle_app.workspace = true
 tangle_checkpoint.workspace = true
 tangle_characterize.workspace = true
 tangle_core.workspace = true
+tangle_ct.workspace = true
 tangle_export.workspace = true
 tangle_generate.workspace = true
 tangle_relax.workspace = true

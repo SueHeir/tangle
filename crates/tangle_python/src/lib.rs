@@ -5,6 +5,7 @@ mod checkpoint;
 mod collection;
 mod common;
 mod compaction;
+mod ct;
 mod generators;
 mod image;
 mod junctions;
@@ -101,5 +102,12 @@ fn _tangle(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyRecipe>()?;
     module.add_class::<PyRunResult>()?;
     module.add_class::<PyImageRelaxer>()?;
+    module.add_class::<ct::PyCtHessian>()?;
+    module.add_function(wrap_pyfunction!(ct::ct_gaussian_filter, module)?)?;
+    module.add_function(wrap_pyfunction!(ct::ct_sample, module)?)?;
+    module.add_function(wrap_pyfunction!(ct::ct_foreground_depth, module)?)?;
+    module.add_function(wrap_pyfunction!(ct::ct_core_holes, module)?)?;
+    module.add_function(wrap_pyfunction!(ct::ct_rasterize, module)?)?;
+    module.add_function(wrap_pyfunction!(ct::ct_paint, module)?)?;
     Ok(())
 }
