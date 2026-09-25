@@ -299,6 +299,56 @@ confidence without the stability check, since a redrawn stretch moves
 because it was redrawn. The history records every pass: regions, how many
 were kept, widened or given up, and the sure coverage.
 
+## Fitting a whole scan in tiles
+
+`fit_fibers` holds the whole volume, and several float copies of it, in
+memory, and a run that stops loses everything. `ct.fit_tiled` fits a scan of
+any size one box at a time and saves every box as it finishes:
+
+```python
+scan = ct.open_scan("scan.tif")   # memory-mapped: only the box being fitted is read
+fit = ct.fit_tiled(scan, voxel_size, spec, settings, tile=256, checkpoint="scan_fit")
+fit.write("scan_fit/result")
+```
+
+- **Tiles.** The scan is split into equal **cores** no larger than `tile`
+  voxels per axis, and each core is fitted with `overlap` voxels of scan
+  around it (default the larger of 16 voxels and two of the largest
+  diameters), so fibers near a core wall are fitted with scan on both sides.
+  Every point belongs to exactly one core, and each tile keeps only the
+  stretches of its fit inside its own core.
+- **Stitching.** Where a kept stretch leaves its core, the tile's fit goes on
+  into the padding, which is the neighbouring core. There the neighbour's
+  own fit of that fiber leaves toward this core. When the two fits lie on
+  each other within half the overlap of the wall (on average closer than
+  three quarters of the smaller radius, and of the same type), they are
+  joined into one fiber; otherwise the fiber is cut at the wall. Joins are
+  made best first, one per end, so a fiber that crosses many cores comes out
+  whole. A short piece that ends at a wall without a partner is dropped.
+- **Checkpoints.** With `checkpoint=<directory>`, the directory holds a
+  `manifest.json` of the inputs and one `tiles/<z>_<y>_<x>.json` per
+  finished tile, in scan coordinates. Running `fit_tiled` again with the
+  same directory fits only the missing tiles, so a stopped or crashed run
+  resumes where it stopped. A checkpoint made from another scan, spec,
+  settings or tile grid is refused (`restart=True` deletes its tiles and
+  starts over). `ct.load_tiles(directory)` stitches whatever tiles are
+  there, without the scan, to look at a run in progress. `tiles=[(z, y, x),
+  ...]` fits only those tiles, so several processes or machines can share
+  one checkpoint.
+- **Grey levels.** A plain grey scan (no mask, grey ranges or profiles) is
+  mapped to void 0 and fiber 1 by levels read off the scan. The central tile
+  is fitted first and its levels are used for every other tile (and saved in
+  the manifest), so fibers are typed and sized the same way everywhere, and
+  a tile with little fiber in it is not mis-levelled. Pass
+  `FitSettings(levels=...)` to set them yourself.
+
+Tile size trades memory and time per tile against the share of each tile
+spent on padding: a tile fits `(1 + 2 overlap / tile)³` times its core's
+volume, e.g. 1.95 times for 256-voxel cores with 32 voxels of overlap. Each tile is an ordinary `fit_fibers` run with
+the same settings, so everything else in this page applies per tile.
+`examples/ct_tiled_scan.py` fits a large synthetic scan in tiles (or whole,
+for comparison) and scores it.
+
 ## Examples
 
 [`ct_examples.py`](../crates/tangle_python/python/examples/ct_examples.py)
@@ -369,7 +419,11 @@ layout.
   an M-series GPU even for 475 fibers; tracing and the one-fiber-or-two
   check, single-threaded Python, are the slow steps. The CPU backend runs
   the same steps but is far too slow for real scans; the tests run on the
-  GPU too and are skipped on CI, which has none.
+  GPU too and are skipped on CI, which has none. Whole scans are fitted in
+  tiles (see above). Next: keep each tile's scan resident on the GPU across
+  solver batches (every batch uploads it again today), and move the slow
+  CPU stages (the Hessian and blur filters, tracing's distance transforms,
+  rasterizing) to the GPU.
 - **Validation.** Next are benchmarks with real ground truth: the
   Math2Market FiberFind validation set and the DTU multimodal glass-fiber
   scans. See the project's dataset notes.

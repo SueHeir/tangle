@@ -12,6 +12,12 @@ volume, and an overlay of the fibers on the scan with one color per fiber.
     >>> fit.write("fit_output", volume=volume)   # fit.json, labels.tif, overlay.*
     >>> assembly = fit.to_assembly()             # continue in Tangle
 
+A whole scan is fitted in tiles, each saved as it finishes so a stopped run
+resumes where it stopped:
+
+    >>> scan = ct.open_scan("scan.tif")          # read from disk tile by tile
+    >>> fit = ct.fit_tiled(scan, 1.3e-6, spec, checkpoint="fit_tiles")
+
 Requires NumPy and SciPy; ``tifffile`` and ``matplotlib`` are optional (TIFF
 and PNG outputs). Install them with ``pip install numpy scipy tifffile
 matplotlib``.
@@ -23,6 +29,7 @@ from ._image import Levels
 from ._profile import CrossSection
 from ._overlay import fiber_palette, overlay_slice, overlay_volume, save_overlay_figure
 from ._synthetic import SyntheticScan, read_vti, synthetic_ct
+from ._tiles import fit_tiled, load_tiles, open_scan
 
 __all__ = [
     "CrossSection",
@@ -33,8 +40,11 @@ __all__ = [
     "SyntheticScan",
     "fiber_palette",
     "fit_fibers",
+    "fit_tiled",
     "geometry_report",
     "load_fit",
+    "load_tiles",
+    "open_scan",
     "overlay_slice",
     "overlay_volume",
     "read_vti",
