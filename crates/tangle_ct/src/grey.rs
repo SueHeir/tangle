@@ -92,7 +92,7 @@ pub fn render_grey(
     }
     for index in 0..size {
         let f = owner[index];
-        if f == usize::MAX || !(surface[index] < 2.0 * edge) {
+        if f == usize::MAX || surface[index] >= 2.0 * edge {
             continue;
         }
         let radius = radii[f];

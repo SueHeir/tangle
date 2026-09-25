@@ -847,7 +847,7 @@ pub(crate) fn ct_node_confidence(
     let shape = volume_shape(&image, "image")?;
     same_shape(&image, &depth, "depth")?;
     per_line(&radii, &counts, "radius")?;
-    if !(spacing > 0.0) || ring == 0 {
+    if spacing.is_nan() || spacing <= 0.0 || ring == 0 {
         return Err(PyValueError::new_err("spacing and ring must be positive"));
     }
     let lines = lines_of(&nodes, &counts)?;

@@ -147,7 +147,7 @@ pub fn half_radius(profile: &[f64], distances: &[f64], peak_reach: f64) -> f64 {
         }
     }
     let half = 0.5 * profile[top];
-    if !(half > 0.0) {
+    if half.is_nan() || half <= 0.0 {
         return 0.0;
     }
     let Some(k) = (top + 1..profile.len()).find(|&k| profile[k] < half) else {
@@ -355,7 +355,7 @@ pub fn node_confidence(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 fn fiber_parts(
     image: &[f32],
     depth: &[f32],
