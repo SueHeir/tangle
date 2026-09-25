@@ -386,7 +386,9 @@ impl Position {
 /// A reproducible description of a biased fiber population.
 ///
 /// Every field can be passed to the constructor as a keyword. `diameter=None`
-/// uses the material's diameter; ranges are `(min, max)` tuples.
+/// uses the material's diameter; ranges are `(min, max)` tuples. An oval
+/// material keeps its thickness-to-width ratio for every sampled diameter,
+/// and its fibers start with the long axis lying flat.
 #[pyclass(name = "FiberPopulation", module = "tangle._tangle")]
 #[derive(Clone, Debug)]
 pub(crate) struct PyFiberPopulation {
@@ -563,6 +565,10 @@ impl PyFiberPopulation {
             length: self.length,
             nominal_parent_length: self.nominal_parent_length,
             radius: scale_range(diameter, 0.5),
+            thickness_ratio: self
+                .material
+                .thickness
+                .map(|thickness| thickness / self.material.diameter),
             intrinsic_curvature_amplitude: self.curvature_amplitude,
             orientation: self.orientation.to_rust(stack_axis),
             position: self.position.to_rust(stack_axis),
@@ -703,7 +709,6 @@ pub(crate) fn generate_fiber_population_py(
     name: String,
 ) -> PyResult<PyFiberCollection> {
     let mut assembly = FiberAssembly::new(cell.inner);
-    population.material.require_round("generate_fiber_population")?;
     population.check_combination()?;
     generate_biased_fiber_population(&mut assembly, &population.to_rust(cell.stack_axis))
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
