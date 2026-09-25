@@ -144,7 +144,7 @@ def main() -> None:
         "side (vox)": scan.volume.shape[0],
         "tile / overlap": f"{args.tile} / {tiles['overlap']}" if tiles else "-",
         "tiles": tiles["tiles"] if tiles else "-",
-        "joins": tiles["joins"] if tiles else "-",
+        "joins (end to end)": f"{tiles['joins']} ({tiles.get('gap_joins', 0)})" if tiles else "-",
         "seconds": round(seconds, 1),
         "tile seconds (sum)": tiles["seconds"] if tiles else "-",
         "peak memory (GB)": round(peak_memory_gb(), 2),
@@ -164,9 +164,12 @@ def main() -> None:
         json.dumps({"row": row, "score": summary, "per_type": report["per_type"], "history": fit.history}, indent=1, default=str) + "\n"
     )
     table = folder / "summary.md"
-    if not table.exists():
-        table.write_text("| " + " | ".join(row) + " |\n|" + "---|" * len(row) + "\n")
+    header = "| " + " | ".join(row) + " |\n|" + "---|" * len(row) + "\n"
+    text = table.read_text() if table.exists() else ""
+    last_header = [line for line in text.splitlines() if line.startswith("| mode |")][-1:] or [""]
     with table.open("a") as handle:
+        if last_header[0] + "\n" != header.splitlines(keepends=True)[0]:
+            handle.write(("\n" if text else "") + header)  # new columns: start a new table
         handle.write("| " + " | ".join(str(v) for v in row.values()) + " |\n")
 
 

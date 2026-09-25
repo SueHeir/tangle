@@ -458,6 +458,7 @@ class _End:
     node: np.ndarray  # the stretch's end node
     band: np.ndarray  # the fit near this end, in order along it: the stretch's last ``band`` voxels and the tail past the wall
     tail: np.ndarray  # the fit past the wall (empty where it ends)
+    outward: np.ndarray | None  # unit direction the stretch leaves its end in (None for a one-node stretch)
 
 
 def stitch(
@@ -489,6 +490,8 @@ def stitch(
                 ends.append(_end(sid, 1, fit.index, line, owners, stop - 1, +1, band))
 
     links = _match(ends, stretches)
+    overlap_joins = len(links) // 2
+    _join_gaps(ends, stretches, links, grid, band)
     chains = _chains(len(stretches), links)
 
     min_length = [(item.min_length or 3.0 * item.diameter) / voxel_size for item in specs]
@@ -522,6 +525,7 @@ def stitch(
             "tiles": len(fits),
             "stretches": len(stretches),
             "joins": len(links) // 2,
+            "gap_joins": len(links) // 2 - overlap_joins,
             "dropped_edge_pieces": dropped,
             "fibers": len(lines),
             "seconds": round(sum(fit.seconds for fit in fits), 2),
@@ -577,7 +581,11 @@ def _end(sid, side, tile, line, owners, k, step, band) -> _End:
         target = tuple(int(i) for i in owners[nxt])
         tail = _walk(line, nxt, step, band)
     ordered = np.concatenate([inward[::-1], tail])  # inward end ... end node, tail ...
-    return _End(sid, side, tuple(tile), target, line[k], ordered, tail)
+    outward = None
+    if len(inward) > 1:
+        chord = line[k] - inward[min(len(inward) - 1, 4)]
+        outward = chord / max(float(np.linalg.norm(chord)), 1e-12)
+    return _End(sid, side, tuple(tile), target, line[k], ordered, tail, outward)
 
 
 def _distance_to_polyline(points: np.ndarray, line: np.ndarray) -> np.ndarray:
@@ -624,6 +632,65 @@ def _match(ends: list[_End], stretches: list[dict[str, Any]]) -> dict[tuple[int,
         links[first] = second
         links[second] = first
     return links
+
+
+def _join_gaps(
+    ends: list[_End], stretches: list[dict[str, Any]], links: dict[tuple[int, int], tuple[int, int]],
+    grid: TileGrid, band: float, max_angle_degrees: float = 30.0,
+) -> None:
+    """Join, end to end, free ends that face each other across a core wall.
+
+    The overlap match needs both tiles to have fitted the same stretch past
+    the wall. Where one tile's fit stops short of it (a void trim, a split
+    near the wall), the two pieces meet at the wall instead: each ends
+    within ``band`` of it, in neighbouring cores, pointing at the other
+    (both within ``max_angle_degrees`` of the line between them, which is
+    at most ``band`` long), with the same type. Nearest pairs first.
+    """
+    cos = np.cos(np.radians(max_angle_degrees))
+    free = [
+        e for e in ends
+        if (e.stretch, e.side) not in links and e.outward is not None and _wall_distance(grid, e.node, e.tile) <= band
+    ]
+    candidates = []
+    for i, a in enumerate(free):
+        for b in free[i + 1:]:
+            if a.tile == b.tile or a.stretch == b.stretch:
+                continue
+            if stretches[a.stretch]["type"] != stretches[b.stretch]["type"]:
+                continue
+            if not np.all(np.abs(np.subtract(a.tile, b.tile)) <= 1):
+                continue
+            gap = b.node - a.node
+            length = float(np.linalg.norm(gap))
+            if length > band:
+                continue
+            if length > 1e-9:
+                direction = gap / length
+                if a.outward @ direction < cos or -(b.outward @ direction) < cos:
+                    continue
+            elif a.outward @ -b.outward < cos:
+                continue
+            candidates.append((length, (a.stretch, a.side), (b.stretch, b.side)))
+    candidates.sort(key=lambda item: item[0])
+    for _, first, second in candidates:
+        if first in links or second in links:
+            continue
+        links[first] = second
+        links[second] = first
+
+
+def _wall_distance(grid: TileGrid, point: np.ndarray, tile: tuple[int, int, int]) -> float:
+    """Distance from ``point`` (x, y, z) to the nearest wall of its core shared with another core."""
+    low, high = grid.core(tile)
+    best = np.inf
+    for a in range(3):  # z, y, x
+        coordinate = float(point[2 - a])
+        if low[a] > 0:
+            best = min(best, abs(coordinate - low[a]))
+        if high[a] < grid.shape[a]:
+            best = min(best, abs(high[a] - coordinate))
+    return best
 
 
 def _chains(count: int, links: dict[tuple[int, int], tuple[int, int]]) -> list[list[tuple[int, int]]]:

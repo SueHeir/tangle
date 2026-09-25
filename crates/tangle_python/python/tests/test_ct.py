@@ -405,14 +405,17 @@ class CtToolTests(unittest.TestCase):
         # Both tiles fit fiber A alike across the wall; they disagree on fiber B
         # by 6 voxels (twice its radius); C pokes 4 voxels past the wall in the
         # left tile only, and D is fitted by the right tile only, ending in the
-        # left one's padding.
-        left = tile((0, 0, 0), [line(2, 76, 30, 30), line(2, 76, 10, 10), line(10, 64, 45, 45)])
-        right = tile((0, 0, 1), [line(44, 118, 30.3, 30), line(44, 118, 16, 10), line(50, 110, 50, 20)])
+        # left one's padding. E stops short of the wall in both tiles (at 56
+        # and 62), so they meet end to end.
+        left = tile((0, 0, 0), [line(2, 76, 30, 30), line(2, 76, 10, 10), line(10, 64, 45, 45), line(2, 57, 50, 50)])
+        right = tile((0, 0, 1), [line(44, 118, 30.3, 30), line(44, 118, 16, 10), line(50, 110, 50, 20), line(62, 118, 50, 50)])
         fit = _tiles.stitch(grid, [left, right], [ct.FiberSpec(diameter=6e-6)], 1e-6, levels)
         spans = sorted((round(float(l[:, 0].min())), round(float(l[:, 0].max()))) for l in fit.centerlines)
-        # A joined whole; B cut at the wall into two; C and D each their own tile's part.
-        self.assertEqual(fit.history[0]["joins"], 1, fit.history[0])
-        self.assertEqual(spans, [(2, 58), (2, 116), (10, 58), (60, 108), (60, 116)], spans)
+        # A joined whole, E joined across its gap; B cut at the wall into two;
+        # C and D each their own tile's part.
+        self.assertEqual(fit.history[0]["joins"], 2, fit.history[0])
+        self.assertEqual(fit.history[0]["gap_joins"], 1, fit.history[0])
+        self.assertEqual(spans, [(2, 58), (2, 116), (2, 116), (10, 58), (60, 108), (60, 116)], spans)
         whole = max(fit.centerlines, key=len)
         self.assertTrue(np.all(np.diff(whole[:, 0]) > 0))  # one fiber, in order, no doubled stretch
         self.assertEqual(len(fit.confidence[0]), len(fit.centerlines[0]))
