@@ -16,6 +16,10 @@ from ._geometry import polyline_length, rasterize, tangents
 from ._image import HessianField, Levels, half_widths, normalize
 from ._trace import trace_fibers
 
+# A study hook: when set, called with every redraw pass's decisions (see
+# ``_Fitter.redraw_loop`` and ``examples/ct_redraw_study.py``).
+_REDRAW_PROBE = None
+
 
 @dataclass(frozen=True)
 class FiberSpec:
@@ -1075,7 +1079,7 @@ class _Fitter:
                 if old_misfit is None:  # kept from the last pass when nothing changed
                     old_misfit = self.grey_misfit(lines, radii, types)
                 new_misfit = self.grey_misfit(new_lines, new_radii, new_types)
-            if self.score_name == "nats":
+            if self.score_name == "nats" or _REDRAW_PROBE is not None:
                 if old_nats is None:  # kept from the last pass when nothing changed
                     old_nats = self.nats_map(lines, radii, types)
                 new_nats = self.nats_map(new_lines, new_radii, new_types)
@@ -1092,7 +1096,7 @@ class _Fitter:
                 mask_gain[c] = (
                     float(old_residual[mask].sum(dtype=np.int64)) - float(new_residual[mask].sum(dtype=np.int64))
                 ) / foreground
-                if self.score_name == "nats":
+                if self.score_name == "nats" or _REDRAW_PROBE is not None:
                     nats_gain[c] = float(old_nats[mask].sum(dtype=np.float64)) - float(new_nats[mask].sum(dtype=np.float64))
                 if self.profiles is not None:
                     # Nats: the drop in squared grey residual over the evidence scale.
@@ -1105,6 +1109,18 @@ class _Fitter:
                 "all": np.ones(count, dtype=bool),
             }
             accepted = better[self.score_name]
+            if _REDRAW_PROBE is not None:
+                _REDRAW_PROBE(
+                    {
+                        "pass": pass_index, "judge": self.score_name, "old": (lines, radii), "new": (new_lines, new_radii),
+                        "groups": [[boxes[k] for k in np.flatnonzero(component == c)] for c in range(count)],
+                        "gains": {
+                            "nats": nats_gain, "grey": grey_gain if self.profiles is not None else None,
+                            "mask": mask_gain, "confidence": confidence_gain,
+                        },
+                        "accepted": accepted.copy(),
+                    }
+                )
             keep_old, keep_new = _regrow.choose(old_touch, new_touch, component, accepted)
             # An old fiber outside every region should be in the redraw too; if
             # the redraw's topology step joined it into a reverted fiber, bring
