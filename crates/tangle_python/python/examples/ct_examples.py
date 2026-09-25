@@ -72,8 +72,8 @@ Examples:
   photon noise, filtered back-projection), so the noise texture, blur and
   edge fringes come from the acquisition, as in a real scan: 2 µm
   resolution, and each fiber moving about 1 µm during the scan. Both types
-  are solid, the coarse ones a quarter as dense as the fine ones (a lighter
-  material, so they show a phase rim where the fine ones stay flat).
+  are solid, the coarse ones a lighter material a bit over half as dense
+  as the fine ones.
 * ``bundled_two_types``: the fine fibers packed in bundles of seven, with
   staggered ends, and the coarse ones loose, scanned as scanner_two_types
   with the noise blotchy (correlated by the scintillator's blur).
@@ -248,20 +248,19 @@ def long_fibers(cache: Path) -> Example:
 # back-projection, with a weakly absorbing, phase-shifting sample and a short
 # propagation distance, so the edges show phase fringes; a 2 µm resolution
 # softens the fibers, and each fiber moves about 1 µm during the scan. Both
-# fiber types are solid. The coarse fibers are a lighter material, a quarter
-# as dense as the fine ones, so the fine fibers stay the brightest thing in
-# the scan; being lighter, the coarse ones also shift the phase more for
-# what they absorb (a higher delta/beta), so they show a rim and a dark band
-# outside it where the dense fine fibers stay flat.
+# fiber types are solid; the coarse fibers are a lighter material, a bit over
+# half as dense as the fine ones, so the fine fibers are the brightest thing
+# in the scan, each with a dark band just outside it, and the coarse ones
+# dim with a faint rim.
 SCANNER = ct.Scanner(
-    photons=1500,
+    photons=1300,
     fiber_attenuation=0.005,
     resolution=2 * um,
-    delta_beta=(2.0, 40.0),
+    delta_beta=(12.0, 9.0),
     propagation=4.0,
     fiber_motion=1 * um,
 )
-SCANNER_PROFILES = [(7 * um, ct.CrossSection()), (19 * um, ct.CrossSection(brightness=0.25))]
+SCANNER_PROFILES = [(7 * um, ct.CrossSection()), (19 * um, ct.CrossSection(brightness=0.55))]
 
 
 def two_types(cache: Path, *, noisy: bool = False, halo: bool = False, scanner: bool = False) -> Example:
