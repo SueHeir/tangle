@@ -138,8 +138,10 @@ mod tests {
             // Through the center the chord is the diameter; the total is the area.
             let middle = 0.5 * (row[width / 2 - 1] + row[width / 2]) as f64;
             assert!((middle - 2.0 * r).abs() < 1.0, "{middle}");
+            // Every ray's sum is conserved: the total is the disk's voxel count.
             let area: f64 = row.iter().map(|&v| v as f64).sum();
-            assert!((area - std::f64::consts::PI * r * r).abs() < 6.0, "{area}");
+            let voxels: f64 = sample.iter().map(|&v| v as f64).sum();
+            assert!((area - voxels).abs() < 1.0, "{area} vs {voxels}");
         }
     }
 
