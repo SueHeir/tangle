@@ -11,6 +11,7 @@ mod admissibility;
 mod assembly;
 mod cell;
 mod curvature;
+mod director;
 mod error;
 mod fiber;
 mod ids;
@@ -25,6 +26,10 @@ pub use admissibility::{FiberAdmissibility, FiberBendLimit};
 pub use assembly::FiberAssembly;
 pub use cell::PeriodicCell;
 pub use curvature::{maximum_polyline_curvature, measure_vertex_curvature, VertexCurvature};
+pub use director::{
+    default_director, default_directors, orthonormalize_directors, polyline_tangents,
+    project_director,
+};
 pub use error::{AnchorError, BuildError};
 pub use fiber::{Fiber, FiberGeometry, FiberTopology, GeometryState};
 pub use ids::{

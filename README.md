@@ -190,7 +190,10 @@ See [solver and architecture notes](docs/architecture.md) for details.
 - **Fiber shape:** curvature and torsion distributions, tangent correlation and
   persistence length, curl index, and a Schladitz β orientation fit, from
   `characterize_shape()` on the same generated or CT-tracked centerlines.
-- **PuMA:** circular-capsule VTI/JSON bundles for direct `pumapy` analysis.
+- **Oval fibers:** `Material(..., thickness=...)` gives fibers an oval
+  cross-section that relaxes, twists and exports to OVITO and PuMA; see the
+  [oval fiber notes](docs/oval_fibers.md). BPM export is round-only.
+- **PuMA:** capsule VTI/JSON bundles for direct `pumapy` analysis.
   Occupied voxel volume and nominal fiber volume are different quantities;
   comparisons need matched definitions and resolution checks.
 - **CT scans:** `tangle.ct` fits Tangle fibers to a CT scan from the known
