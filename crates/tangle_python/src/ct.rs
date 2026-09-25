@@ -780,6 +780,51 @@ pub(crate) fn ct_resolve_side_by_side(
     Ok((pack(&lines), radii, changed))
 }
 
+/// Line integrals of a `(z, y, x)` sample at `angles` (radians) into `out`,
+/// an `(angles, z, width)` array (see `tangle_ct::scan::project`).
+#[pyfunction]
+pub(crate) fn ct_project(
+    sample: PyBuffer<f32>,
+    angles: Vec<f64>,
+    out: PyBuffer<f32>,
+) -> PyResult<()> {
+    let shape = volume_shape(&sample, "sample")?;
+    let width = match out.shape() {
+        [a, z, w] if *a == angles.len() && *z == shape[0] => *w,
+        _ => {
+            return Err(PyValueError::new_err(
+                "out must be (angles, sample z, width)",
+            ))
+        }
+    };
+    let result = tangle_ct::scan::project(read(&sample, "sample")?, shape, &angles, width);
+    write(&out, "out")?.copy_from_slice(&result);
+    Ok(())
+}
+
+/// The back-projection of `(angles, z, width)` rows over the `(z, y, x)`
+/// volume `out` (see `tangle_ct::scan::back_project`).
+#[pyfunction]
+pub(crate) fn ct_back_project(
+    projections: PyBuffer<f32>,
+    angles: Vec<f64>,
+    out: PyBuffer<f32>,
+) -> PyResult<()> {
+    let shape = volume_shape(&out, "out")?;
+    let width = match projections.shape() {
+        [a, z, w] if *a == angles.len() && *z == shape[0] => *w,
+        _ => {
+            return Err(PyValueError::new_err(
+                "projections must be (angles, out z, width)",
+            ))
+        }
+    };
+    let result =
+        tangle_ct::scan::back_project(read(&projections, "projections")?, &angles, width, shape);
+    write(&out, "out")?.copy_from_slice(&result);
+    Ok(())
+}
+
 /// The grey the lines should show over box `[low, high)` into `out`, a
 /// `(z, y, x)` array of the box (see `_grey.render_grey`).
 #[pyfunction]

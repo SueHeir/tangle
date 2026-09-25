@@ -32,8 +32,6 @@ Voxels are the detector pixels (unit magnification).
 
 from __future__ import annotations
 
-import os
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -65,31 +63,16 @@ def acquire(
 
     ``voxel_size`` (meters) is needed only for ``scanner.resolution``.
     """
-    from scipy.ndimage import gaussian_filter, rotate
+    from scipy.ndimage import gaussian_filter
+
+    from . import _native
 
     nz, ny, nx = attenuation.shape
-    # Pad the slice to its diagonal so nothing leaves the field as it turns.
+    # The detector spans the slice's diagonal, so every ray through it is seen.
     width = int(np.ceil(np.hypot(ny, nx))) + 4
-    pad_y, pad_x = (width - ny) // 2, (width - nx) // 2
-    sample = np.zeros((nz, width, width), dtype=np.float32)
-    sample[:, pad_y : pad_y + ny, pad_x : pad_x + nx] = attenuation
     count = scanner.angles or width
-    angles = np.arange(count) * (180.0 / count)
-
-    # Angles are spread over threads (the rotations release the GIL).
-    workers = max(1, min(8, os.cpu_count() or 1, count))
-    chunks = [range(w, count, workers) for w in range(workers)]
-
-    # Projections (angle, z, u): line integrals along y of the turned sample.
-    line = np.empty((count, nz, width), dtype=np.float32)
-
-    def project(chunk):
-        for k in chunk:
-            turned = rotate(sample, angles[k], axes=(1, 2), reshape=False, order=1, mode="constant")
-            line[k] = turned.sum(axis=1)
-
-    with ThreadPoolExecutor(workers) as pool:
-        list(pool.map(project, chunks))
+    angles = np.arange(count) * (np.pi / count)
+    line = _native.project(attenuation, angles, width)  # (angle, z, u)
 
     intensity = np.exp(-line)
     if scanner.propagation > 0 and scanner.delta_beta > 0:
@@ -107,19 +90,9 @@ def acquire(
     measured = -np.log(np.maximum(counts, 0.5) / scanner.photons)
 
     # Filtered back-projection, the inverse of the projector above.
-    filtered = _filter(measured)
-
-    def back_project(chunk):
-        total = np.zeros_like(sample)
-        for k in chunk:
-            smear = np.broadcast_to(filtered[k][:, None, :], sample.shape)
-            total += rotate(smear, -angles[k], axes=(1, 2), reshape=False, order=1, mode="constant")
-        return total
-
-    with ThreadPoolExecutor(workers) as pool:
-        volume = sum(pool.map(back_project, chunks))
+    volume = _native.back_project(_filter(measured), angles, attenuation.shape)
     volume *= np.pi / count
-    return volume[:, pad_y : pad_y + ny, pad_x : pad_x + nx]
+    return volume
 
 
 def _propagate(line: np.ndarray, delta_beta: float, distance: float) -> np.ndarray:

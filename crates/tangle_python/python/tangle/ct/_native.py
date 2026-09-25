@@ -300,3 +300,20 @@ def overlap(low, high, centerlines, radii) -> np.ndarray:
         nodes, counts = _pack(centerlines)
         _tangle.ct_overlap(low, high, nodes, counts, [float(r) for r in radii], out)
     return out
+
+
+def project(sample, angles, width: int) -> np.ndarray:
+    """Parallel-beam line integrals of a ``(z, y, x)`` sample: ``(angles, z, width)`` (see ``_scanner``)."""
+    sample = _f32(sample)
+    angles = [float(a) for a in angles]
+    out = np.empty((len(angles), sample.shape[0], int(width)), dtype=np.float32)
+    _tangle.ct_project(sample, angles, out)
+    return out
+
+
+def back_project(projections, angles, shape) -> np.ndarray:
+    """The back-projection of ``(angles, z, width)`` rows over a ``shape`` volume (see ``_scanner``)."""
+    out = np.empty(tuple(int(n) for n in shape), dtype=np.float32)
+    _tangle.ct_back_project(_f32(projections), [float(a) for a in angles], out)
+    return out
+
