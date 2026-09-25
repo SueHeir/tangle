@@ -303,7 +303,7 @@ pub fn merge_fragments(
                     }
                 }
                 let score = distance * (2.0 - facing);
-                if best.map_or(true, |b| score < b.0) {
+                if best.is_none_or(|b| score < b.0) {
                     best = Some((score, i, ei, j, ej));
                 }
             }
@@ -897,7 +897,7 @@ pub fn resolve_side_by_side(
             }
             starts.insert(k, points.len());
             points.extend_from_slice(line);
-            owner.extend(std::iter::repeat(k).take(line.len()));
+            owner.extend(std::iter::repeat_n(k, line.len()));
             let mut low = [f64::INFINITY; 3];
             let mut high = [f64::NEG_INFINITY; 3];
             for p in line {
@@ -1030,7 +1030,7 @@ pub fn resolve_side_by_side(
         let mut drawn: Vec<&[Point]> = vec![&merged_j];
         drawn.extend(pieces.iter().map(|p| p.as_slice()));
         let drawn_radii: Vec<f64> = std::iter::once(radii[j])
-            .chain(std::iter::repeat(radii[i]).take(pieces.len()))
+            .chain(std::iter::repeat_n(radii[i], pieces.len()))
             .collect();
         let one = union(render_occupancy(low, high, &drawn, &drawn_radii, EDGE));
         let added_ends = 2.0 * pieces.len() as f64 - 2.0;
