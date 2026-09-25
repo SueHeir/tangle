@@ -13,17 +13,37 @@ use grass_app::prelude::*;
 use grass_scheduler::prelude::*;
 use tangle_app::prelude::*;
 mod distribution;
+mod entanglement;
+mod graph;
 mod neighbors;
+mod phases;
+mod scorecard;
 mod shape;
+mod slices;
 
 pub use distribution::Distribution;
+pub use entanglement::{
+    analyze_entanglement, EntanglementConfig, EntanglementError, EntanglementMetrics,
+    FiberEntanglementMetrics, ENTANGLEMENT_SCHEMA_VERSION,
+};
+pub use graph::{analyze_contact_graph, ContactGraphMetrics, CONTACT_GRAPH_SCHEMA_VERSION};
 pub use neighbors::{
     analyze_neighbors, ContactEvent, FiberNeighborMetrics, NeighborAnalysisConfig,
     NeighborAnalysisError, NeighborMetrics, NEIGHBOR_SCHEMA_VERSION,
 };
+pub use phases::{
+    analyze_phases, PhaseAnalysisConfig, PhaseAnalysisError, PhaseMetrics, PHASE_SCHEMA_VERSION,
+};
+pub use scorecard::{
+    crop_assembly, profile_structure, score_structure, ScoreRow, Scorecard, ScorecardConfig,
+    ScorecardError, StructureProfile, SCORECARD_SCHEMA_VERSION,
+};
 pub use shape::{
     analyze_shape, FiberShapeMetrics, ShapeAnalysisConfig, ShapeAnalysisError, ShapeMetrics,
     SHAPE_SCHEMA_VERSION,
+};
+pub use slices::{
+    analyze_slices, SliceAnalysisConfig, SliceAnalysisError, SliceMetrics, SLICE_SCHEMA_VERSION,
 };
 
 use tangle_core::{

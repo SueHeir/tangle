@@ -418,7 +418,7 @@ fn default_spacing(fibers: &[FiberPath]) -> f64 {
 // Sampling
 
 /// Points at arc lengths `0, h, 2h, …` up to the fiber length.
-fn resample(fiber: &FiberPath, spacing: f64) -> Vec<Vec3> {
+pub(crate) fn resample(fiber: &FiberPath, spacing: f64) -> Vec<Vec3> {
     let count = (fiber.length / spacing).floor() as usize + 1;
     let mut points = Vec::with_capacity(count);
     let mut segment = 0;

@@ -185,11 +185,25 @@ See [solver and architecture notes](docs/architecture.md) for details.
   per-fiber summaries, curvature, and length-/volume-weighted orientation.
 - **Contacts and neighbors:** contact counts against a random-placement
   baseline, in-axis vs crossing contacts, contact persistence, and neighbor
-  turnover along each fiber. Works on generated assemblies and on CT-tracked
-  centerlines added with `Assembly.insert()`.
+  turnover along each fiber, plus the contact network (coordination number,
+  clustering, repeated contacts, percolation). Works on generated assemblies
+  and on CT-tracked centerlines added with `Assembly.insert()`.
 - **Fiber shape:** curvature and torsion distributions, tangent correlation and
   persistence length, curl index, and a Schladitz β orientation fit, from
   `characterize_shape()` on the same generated or CT-tracked centerlines.
+- **Entanglement:** per-fiber writhe and the Gauss linking of contacting
+  fibers, from `characterize_entanglement()`, to tell wrapped fibers from ones
+  that only cross.
+- **Cross-sections:** nearest-neighbor distances, the Clark-Evans ratio and
+  the pair correlation g(r) of fiber sections in slice planes, from
+  `characterize_slices()`, the way a CT slice is read.
+- **Pores and solid:** exact overlap-free solid fraction, solid and void
+  chord-length distributions, two-point correlation and a through-thickness
+  profile from test lines, with `characterize_phases()`; no voxel size needed.
+- **Scorecard against a scan:** `tangle.score_structure(candidate, reference,
+  contact_gap)` scores every shape, contact and orientation metric by its
+  distance to the reference divided by the reference's own
+  subvolume-to-subvolume spread.
 - **Oval fibers:** `Material(..., thickness=...)` gives fibers an oval
   cross-section that relaxes, twists and exports to OVITO and PuMA; see the
   [oval fiber notes](docs/oval_fibers.md). BPM export is round-only.

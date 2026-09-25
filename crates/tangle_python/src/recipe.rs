@@ -21,8 +21,9 @@ use tangle_generate::{
 use tangle_relax::{RelaxationPlugin, RelaxationState};
 
 use crate::analysis::{
-    characterize_neighbors, characterize_shape, PyAnalysisReport, PyNeighborReport,
-    PyPumaExportReport, PyShapeReport,
+    characterize_entanglement, characterize_neighbors, characterize_phases, characterize_shape,
+    characterize_slices, PyAnalysisReport, PyEntanglementReport, PyNeighborReport, PyPhaseReport,
+    PyPumaExportReport, PyShapeReport, PySliceReport,
 };
 use crate::checkpoint::PyCheckpointSettings;
 use crate::collection::{
@@ -969,6 +970,69 @@ impl PyRunResult {
             quantile_count,
             orientation_axis,
             min_torsion_curvature,
+        )
+    }
+
+    /// Measures fiber writhe and the Gauss linking of contacting fibers.
+    #[pyo3(signature = (contact_gap, *, sample_spacing=None, window=None, neighbor_sample_spacing=None, quantile_count=101))]
+    fn characterize_entanglement(
+        &self,
+        contact_gap: f64,
+        sample_spacing: Option<f64>,
+        window: Option<f64>,
+        neighbor_sample_spacing: Option<f64>,
+        quantile_count: usize,
+    ) -> PyResult<PyEntanglementReport> {
+        characterize_entanglement(
+            &self.model().assembly,
+            contact_gap,
+            sample_spacing,
+            window,
+            neighbor_sample_spacing,
+            quantile_count,
+        )
+    }
+
+    /// Measures nearest-neighbor distances and the pair correlation g(r) of
+    /// fiber cross-sections in planes normal to one cell axis.
+    #[pyo3(signature = (*, axis=2, slice_count=16, max_radius=None, bin_count=40, quantile_count=101))]
+    fn characterize_slices(
+        &self,
+        axis: usize,
+        slice_count: usize,
+        max_radius: Option<f64>,
+        bin_count: usize,
+        quantile_count: usize,
+    ) -> PyResult<PySliceReport> {
+        characterize_slices(
+            &self.model().assembly,
+            axis,
+            slice_count,
+            max_radius,
+            bin_count,
+            quantile_count,
+        )
+    }
+
+    /// Casts test lines through the fiber capsules and measures the exact
+    /// solid fraction, solid and void chord lengths, two-point correlation
+    /// and solid-fraction profile.
+    #[pyo3(signature = (*, line_count=64, max_lag=None, lag_count=32, profile_axis=2, quantile_count=101))]
+    fn characterize_phases(
+        &self,
+        line_count: usize,
+        max_lag: Option<f64>,
+        lag_count: usize,
+        profile_axis: usize,
+        quantile_count: usize,
+    ) -> PyResult<PyPhaseReport> {
+        characterize_phases(
+            &self.model().assembly,
+            line_count,
+            max_lag,
+            lag_count,
+            profile_axis,
+            quantile_count,
         )
     }
 

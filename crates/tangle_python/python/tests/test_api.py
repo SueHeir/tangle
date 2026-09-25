@@ -1,5 +1,6 @@
 import ast
 import math
+import random
 import tempfile
 import unittest
 from pathlib import Path
@@ -185,6 +186,10 @@ class CollectionTests(unittest.TestCase):
         self.assertAlmostEqual(report.median_crossing_angle_degrees, 90.0)
         self.assertAlmostEqual(report.median_excess_persistence, 1.0, delta=0.1)
         self.assertEqual(len(report.crossing_angles_degrees), 2)
+        graph = report.contact_graph()
+        self.assertEqual(graph["edges"], 1)
+        self.assertEqual(graph["degrees"], [1, 1])
+        self.assertEqual(graph["components"], 1)
         self.assertEqual(report.to_dict()["schema_version"], 1)
         self.assertIn('"contacts": 2', report.to_json())
         with tempfile.TemporaryDirectory() as directory:
@@ -193,6 +198,93 @@ class CollectionTests(unittest.TestCase):
             self.assertTrue(path.is_file())
         with self.assertRaises(ValueError):
             assembly.characterize_neighbors(0.1, neighbor_gap=0.01)
+
+    def test_entanglement_measures_contact_linking(self):
+        radius = 0.05
+        material = tangle.Material("fiber", diameter=2 * radius)
+        collection = tangle.FiberCollection.from_centerlines(
+            [
+                [[0.5, 1.0, 1.0], [1.5, 1.0, 1.0]],
+                [[1.0, 0.5, 1.0 + 2 * radius], [1.0, 1.5, 1.0 + 2 * radius]],
+            ],
+            material,
+        )
+        assembly = tangle.Assembly(tangle.Cell([2.0, 2.0, 2.0]))
+        assembly.insert(collection)
+
+        report = assembly.characterize_entanglement(0.01, neighbor_sample_spacing=0.002)
+        self.assertIsInstance(report, tangle.EntanglementReport)
+        self.assertAlmostEqual(report.sample_spacing, 2 * radius)
+        self.assertAlmostEqual(report.window, 20 * 2 * radius)
+        linking = report.absolute_contact_linking
+        self.assertEqual(linking["count"], 1)
+        self.assertGreater(linking["mean"], 0.2)
+        self.assertLess(linking["mean"], 0.5)
+        self.assertEqual(len(report.fiber_writhes), 2)
+        self.assertTrue(all(abs(value) < 1e-9 for value in report.fiber_writhes))
+        self.assertEqual(report.to_dict()["schema_version"], 1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nested" / "entanglement.json"
+            report.write_json(path)
+            self.assertTrue(path.is_file())
+
+    def test_slice_analysis_measures_a_square_lattice(self):
+        material = tangle.Material("fiber", diameter=0.1)
+        collection = tangle.FiberCollection.from_centerlines(
+            [
+                [[i + 0.5, j + 0.5, 0.0], [i + 0.5, j + 0.5, 2.0]]
+                for i in range(4)
+                for j in range(4)
+            ],
+            material,
+        )
+        assembly = tangle.Assembly(tangle.Cell([4.0, 4.0, 2.0], periodic="xy"))
+        assembly.insert(collection)
+
+        report = assembly.characterize_slices(slice_count=4, bin_count=8)
+        self.assertIsInstance(report, tangle.SliceReport)
+        self.assertEqual(report.section_counts, [16, 16, 16, 16])
+        self.assertAlmostEqual(report.sections_per_area, 1.0)
+        nearest = report.nearest_neighbor_distance
+        self.assertEqual(nearest["count"], 64)
+        self.assertAlmostEqual(nearest["quantiles"][0], 1.0)
+        self.assertAlmostEqual(nearest["quantiles"][-1], 1.0)
+        self.assertGreater(report.clark_evans_ratio, 1.9)
+        self.assertAlmostEqual(report.max_radius, 2.0)
+        self.assertEqual(len(report.pair_correlation), 8)
+        self.assertEqual(report.pair_correlation[0], 0.0)
+        self.assertEqual(report.to_dict()["schema_version"], 1)
+        with self.assertRaises(ValueError):
+            assembly.characterize_slices(axis=3)
+
+    def test_phase_analysis_measures_a_rod_exactly(self):
+        radius = 0.2
+        material = tangle.Material("fiber", diameter=2 * radius)
+        collection = tangle.FiberCollection.from_centerlines(
+            [[[0.5, 0.5, 0.0], [0.5, 0.5, 1.0]]], material
+        )
+        assembly = tangle.Assembly(tangle.Cell([1.0, 1.0, 1.0], periodic="xy"))
+        assembly.insert(collection)
+
+        report = assembly.characterize_phases(line_count=64, lag_count=4)
+        self.assertIsInstance(report, tangle.PhaseReport)
+        area = math.pi * radius * radius
+        self.assertAlmostEqual(report.solid_fraction_by_axis[0], area, delta=5e-3)
+        self.assertAlmostEqual(report.solid_fraction_by_axis[1], area, delta=5e-3)
+        solid_x = report.solid_chord_length[0]
+        self.assertAlmostEqual(solid_x["quantiles"][-1], 2 * radius, delta=1e-3)
+        self.assertAlmostEqual(solid_x["mean"], math.pi * radius / 2, delta=5e-3)
+        void_x = report.void_chord_length[0]
+        self.assertAlmostEqual(void_x["quantiles"][0], 1 - 2 * radius, delta=1e-3)
+        self.assertEqual(len(report.correlation_lags), 5)
+        self.assertEqual(len(report.two_point_correlation), 3)
+        self.assertAlmostEqual(
+            report.two_point_correlation[0][0], report.solid_fraction_by_axis[0]
+        )
+        self.assertEqual(len(report.solid_fraction_profile), 64)
+        self.assertEqual(report.to_dict()["schema_version"], 1)
+        with self.assertRaises(ValueError):
+            assembly.characterize_phases(line_count=0)
 
     def test_shape_analysis_measures_a_helix(self):
         a, c = 1.0, 0.5
@@ -219,6 +311,39 @@ class CollectionTests(unittest.TestCase):
             self.assertTrue(path.is_file())
         with self.assertRaises(ValueError):
             assembly.characterize_shape(orientation_axis=[0.0, 0.0, 0.0])
+
+    def test_scorecard_flags_a_wavier_structure(self):
+        def slab(amplitude, seed):
+            rng = random.Random(seed)
+            lines = []
+            for _ in range(40):
+                x0, y0, z = 0.2 + 3.6 * rng.random(), 0.2 + 3.6 * rng.random(), 0.5
+                angle, phase = 2 * math.pi * rng.random(), 2 * math.pi * rng.random()
+                u, v = (math.cos(angle), math.sin(angle)), (-math.sin(angle), math.cos(angle))
+                line = []
+                for i in range(61):
+                    s = 1.2 * i / 60
+                    w = amplitude * math.sin(2 * math.pi * s / 0.4 + phase)
+                    line.append([x0 + s * u[0] + w * v[0], y0 + s * u[1] + w * v[1], z])
+                lines.append(line)
+            assembly = tangle.Assembly(tangle.Cell([4.0, 4.0, 1.0]))
+            material = tangle.Material("fiber", diameter=0.02)
+            assembly.insert(tangle.FiberCollection.from_centerlines(lines, material))
+            return assembly
+
+        reference = slab(0.02, 1)
+        card = tangle.score_structure(slab(0.08, 2), reference, 0.005, subdivisions=[2, 2, 1])
+        self.assertEqual(card.reference_subvolume_count, 4)
+        self.assertEqual(card.subvolume_size, [2.0, 2.0, 1.0])
+        self.assertIn("curvature", card.scores)
+        self.assertGreater(card.scores["curvature"], 2.0)
+        self.assertIn("curvature", card.table())
+        self.assertEqual(len(card.rows), len(card.scores))
+        self.assertEqual(card.to_dict()["schema_version"], 1)
+        # The same assembly on both sides must not deadlock.
+        tangle.score_structure(reference, reference, 0.005, subdivisions=[2, 2, 1])
+        with self.assertRaises(ValueError):
+            tangle.score_structure(reference, reference, 0.005, subdivisions=[1, 1, 1])
 
 
 class CellTests(unittest.TestCase):

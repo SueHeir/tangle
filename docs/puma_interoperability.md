@@ -54,10 +54,12 @@ and can be compared byte-for-byte with the Python fixture's VTI/native JSON.
 | Orientation | Length- and volume-weighted centerline tensors | Accumulation of exported tangents, or independent image-based orientation |
 | Fiber statistics | Per-fiber length, equivalent diameter, stretch, maximum curvature, bend utilization; counts and material summaries | No individual-fiber reconstruction in this workflow |
 | Surface area | Nominal lateral area derived from radius and length in the section report | Marching-cubes surface area |
-| Void intercept lengths/connectivity | No native counterpart yet | PuMA mean intercept length and pore labeling |
+| Void intercept lengths/connectivity | `characterize_phases()`: exact solid and void chord-length distributions per axis, two-point correlation, solid-fraction profile; no pore labeling | PuMA mean intercept length and pore labeling |
 | Transport/continuum mechanics | No native characterization solver | PuMA conductivity, diffusivity/tortuosity, permeability, radiation, elasticity |
 | Contacts and neighbors | `characterize_neighbors()`: contact events, crossing angles, in-axis/out-of-axis split, excess persistence, free lengths, neighbor counts, neighbor turnover | No counterpart; voxel connectivity is not contact |
 | Fiber shape | `characterize_shape()`: curvature and torsion distributions, tangent correlation and persistence length, curl index, Schladitz β orientation fit | No individual-fiber reconstruction in this workflow |
+| Entanglement | `characterize_entanglement()`: per-fiber writhe, Gauss linking of contacting fibers | No counterpart |
+| Cross-sections | `characterize_slices()`: section nearest-neighbor distances, Clark-Evans ratio, pair correlation g(r) | No counterpart; slice images would need section segmentation |
 
 PuMA's property methods are described in its
 [analysis API](https://puma-nasa.readthedocs.io/en/latest/python_api/pumapy.material_properties.html).
@@ -99,6 +101,14 @@ distances and must be orthorhombic.
 - **Contact-count dispersion:** variance over mean of contacts per fiber.
   Random placement of equal-length fibers gives about one; clustering gives
   more.
+- **Contact graph:** `NeighborReport.contact_graph()` treats fibers as nodes
+  joined when they touch at least once. It reports the degree (coordination
+  number) and its histogram, `degree_per_length` (partners per unit length,
+  insensitive to truncation at a scan boundary), the number of separate
+  contacts per pair and the fraction of pairs that touch more than once
+  (wrapping or wandering back), the average local clustering and global
+  transitivity, and connected components with the fraction of fibers and
+  of length in the largest one (percolation).
 
 When comparing with a CT scan, run the same call on the tracked centerlines
 (inserted with `Assembly.insert()`) using the same gaps and angle. CT cannot
@@ -172,6 +182,133 @@ spaced `quantiles` (minimum first, maximum last; `quantile_count`, default 101).
 The quantile function is enough to plot a distribution and to compute its
 Wasserstein distance to another, which is how a generated structure will be
 scored against a scan.
+
+## Entanglement
+
+`characterize_entanglement(contact_gap)` separates fibers that merely cross or
+bend from fibers that coil and wrap around each other. It evaluates the Gauss
+linking integral exactly for polylines with the segment-pair solid-angle
+formula of Klenin and Langowski (2000), on fibers resampled at
+`sample_spacing` (default the smallest fiber diameter).
+
+- **Writhe:** the integral of each fiber with itself. It is zero for a fiber
+  that stays in a plane and grows as the fiber coils; its sign is the
+  handedness. `absolute_writhe_per_length` divides by fiber length so long and
+  short fibers can share a distribution.
+- **Contact linking:** the integral between two fibers that touch (the pairs
+  found by `characterize_neighbors` with the same `contact_gap`), restricted to
+  a `window` of arc length (default 20 sample spacings) centered on their first
+  contact on each fiber. Fibers are open, so it is not an integer: a single
+  straight crossing tends to one half in magnitude as the window grows
+  (a perpendicular crossing of two unit-length fibers 0.1 apart gives 0.41;
+  a 20° one gives 0.31), and each full wrap adds about one.
+  Each contacting pair is counted once.
+
+Both depend on the spacing and the window, so compare structures only at the
+same settings; the scorecard resolves them once from the reference.
+
+## Cross-sections
+
+`characterize_slices()` measures what a CT slice shows: the centers of the
+fiber sections in `slice_count` evenly spaced planes normal to `axis`
+(default z). A fiber lying in a slice plane gives no section there; an
+oblique fiber gives the center of an elongated one.
+
+- **Nearest-neighbor distance:** center-to-center distance from each section
+  to the closest other section in the same slice.
+- **Clark-Evans ratio:** mean nearest-neighbor distance over `0.5 / √λ`, its
+  value for randomly placed sections at the same density `λ`. Below one is
+  clustered (bundles); above one is more even than random.
+- **Pair correlation `g(r)`:** density of sections at distance `r` from a
+  typical section relative to random placement, in `bin_count` bins up to
+  `max_radius` (default eight mean section spacings). Values below one at
+  short range show excluded volume, a peak near one diameter shows packing,
+  and `g → 1` far away means no long-range order.
+
+Periodic in-plane axes use minimum-image distances. Along a non-periodic
+axis (a CT volume, a scorecard subvolume) sections near the edge have
+neighbors outside the view, so a nearest-neighbor distance only counts when it
+is no larger than the section's distance to the edge and is weighted by the
+inverse of the window shrunk by that distance (Hanisch), and `g(r)` is
+averaged only over sections at least `max_radius` from every edge. That is
+why `max_radius` may be at most a quarter of a non-periodic in-plane length
+(half of a periodic one).
+
+## Solid and pore statistics
+
+`characterize_phases()` computes pore-space statistics without voxelizing. It
+casts a `line_count × line_count` grid of straight test lines along each axis
+and intersects them exactly with the fiber capsules (each segment swept by its
+radius), so overlapping fibers count once and nothing depends on a voxel size.
+Oval fibers are treated as round, with the radius of a circle of equal area.
+
+- **Solid fraction:** covered length over line length, averaged over all
+  lines, also reported per axis. Unlike `nominal_swept_volume_fraction` it
+  does not double-count overlaps; at fine resolution it is what PuMA's voxel
+  fraction converges to.
+- **Chord lengths:** lengths of the solid and void intervals along x, y and z.
+  The mean void chord is PuMA's mean intercept length; the distributions add
+  its spread and the anisotropy between in-plane and through-thickness
+  directions. Chords cut by a non-periodic face are dropped because their true
+  length is unknown.
+- **Two-point correlation `S₂(r)`:** probability that two points `r` apart
+  along an axis are both solid, at `lag_count` lags up to `max_lag` (default
+  half the smallest cell length). It starts at the solid fraction and levels
+  at its square once solid positions decorrelate.
+- **Solid-fraction profile:** solid fraction at `line_count` positions along
+  `profile_axis` (default z, through the thickness).
+
+## Scoring against a scan
+
+`tangle.score_structure(candidate, reference, contact_gap)` compares a
+generated structure with a reference, usually centerlines fitted to a CT scan
+(`tangle.ct` `fit.to_assembly()`, or tracked centerlines added with
+`Assembly.insert()`). Both must use the same length unit.
+
+A raw difference cannot say whether a structure matches: a 10% difference in
+median curvature may be inside the scan's own variation or far outside it. The
+scorecard therefore cuts the reference region into `subdivisions` subvolumes
+(default 2×2×2), tiles the candidate region with subvolumes of the same
+physical size, and measures every metric in each. For each metric:
+
+```text
+score = median distance over (candidate, reference) subvolume pairs
+        ───────────────────────────────────────────────────────────
+        median distance over (reference, reference) subvolume pairs
+```
+
+The distance is the absolute difference for a scalar and the Wasserstein
+distance for a distribution. A score near one means the candidate differs from
+the scan about as much as the scan differs from itself at that scale; well
+above one is a real difference. `Scorecard.table()` lists the metrics worst
+first.
+
+| Kind | Metrics |
+| --- | --- |
+| Scalars | `volume_fraction`, `length_density`, `mean_squared_axis_cosine`, `log_schladitz_beta`, `persistence_length`, `tangent_correlation_length`, `contacts_per_length`, `contact_ratio_to_random`, `in_axis_contact_fraction`, `mean_neighbors`, `neighbor_correlation_length`, `contact_degree_per_length`, `contact_clustering`, `repeated_contact_fraction`, `largest_component_length_fraction`, `sections_per_area`, `clark_evans_ratio`, `solid_fraction` |
+| Distributions | `curvature`, `absolute_torsion`, `curl_index`, `axis_cosine`, `fiber_length`, `crossing_angle`, `free_length`, `excess_persistence`, `absolute_writhe_per_length`, `absolute_contact_linking`, `section_nearest_neighbor_distance`, `solid_chord_length_x`/`_y`/`_z`, `void_chord_length_x`/`_y`/`_z` |
+
+- **Same settings on both sides.** Sample spacings, the neighbor gap, lag
+  ranges and the torsion threshold are resolved once from the whole reference
+  region and reused for every subvolume; the resolved values are in the
+  report's `shape`, `neighbors` and `entanglement` settings. The linking
+  window defaults to 20 shape sample spacings (`linking_window`). Sections are
+  taken in `slice_count` planes normal to `slice_axis` in every subvolume;
+  `g(r)` is not scored. Chords come from `line_count²` test lines per axis
+  in every subvolume; `S₂` is not scored.
+- **Cropping.** Each subvolume is analyzed as a non-periodic box. Fibers are
+  clipped at its faces (periodic images included), and pieces shorter than
+  `min_piece_length` (default the largest reference fiber diameter) are
+  dropped, as a CT tracker drops fibers clipping a corner. Truncation shortens
+  fibers and lowers the curl index equally on both sides because the
+  subvolumes have the same size.
+- **Regions.** `candidate_region` and `reference_region` take `(lower, upper)`
+  corners. Restrict the candidate to the part its fibers actually fill, for
+  example the thickness of a generated stack, or the volume fraction will be
+  diluted by empty cell.
+- **Undefined scores.** A score is `None` when a metric is undefined in the
+  subvolumes (no contacts, no decay of the tangent correlation) or the
+  reference spread is zero. At least two reference subvolumes are required.
 
 ## Bundle format (schema 1)
 
