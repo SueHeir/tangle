@@ -222,7 +222,8 @@ pub fn cut_void(
                     .iter()
                     .map(|&p| value(p))
                     .fold(f64::INFINITY, f64::min);
-                let bow = offset >= rules.bridge_offset_radii * radius && lowest >= rules.bridge_level;
+                let bow =
+                    offset >= rules.bridge_offset_radii * radius && lowest >= rules.bridge_level;
                 let mut aligned = false;
                 if !bow && lowest >= rules.aligned_level {
                     if let Some(directions) = directions.as_mut() {
@@ -283,7 +284,10 @@ pub fn support(image: &[f32], shape: Shape, lines: &[Vec<Point>]) -> Vec<f64> {
             if line.is_empty() {
                 return 0.0;
             }
-            line.iter().map(|&p| trilinear(image, shape, p, 0.0)).sum::<f64>() / line.len() as f64
+            line.iter()
+                .map(|&p| trilinear(image, shape, p, 0.0))
+                .sum::<f64>()
+                / line.len() as f64
         })
         .collect()
 }
@@ -344,7 +348,14 @@ mod tests {
         assert_eq!(source, vec![0, 0]);
         assert_eq!(pieces[0].last().unwrap()[0], 40.0);
         assert_eq!(pieces[1][0][0], 45.0);
-        assert_eq!(counts, VoidCounts { trimmed: 4, splits: 1, bridged: 0 });
+        assert_eq!(
+            counts,
+            VoidCounts {
+                trimmed: 4,
+                splits: 1,
+                bridged: 0
+            }
+        );
         let dip: Vec<Point> = (30..50).map(|x| [x as f64, 10.0, 10.0]).collect();
         let (pieces, _, _) = cut_void(&image, shape, &[dip.clone()], &[4.0], RULES, None);
         assert_eq!(pieces, vec![dip]);
@@ -364,7 +375,8 @@ mod tests {
         let (_, source, counts) = cut_void(&image, shape, &lines, &[4.0], RULES, None);
         assert_eq!((source.len(), counts.bridged), (2, 0));
         let mut along_x = |_: usize, _: [Point; 2]| [[1.0, 0.0, 0.0]; 2];
-        let (_, source, counts) = cut_void(&image, shape, &lines, &[4.0], RULES, Some(&mut along_x));
+        let (_, source, counts) =
+            cut_void(&image, shape, &lines, &[4.0], RULES, Some(&mut along_x));
         assert_eq!((source.len(), counts.bridged), (1, 1));
     }
 

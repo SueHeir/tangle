@@ -90,7 +90,6 @@ pub fn resample(points: &[Point], spacing: f64) -> Vec<Point> {
     out
 }
 
-
 /// Unit tangents at the nodes: central differences, one-sided at the ends
 /// (`np.gradient`), normalized.
 pub fn tangents(points: &[Point]) -> Vec<Point> {

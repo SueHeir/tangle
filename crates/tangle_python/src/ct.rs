@@ -501,12 +501,20 @@ pub(crate) fn ct_cut_void(
     if let Some(error) = failure {
         return Err(error);
     }
-    Ok((pack(&pieces), source, (cut.trimmed, cut.splits, cut.bridged)))
+    Ok((
+        pack(&pieces),
+        source,
+        (cut.trimmed, cut.splits, cut.bridged),
+    ))
 }
 
 /// Each line resampled to `spacing` (see `_geometry.resample`); returns packed lines.
 #[pyfunction]
-pub(crate) fn ct_resample(nodes: PyBuffer<f64>, counts: Vec<usize>, spacing: f64) -> PyResult<Packed> {
+pub(crate) fn ct_resample(
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+    spacing: f64,
+) -> PyResult<Packed> {
     if !(spacing > 0.0) {
         return Err(PyValueError::new_err("spacing must be positive"));
     }
@@ -517,9 +525,17 @@ pub(crate) fn ct_resample(nodes: PyBuffer<f64>, counts: Vec<usize>, spacing: f64
 
 /// Mean image value along each line (see `_refine.support`).
 #[pyfunction]
-pub(crate) fn ct_support(image: PyBuffer<f32>, nodes: PyBuffer<f64>, counts: Vec<usize>) -> PyResult<Vec<f64>> {
+pub(crate) fn ct_support(
+    image: PyBuffer<f32>,
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+) -> PyResult<Vec<f64>> {
     let shape = volume_shape(&image, "image")?;
-    Ok(support(read(&image, "image")?, shape, &lines_of(&nodes, &counts)?))
+    Ok(support(
+        read(&image, "image")?,
+        shape,
+        &lines_of(&nodes, &counts)?,
+    ))
 }
 
 /// Largest curvature times `min_bend_radius`, per line (see `_refine.curvature_ratio`).
@@ -529,5 +545,8 @@ pub(crate) fn ct_curvature_ratio(
     counts: Vec<usize>,
     min_bend_radius: f64,
 ) -> PyResult<Vec<f64>> {
-    Ok(curvature_ratio(&lines_of(&nodes, &counts)?, min_bend_radius))
+    Ok(curvature_ratio(
+        &lines_of(&nodes, &counts)?,
+        min_bend_radius,
+    ))
 }
