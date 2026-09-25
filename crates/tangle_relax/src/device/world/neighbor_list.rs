@@ -4,7 +4,7 @@ use cubecl::prelude::*;
 use tangle_contact::device::{
     build_segment_neighbor_lists, finish_neighbor_list_rebuild, flag_neighbor_list_displacement,
     gather_cell_slot_geometry, request_neighbor_list_rebuild,
-    snapshot_neighbor_reference_positions,
+    snapshot_neighbor_reference_positions, sort_neighbor_lists,
 };
 
 use super::DeviceFiberWorld;
@@ -23,76 +23,70 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             self.cells_z,
             self.neighbor_state.clone(),
             2,
+            true,
         );
         let cube_dim = CubeDim::new_1d(64);
-        let segment_cubes = CubeCount::Static(self.active_segment_count.div_ceil(64) as u32, 1, 1);
+        // One thread per possible cell-list slot; the kernels stop at the
+        // number of slots the scatter actually filled.
+        let slot_cubes = CubeCount::Static(self.proxy_capacity.div_ceil(64) as u32, 1, 1);
+        let segments = self.packed.segment_count();
+        let slots = self.proxy_capacity;
         unsafe {
             gather_cell_slot_geometry::launch_unchecked::<R>(
                 &self.client,
-                segment_cubes.clone(),
+                slot_cubes.clone(),
                 cube_dim.clone(),
                 BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                BufferArg::from_raw_parts(
-                    self.segment_vertices.clone(),
-                    self.packed.segment_vertices.len(),
-                ),
-                BufferArg::from_raw_parts(
-                    self.segment_fibers.clone(),
-                    self.packed.segment_fibers.len(),
-                ),
-                BufferArg::from_raw_parts(
-                    self.segment_radii.clone(),
-                    self.packed.segment_radii.len(),
-                ),
-                BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
-                BufferArg::from_raw_parts(self.cell_segments.clone(), self.packed.segment_count()),
+                BufferArg::from_raw_parts(self.segment_vertices.clone(), 2 * segments),
+                BufferArg::from_raw_parts(self.segment_fibers.clone(), segments),
+                BufferArg::from_raw_parts(self.segment_radii.clone(), segments),
+                BufferArg::from_raw_parts(self.segment_proxies.clone(), segments),
+                BufferArg::from_raw_parts(self.cell_counts.clone(), self.cell_count),
+                BufferArg::from_raw_parts(self.cell_offsets.clone(), self.cell_count),
+                BufferArg::from_raw_parts(self.cell_segments.clone(), slots),
+                BufferArg::from_raw_parts(self.cell_proxies.clone(), slots),
                 BufferArg::from_raw_parts(self.neighbor_state.clone(), 2),
-                BufferArg::from_raw_parts(
-                    self.slot_geometry.clone(),
-                    8 * self.packed.segment_count(),
-                ),
-                BufferArg::from_raw_parts(
-                    self.slot_topology.clone(),
-                    3 * self.packed.segment_count(),
-                ),
+                BufferArg::from_raw_parts(self.slot_geometry.clone(), 8 * slots),
+                BufferArg::from_raw_parts(self.slot_topology.clone(), 5 * slots),
+                BufferArg::from_raw_parts(self.neighbor_counts.clone(), segments),
+                self.cell_count as u32,
             );
             build_segment_neighbor_lists::launch_unchecked::<R>(
                 &self.client,
-                segment_cubes,
+                slot_cubes,
                 cube_dim.clone(),
-                BufferArg::from_raw_parts(
-                    self.slot_geometry.clone(),
-                    8 * self.packed.segment_count(),
-                ),
-                BufferArg::from_raw_parts(
-                    self.slot_topology.clone(),
-                    3 * self.packed.segment_count(),
-                ),
-                BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                BufferArg::from_raw_parts(self.slot_geometry.clone(), 8 * slots),
+                BufferArg::from_raw_parts(self.slot_topology.clone(), 5 * slots),
                 BufferArg::from_raw_parts(self.cell_counts.clone(), self.cell_count),
                 BufferArg::from_raw_parts(self.cell_offsets.clone(), self.cell_count),
-                BufferArg::from_raw_parts(self.cell_segments.clone(), self.packed.segment_count()),
+                BufferArg::from_raw_parts(self.cell_segments.clone(), slots),
                 BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
                 BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
                 BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
                 BufferArg::from_raw_parts(self.neighbor_state.clone(), 2),
-                BufferArg::from_raw_parts(
-                    self.neighbor_counts.clone(),
-                    self.packed.segment_count(),
-                ),
-                BufferArg::from_raw_parts(
-                    self.neighbor_segments.clone(),
-                    self.packed.segment_count() * self.neighbor_capacity as usize,
-                ),
-                BufferArg::from_raw_parts(
-                    self.neighbor_home_cells.clone(),
-                    self.packed.segment_count(),
-                ),
+                BufferArg::from_raw_parts(self.neighbor_counts.clone(), segments),
+                BufferArg::from_raw_parts(self.neighbor_segments.clone(), self.neighbor_slots),
+                BufferArg::from_raw_parts(self.list_offsets.clone(), self.packed.segment_count()),
+                BufferArg::from_raw_parts(self.list_weights.clone(), self.packed.segment_count()),
                 self.neighbor_skin,
-                self.neighbor_capacity,
+                self.neighbor_block,
+                self.cell_count as u32,
                 self.cells_x,
                 self.cells_y,
                 self.cells_z,
+            );
+            sort_neighbor_lists::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::Static(self.active_segment_count.div_ceil(64) as u32, 1, 1),
+                cube_dim.clone(),
+                BufferArg::from_raw_parts(self.active_segment_indices.clone(), segments),
+                BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
+                BufferArg::from_raw_parts(self.neighbor_state.clone(), 2),
+                BufferArg::from_raw_parts(self.neighbor_counts.clone(), segments),
+                BufferArg::from_raw_parts(self.neighbor_segments.clone(), self.neighbor_slots),
+                BufferArg::from_raw_parts(self.list_offsets.clone(), segments),
+                BufferArg::from_raw_parts(self.list_weights.clone(), segments),
+                self.neighbor_block,
             );
             snapshot_neighbor_reference_positions::launch_unchecked::<R>(
                 &self.client,

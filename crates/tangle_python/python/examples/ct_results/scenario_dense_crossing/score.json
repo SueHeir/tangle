@@ -1,0 +1,991 @@
+{
+ "seconds": 15.00167483300902,
+ "score": {
+  "true_fibers_in_volume": 55,
+  "fitted_fibers": 69,
+  "recovered": 34,
+  "split": 9,
+  "missed": 12,
+  "stubs": 12,
+  "false_fibers": 4,
+  "merged_fibers": 7,
+  "recall": 0.6181818181818182,
+  "precision": 0.9420289855072463,
+  "f1": 0.7464955244046613,
+  "centerline_error_voxels": 0.6173714400227378,
+  "centerline_error_m": 1.024219218997722e-06,
+  "diameter_bias_m": 1.0919974673410943e-07,
+  "diameter_rms_error_m": 5.030795187928659e-07,
+  "solid_dice": 0.8277847635931369,
+  "voxel_label_accuracy": 0.7511488688584949,
+  "centerline_recall": 0.7936681222707423,
+  "centerline_precision": 0.8278985507246377,
+  "centerline_f1": 0.8104220432336972,
+  "interior_ends_fit": 59,
+  "interior_ends_truth": 42,
+  "implied_mean_length_fit_m": 0.0001224589853552127,
+  "implied_mean_length_truth_m": 0.0001884687960091057,
+  "per_type": null,
+  "per_true_fiber": [
+   {
+    "id": 1,
+    "state": "recovered",
+    "coverage": 0.9803921568627451,
+    "union_coverage": 0.9803921568627451,
+    "fitted": 1
+   },
+   {
+    "id": 2,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 3,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 4,
+    "state": "split",
+    "coverage": 0.797979797979798,
+    "union_coverage": 0.9797979797979798,
+    "fitted": 2
+   },
+   {
+    "id": 5,
+    "state": "missed",
+    "coverage": 0.5163934426229508,
+    "union_coverage": 0.7459016393442623,
+    "fitted": 2
+   },
+   {
+    "id": 6,
+    "state": "missed",
+    "coverage": 0.735632183908046,
+    "union_coverage": 0.735632183908046,
+    "fitted": 1
+   },
+   {
+    "id": 7,
+    "state": "stub",
+    "coverage": null,
+    "union_coverage": null,
+    "fitted": 0
+   },
+   {
+    "id": 8,
+    "state": "stub",
+    "coverage": null,
+    "union_coverage": null,
+    "fitted": 0
+   },
+   {
+    "id": 9,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 10,
+    "state": "split",
+    "coverage": 0.7238095238095238,
+    "union_coverage": 0.8666666666666667,
+    "fitted": 2
+   },
+   {
+    "id": 11,
+    "state": "recovered",
+    "coverage": 0.9846153846153847,
+    "union_coverage": 0.9846153846153847,
+    "fitted": 1
+   },
+   {
+    "id": 12,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 13,
+    "state": "split",
+    "coverage": 0.6991869918699187,
+    "union_coverage": 0.983739837398374,
+    "fitted": 2
+   },
+   {
+    "id": 14,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 15,
+    "state": "missed",
+    "coverage": 0.475,
+    "union_coverage": 0.475,
+    "fitted": 1
+   },
+   {
+    "id": 16,
+    "state": "recovered",
+    "coverage": 0.9333333333333333,
+    "union_coverage": 0.9333333333333333,
+    "fitted": 1
+   },
+   {
+    "id": 17,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 18,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 19,
+    "state": "missed",
+    "coverage": 0.5,
+    "union_coverage": 0.5,
+    "fitted": 1
+   },
+   {
+    "id": 20,
+    "state": "split",
+    "coverage": 0.6101694915254238,
+    "union_coverage": 1.0,
+    "fitted": 2
+   },
+   {
+    "id": 21,
+    "state": "missed",
+    "coverage": 0.7619047619047619,
+    "union_coverage": 0.7619047619047619,
+    "fitted": 1
+   },
+   {
+    "id": 22,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 23,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 24,
+    "state": "missed",
+    "coverage": 0.7181818181818181,
+    "union_coverage": 0.7181818181818181,
+    "fitted": 1
+   },
+   {
+    "id": 25,
+    "state": "split",
+    "coverage": 0.6240601503759399,
+    "union_coverage": 1.0,
+    "fitted": 2
+   },
+   {
+    "id": 26,
+    "state": "recovered",
+    "coverage": 0.8035714285714286,
+    "union_coverage": 0.8035714285714286,
+    "fitted": 1
+   },
+   {
+    "id": 27,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 28,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 29,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 30,
+    "state": "stub",
+    "coverage": null,
+    "union_coverage": null,
+    "fitted": 0
+   },
+   {
+    "id": 31,
+    "state": "missed",
+    "coverage": 0.680327868852459,
+    "union_coverage": 0.680327868852459,
+    "fitted": 1
+   },
+   {
+    "id": 32,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 33,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 34,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 35,
+    "state": "stub",
+    "coverage": null,
+    "union_coverage": null,
+    "fitted": 0
+   },
+   {
+    "id": 36,
+    "state": "recovered",
+    "coverage": 0.8905109489051095,
+    "union_coverage": 0.9781021897810219,
+    "fitted": 2
+   },
+   {
+    "id": 37,
+    "state": "missed",
+    "coverage": 0.765625,
+    "union_coverage": 0.765625,
+    "fitted": 1
+   },
+   {
+    "id": 38,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 39,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 40,
+    "state": "stub",
+    "coverage": null,
+    "union_coverage": null,
+    "fitted": 0
+   },
+   {
+    "id": 41,
+    "state": "missed",
+    "coverage": 0.6831683168316832,
+    "union_coverage": 0.6831683168316832,
+    "fitted": 1
+   },
+   {
+    "id": 42,
+    "state": "missed",
+    "coverage": 0.0,
+    "union_coverage": 0.0,
+    "fitted": 0
+   },
+   {
+    "id": 43,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 44,
+    "state": "split",
+    "coverage": 0.5084745762711864,
+    "union_coverage": 0.9322033898305084,
+    "fitted": 2
+   },
+   {
+    "id": 45,
+    "state": "stub",
+    "coverage": null,
+    "union_coverage": null,
+    "fitted": 0
+   },
+   {
+    "id": 46,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 47,
+    "state": "stub",
+    "coverage": null,
+    "union_coverage": null,
+    "fitted": 0
+   },
+   {
+    "id": 48,
+    "state": "split",
+    "coverage": 0.7070707070707071,
+    "union_coverage": 0.898989898989899,
+    "fitted": 2
+   },
+   {
+    "id": 49,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 50,
+    "state": "stub",
+    "coverage": null,
+    "union_coverage": null,
+    "fitted": 0
+   },
+   {
+    "id": 51,
+    "state": "recovered",
+    "coverage": 0.9878048780487805,
+    "union_coverage": 0.9878048780487805,
+    "fitted": 1
+   },
+   {
+    "id": 52,
+    "state": "recovered",
+    "coverage": 0.9545454545454546,
+    "union_coverage": 0.9545454545454546,
+    "fitted": 1
+   },
+   {
+    "id": 53,
+    "state": "stub",
+    "coverage": null,
+    "union_coverage": null,
+    "fitted": 0
+   },
+   {
+    "id": 54,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 55,
+    "state": "stub",
+    "coverage": null,
+    "union_coverage": null,
+    "fitted": 0
+   },
+   {
+    "id": 56,
+    "state": "stub",
+    "coverage": null,
+    "union_coverage": null,
+    "fitted": 0
+   },
+   {
+    "id": 57,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 58,
+    "state": "recovered",
+    "coverage": 0.9882352941176471,
+    "union_coverage": 0.9882352941176471,
+    "fitted": 1
+   },
+   {
+    "id": 59,
+    "state": "recovered",
+    "coverage": 0.868421052631579,
+    "union_coverage": 0.868421052631579,
+    "fitted": 1
+   },
+   {
+    "id": 60,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 61,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 62,
+    "state": "missed",
+    "coverage": 0.75,
+    "union_coverage": 0.75,
+    "fitted": 1
+   },
+   {
+    "id": 63,
+    "state": "split",
+    "coverage": 0.6115702479338843,
+    "union_coverage": 0.9421487603305785,
+    "fitted": 2
+   },
+   {
+    "id": 64,
+    "state": "split",
+    "coverage": 0.5897435897435898,
+    "union_coverage": 0.8717948717948718,
+    "fitted": 2
+   },
+   {
+    "id": 65,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 66,
+    "state": "stub",
+    "coverage": null,
+    "union_coverage": null,
+    "fitted": 0
+   },
+   {
+    "id": 67,
+    "state": "missed",
+    "coverage": 0.0,
+    "union_coverage": 0.0,
+    "fitted": 0
+   }
+  ],
+  "per_fitted_fiber": [
+   {
+    "id": 1,
+    "true_id": 35,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 2,
+    "true_id": 37,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 3,
+    "true_id": 30,
+    "purity": 0.8275862068965517,
+    "state": "matched"
+   },
+   {
+    "id": 4,
+    "true_id": 19,
+    "purity": 0.3548387096774194,
+    "state": "false"
+   },
+   {
+    "id": 5,
+    "true_id": 39,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 6,
+    "true_id": 20,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 7,
+    "true_id": 64,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 8,
+    "true_id": 29,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 9,
+    "true_id": 5,
+    "purity": 0.4307692307692308,
+    "state": "false"
+   },
+   {
+    "id": 10,
+    "true_id": 4,
+    "purity": 0.3541666666666667,
+    "state": "false"
+   },
+   {
+    "id": 11,
+    "true_id": 26,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 12,
+    "true_id": 21,
+    "purity": 0.5681818181818182,
+    "state": "merged"
+   },
+   {
+    "id": 13,
+    "true_id": 5,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 14,
+    "true_id": 52,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 15,
+    "true_id": 28,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 16,
+    "true_id": 2,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 17,
+    "true_id": 13,
+    "purity": 0.639344262295082,
+    "state": "merged"
+   },
+   {
+    "id": 18,
+    "true_id": 13,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 19,
+    "true_id": 24,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 20,
+    "true_id": 61,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 21,
+    "true_id": 51,
+    "purity": 0.8461538461538461,
+    "state": "matched"
+   },
+   {
+    "id": 22,
+    "true_id": 60,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 23,
+    "true_id": 58,
+    "purity": 0.6639344262295082,
+    "state": "merged"
+   },
+   {
+    "id": 24,
+    "true_id": 33,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 25,
+    "true_id": 25,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 26,
+    "true_id": 46,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 27,
+    "true_id": 63,
+    "purity": 0.5584415584415584,
+    "state": "merged"
+   },
+   {
+    "id": 28,
+    "true_id": 3,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 29,
+    "true_id": 63,
+    "purity": 0.6868686868686869,
+    "state": "merged"
+   },
+   {
+    "id": 30,
+    "true_id": 31,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 31,
+    "true_id": 23,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 32,
+    "true_id": 17,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 33,
+    "true_id": 65,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 34,
+    "true_id": 1,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 35,
+    "true_id": 25,
+    "purity": 0.8688524590163934,
+    "state": "matched"
+   },
+   {
+    "id": 36,
+    "true_id": 34,
+    "purity": 0.9241379310344827,
+    "state": "matched"
+   },
+   {
+    "id": 37,
+    "true_id": 8,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 38,
+    "true_id": 44,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 39,
+    "true_id": 44,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 40,
+    "true_id": 20,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 41,
+    "true_id": 36,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 42,
+    "true_id": 36,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 43,
+    "true_id": 12,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 44,
+    "true_id": 6,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 45,
+    "true_id": 14,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 46,
+    "true_id": 4,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 47,
+    "true_id": 64,
+    "purity": 0.7575757575757576,
+    "state": "merged"
+   },
+   {
+    "id": 48,
+    "true_id": 27,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 49,
+    "true_id": 16,
+    "purity": 0.8245614035087719,
+    "state": "matched"
+   },
+   {
+    "id": 50,
+    "true_id": 54,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 51,
+    "true_id": 32,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 52,
+    "true_id": 49,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 53,
+    "true_id": 41,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 54,
+    "true_id": 18,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 55,
+    "true_id": 22,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 56,
+    "true_id": 57,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 57,
+    "true_id": 38,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 58,
+    "true_id": 43,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 59,
+    "true_id": 11,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 60,
+    "true_id": 9,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 61,
+    "true_id": 48,
+    "purity": 0.4888888888888889,
+    "state": "false"
+   },
+   {
+    "id": 62,
+    "true_id": 10,
+    "purity": 0.5,
+    "state": "merged"
+   },
+   {
+    "id": 63,
+    "true_id": 48,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 64,
+    "true_id": 59,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 65,
+    "true_id": 10,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 66,
+    "true_id": 62,
+    "purity": 0.810126582278481,
+    "state": "matched"
+   },
+   {
+    "id": 67,
+    "true_id": 15,
+    "purity": 0.9444444444444444,
+    "state": "matched"
+   },
+   {
+    "id": 68,
+    "true_id": 53,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 69,
+    "true_id": 47,
+    "purity": 0.84375,
+    "state": "matched"
+   }
+  ]
+ },
+ "geometry": {
+  "fibers": 69,
+  "curvature_ratio_max": 1.0016283444382734,
+  "curvature_ratio_p95": 0.9959409380336639,
+  "fibers_over_bend_limit": 0,
+  "max_penetration_radii": 0.12070908680142528,
+  "overlapping_pairs": 10,
+  "min_segment_diameters": 0.449120267758832,
+  "segment_length_cv": 0.09650199178155272,
+  "total_length": 2175.5704707198047
+ },
+ "diff": {
+  "missed_voxels": 13098,
+  "extra_voxels": 11965,
+  "wrong_fiber_voxels": 5150,
+  "missed_fraction_of_true_fiber": 0.17860990277228533,
+  "extra_fraction_of_true_fiber": 0.16315983254469338,
+  "wrong_fiber_fraction_of_true_fiber": 0.07022759194359975
+ },
+ "confidence": {
+  "voxel_auc": 0.754417896270752,
+  "voxel_mean_confidence_right": 0.810920238494873,
+  "voxel_mean_confidence_wrong": 0.6243432760238647,
+  "fiber_auc": 0.8213166144200627,
+  "fiber_mean_confidence_matched": 0.8076471405155142,
+  "fiber_mean_confidence_merged_or_false": 0.6071645742267999,
+  "missed_next_to_unsure_fit": 0.2815697052985189,
+  "missed_next_to_any_fit": 0.8557795083218812
+ },
+ "end_error_max_voxels": 10.172477294904402,
+ "end_errors_voxels": [
+  4.7271670731955595,
+  9.977364177915497,
+  1.833244078999679,
+  2.7363260959491567,
+  0.8836752669162907,
+  1.3018947470370161,
+  3.3605355911398163,
+  0.3046870917904169,
+  1.1348682659712614,
+  0.8901110855072162,
+  5.778553891869512,
+  1.376323550161993,
+  6.456346556107086,
+  6.27178338883829,
+  2.1947495879857004,
+  1.4218571789884311,
+  1.4628121445567892,
+  2.0488883079081734,
+  0.868516158721598,
+  7.136613340864885,
+  0.661166934725886,
+  0.8181290962593102,
+  1.3990948717065814,
+  8.837281890112234,
+  1.587270914970989,
+  10.172477294904402,
+  4.37864864125628,
+  0.48100675270447973,
+  0.49303198647219765,
+  0.9550841660235009,
+  0.5413372147347884,
+  7.2784676781286235,
+  0.18023471433618474,
+  0.5285652490977537,
+  4.451018933721746,
+  0.1272615280940305,
+  1.6657351844724206,
+  1.68017507097126,
+  1.8334058800796507,
+  7.242977347189677,
+  7.993648855941414,
+  8.66709552204154
+ ]
+}

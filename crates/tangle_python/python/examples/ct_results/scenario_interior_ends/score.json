@@ -1,0 +1,81 @@
+{
+ "seconds": 0.8316398330498487,
+ "score": {
+  "true_fibers_in_volume": 1,
+  "fitted_fibers": 1,
+  "recovered": 1,
+  "split": 0,
+  "missed": 0,
+  "stubs": 0,
+  "false_fibers": 0,
+  "merged_fibers": 0,
+  "recall": 1.0,
+  "precision": 1.0,
+  "f1": 1.0,
+  "centerline_error_voxels": 0.09063909154313991,
+  "centerline_error_m": 1.3595863731470986e-07,
+  "diameter_bias_m": 0.0,
+  "diameter_rms_error_m": 0.0,
+  "solid_dice": 0.9847076461769115,
+  "voxel_label_accuracy": 0.9814704124327556,
+  "centerline_recall": 1.0,
+  "centerline_precision": 1.0,
+  "centerline_f1": 1.0,
+  "interior_ends_fit": 2,
+  "interior_ends_truth": 2,
+  "implied_mean_length_fit_m": 8.998332839833817e-05,
+  "implied_mean_length_truth_m": 9.01387818865997e-05,
+  "per_type": null,
+  "per_true_fiber": [
+   {
+    "id": 1,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   }
+  ],
+  "per_fitted_fiber": [
+   {
+    "id": 1,
+    "true_id": 1,
+    "purity": 1.0,
+    "state": "matched"
+   }
+  ]
+ },
+ "geometry": {
+  "fibers": 1,
+  "curvature_ratio_max": 0.07638980835111632,
+  "curvature_ratio_p95": 0.07638980835111632,
+  "fibers_over_bend_limit": 0,
+  "max_penetration_radii": 0.0,
+  "overlapping_pairs": 0,
+  "min_segment_diameters": 1.2497684280365948,
+  "segment_length_cv": 5.9303947633333095e-09,
+  "total_length": 59.98888532163704
+ },
+ "diff": {
+  "missed_voxels": 62,
+  "extra_voxels": 40,
+  "wrong_fiber_voxels": 0,
+  "missed_fraction_of_true_fiber": 0.01852958756724447,
+  "extra_fraction_of_true_fiber": 0.011954572624028692,
+  "wrong_fiber_fraction_of_true_fiber": 0.0
+ },
+ "confidence": {
+  "voxel_auc": 0.681904673576355,
+  "voxel_mean_confidence_right": 0.9800800681114197,
+  "voxel_mean_confidence_wrong": 0.9729728698730469,
+  "fiber_auc": null,
+  "fiber_mean_confidence_matched": 0.9783605080581423,
+  "fiber_mean_confidence_merged_or_false": null,
+  "missed_next_to_unsure_fit": 0.0,
+  "missed_next_to_any_fit": 1.0
+ },
+ "end_error_max_voxels": 0.5342384816326694,
+ "end_errors_voxels": [
+  0.5342384816326694,
+  0.4310095039715692
+ ]
+}

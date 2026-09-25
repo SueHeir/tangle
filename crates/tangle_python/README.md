@@ -4,7 +4,7 @@ Python is the primary user path for TANGLE. Python constructs fiber
 collections and manufacturing recipes; the existing Rust implementation owns
 validation, CubeCL device residency, relaxation, refinement, and export.
 
-The extension is compiled code. A development install requires Python 3.10 or
+The extension is compiled code. A development install requires Python 3.11 or
 newer, a stable [Rust toolchain](https://rustup.rs/) including Cargo, a native
 C/C++ compiler/linker, and network access for the first dependency build.
 CubeCL's build dependency downloads its matching bundled LLVM automatically;
@@ -414,6 +414,10 @@ for exact definitions, supported comparisons, and current limitations.
   centerline metrics with an independently imported PuMA voxel workspace.
 - `native/` mirrors the complete Rust example suite using the same native
   generators and solver. See `native/README.md` for the configuration map.
+- `ct_examples.py` fits Tangle fibers to synthetic CT scans with `tangle.ct`
+  and scores them against the truth. See the
+  [CT fitting guide](../../docs/ct_fitting.md) and the
+  [results, with pictures](python/examples/ct_results/README.md).
 
 ## Topic reference notebooks
 

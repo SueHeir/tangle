@@ -1268,6 +1268,31 @@ fn neighbor_lists_match_rebuilding_every_iteration() {
     );
 }
 
+/// Each active segment's built neighbor list, or `None` when it is inactive or
+/// overflowed its room (`neighbor_block` slots per list weight) and the
+/// contact pass scans cells.
+fn neighbor_lists(world: &DeviceFiberWorld<WgpuRuntime>) -> Vec<Option<Vec<u32>>> {
+    let read_u32 =
+        |handle: &Handle| u32::from_bytes(&world.client.read_one(handle.clone()).unwrap()).to_vec();
+    let counts = read_u32(&world.neighbor_counts);
+    let lists = read_u32(&world.neighbor_segments);
+    let offsets = read_u32(&world.list_offsets);
+    let weights = read_u32(&world.list_weights);
+    let active = world.download_segment_active();
+    let block = world.neighbor_block as usize;
+    (0..counts.len())
+        .map(|segment| {
+            if active[segment] == 0 {
+                return None;
+            }
+            let count = counts[segment] as usize;
+            let start = block * offsets[segment] as usize;
+            (count <= block * weights[segment] as usize)
+                .then(|| lists[start..start + count].to_vec())
+        })
+        .collect()
+}
+
 /// Distance between the axes of two segments, in f64 on the host.
 fn host_segment_axis_distance(p1: [f64; 3], q1: [f64; 3], p2: [f64; 3], q2: [f64; 3]) -> f64 {
     let d1 = [q1[0] - p1[0], q1[1] - p1[1], q1[2] - p1[2]];
@@ -1320,11 +1345,7 @@ fn neighbor_lists_hold_every_pair_within_the_skin() {
     };
     // The first contact pass builds the lists from the uploaded positions.
     world.run_batch(&config, 1);
-    let read_u32 =
-        |handle: &Handle| u32::from_bytes(&world.client.read_one(handle.clone()).unwrap()).to_vec();
-    let counts = read_u32(&world.neighbor_counts);
-    let lists = read_u32(&world.neighbor_segments);
-    let capacity = world.neighbor_capacity as usize;
+    let lists = neighbor_lists(&world);
     let skin = f64::from(world.neighbor_skin);
 
     let vertex = |index: u32| {
@@ -1340,9 +1361,10 @@ fn neighbor_lists_hold_every_pair_within_the_skin() {
     let segments = packed.segment_count();
     let mut checked = 0;
     for first in 0..segments {
-        let count = counts[first] as usize;
-        assert!(count <= capacity, "segment {first} overflowed: {count}");
-        let listed = &lists[first * capacity..first * capacity + count];
+        let listed = lists[first]
+            .as_deref()
+            .unwrap_or_else(|| panic!("segment {first} overflowed"));
+        let count = listed.len();
         let mut unique = listed.to_vec();
         unique.sort_unstable();
         unique.dedup();
@@ -1475,4 +1497,548 @@ fn needle_split_midpoints_join_the_relaxation_immediately() {
         "midpoint stayed at {:?}",
         &positions[index..index + 3]
     );
+}
+
+#[test]
+fn adaptive_relaxation_is_bitwise_repeatable() {
+    // Refinement and coarsening both fire here. Splits are decided in one
+    // launch and applied in the next, so no thread sees a split from the same
+    // epoch and the topology and positions repeat bit for bit.
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic(
+        [2.4, 2.4, 1.0],
+        [true, true, false],
+    ));
+    let material = assembly.materials.add("fiber");
+    let section = assembly.sections.add(Section::Circular { radius: 0.1 });
+    let mut id = 1;
+    for index in 0..12 {
+        let offset = 0.05 + 0.18 * index as f64;
+        let wobble = 0.03 * (index % 3) as f64;
+        for placed in [
+            [[0.2, offset, 0.45 + wobble], [2.2, offset, 0.45 + wobble]],
+            [
+                [offset + 0.07, 0.2, 0.55 - wobble],
+                [offset + 0.07, 2.2, 0.55 - wobble],
+            ],
+        ] {
+            assembly
+                .add_fiber(FiberId(id), material, section, &placed, &placed)
+                .unwrap();
+            id += 1;
+        }
+    }
+    let adaptive = AdaptiveSegmentationConfig {
+        contact_length_over_diameter: 2.0,
+        minimum_length_over_diameter: 0.5,
+        maximum_refinement_levels: 5,
+        refinement_interval: 4,
+        refinement_persistence: 1,
+        coarsening_persistence: 2,
+        ..AdaptiveSegmentationConfig::default()
+    };
+    let config = RelaxationConfig {
+        adaptive_segmentation: Some(adaptive),
+        penetration_tolerance: 0.0,
+        force_full_iterations: true,
+        max_step: 0.01,
+        max_iterations: 200,
+        iterations_per_batch: 20,
+        ..RelaxationConfig::default()
+    };
+    let run = || {
+        let packed =
+            PackedAssembly::from_assembly_with_options(&assembly, Some(adaptive), false).unwrap();
+        let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+            &WgpuDevice::default(),
+            packed,
+            CellListConfig::default(),
+            config.max_step,
+        );
+        let mut status = BatchStatus::default();
+        for _ in 0..10 {
+            status = world.run_batch(&config, 20);
+        }
+        let bits: Vec<u32> = world
+            .download_positions()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
+        (status, world.download_vertex_active(), bits)
+    };
+    let (first_status, first_active, first_bits) = run();
+    let (second_status, second_active, second_bits) = run();
+    assert!(first_status.segment_splits > 0, "{first_status:?}");
+    assert!(first_status.segment_merges > 0, "{first_status:?}");
+    assert_eq!(first_status, second_status);
+    assert_eq!(first_active, second_active);
+    assert!(first_bits == second_bits, "positions differ between runs");
+}
+
+#[test]
+fn long_segments_get_proportionally_longer_neighbor_lists() {
+    // Twenty 1.6-long single-segment fibers crossing in two layers 0.03
+    // apart, packed adaptively: each unrefined root is ten or more list blocks long,
+    // so with two slots per block its ~10 crossings still fit its list.
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic(
+        [2.0, 2.0, 1.0],
+        [true, true, false],
+    ));
+    let material = assembly.materials.add("fiber");
+    let section = assembly.sections.add(Section::Circular { radius: 0.02 });
+    let mut id = 1;
+    for index in 0..10 {
+        let offset = 0.1 + 0.19 * index as f64;
+        for placed in [
+            [[0.2, offset, 0.45], [1.8, offset + 0.05, 0.45]],
+            [[offset + 0.07, 0.2, 0.48], [offset + 0.02, 1.8, 0.48]],
+        ] {
+            assembly
+                .add_fiber(FiberId(id), material, section, &placed, &placed)
+                .unwrap();
+            id += 1;
+        }
+    }
+    let adaptive = AdaptiveSegmentationConfig {
+        contact_length_over_diameter: 100.0,
+        minimum_length_over_diameter: 1.0,
+        maximum_refinement_levels: 4,
+        ..AdaptiveSegmentationConfig::default()
+    };
+    let packed =
+        PackedAssembly::from_assembly_with_options(&assembly, Some(adaptive), false).unwrap();
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed.clone(),
+        CellListConfig {
+            neighbor_capacity: 2,
+            ..CellListConfig::default()
+        },
+        0.01,
+    );
+    let config = RelaxationConfig {
+        max_step: 0.01,
+        max_iterations: 1,
+        iterations_per_batch: 1,
+        ..RelaxationConfig::default()
+    };
+    world.run_batch(&config, 1);
+    assert_eq!(world.neighbor_block, 2);
+    let weights =
+        u32::from_bytes(&world.client.read_one(world.list_weights.clone()).unwrap()).to_vec();
+    let lists = neighbor_lists(&world);
+    let vertex = |index: u32| {
+        let index = 3 * index as usize;
+        [
+            f64::from(packed.positions[index]),
+            f64::from(packed.positions[index + 1]),
+            f64::from(packed.positions[index + 2]),
+        ]
+    };
+    let skin = f64::from(world.neighbor_skin);
+    let active: Vec<usize> = (0..packed.segment_count())
+        .filter(|&segment| packed.segment_active[segment] != 0)
+        .collect();
+    assert_eq!(active.len(), 20);
+    let mut crossings = 0;
+    for &first in &active {
+        assert!(weights[first] >= 10, "weight {}", weights[first]);
+        let listed = lists[first]
+            .as_deref()
+            .unwrap_or_else(|| panic!("segment {first} overflowed"));
+        assert!(listed.windows(2).all(|pair| pair[0] < pair[1]));
+        let (p1, q1) = (
+            vertex(packed.segment_vertices[2 * first]),
+            vertex(packed.segment_vertices[2 * first + 1]),
+        );
+        for &second in active.iter().filter(|&&second| second != first) {
+            let (mut p2, mut q2) = (
+                vertex(packed.segment_vertices[2 * second]),
+                vertex(packed.segment_vertices[2 * second + 1]),
+            );
+            for axis in 0..2 {
+                let shift = (0.5 * (p2[axis] + q2[axis] - p1[axis] - q1[axis]) / 2.0).round() * 2.0;
+                p2[axis] -= shift;
+                q2[axis] -= shift;
+            }
+            let interaction = 0.04 + skin;
+            let distance = host_segment_axis_distance(p1, q1, p2, q2);
+            if distance < 0.999 * interaction {
+                assert!(
+                    listed.contains(&(second as u32)),
+                    "{first}-{second} missing"
+                );
+                crossings += 1;
+            } else if distance > 1.001 * interaction {
+                assert!(
+                    !listed.contains(&(second as u32)),
+                    "{first}-{second} listed"
+                );
+            }
+        }
+        // More neighbors than one block could hold: the weighting matters.
+        assert!(
+            listed.len() > 2,
+            "segment {first} has {} neighbors",
+            listed.len()
+        );
+    }
+    assert!(crossings > 150, "{crossings} crossings");
+}
+
+/// Twenty 1.6-long single-segment fibers crossing in two layers 0.03 apart,
+/// packed adaptively: the unrefined roots are far longer than the finest
+/// leaves, so the neighbor grid bins each root as several proxy pieces.
+fn long_crossing_fibers() -> (PackedAssembly, f32) {
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic(
+        [2.0, 2.0, 1.0],
+        [true, true, false],
+    ));
+    let material = assembly.materials.add("fiber");
+    let section = assembly.sections.add(Section::Circular { radius: 0.02 });
+    let mut id = 1;
+    for index in 0..10 {
+        let offset = 0.1 + 0.19 * index as f64;
+        for placed in [
+            [[0.2, offset, 0.45], [1.8, offset + 0.05, 0.45]],
+            [[offset + 0.07, 0.2, 0.48], [offset + 0.02, 1.8, 0.48]],
+        ] {
+            assembly
+                .add_fiber(FiberId(id), material, section, &placed, &placed)
+                .unwrap();
+            id += 1;
+        }
+    }
+    let adaptive = AdaptiveSegmentationConfig {
+        contact_length_over_diameter: 100.0,
+        minimum_length_over_diameter: 1.0,
+        maximum_refinement_levels: 4,
+        ..AdaptiveSegmentationConfig::default()
+    };
+    let packed =
+        PackedAssembly::from_assembly_with_options(&assembly, Some(adaptive), false).unwrap();
+    (packed, 0.01)
+}
+
+#[test]
+fn long_segments_are_binned_as_proxy_pieces() {
+    let (packed, max_step) = long_crossing_fibers();
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed.clone(),
+        CellListConfig::default(),
+        max_step,
+    );
+    // The grid follows the 0.1-long leaves, not the 1.6-long roots.
+    assert!(world.cell_size() < 0.5, "cell size {}", world.cell_size());
+    assert!(world.segment_cell_size > 1.6);
+    let proxies = u32::from_bytes(
+        &world
+            .client
+            .read_one(world.segment_proxies.clone())
+            .unwrap(),
+    )
+    .to_vec();
+    let active: Vec<usize> = (0..packed.segment_count())
+        .filter(|&segment| packed.segment_active[segment] != 0)
+        .collect();
+    assert_eq!(active.len(), 20);
+    assert!(active.iter().all(|&segment| proxies[segment] >= 5));
+
+    let config = RelaxationConfig {
+        max_step,
+        max_iterations: 1,
+        iterations_per_batch: 1,
+        ..RelaxationConfig::default()
+    };
+    // The first contact pass builds the lists from the uploaded positions.
+    world.run_batch(&config, 1);
+    let lists = neighbor_lists(&world);
+    let skin = f64::from(world.neighbor_skin);
+    let vertex = |index: u32| {
+        let index = 3 * index as usize;
+        [
+            f64::from(packed.positions[index]),
+            f64::from(packed.positions[index + 1]),
+            f64::from(packed.positions[index + 2]),
+        ]
+    };
+    let lengths = [2.0, 2.0, 1.0];
+    let periodic = [true, true, false];
+    let mut listed_pairs = 0;
+    for &first in &active {
+        let listed = lists[first]
+            .as_deref()
+            .unwrap_or_else(|| panic!("segment {first} overflowed"));
+        let count = listed.len();
+        let mut unique = listed.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            count,
+            "segment {first} lists a neighbor twice"
+        );
+        // Lists are sorted after the build, whatever order pieces appended in.
+        assert!(
+            listed.windows(2).all(|pair| pair[0] < pair[1]),
+            "segment {first} list is not ascending: {listed:?}"
+        );
+        let (p1, q1) = (
+            vertex(packed.segment_vertices[2 * first]),
+            vertex(packed.segment_vertices[2 * first + 1]),
+        );
+        for &second in &active {
+            if second == first {
+                continue;
+            }
+            let (mut p2, mut q2) = (
+                vertex(packed.segment_vertices[2 * second]),
+                vertex(packed.segment_vertices[2 * second + 1]),
+            );
+            for axis in 0..3 {
+                if periodic[axis] {
+                    let shift = (0.5 * (p2[axis] + q2[axis] - p1[axis] - q1[axis]) / lengths[axis])
+                        .round()
+                        * lengths[axis];
+                    p2[axis] -= shift;
+                    q2[axis] -= shift;
+                }
+            }
+            let interaction = 0.04 + skin;
+            let distance = host_segment_axis_distance(p1, q1, p2, q2);
+            let is_listed = listed.contains(&(second as u32));
+            if distance < 0.999 * interaction {
+                assert!(is_listed, "{first}-{second} at {distance} missing");
+                listed_pairs += 1;
+            } else if distance > 1.001 * interaction {
+                assert!(!is_listed, "{first}-{second} at {distance} listed");
+            }
+        }
+    }
+    // Most of the 100 x/y fiber pairs cross (each crossing counts from both
+    // sides); the fibers' ends leave a few apart.
+    assert!(listed_pairs > 150, "{listed_pairs} neighbor pairs");
+}
+
+/// Relaxes the long crossing fibers and returns the positions, how many
+/// active lists overflowed at the last build, and the most pieces any
+/// segment was binned as.
+fn relax_long_crossing_fibers(cell_list: CellListConfig) -> (Vec<f32>, usize, u32) {
+    let (packed, max_step) = long_crossing_fibers();
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed,
+        cell_list,
+        max_step,
+    );
+    let config = RelaxationConfig {
+        penetration_tolerance: 0.0,
+        force_full_iterations: true,
+        max_step,
+        max_iterations: 30,
+        iterations_per_batch: 30,
+        ..RelaxationConfig::default()
+    };
+    let status = world.run_batch(&config, 30);
+    assert!(status.max_penetration.is_finite(), "{status:?}");
+    let active = world.download_segment_active();
+    let lists = neighbor_lists(&world);
+    let overflowed = (0..lists.len())
+        .filter(|&segment| active[segment] != 0 && lists[segment].is_none())
+        .count();
+    let proxies = u32::from_bytes(
+        &world
+            .client
+            .read_one(world.segment_proxies.clone())
+            .unwrap(),
+    )
+    .iter()
+    .copied()
+    .max()
+    .unwrap_or(1);
+    (world.download_positions(), overflowed, proxies)
+}
+
+/// Lists far too short for a wide skin: every long root overflows and takes
+/// the per-piece cell scan, with each root still split into several pieces.
+fn overflowing_proxy_lists() -> CellListConfig {
+    CellListConfig {
+        neighbor_capacity: 1,
+        neighbor_skin_scale: 20.0,
+        ..CellListConfig::default()
+    }
+}
+
+#[test]
+fn proxy_overflow_scan_matches_neighbor_lists() {
+    let (reference, _, _) = relax_long_crossing_fibers(CellListConfig {
+        neighbor_skin_scale: 0.0,
+        ..CellListConfig::default()
+    });
+    let (listed, listed_overflows, _) = relax_long_crossing_fibers(CellListConfig::default());
+    assert_eq!(listed_overflows, 0);
+    // Overflowing lists send every crossing through the per-piece cell scan,
+    // which must find each contact exactly once.
+    let (overflowed, overflows, proxies) = relax_long_crossing_fibers(overflowing_proxy_lists());
+    assert!(overflows >= 10, "only {overflows} lists overflowed");
+    assert!(proxies >= 2, "roots binned as {proxies} piece(s)");
+    let largest_difference = |left: &[f32], right: &[f32]| {
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0_f32, f32::max)
+    };
+    // The crossings overlap (0.03 apart, radii 0.02), so relaxation moves them.
+    let (packed, _) = long_crossing_fibers();
+    assert!(largest_difference(&reference, &packed.positions) > 1.0e-3);
+    assert!(largest_difference(&listed, &reference) < 1.0e-4);
+    assert!(largest_difference(&overflowed, &reference) < 1.0e-4);
+}
+
+#[test]
+fn proxy_relaxation_is_bitwise_repeatable() {
+    // Several proxy pieces append to one neighbor list concurrently; the
+    // lists are sorted after the build, so repeated runs stay identical.
+    for cell_list in [CellListConfig::default(), overflowing_proxy_lists()] {
+        let (first, _, _) = relax_long_crossing_fibers(cell_list);
+        let (second, _, _) = relax_long_crossing_fibers(cell_list);
+        let bits = |values: &[f32]| {
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            bits(&first) == bits(&second),
+            "{cell_list:?} relaxed differently"
+        );
+    }
+}
+
+/// Two flat ovals (long semi-axis 0.15, short 0.075) crossing at right angles,
+/// or lying side by side, in a closed 4-unit box.
+fn oval_pair(second: [[f64; 3]; 2], periodic: [bool; 3]) -> FiberAssembly {
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([4.0; 3], periodic));
+    let material = assembly.materials.add("oval");
+    let section = assembly.sections.add(Section::Elliptical {
+        semi_axes: [0.15, 0.075],
+    });
+    for (id, placed) in [(1, [[1.0, 2.0, 2.0], [3.0, 2.0, 2.0]]), (2, second)] {
+        assembly
+            .add_fiber(FiberId(id), material, section, &placed, &placed)
+            .unwrap();
+    }
+    assembly
+}
+
+fn relax_ovals(assembly: &FiberAssembly) -> (DeviceFiberWorld<WgpuRuntime>, BatchStatus) {
+    let packed = PackedAssembly::from_assembly(assembly).unwrap();
+    assert!(packed.has_ovals);
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed,
+        CellListConfig::default(),
+        0.05,
+    );
+    let config = RelaxationConfig {
+        penetration_tolerance: 1.0e-5,
+        max_step: 0.05,
+        max_iterations: 400,
+        iterations_per_batch: 400,
+        ..RelaxationConfig::default()
+    };
+    let status = world.run_batch(&config, 400);
+    (world, status)
+}
+
+#[test]
+fn stacked_flat_ovals_separate_by_their_thickness() {
+    // The second oval crosses 0.1 above the first: closer than the two
+    // thicknesses (0.15) but the lanes, not the bounding radii (0.3), decide.
+    let assembly = oval_pair([[2.0, 1.0, 2.1], [2.0, 3.0, 2.1]], [false; 3]);
+    let (world, status) = relax_ovals(&assembly);
+    assert!(status.converged, "{status:?}");
+    let positions = world.download_positions();
+    let first_z = 0.5 * (positions[2] + positions[5]);
+    let second_z = 0.5 * (positions[8] + positions[11]);
+    let separation = second_z - first_z;
+    assert!(
+        (0.15 - 2.0e-4..0.17).contains(&separation),
+        "separation {separation}"
+    );
+}
+
+#[test]
+fn side_by_side_flat_ovals_separate_by_their_width() {
+    let assembly = oval_pair([[1.0, 2.2, 2.0], [3.0, 2.2, 2.0]], [false; 3]);
+    let (world, status) = relax_ovals(&assembly);
+    assert!(status.converged, "{status:?}");
+    let positions = world.download_positions();
+    let separation = 0.5 * (positions[7] + positions[10]) - 0.5 * (positions[1] + positions[4]);
+    assert!(
+        (0.3 - 2.0e-4..0.32).contains(&separation),
+        "separation {separation}"
+    );
+}
+
+#[test]
+fn flat_oval_rests_on_a_wall_by_its_thickness() {
+    // Start partly through the floor; the wall pushes the oval out to its
+    // short semi-axis, not its long one.
+    let mut assembly = oval_pair([[2.0, 1.0, 3.0], [2.0, 3.0, 3.0]], [false; 3]);
+    for vertex in 0..2 {
+        assembly.geometry.placed.positions[vertex][2] = 0.03;
+    }
+    // Walls are enforced only while the solver iterates, and a layout with
+    // no contacts converges before the first iteration, so force the run.
+    let packed = PackedAssembly::from_assembly(&assembly).unwrap();
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed,
+        CellListConfig::default(),
+        0.05,
+    );
+    let config = RelaxationConfig {
+        penetration_tolerance: 1.0e-5,
+        max_step: 0.05,
+        max_iterations: 400,
+        iterations_per_batch: 400,
+        force_full_iterations: true,
+        ..RelaxationConfig::default()
+    };
+    let status = world.run_batch(&config, 400);
+    assert!(status.max_penetration <= 1.0e-5, "{status:?}");
+    let positions = world.download_positions();
+    for z in [positions[2], positions[5]] {
+        assert!((z - 0.075).abs() < 1.0e-4, "height {z}");
+    }
+}
+
+#[test]
+fn off_center_contact_turns_an_oval() {
+    // A round fiber presses on one edge of a flat oval, so the oval tips
+    // about its axis instead of only sliding away.
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([4.0; 3], [true; 3]));
+    let material = assembly.materials.add("fiber");
+    let oval = assembly.sections.add(Section::Elliptical {
+        semi_axes: [0.15, 0.075],
+    });
+    let round = assembly.sections.add(Section::Circular { radius: 0.05 });
+    let axis = [[1.0, 2.0, 2.0], [3.0, 2.0, 2.0]];
+    let edge = [[1.0, 2.12, 2.1], [3.0, 2.12, 2.1]];
+    assembly
+        .add_fiber(FiberId(1), material, oval, &axis, &axis)
+        .unwrap();
+    assembly
+        .add_fiber(FiberId(2), material, round, &edge, &edge)
+        .unwrap();
+    let (world, status) = relax_ovals(&assembly);
+    assert!(status.converged, "{status:?}");
+    let directors = world.download_directors();
+    assert!(directors[2].abs() > 0.01, "director {:?}", &directors[0..3]);
+
+    let mut relaxed = assembly.clone();
+    world.download_into(&mut relaxed).unwrap();
+    relaxed.validate().unwrap();
+    assert!(relaxed.geometry.placed.directors[0][2].abs() > 0.01);
 }

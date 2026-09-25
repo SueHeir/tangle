@@ -3532,7 +3532,12 @@ name = "tangle_core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
+
+[[package]]
+name = "tangle_ct"
+version = "0.1.0"
 
 [[package]]
 name = "tangle_example_support"
@@ -3578,6 +3583,7 @@ dependencies = [
  "tangle_characterize",
  "tangle_checkpoint",
  "tangle_core",
+ "tangle_ct",
  "tangle_export",
  "tangle_generate",
  "tangle_relax",

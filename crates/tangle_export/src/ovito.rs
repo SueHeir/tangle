@@ -192,12 +192,11 @@ fn write_connected_fiber_frame(
 ) -> Result<(), ExportError> {
     let (box_low, box_high) = crate::orthorhombic_bounds(assembly)?;
     let capsules = build_fiber_capsules(assembly, config.atom_type)?;
-    let vertex_count = assembly
-        .topology
-        .fibers
-        .iter()
-        .map(|fiber| fiber.vertices.len as usize)
-        .sum::<usize>();
+    let mut vertex_count = 0;
+    for (fiber_index, fiber) in assembly.topology.fibers.iter().enumerate() {
+        vertex_count +=
+            fiber.vertices.len as usize * SectionLanes::of_fiber(assembly, fiber_index)?.count();
+    }
     let mut writer = open_frame_writer(&config.dump_path, append)?;
     write_frame_header(
         &mut writer,
@@ -237,15 +236,8 @@ fn write_connected_fiber_frame(
         .ok_or(ExportError::IndexOverflow)?;
     let mut next_id = u32::try_from(capsules.len() + 1).map_err(|_| ExportError::IndexOverflow)?;
     for (fiber_index, fiber) in assembly.topology.fibers.iter().enumerate() {
-        let radius = match assembly
-            .sections
-            .entries
-            .get(fiber.section.0 as usize)
-            .ok_or(ExportError::MissingSection(fiber.id.0))?
-        {
-            Section::Circular { radius } => *radius,
-            Section::Elliptical { .. } => return Err(ExportError::NonCircularSection(fiber.id.0)),
-        };
+        let lanes = SectionLanes::of_fiber(assembly, fiber_index)?;
+        let radius = lanes.radius;
         let start = fiber.vertices.start as usize;
         let end = fiber
             .vertices
@@ -302,23 +294,25 @@ fn write_connected_fiber_frame(
             } else {
                 0.0
             };
-            write_fiber_glyph(
-                &mut writer,
-                next_id,
-                fiber.id.0,
-                sphere_type,
-                [radius, radius, radius],
-                [0.0, 0.0, 0.0, 1.0],
-                position,
-                u32::try_from(local_vertex).map_err(|_| ExportError::IndexOverflow)?,
-                fiber_points,
-                natural_curvature,
-                current_curvature,
-                curvature_ratio,
-                curvature_excess,
-                refinement_level,
-            )?;
-            next_id = next_id.checked_add(1).ok_or(ExportError::IndexOverflow)?;
+            for lane in 0..lanes.count() {
+                write_fiber_glyph(
+                    &mut writer,
+                    next_id,
+                    fiber.id.0,
+                    sphere_type,
+                    [radius, radius, radius],
+                    [0.0, 0.0, 0.0, 1.0],
+                    lanes.point(lane, local_vertex, position),
+                    u32::try_from(local_vertex).map_err(|_| ExportError::IndexOverflow)?,
+                    fiber_points,
+                    natural_curvature,
+                    current_curvature,
+                    curvature_ratio,
+                    curvature_excess,
+                    refinement_level,
+                )?;
+                next_id = next_id.checked_add(1).ok_or(ExportError::IndexOverflow)?;
+            }
         }
     }
     writer.flush()?;
@@ -421,15 +415,8 @@ fn build_fiber_capsules(
 ) -> Result<Vec<FiberCapsule>, ExportError> {
     let mut capsules = Vec::new();
     for (fiber_index, fiber) in assembly.topology.fibers.iter().enumerate() {
-        let section = assembly
-            .sections
-            .entries
-            .get(fiber.section.0 as usize)
-            .ok_or(ExportError::MissingSection(fiber.id.0))?;
-        let radius = match section {
-            Section::Circular { radius } => *radius,
-            Section::Elliptical { .. } => return Err(ExportError::NonCircularSection(fiber.id.0)),
-        };
+        let lanes = SectionLanes::of_fiber(assembly, fiber_index)?;
+        let radius = lanes.radius;
         let start = fiber.vertices.start as usize;
         let end = fiber
             .vertices
@@ -462,9 +449,6 @@ fn build_fiber_capsules(
             .map(|limit| limit.maximum_curvature());
         let fiber_points = u32::try_from(points.len()).map_err(|_| ExportError::IndexOverflow)?;
         for (local_segment, points) in points.windows(2).enumerate() {
-            let delta = sub(points[1], points[0]);
-            let length = norm(delta);
-            let id = u32::try_from(capsules.len() + 1).map_err(|_| ExportError::IndexOverflow)?;
             let natural_curvature =
                 natural_curvatures[local_segment].max(natural_curvatures[local_segment + 1]);
             let current_curvature =
@@ -482,26 +466,121 @@ fn build_fiber_capsules(
             } else {
                 0.0
             };
-            capsules.push(FiberCapsule {
-                id,
-                fiber_id: fiber.id.0,
-                atom_type,
-                radius,
-                length,
-                position: scale(add(points[0], points[1]), 0.5),
-                orientation: z_axis_orientation(delta, length),
-                local_segment: u32::try_from(local_segment)
-                    .map_err(|_| ExportError::IndexOverflow)?,
-                fiber_points,
-                natural_curvature,
-                current_curvature,
-                curvature_ratio,
-                curvature_excess,
-                refinement_level,
-            });
+            for lane in 0..lanes.count() {
+                let first = lanes.point(lane, local_segment, points[0]);
+                let second = lanes.point(lane, local_segment + 1, points[1]);
+                let lane_delta = sub(second, first);
+                let lane_length = norm(lane_delta);
+                let id =
+                    u32::try_from(capsules.len() + 1).map_err(|_| ExportError::IndexOverflow)?;
+                capsules.push(FiberCapsule {
+                    id,
+                    fiber_id: fiber.id.0,
+                    atom_type,
+                    radius,
+                    length: lane_length,
+                    position: scale(add(first, second), 0.5),
+                    orientation: z_axis_orientation(lane_delta, lane_length),
+                    local_segment: u32::try_from(local_segment)
+                        .map_err(|_| ExportError::IndexOverflow)?,
+                    fiber_points,
+                    natural_curvature,
+                    current_curvature,
+                    curvature_ratio,
+                    curvature_excess,
+                    refinement_level,
+                });
+            }
         }
     }
     Ok(capsules)
+}
+
+/// The round lanes that draw one fiber: a single lane on the centerline for
+/// round fibers, and for ovals the same row of lanes along the long-axis
+/// directors that the relaxation solver uses for contact.
+struct SectionLanes {
+    /// Radius of every lane.
+    radius: f64,
+    /// Signed lane offsets along the director; empty for a round fiber.
+    offsets: Vec<f64>,
+    /// Long-axis director per fiber vertex; empty for a round fiber.
+    directors: Vec<Vec3>,
+}
+
+impl SectionLanes {
+    fn of_fiber(assembly: &FiberAssembly, fiber_index: usize) -> Result<Self, ExportError> {
+        let fiber = &assembly.topology.fibers[fiber_index];
+        let section = assembly
+            .sections
+            .entries
+            .get(fiber.section.0 as usize)
+            .ok_or(ExportError::MissingSection(fiber.id.0))?;
+        let (radius, offsets) = oval_lanes(section);
+        if offsets.is_empty() {
+            return Ok(Self {
+                radius,
+                offsets,
+                directors: Vec::new(),
+            });
+        }
+        let mut directors = assembly.fiber_directors(fiber_index);
+        if let Section::Elliptical { semi_axes } = section {
+            if semi_axes[1] > semi_axes[0] {
+                // The long axis is the second one: turn a quarter turn.
+                let start = fiber.vertices.start as usize;
+                let placed =
+                    &assembly.geometry.placed.positions[start..start + fiber.vertices.len as usize];
+                for (director, tangent) in directors
+                    .iter_mut()
+                    .zip(tangle_core::polyline_tangents(placed))
+                {
+                    *director = [
+                        tangent[1] * director[2] - tangent[2] * director[1],
+                        tangent[2] * director[0] - tangent[0] * director[2],
+                        tangent[0] * director[1] - tangent[1] * director[0],
+                    ];
+                }
+            }
+        }
+        Ok(Self {
+            radius,
+            offsets,
+            directors,
+        })
+    }
+
+    fn count(&self) -> usize {
+        self.offsets.len().max(1)
+    }
+
+    fn point(&self, lane: usize, local_vertex: usize, position: Vec3) -> Vec3 {
+        match self.offsets.get(lane) {
+            Some(offset) => add(position, scale(self.directors[local_vertex], *offset)),
+            None => position,
+        }
+    }
+}
+
+/// Lane radius and signed lane offsets of a section, matching the solver's
+/// lane model; no offsets for a round section.
+pub(crate) fn oval_lanes(section: &Section) -> (f64, Vec<f64>) {
+    match *section {
+        Section::Circular { radius } => (radius, Vec::new()),
+        Section::Elliptical { semi_axes } => {
+            let long = semi_axes[0].max(semi_axes[1]);
+            let short = semi_axes[0].min(semi_axes[1]);
+            let offset = long - short;
+            if offset <= 0.0 {
+                return (long, Vec::new());
+            }
+            let lanes = tangle_relax::oval_lane_count(offset as f32, short as f32) as usize;
+            let offsets = (0..lanes)
+                .map(|lane| offset * (2.0 * lane as f64 / (lanes - 1) as f64 - 1.0))
+                .collect();
+            (short, offsets)
+        }
+    }
 }
 
 fn vertex_curvatures(points: &[Vec3]) -> Vec<f64> {
@@ -963,5 +1042,30 @@ mod tests {
         assert!(script.contains("AssignColorModifier(color=(1.0, 0.0, 0.0))"));
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir(directory);
+    }
+
+    #[test]
+    fn oval_fibers_draw_as_rows_of_lane_capsules() {
+        let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([1.0; 3], [false; 3]));
+        let material = assembly.materials.add("oval");
+        let section = assembly.sections.add(Section::Elliptical {
+            semi_axes: [0.06, 0.04],
+        });
+        let points = [[0.2, 0.5, 0.5], [0.5, 0.5, 0.5], [0.8, 0.5, 0.5]];
+        assembly
+            .add_fiber(FiberId(3), material, section, &points, &points)
+            .unwrap();
+
+        let capsules = build_fiber_capsules(&assembly, 1).unwrap();
+        // Offset 0.02 over lane radius 0.04 gives two lane gaps, three lanes.
+        assert_eq!(capsules.len(), 2 * 3);
+        assert!(capsules.iter().all(|capsule| capsule.radius == 0.04));
+        let widths = capsules[0..3]
+            .iter()
+            .map(|capsule| capsule.position[1] - 0.5)
+            .collect::<Vec<_>>();
+        assert!((widths[0] + 0.02).abs() < 1.0e-12);
+        assert!(widths[1].abs() < 1.0e-12);
+        assert!((widths[2] - 0.02).abs() < 1.0e-12);
     }
 }

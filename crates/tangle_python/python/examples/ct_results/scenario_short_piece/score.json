@@ -1,0 +1,60 @@
+{
+ "seconds": 0.7664403750095516,
+ "score": {
+  "true_fibers_in_volume": 0,
+  "fitted_fibers": 0,
+  "recovered": 0,
+  "split": 0,
+  "missed": 0,
+  "stubs": 1,
+  "false_fibers": 0,
+  "merged_fibers": 0,
+  "recall": 0.0,
+  "precision": 0.0,
+  "f1": 0.0,
+  "centerline_error_voxels": null,
+  "centerline_error_m": null,
+  "diameter_bias_m": null,
+  "diameter_rms_error_m": null,
+  "solid_dice": 0.0,
+  "voxel_label_accuracy": 0.0,
+  "centerline_recall": null,
+  "centerline_precision": null,
+  "centerline_f1": null,
+  "interior_ends_fit": 0,
+  "interior_ends_truth": 2,
+  "implied_mean_length_fit_m": null,
+  "implied_mean_length_truth_m": 2.400000000000001e-05,
+  "per_type": null,
+  "per_true_fiber": [
+   {
+    "id": 1,
+    "state": "stub",
+    "coverage": null,
+    "union_coverage": null,
+    "fitted": 0
+   }
+  ],
+  "per_fitted_fiber": []
+ },
+ "geometry": {},
+ "diff": {
+  "missed_voxels": 1112,
+  "extra_voxels": 0,
+  "wrong_fiber_voxels": 0,
+  "missed_fraction_of_true_fiber": 1.0,
+  "extra_fraction_of_true_fiber": 0.0,
+  "wrong_fiber_fraction_of_true_fiber": 0.0
+ },
+ "confidence": {
+  "voxel_auc": null,
+  "voxel_mean_confidence_right": null,
+  "voxel_mean_confidence_wrong": null,
+  "fiber_auc": null
+ },
+ "end_error_max_voxels": Infinity,
+ "end_errors_voxels": [
+  Infinity,
+  Infinity
+ ]
+}

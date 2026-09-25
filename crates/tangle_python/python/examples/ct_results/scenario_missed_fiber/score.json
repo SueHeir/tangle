@@ -1,0 +1,235 @@
+{
+ "seconds": 6.237614833051339,
+ "score": {
+  "true_fibers_in_volume": 12,
+  "fitted_fibers": 13,
+  "recovered": 11,
+  "split": 1,
+  "missed": 0,
+  "stubs": 0,
+  "false_fibers": 0,
+  "merged_fibers": 0,
+  "recall": 0.9166666666666666,
+  "precision": 1.0,
+  "f1": 0.9565217391304348,
+  "centerline_error_voxels": 0.21069584673166297,
+  "centerline_error_m": 3.160437700974945e-07,
+  "diameter_bias_m": -4.259779820075402e-08,
+  "diameter_rms_error_m": 1.6573673945004783e-07,
+  "solid_dice": 0.9596426426972834,
+  "voxel_label_accuracy": 0.9497631356161176,
+  "centerline_recall": 0.9938271604938271,
+  "centerline_precision": 0.9995152690256908,
+  "centerline_f1": 0.9966630990998023,
+  "interior_ends_fit": 12,
+  "interior_ends_truth": 7,
+  "implied_mean_length_fit_m": 0.00025636933623579024,
+  "implied_mean_length_truth_m": 0.00044884841799446674,
+  "per_type": null,
+  "per_true_fiber": [
+   {
+    "id": 1,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 2,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 3,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 4,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 5,
+    "state": "split",
+    "coverage": 0.7264150943396226,
+    "union_coverage": 0.9952830188679245,
+    "fitted": 2
+   },
+   {
+    "id": 6,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 7,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 8,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 9,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 10,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 11,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   },
+   {
+    "id": 12,
+    "state": "recovered",
+    "coverage": 1.0,
+    "union_coverage": 1.0,
+    "fitted": 1
+   }
+  ],
+  "per_fitted_fiber": [
+   {
+    "id": 1,
+    "true_id": 2,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 2,
+    "true_id": 5,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 3,
+    "true_id": 5,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 4,
+    "true_id": 1,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 5,
+    "true_id": 8,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 6,
+    "true_id": 6,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 7,
+    "true_id": 11,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 8,
+    "true_id": 3,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 9,
+    "true_id": 12,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 10,
+    "true_id": 7,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 11,
+    "true_id": 9,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 12,
+    "true_id": 4,
+    "purity": 1.0,
+    "state": "matched"
+   },
+   {
+    "id": 13,
+    "true_id": 10,
+    "purity": 1.0,
+    "state": "matched"
+   }
+  ]
+ },
+ "geometry": {
+  "fibers": 13,
+  "curvature_ratio_max": 1.0005905237718762,
+  "curvature_ratio_p95": 1.0001349848031564,
+  "fibers_over_bend_limit": 0,
+  "max_penetration_radii": 0.01625986233952463,
+  "overlapping_pairs": 0,
+  "min_segment_diameters": 1.1921689552568884,
+  "segment_length_cv": 0.03846519870190394,
+  "total_length": 1025.4570497956202
+ },
+ "diff": {
+  "missed_voxels": 2776,
+  "extra_voxels": 1660,
+  "wrong_fiber_voxels": 13,
+  "missed_fraction_of_true_fiber": 0.05000270187510132,
+  "extra_fraction_of_true_fiber": 0.029900751121278168,
+  "wrong_fiber_fraction_of_true_fiber": 0.00023416250878109408
+ },
+ "confidence": {
+  "voxel_auc": 0.5445870757102966,
+  "voxel_mean_confidence_right": 0.9502765536308289,
+  "voxel_mean_confidence_wrong": 0.9332087635993958,
+  "fiber_auc": null,
+  "fiber_mean_confidence_matched": 0.9489957415568762,
+  "fiber_mean_confidence_merged_or_false": null,
+  "missed_next_to_unsure_fit": 0.0,
+  "missed_next_to_any_fit": 1.0
+ },
+ "end_error_max_voxels": 1.757400489153288,
+ "end_errors_voxels": [
+  0.10087166580352674,
+  0.4684659380974083,
+  0.13357099660915117,
+  1.2512947272777382,
+  1.2295286347908687,
+  0.8281157304862938,
+  1.757400489153288
+ ]
+}

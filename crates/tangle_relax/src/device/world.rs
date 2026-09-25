@@ -1,20 +1,26 @@
 mod cell_list;
+mod image_force;
 mod neighbor_list;
+mod pinning;
+
+pub use image_force::ImageForceSettings;
 
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::kernels::{
     activate_formation_step, apply_coarsening_candidates, apply_contact_corrections,
-    apply_formation_layer_targets, apply_internal_corrections, apply_rigid_contact_corrections,
-    apply_vertex_targets, assess_reduced_metrics, begin_relaxation_batch,
-    clear_active_index_counts, clear_adaptation_epoch, clear_reduced_metrics, clear_wall_reactions,
-    compact_active_indices, compact_affine_vertices, compact_moving_walls,
-    compact_rigid_fiber_centers, find_internal_corrections, finish_adaptation_epoch,
-    initialize_vertex_displacement_targets, mark_coarsening_candidates, measure_compaction_metrics,
+    apply_formation_layer_targets, apply_internal_corrections, apply_refinement_candidates,
+    apply_rigid_contact_corrections, apply_vertex_targets, assess_reduced_metrics,
+    begin_relaxation_batch, clear_active_index_counts, clear_adaptation_epoch,
+    clear_reduced_metrics, clear_wall_reactions, compact_active_indices, compact_affine_vertices,
+    compact_moving_walls, compact_rigid_fiber_centers, find_internal_corrections,
+    finish_adaptation_epoch, initialize_vertex_displacement_targets, mark_coarsening_candidates,
+    mark_refinement_candidates, mask_active_list_weights, measure_compaction_metrics,
     measure_curvature_ratio, measure_layer_target_error, measure_vertex_target_error,
     project_fiber_curvature_in_place, reduce_active_segment_penetration,
-    reduce_active_vertex_metrics, refine_contact_segments, refine_vertex_paths,
+    reduce_active_vertex_metrics, refine_vertex_paths, total_active_list_weight,
+    update_fiber_directors,
 };
 use super::{
     AdaptiveSegmentationConfig, FiberMotion, PackedAssembly, PackingError, RelaxationConfig,
@@ -26,6 +32,10 @@ use tangle_contact::device::{capture_segment_contacts, find_segment_corrections}
 const CELL_SCAN_BLOCK_SIZE: usize = 256;
 /// Largest neighbor-list buffer, below WGPU's default 128 MiB binding limit.
 const MAXIMUM_NEIGHBOR_LIST_BYTES: usize = 120 << 20;
+/// Cell room for proxy pieces of segments stretched past their rest length.
+const PROXY_STRETCH_ALLOWANCE: f32 = 1.05;
+/// Largest director turn, in radians, applied to one vertex per iteration.
+const MAXIMUM_DIRECTOR_TURN: f32 = 0.1;
 
 /// One unique inter-fiber capsule contact captured from the resident GPU world.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -114,6 +124,10 @@ pub struct DeviceFiberWorld<R: Runtime> {
     segment_vertices: Handle,
     segment_fibers: Handle,
     segment_radii: Handle,
+    segment_lane_offsets: Handle,
+    directors: Handle,
+    director_corrections: Handle,
+    vertex_wall_extents: Handle,
     segment_rest_lengths: Handle,
     segment_active: Handle,
     segment_children: Handle,
@@ -125,7 +139,6 @@ pub struct DeviceFiberWorld<R: Runtime> {
     fiber_vertex_spans: Handle,
     fiber_formation_layers: Handle,
     fiber_formation_steps: Handle,
-    vertex_fibers: Handle,
     vertex_segments: Handle,
     vertex_max_curvature: Handle,
     vertex_active: Handle,
@@ -143,6 +156,7 @@ pub struct DeviceFiberWorld<R: Runtime> {
     // Scatter scratch: run-order slots and each slot's cell, ranked into
     // `cell_segments` in segment order.
     scattered_cell_segments: Handle,
+    scattered_cell_proxies: Handle,
     cell_slot_cells: Handle,
     cell_overflow: Handle,
     cell_scan_block_size: usize,
@@ -152,14 +166,33 @@ pub struct DeviceFiberWorld<R: Runtime> {
     neighbor_state: Handle,
     neighbor_counts: Handle,
     neighbor_segments: Handle,
-    neighbor_home_cells: Handle,
     neighbor_reference_positions: Handle,
     // Cell-sorted copies of each slot's segment geometry (eight floats) and
-    // topology (vertex ids and fiber), refreshed at every list build.
+    // topology (vertex ids, fiber, proxy piece and proxy count), refreshed at
+    // every list build.
     slot_geometry: Handle,
     slot_topology: Handle,
+    // Proxy pieces per packed segment, the piece each cell-list slot holds,
+    // and the slot capacity (the sum of all segments' pieces).
+    segment_proxies: Handle,
+    cell_proxies: Handle,
+    proxy_capacity: usize,
     neighbor_skin: f32,
+    // Configured slots per list block, and the block size in use: smaller
+    // when the active segments' blocks would not fit in `neighbor_slots`.
     neighbor_capacity: u32,
+    neighbor_block: u32,
+    neighbor_slots: usize,
+    // Static blocks per packed segment, the active ones' weights, their
+    // exclusive-scan offsets (in blocks), and the scan's total and scratch.
+    list_weights: Handle,
+    active_list_weights: Handle,
+    list_offsets: Handle,
+    list_weight_total: Handle,
+    list_scan_block_sums: Vec<Handle>,
+    list_scan_block_offsets: Vec<Handle>,
+    // A control word that is always 1, for scans outside the relaxation loop.
+    always_run: Handle,
     corrections: Handle,
     segment_max: Handle,
     curvature_ratio: Handle,
@@ -184,8 +217,10 @@ pub struct DeviceFiberWorld<R: Runtime> {
     active_layer_stiffness: f32,
     active_layer_max_translation: f32,
     active_vertex_targets: Option<ActiveVertexTargets>,
+    image_force: Option<image_force::ImageForce>,
     total_iterations: usize,
     cell_size: f32,
+    segment_cell_size: f32,
     cells_x: u32,
     cells_y: u32,
     cells_z: u32,
@@ -267,7 +302,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
     /// Uploads a packed assembly and allocates all reusable solver buffers.
     pub fn upload(
         device: &R::Device,
-        packed: PackedAssembly,
+        mut packed: PackedAssembly,
         cell_list: CellListConfig,
         max_step: f32,
     ) -> Self {
@@ -277,6 +312,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         assert!(cell_list.neighbor_skin_scale.is_finite() && cell_list.neighbor_skin_scale >= 0.0);
         assert!(cell_list.neighbor_capacity > 0);
         assert!(max_step > 0.0);
+        packed.ensure_lane_buffers();
 
         let mut fiber_has_active_segment = vec![false; packed.fiber_count()];
         for (segment, active) in packed.segment_active.iter().copied().enumerate() {
@@ -299,28 +335,69 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             .filter(|(segment, _)| participates_in_cell_scale(*segment))
             .map(|(_, length)| length)
             .fold(0.0_f32, f32::max);
-        let maximum_initial_length = packed
-            .segment_vertices
-            .chunks_exact(2)
-            .enumerate()
-            .filter(|(segment, _)| participates_in_cell_scale(*segment))
-            .map(|(_, vertices)| {
-                let first = vertices[0] as usize;
-                let second = vertices[1] as usize;
-                let dx = packed.positions[3 * second] - packed.positions[3 * first];
-                let dy = packed.positions[3 * second + 1] - packed.positions[3 * first + 1];
-                let dz = packed.positions[3 * second + 2] - packed.positions[3 * first + 2];
-                (dx * dx + dy * dy + dz * dz).sqrt()
-            })
+        let initial_length = |segment: usize| {
+            let first = packed.segment_vertices[2 * segment] as usize;
+            let second = packed.segment_vertices[2 * segment + 1] as usize;
+            let dx = packed.positions[3 * second] - packed.positions[3 * first];
+            let dy = packed.positions[3 * second + 1] - packed.positions[3 * first + 1];
+            let dz = packed.positions[3 * second + 2] - packed.positions[3 * first + 2];
+            (dx * dx + dy * dy + dz * dz).sqrt()
+        };
+        let maximum_initial_length = (0..packed.segment_count())
+            .filter(|segment| participates_in_cell_scale(*segment))
+            .map(initial_length)
             .fold(0.0_f32, f32::max);
+        let maximum_length = maximum_rest_length.max(maximum_initial_length);
         let maximum_radius = packed.segment_radii.iter().copied().fold(0.0_f32, f32::max);
         let neighbor_skin = cell_list.neighbor_skin_scale * maximum_radius;
-        // Neighbor lists are built from this grid, so a cell must also span
-        // the skin around the widest capsule pair.
-        let cell_size = (maximum_rest_length.max(maximum_initial_length)
-            + 2.0 * maximum_radius
-            + (2.0 * max_step).max(neighbor_skin))
-            * cell_list.cell_size_scale;
+        // Neighbor-list room grows with segment length, counted in blocks of
+        // `neighbor_capacity` slots. A uniform layout's longest segment is a
+        // leaf, so every segment gets one block as before; an adaptive layout
+        // gives an unrefined parent one block per leaf length (or twice the
+        // interaction margin) of its length, since its neighbor count grows
+        // with it.
+        let segment_length = |segment: usize| {
+            let first = packed.segment_vertices[2 * segment] as usize;
+            let second = packed.segment_vertices[2 * segment + 1] as usize;
+            let dx = packed.positions[3 * second] - packed.positions[3 * first];
+            let dy = packed.positions[3 * second + 1] - packed.positions[3 * first + 1];
+            let dz = packed.positions[3 * second + 2] - packed.positions[3 * first + 2];
+            packed.segment_rest_lengths[segment].max((dx * dx + dy * dy + dz * dz).sqrt())
+        };
+        let interaction_margin = 2.0 * maximum_radius + (2.0 * max_step).max(neighbor_skin);
+        let maximum_leaf_length = (0..packed.segment_count())
+            .filter(|segment| packed.segment_children[2 * segment] == u32::MAX)
+            .map(segment_length)
+            .fold(0.0_f32, f32::max);
+        let list_block_length =
+            maximum_length.min(maximum_leaf_length.max(2.0 * interaction_margin));
+        let list_weights: Vec<u32> = (0..packed.segment_count())
+            .map(|segment| ((segment_length(segment) / list_block_length).ceil() as u32).max(1))
+            .collect();
+        // Segments longer than one list block are also binned as that many
+        // equal proxy pieces, so the grid follows the short segments: a
+        // uniform layout bins every segment whole as before, while an adaptive
+        // layout bins unrefined parents as leaf-length pieces. Neighbor lists
+        // are built from this grid, so a cell must also span the skin around
+        // the widest capsule pair.
+        let proxy_length = list_block_length;
+        let segment_proxies = list_weights.clone();
+        let proxy_capacity = segment_proxies
+            .iter()
+            .map(|&proxies| proxies as usize)
+            .sum();
+        // Pieces of a segment stretched past its rest and initial length are
+        // longer than `proxy_length`; in a dyadic tree every root of the
+        // longest length has zero slack, so pieces get 5 % of room to stretch.
+        // A uniform layout keeps its previous grid.
+        let piece_length = if proxy_length < maximum_length {
+            PROXY_STRETCH_ALLOWANCE * proxy_length
+        } else {
+            proxy_length
+        };
+        let cell_size = (piece_length + interaction_margin) * cell_list.cell_size_scale;
+        // Contact capture bins whole segments.
+        let segment_cell_size = (maximum_length + interaction_margin) * cell_list.cell_size_scale;
         let cell_extent = [
             packed.cell_upper[0] - packed.cell_lower[0],
             packed.cell_upper[1] - packed.cell_lower[1],
@@ -340,6 +417,13 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         let segment_vertices = client.create_from_slice(u32::as_bytes(&packed.segment_vertices));
         let segment_fibers = client.create_from_slice(u32::as_bytes(&packed.segment_fibers));
         let segment_radii = client.create_from_slice(f32::as_bytes(&packed.segment_radii));
+        let segment_lane_offsets =
+            client.create_from_slice(f32::as_bytes(&packed.segment_lane_offsets));
+        let directors = client.create_from_slice(f32::as_bytes(&packed.directors));
+        let director_corrections =
+            client.create_from_slice(f32::as_bytes(&vec![0.0_f32; 2 * packed.segment_count()]));
+        let vertex_wall_extents =
+            client.create_from_slice(f32::as_bytes(&packed.vertex_wall_extents()));
         let segment_rest_lengths =
             client.create_from_slice(f32::as_bytes(&packed.segment_rest_lengths));
         let segment_active = client.create_from_slice(u32::as_bytes(&packed.segment_active));
@@ -360,7 +444,6 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             client.create_from_slice(u32::as_bytes(&packed.fiber_formation_layers));
         let fiber_formation_steps =
             client.create_from_slice(u32::as_bytes(&packed.fiber_formation_steps));
-        let vertex_fibers = client.create_from_slice(u32::as_bytes(&packed.vertex_fibers));
         let vertex_segments = client.create_from_slice(u32::as_bytes(&packed.vertex_segments));
         let vertex_max_curvature =
             client.create_from_slice(f32::as_bytes(&packed.vertex_max_curvature));
@@ -377,10 +460,12 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         let cell_counts = client.create_from_slice(u32::as_bytes(&vec![0_u32; cell_count]));
         let cell_offsets = client.create_from_slice(u32::as_bytes(&vec![0_u32; cell_count]));
         let cell_cursors = client.create_from_slice(u32::as_bytes(&vec![0_u32; cell_count]));
-        let cell_segments = client.empty(packed.segment_count() * core::mem::size_of::<u32>());
-        let scattered_cell_segments =
-            client.empty(packed.segment_count() * core::mem::size_of::<u32>());
-        let cell_slot_cells = client.empty(packed.segment_count() * core::mem::size_of::<u32>());
+        let cell_segments = client.empty(proxy_capacity * core::mem::size_of::<u32>());
+        let cell_proxies = client.empty(proxy_capacity * core::mem::size_of::<u32>());
+        let scattered_cell_segments = client.empty(proxy_capacity * core::mem::size_of::<u32>());
+        let scattered_cell_proxies = client.empty(proxy_capacity * core::mem::size_of::<u32>());
+        let cell_slot_cells = client.empty(proxy_capacity * core::mem::size_of::<u32>());
+        let segment_proxies = client.create_from_slice(u32::as_bytes(&segment_proxies));
         let cell_overflow = client.create_from_slice(u32::as_bytes(&[0_u32]));
         let maximum_scan_block_size = CELL_SCAN_BLOCK_SIZE
             .min(client.properties().hardware.max_cube_dim.0 as usize)
@@ -399,25 +484,46 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             }
             scan_length = blocks;
         }
-        // Keep the list buffer within a single binding on every backend; an
+        // Room for every segment's full lists at once, kept within a single
+        // binding on every backend. When the active segments need more, the
+        // block size shrinks (see `update_neighbor_list_layout`); an
         // overflowing segment only falls back to scanning its cells.
-        let neighbor_capacity = cell_list.neighbor_capacity.min(
-            (MAXIMUM_NEIGHBOR_LIST_BYTES / (core::mem::size_of::<u32>() * packed.segment_count()))
-                .max(1) as u32,
-        );
+        let neighbor_capacity = cell_list.neighbor_capacity;
+        // A parent's weight never exceeds its two children's, so the leaves'
+        // total bounds every active set of an adaptive tree.
+        let total_list_weight: usize = (0..packed.segment_count())
+            .filter(|&segment| packed.segment_children[2 * segment] == u32::MAX)
+            .map(|segment| list_weights[segment] as usize)
+            .sum();
+        let neighbor_slots = (neighbor_capacity as usize * total_list_weight)
+            .min(MAXIMUM_NEIGHBOR_LIST_BYTES / core::mem::size_of::<u32>())
+            .max(1);
         // Lists start stale so the first contact pass builds them.
         let neighbor_state = client.create_from_slice(u32::as_bytes(&[1_u32, 0]));
         let neighbor_counts =
             client.create_from_slice(u32::as_bytes(&vec![0_u32; packed.segment_count()]));
-        let neighbor_segments = client.empty(
-            packed.segment_count() * neighbor_capacity as usize * core::mem::size_of::<u32>(),
-        );
-        let neighbor_home_cells =
-            client.create_from_slice(u32::as_bytes(&vec![0_u32; packed.segment_count()]));
+        let neighbor_segments = client.empty(neighbor_slots * core::mem::size_of::<u32>());
+        let list_weights = client.create_from_slice(u32::as_bytes(&list_weights));
+        let active_list_weights =
+            client.empty(packed.segment_count() * core::mem::size_of::<u32>());
+        let list_offsets = client.empty(packed.segment_count() * core::mem::size_of::<u32>());
+        let list_weight_total = client.create_from_slice(u32::as_bytes(&[0_u32]));
+        let mut list_scan_block_sums = Vec::new();
+        let mut list_scan_block_offsets = Vec::new();
+        let mut scan_length = packed.segment_count();
+        loop {
+            let blocks = scan_length.div_ceil(cell_scan_block_size);
+            list_scan_block_sums.push(client.empty(blocks * core::mem::size_of::<u32>()));
+            list_scan_block_offsets.push(client.empty(blocks * core::mem::size_of::<u32>()));
+            if blocks == 1 {
+                break;
+            }
+            scan_length = blocks;
+        }
         let neighbor_reference_positions =
             client.create_from_slice(f32::as_bytes(&packed.positions));
-        let slot_geometry = client.empty(8 * packed.segment_count() * core::mem::size_of::<f32>());
-        let slot_topology = client.empty(3 * packed.segment_count() * core::mem::size_of::<u32>());
+        let slot_geometry = client.empty(8 * proxy_capacity * core::mem::size_of::<f32>());
+        let slot_topology = client.empty(5 * proxy_capacity * core::mem::size_of::<u32>());
         let corrections =
             client.create_from_slice(f32::as_bytes(&vec![0.0_f32; 6 * packed.segment_count()]));
         let segment_max =
@@ -466,7 +572,9 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         let cell_lower_host = packed.cell_lower;
         let cell_upper_host = packed.cell_upper;
 
-        Self {
+        let always_run = client.create_from_slice(u32::as_bytes(&[1_u32]));
+        let mut world = Self {
+            always_run,
             client,
             packed,
             positions,
@@ -474,6 +582,10 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             segment_vertices,
             segment_fibers,
             segment_radii,
+            segment_lane_offsets,
+            directors,
+            director_corrections,
+            vertex_wall_extents,
             segment_rest_lengths,
             segment_active,
             segment_children,
@@ -485,7 +597,6 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             fiber_vertex_spans,
             fiber_formation_layers,
             fiber_formation_steps,
-            vertex_fibers,
             vertex_segments,
             vertex_max_curvature,
             vertex_active,
@@ -501,6 +612,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             cell_cursors,
             cell_segments,
             scattered_cell_segments,
+            scattered_cell_proxies,
             cell_slot_cells,
             cell_overflow,
             cell_scan_block_size,
@@ -509,12 +621,22 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             neighbor_state,
             neighbor_counts,
             neighbor_segments,
-            neighbor_home_cells,
             neighbor_reference_positions,
             slot_geometry,
             slot_topology,
+            segment_proxies,
+            cell_proxies,
+            proxy_capacity,
             neighbor_skin,
             neighbor_capacity,
+            neighbor_block: neighbor_capacity,
+            neighbor_slots,
+            list_weights,
+            active_list_weights,
+            list_offsets,
+            list_weight_total,
+            list_scan_block_sums,
+            list_scan_block_offsets,
             corrections,
             segment_max,
             curvature_ratio,
@@ -539,15 +661,19 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             active_layer_stiffness: 1.0,
             active_layer_max_translation: 1.0,
             active_vertex_targets: None,
+            image_force: None,
             total_iterations: 0,
             cell_size,
+            segment_cell_size,
             cells_x,
             cells_y,
             cells_z,
             cell_count,
             cell_lower_host,
             cell_upper_host,
-        }
+        };
+        world.update_neighbor_list_layout();
+        world
     }
 
     /// Recreates a resident world from a previously downloaded checkpoint.
@@ -631,6 +757,9 @@ impl<R: Runtime> DeviceFiberWorld<R> {
 
         let mut packed = self.packed.clone();
         packed.positions = read_f32(&self.positions);
+        if packed.has_ovals {
+            packed.directors = read_f32(&self.directors);
+        }
         packed.segment_active = read_u32(&self.segment_active);
         packed.segment_birth_epochs = read_u32(&self.segment_birth_epochs);
         packed.segment_contact_epochs = read_u32(&self.segment_contact_epochs);
@@ -720,6 +849,58 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         let counts = u32::from_bytes(&bytes);
         self.active_segment_count = counts[0] as usize;
         self.active_vertex_count = counts[1] as usize;
+        self.update_neighbor_list_layout();
+    }
+
+    /// Places each active segment's neighbor list after the lists of all
+    /// lower-indexed active segments and fits the block size to the buffer.
+    ///
+    /// The offsets follow segment order, not the order of the atomically
+    /// compacted active list, so an unchanged active set keeps its layout.
+    /// Every caller that changes the active set also requests a list rebuild.
+    fn update_neighbor_list_layout(&mut self) {
+        let segments = self.packed.segment_count();
+        let segment_cubes = CubeCount::Static(segments.div_ceil(64) as u32, 1, 1);
+        unsafe {
+            mask_active_list_weights::launch_unchecked::<R>(
+                &self.client,
+                segment_cubes,
+                CubeDim::new_1d(64),
+                BufferArg::from_raw_parts(self.segment_active.clone(), segments),
+                BufferArg::from_raw_parts(self.list_weights.clone(), segments),
+                BufferArg::from_raw_parts(self.active_list_weights.clone(), segments),
+            );
+        }
+        self.scan_u32(
+            self.active_list_weights.clone(),
+            self.list_offsets.clone(),
+            segments,
+            0,
+            self.always_run.clone(),
+            1,
+            &self.list_scan_block_sums,
+            &self.list_scan_block_offsets,
+        );
+        unsafe {
+            total_active_list_weight::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new_1d(1),
+                BufferArg::from_raw_parts(self.active_list_weights.clone(), segments),
+                BufferArg::from_raw_parts(self.list_offsets.clone(), segments),
+                BufferArg::from_raw_parts(self.list_weight_total.clone(), 1),
+            );
+        }
+        let bytes = self
+            .client
+            .read_one(self.list_weight_total.clone())
+            .expect("CubeCL neighbor-list weight readback failed");
+        let total = (u32::from_bytes(&bytes)[0] as usize).max(1);
+        // Zero only past ~31 M active blocks: then every segment takes the
+        // exact overflow scan instead of a list.
+        self.neighbor_block = self
+            .neighbor_capacity
+            .min((self.neighbor_slots / total).min(u32::MAX as usize) as u32);
     }
 
     /// Projects every active fiber back inside its curvature limit with
@@ -740,16 +921,12 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     3 * self.packed.vertex_count(),
                 ),
                 BufferArg::from_raw_parts(
-                    self.fiber_segment_spans.clone(),
-                    self.packed.fiber_segment_spans.len(),
-                ),
-                BufferArg::from_raw_parts(
                     self.fiber_vertex_spans.clone(),
                     self.packed.fiber_vertex_spans.len(),
                 ),
                 BufferArg::from_raw_parts(
-                    self.segment_radii.clone(),
-                    self.packed.segment_radii.len(),
+                    self.vertex_wall_extents.clone(),
+                    3 * self.packed.vertex_count(),
                 ),
                 BufferArg::from_raw_parts(
                     self.vertex_max_curvature.clone(),
@@ -770,6 +947,52 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 config.curvature_cleanup_sweeps as u32,
                 config.curvature_limit_stiffness,
                 config.curvature_limit_safety_margin,
+            );
+        }
+    }
+
+    /// Turns oval directors by the contact turns found this iteration, keeps
+    /// them perpendicular to the moved centerlines, smooths their twist and
+    /// refreshes the wall extents that depend on them.
+    fn launch_director_update(&self, config: &RelaxationConfig) {
+        unsafe {
+            update_fiber_directors::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::Static(self.packed.fiber_count().div_ceil(64) as u32, 1, 1),
+                CubeDim::new_1d(64),
+                BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                BufferArg::from_raw_parts(self.directors.clone(), self.packed.positions.len()),
+                BufferArg::from_raw_parts(
+                    self.director_corrections.clone(),
+                    2 * self.packed.segment_count(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.vertex_wall_extents.clone(),
+                    3 * self.packed.vertex_count(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.fiber_segment_spans.clone(),
+                    self.packed.fiber_segment_spans.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.fiber_vertex_spans.clone(),
+                    self.packed.fiber_vertex_spans.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.segment_radii.clone(),
+                    self.packed.segment_radii.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.segment_lane_offsets.clone(),
+                    self.packed.segment_count(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.vertex_active.clone(),
+                    self.packed.vertex_active.len(),
+                ),
+                BufferArg::from_raw_parts(self.control.clone(), 4),
+                config.twist_stiffness,
+                MAXIMUM_DIRECTOR_TURN,
             );
         }
     }
@@ -815,16 +1038,18 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                         self.packed.segment_radii.len(),
                     ),
                     BufferArg::from_raw_parts(
+                        self.segment_lane_offsets.clone(),
+                        self.packed.segment_count(),
+                    ),
+                    BufferArg::from_raw_parts(self.directors.clone(), self.packed.positions.len()),
+                    BufferArg::from_raw_parts(
                         self.active_segment_indices.clone(),
                         self.packed.segment_count(),
                     ),
                     BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
                     BufferArg::from_raw_parts(self.cell_counts.clone(), self.cell_count),
                     BufferArg::from_raw_parts(self.cell_offsets.clone(), self.cell_count),
-                    BufferArg::from_raw_parts(
-                        self.cell_segments.clone(),
-                        self.packed.segment_count(),
-                    ),
+                    BufferArg::from_raw_parts(self.cell_segments.clone(), self.proxy_capacity),
                     BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
                     BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
                     BufferArg::from_raw_parts(self.cell_periodic.clone(), 3),
@@ -833,23 +1058,37 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                         self.neighbor_counts.clone(),
                         self.packed.segment_count(),
                     ),
+                    BufferArg::from_raw_parts(self.neighbor_segments.clone(), self.neighbor_slots),
                     BufferArg::from_raw_parts(
-                        self.neighbor_segments.clone(),
-                        self.packed.segment_count() * self.neighbor_capacity as usize,
+                        self.neighbor_reference_positions.clone(),
+                        self.packed.positions.len(),
                     ),
                     BufferArg::from_raw_parts(
-                        self.neighbor_home_cells.clone(),
+                        self.segment_proxies.clone(),
                         self.packed.segment_count(),
                     ),
+                    BufferArg::from_raw_parts(self.cell_proxies.clone(), self.proxy_capacity),
                     BufferArg::from_raw_parts(
                         self.corrections.clone(),
                         6 * self.packed.segment_count(),
                     ),
                     BufferArg::from_raw_parts(
+                        self.director_corrections.clone(),
+                        2 * self.packed.segment_count(),
+                    ),
+                    BufferArg::from_raw_parts(
                         self.segment_max.clone(),
                         self.packed.segment_count(),
                     ),
-                    self.neighbor_capacity,
+                    BufferArg::from_raw_parts(
+                        self.list_offsets.clone(),
+                        self.packed.segment_count(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.list_weights.clone(),
+                        self.packed.segment_count(),
+                    ),
+                    self.neighbor_block,
                     config.correction_fraction,
                     config.contact_aggregation as u32,
                     self.cells_x,
@@ -1028,16 +1267,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                                 3 * self.packed.vertex_count(),
                             ),
                             BufferArg::from_raw_parts(
-                                self.segment_radii.clone(),
-                                self.packed.segment_radii.len(),
-                            ),
-                            BufferArg::from_raw_parts(
-                                self.vertex_fibers.clone(),
-                                self.packed.vertex_fibers.len(),
-                            ),
-                            BufferArg::from_raw_parts(
-                                self.fiber_segment_spans.clone(),
-                                self.packed.fiber_segment_spans.len(),
+                                self.vertex_wall_extents.clone(),
+                                3 * self.packed.vertex_count(),
                             ),
                             BufferArg::from_raw_parts(
                                 self.active_vertex_indices.clone(),
@@ -1082,16 +1313,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                                 self.packed.vertex_segments.len(),
                             ),
                             BufferArg::from_raw_parts(
-                                self.segment_radii.clone(),
-                                self.packed.segment_radii.len(),
-                            ),
-                            BufferArg::from_raw_parts(
-                                self.vertex_fibers.clone(),
-                                self.packed.vertex_fibers.len(),
-                            ),
-                            BufferArg::from_raw_parts(
-                                self.fiber_segment_spans.clone(),
-                                self.packed.fiber_segment_spans.len(),
+                                self.vertex_wall_extents.clone(),
+                                3 * self.packed.vertex_count(),
                             ),
                             BufferArg::from_raw_parts(
                                 self.active_vertex_indices.clone(),
@@ -1143,8 +1366,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                                 self.packed.fiber_vertex_spans.len(),
                             ),
                             BufferArg::from_raw_parts(
-                                self.segment_radii.clone(),
-                                self.packed.segment_radii.len(),
+                                self.vertex_wall_extents.clone(),
+                                3 * self.packed.vertex_count(),
                             ),
                             BufferArg::from_raw_parts(self.cell_lower.clone(), 3),
                             BufferArg::from_raw_parts(self.cell_upper.clone(), 3),
@@ -1168,6 +1391,9 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 // neighboring bend constraints reinforce rather than cancel.
                 if config.motion_model == FiberMotion::Flexible {
                     self.launch_curvature_cleanup(config);
+                    if self.packed.has_ovals {
+                        self.launch_director_update(config);
+                    }
                 }
                 // Manufacturing targets are capped kinematic actuators. Apply
                 // them after mechanics so each iteration ends at the commanded
@@ -1232,6 +1458,11 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                             targets.max_translation,
                         );
                     }
+                    // CT image attraction: one self-contained find/apply
+                    // launch pair, absent unless an image force is set.
+                    if let Some(image) = &self.image_force {
+                        self.launch_image_force(image, config.max_step);
+                    }
                 }
             }
             self.flag_neighbor_list_displacement();
@@ -1257,15 +1488,12 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 CubeDim::new_1d(1),
                 BufferArg::from_raw_parts(self.refinement_count.clone(), 6),
             );
-            refine_contact_segments::launch_unchecked::<R>(
+            // Decide every split before applying any, so no thread sees a
+            // sibling's split from the same epoch.
+            mark_refinement_candidates::launch_unchecked::<R>(
                 &self.client,
                 CubeCount::Static(self.packed.segment_count().div_ceil(64) as u32, 1, 1),
                 CubeDim::new_1d(64),
-                BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
-                BufferArg::from_raw_parts(
-                    self.segment_vertices.clone(),
-                    self.packed.segment_vertices.len(),
-                ),
                 BufferArg::from_raw_parts(
                     self.segment_radii.clone(),
                     self.packed.segment_radii.len(),
@@ -1279,6 +1507,46 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     self.packed.segment_children.len(),
                 ),
                 BufferArg::from_raw_parts(self.segment_max.clone(), self.packed.segment_count()),
+                BufferArg::from_raw_parts(
+                    self.segment_active.clone(),
+                    self.packed.segment_active.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.segment_birth_epochs.clone(),
+                    self.packed.segment_birth_epochs.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.segment_contact_epochs.clone(),
+                    self.packed.segment_contact_epochs.len(),
+                ),
+                BufferArg::from_raw_parts(self.control.clone(), 4),
+                BufferArg::from_raw_parts(
+                    self.coarsening_candidates.clone(),
+                    self.packed.segment_count(),
+                ),
+                epoch,
+                penetration_threshold,
+                config.contact_length_over_diameter,
+                config.minimum_length_over_diameter,
+                config.refinement_persistence,
+            );
+            apply_refinement_candidates::launch_unchecked::<R>(
+                &self.client,
+                CubeCount::Static(self.packed.segment_count().div_ceil(64) as u32, 1, 1),
+                CubeDim::new_1d(64),
+                BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
+                BufferArg::from_raw_parts(
+                    self.segment_vertices.clone(),
+                    self.packed.segment_vertices.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.segment_children.clone(),
+                    self.packed.segment_children.len(),
+                ),
+                BufferArg::from_raw_parts(
+                    self.coarsening_candidates.clone(),
+                    self.packed.segment_count(),
+                ),
                 BufferArg::from_raw_parts(
                     self.segment_active.clone(),
                     self.packed.segment_active.len(),
@@ -1306,10 +1574,6 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 BufferArg::from_raw_parts(self.control.clone(), 4),
                 BufferArg::from_raw_parts(self.refinement_count.clone(), 6),
                 epoch,
-                penetration_threshold,
-                config.contact_length_over_diameter,
-                config.minimum_length_over_diameter,
-                config.refinement_persistence,
             );
 
             if config.coarsening_persistence > 0
@@ -1691,16 +1955,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                             self.packed.positions.len(),
                         ),
                         BufferArg::from_raw_parts(
-                            self.segment_radii.clone(),
-                            self.packed.segment_radii.len(),
-                        ),
-                        BufferArg::from_raw_parts(
-                            self.vertex_fibers.clone(),
-                            self.packed.vertex_fibers.len(),
-                        ),
-                        BufferArg::from_raw_parts(
-                            self.fiber_segment_spans.clone(),
-                            self.packed.fiber_segment_spans.len(),
+                            self.vertex_wall_extents.clone(),
+                            3 * self.packed.vertex_count(),
                         ),
                         BufferArg::from_raw_parts(
                             self.vertex_active.clone(),
@@ -1916,7 +2172,9 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         assert!(maximum_surface_gap.is_finite() && maximum_surface_gap >= 0.0);
         assert!(capacity > 0);
         self.rebuild_active_indices();
-        let capture_cell_size = self.cell_size + maximum_surface_gap;
+        // Whole segments need the segment-sized grid; never go finer than the
+        // allocated neighbor grid, whose cell buffers the capture reuses.
+        let capture_cell_size = self.segment_cell_size.max(self.cell_size) + maximum_surface_gap;
         let extents = [
             self.packed.cell_upper[0] - self.packed.cell_lower[0],
             self.packed.cell_upper[1] - self.packed.cell_lower[1],
@@ -1944,6 +2202,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             cells_z,
             capture_control.clone(),
             1,
+            false,
         );
         // The shared grid now uses the capture layout, which the overflow
         // path of the next contact pass must not read.
@@ -2104,6 +2363,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         positions: &[f32],
         assembly: &mut tangle_core::FiberAssembly,
     ) -> Result<(), PackingError> {
+        let directors = self.packed.has_ovals.then(|| self.download_directors());
         if self.packed.adaptive
             || self
                 .packed
@@ -2113,10 +2373,21 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         {
             let active = self.download_vertex_active();
             self.packed
-                .unpack_active_positions(positions, &active, assembly)
+                .unpack_active_positions(positions, directors.as_deref(), &active, assembly)
         } else {
-            self.packed.unpack_positions(positions, assembly)
+            self.packed
+                .unpack_positions(positions, directors.as_deref(), assembly)
         }
+    }
+
+    /// Downloads the current interleaved long-axis directors (zero for round
+    /// fibers).
+    pub fn download_directors(&self) -> Vec<f32> {
+        let bytes = self
+            .client
+            .read_one(self.directors.clone())
+            .expect("CubeCL director readback failed");
+        f32::from_bytes(&bytes).to_vec()
     }
 
     /// Downloads the current active-vertex flags.

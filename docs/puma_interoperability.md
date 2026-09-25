@@ -240,6 +240,7 @@ why `max_radius` may be at most a quarter of a non-periodic in-plane length
 casts a `line_count × line_count` grid of straight test lines along each axis
 and intersects them exactly with the fiber capsules (each segment swept by its
 radius), so overlapping fibers count once and nothing depends on a voxel size.
+Oval fibers are treated as round, with the radius of a circle of equal area.
 
 - **Solid fraction:** covered length over line length, averaged over all
   lines, also reported per axis. Unlike `nominal_swept_volume_fraction` it

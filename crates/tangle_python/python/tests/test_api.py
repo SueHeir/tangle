@@ -39,6 +39,45 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(collection.rest_centerlines()[0][1], [1.0, 0.0, 0.0])
         self.assertAlmostEqual(material.min_bend_radius, 35 * um)
 
+    def test_oval_material_and_long_axes(self):
+        oval = tangle.Material("oval", diameter=0.06, thickness=0.04)
+        self.assertTrue(oval.is_oval)
+        self.assertAlmostEqual(oval.thickness, 0.04)
+        self.assertFalse(tangle.Material("round", diameter=0.06, thickness=0.06).is_oval)
+        with self.assertRaises(ValueError):
+            tangle.Material("bad", diameter=0.06, thickness=0.08)
+
+        collection = tangle.FiberCollection("ovals")
+        # Default long axis lies flat: perpendicular to the fiber, in xy.
+        collection.add_fiber([[0.0, 0.5, 0.5], [1.0, 0.5, 0.5]], oval)
+        # An explicit long axis is made perpendicular to the fiber.
+        collection.add_fiber(
+            [[0.5, 0.0, 0.5], [0.5, 1.0, 0.5]], oval, long_axis=[0.0, 0.3, 2.0]
+        )
+        default_axis, given_axis = (axes[0] for axes in collection.long_axes())
+        self.assertEqual([round(value, 12) for value in default_axis], [0.0, 1.0, 0.0])
+        self.assertEqual([round(value, 12) for value in given_axis], [0.0, 0.0, 1.0])
+
+        assembly = tangle.Assembly(tangle.Cell([2.0, 2.0, 2.0]))
+        rotation = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+        assembly.insert(collection, rotation=rotation)
+        placed_axes = assembly.long_axes()
+        self.assertEqual([round(value, 12) for value in placed_axes[1][0]], [0.0, 0.0, 1.0])
+        self.assertEqual(len(placed_axes[0]), 2)
+
+    def test_crossing_generators_reject_oval_materials(self):
+        oval = tangle.Material("oval", diameter=0.06, thickness=0.04)
+        with self.assertRaises(ValueError):
+            tangle.generate_point_crossing(tangle.Cell([1.0, 1.0, 1.0]), material=oval)
+
+    def test_population_keeps_the_oval_shape(self):
+        oval = tangle.Material("oval", diameter=0.03, thickness=0.02)
+        population = tangle.FiberPopulation(material=oval, count=4, diameter=(0.02, 0.04))
+        collection = tangle.generate_fiber_population(tangle.Cell([1.0, 1.0, 1.0]), population)
+        self.assertEqual(len(collection), 4)
+        for axes in collection.long_axes():
+            self.assertAlmostEqual(axes[0][2], 0.0, places=12)
+
     def test_recipe_insert_returns_persistent_selection(self):
         material = tangle.Material("fiber", diameter=0.1)
         collection = tangle.FiberCollection("crossing")
@@ -551,6 +590,24 @@ class RecipeTests(unittest.TestCase):
         )
         self.assertEqual(result.assembly.fiber_count, 3)
         self.assertEqual(result.fiber_count, 3)
+
+    def test_crossing_flat_ovals_separate_by_their_thickness(self):
+        oval = tangle.Material("oval", diameter=0.12, thickness=0.06)
+        crossing = tangle.FiberCollection("ovals")
+        crossing.add_fiber([[0.2, 0.5, 0.5], [0.8, 0.5, 0.5]], oval)
+        crossing.add_fiber([[0.5, 0.2, 0.54], [0.5, 0.8, 0.54]], oval)
+        recipe = tangle.Recipe(tangle.Cell([1.0, 1.0, 1.0]))
+        recipe.insert(crossing)
+        recipe.relax_until_converged(max_iterations=400)
+        result = recipe.run(
+            tangle.RelaxationSettings(backend="cpu", max_step=0.01, penetration_tolerance=1.0e-5)
+        )
+        first, second = result.centerlines()
+        separation = 0.5 * (second[0][2] + second[1][2]) - 0.5 * (first[0][2] + first[1][2])
+        # Thickness 0.06 decides, not the 0.12 width.
+        self.assertGreater(separation, 0.06 - 1.0e-4)
+        self.assertLess(separation, 0.07)
+        self.assertEqual(len(result.assembly.long_axes()[0]), 2)
 
     def test_run_returns_a_new_assembly(self):
         assembly = tangle.Assembly(tangle.Cell([1.0, 1.0, 1.0]))

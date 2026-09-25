@@ -35,6 +35,11 @@ pub struct FiberTopology {
 pub struct GeometryState {
     /// Flat vertex positions addressed by [`Fiber::vertices`].
     pub positions: Vec<Vec3>,
+    /// Unit long-axis direction of the cross-section at each vertex, for
+    /// non-circular sections. Either empty (no fiber needs one) or one entry
+    /// per position; see [`crate::default_directors`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub directors: Vec<Vec3>,
 }
 
 /// Intrinsic, placed, and optional manufactured reference geometry.

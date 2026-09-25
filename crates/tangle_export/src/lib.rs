@@ -368,7 +368,7 @@ impl fmt::Display for ExportError {
                 write!(f, "first atom type must be positive, got {value}")
             }
             Self::NonCircularSection(id) => {
-                write!(f, "fiber {id} uses a non-circular section")
+                write!(f, "fiber {id} is oval, which BPM export does not support")
             }
             Self::MissingSection(id) => write!(f, "fiber {id} references a missing section"),
             Self::InvalidFiberSpan(id) => write!(f, "fiber {id} has an invalid placed span"),

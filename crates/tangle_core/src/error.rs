@@ -29,6 +29,13 @@ pub enum BuildError {
     UnknownSection(SectionId),
     /// A referenced junction law does not exist.
     UnknownJunctionLaw(JunctionLawId),
+    /// A per-vertex director list did not match the fiber's vertex count.
+    DirectorCountMismatch {
+        /// Number of fiber vertices.
+        vertices: usize,
+        /// Number of supplied directors.
+        directors: usize,
+    },
     /// A flat table cannot be represented with 32-bit dense indices.
     IndexOverflow,
 }
@@ -52,6 +59,13 @@ impl fmt::Display for BuildError {
             Self::UnknownMaterial(id) => write!(f, "unknown material ID {:?}", id),
             Self::UnknownSection(id) => write!(f, "unknown section ID {:?}", id),
             Self::UnknownJunctionLaw(id) => write!(f, "unknown junction law ID {:?}", id),
+            Self::DirectorCountMismatch {
+                vertices,
+                directors,
+            } => write!(
+                f,
+                "fiber has {vertices} vertices but {directors} directors were supplied"
+            ),
             Self::IndexOverflow => f.write_str("assembly exceeds 32-bit dense-index capacity"),
         }
     }

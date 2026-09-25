@@ -30,7 +30,7 @@ solver as the native applications; relaxation does not run as a Python loop.
 Start with the [installation guide](crates/tangle_python/README.md) or
 [tutorial 00](crates/tangle_python/python/tutorials/00_installation_and_environment.ipynb).
 This is currently a **source install**, not a published-wheel installation.
-You need Python 3.10+, Rust/Cargo, and a native compiler/linker. CubeCL downloads
+You need Python 3.11+, Rust/Cargo, and a native compiler/linker. CubeCL downloads
 its matching LLVM build dependency; a system `llvm-config` is not required.
 
 After installing those prerequisites, from the repository root (macOS/Linux):
@@ -204,12 +204,23 @@ See [solver and architecture notes](docs/architecture.md) for details.
   contact_gap)` scores every shape, contact and orientation metric by its
   distance to the reference divided by the reference's own
   subvolume-to-subvolume spread.
-- **PuMA:** circular-capsule VTI/JSON bundles for direct `pumapy` analysis.
+- **Oval fibers:** `Material(..., thickness=...)` gives fibers an oval
+  cross-section that relaxes, twists and exports to OVITO and PuMA; see the
+  [oval fiber notes](docs/oval_fibers.md). BPM export is round-only.
+- **PuMA:** capsule VTI/JSON bundles for direct `pumapy` analysis.
   Occupied voxel volume and nominal fiber volume are different quantities;
   comparisons need matched definitions and resolution checks.
+- **CT scans:** `tangle.ct` fits Tangle fibers to a CT scan from the known
+  fiber diameter and bend limit, and exports an assembly, a fitted
+  population, per-voxel fiber labels and a per-fiber overlay on the scan.
+  See the [CT fitting guide](docs/ct_fitting.md), the
+  [step-by-step method](docs/ct_fitting_internals.md), and the
+  [results on synthetic scans, with pictures](crates/tangle_python/python/examples/ct_results/README.md).
 
 [Results/export tutorial](crates/tangle_python/python/tutorials/14_results_and_exports.ipynb)
 · [PuMA analysis guide](docs/puma_interoperability.md)
+· [CT fitting guide](docs/ct_fitting.md)
+· [CT fitting results](crates/tangle_python/python/examples/ct_results/README.md)
 
 ## Backends and reproducibility
 

@@ -24,6 +24,9 @@
 //!
 //! Lines lie on a regular `line_count × line_count` grid in each of the
 //! three axis directions.
+//!
+//! Oval (elliptical) sections are treated as round with the equal-area
+//! radius, as in the other analyses.
 
 use std::fmt;
 

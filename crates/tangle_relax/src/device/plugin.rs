@@ -6,7 +6,8 @@ use tangle_core::FiberAssembly;
 use crate::{
     AdaptiveSegmentationConfig, BatchStatus, CellListConfig, CompactionEnergyModel,
     CompactionKinematics, CompactionMetrics, ContactCapture, DeviceFiberWorld,
-    DeviceWorldCheckpoint, FormationTargetError, PackedAssembly, PackingError, RelaxationSnapshot,
+    DeviceWorldCheckpoint, FormationTargetError, ImageForceSettings, PackedAssembly, PackingError,
+    RelaxationSnapshot,
 };
 
 /// CubeCL runtime selected for relaxation.
@@ -108,6 +109,10 @@ pub struct RelaxationConfig {
     /// Forward/backward in-place curvature sweeps performed after each contact
     /// correction before the next hard convergence audit.
     pub curvature_cleanup_sweeps: usize,
+    /// Oval fibers only: fraction of the difference between a vertex's
+    /// long-axis direction and its neighbours' mean removed per iteration.
+    /// Larger values make ovals resist twisting more.
+    pub twist_stiffness: f32,
     /// Maximum contact displacement of one vertex in an iteration.
     pub max_step: f32,
     /// Maximum device-side correction iterations.
@@ -142,6 +147,7 @@ impl Default for RelaxationConfig {
             curvature_ratio_tolerance: 1.0e-5,
             constraint_iterations: 2,
             curvature_cleanup_sweeps: 4,
+            twist_stiffness: 0.1,
             max_step: 0.006,
             max_iterations: 2_000,
             iterations_per_batch: 128,
@@ -393,6 +399,104 @@ impl DeviceWorld {
             Self::Cuda(world) => world.run_batch(config, iterations),
             #[cfg(feature = "hip")]
             Self::Hip(world) => world.run_batch(config, iterations),
+        }
+    }
+
+    /// Uploads a packed assembly to the configured backend outside a GRASS
+    /// app, for callers that drive `run_batch` themselves.
+    pub fn new(config: &RelaxationConfig, packed: PackedAssembly) -> Self {
+        Self::upload(config, packed)
+    }
+
+    /// Uploads a normalized CT volume for the image force (initially off).
+    /// See [`DeviceFiberWorld::set_image`].
+    pub fn set_image(
+        &mut self,
+        image: &[f32],
+        shape_zyx: [usize; 3],
+        voxel_size: f32,
+        origin: [f32; 3],
+    ) {
+        match self {
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(world) => world.set_image(image, shape_zyx, voxel_size, origin),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.set_image(image, shape_zyx, voxel_size, origin),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(world) => world.set_image(image, shape_zyx, voxel_size, origin),
+            #[cfg(feature = "hip")]
+            Self::Hip(world) => world.set_image(image, shape_zyx, voxel_size, origin),
+        }
+    }
+
+    /// Sets the image-force parameters; a rate of zero disables the force.
+    pub fn set_image_force(&mut self, settings: ImageForceSettings) {
+        match self {
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(world) => world.set_image_force(settings),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.set_image_force(settings),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(world) => world.set_image_force(settings),
+            #[cfg(feature = "hip")]
+            Self::Hip(world) => world.set_image_force(settings),
+        }
+    }
+
+    /// Whether an image is resident and its force is enabled.
+    pub fn image_force_active(&self) -> bool {
+        match self {
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(world) => world.image_force_active(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.image_force_active(),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(world) => world.image_force_active(),
+            #[cfg(feature = "hip")]
+            Self::Hip(world) => world.image_force_active(),
+        }
+    }
+
+    /// Replaces the per-vertex pin flags (one per packed vertex; nonzero pins).
+    /// See [`DeviceFiberWorld::set_vertex_pinned`].
+    pub fn set_vertex_pinned(&mut self, pinned: &[u32]) {
+        match self {
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(world) => world.set_vertex_pinned(pinned),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.set_vertex_pinned(pinned),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(world) => world.set_vertex_pinned(pinned),
+            #[cfg(feature = "hip")]
+            Self::Hip(world) => world.set_vertex_pinned(pinned),
+        }
+    }
+
+    /// Number of currently pinned packed vertices.
+    pub fn pinned_vertex_count(&self) -> usize {
+        match self {
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(world) => world.pinned_vertex_count(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.pinned_vertex_count(),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(world) => world.pinned_vertex_count(),
+            #[cfg(feature = "hip")]
+            Self::Hip(world) => world.pinned_vertex_count(),
+        }
+    }
+
+    /// Per-vertex `(owned mass in voxel², support)` at the current positions.
+    pub fn image_vertex_stats(&self) -> Vec<f32> {
+        match self {
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(world) => world.image_vertex_stats(),
+            #[cfg(feature = "cpu")]
+            Self::Cpu(world) => world.image_vertex_stats(),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(world) => world.image_vertex_stats(),
+            #[cfg(feature = "hip")]
+            Self::Hip(world) => world.image_vertex_stats(),
         }
     }
 
