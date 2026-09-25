@@ -132,3 +132,59 @@ def trace_fibers(
         None if max_fibers is None else int(max_fibers), float(seed_depth_radii),
     )
     return [np.array(line, dtype=np.float64).reshape(-1, 3) for line in lines]
+
+
+def _pack(lines) -> tuple[np.ndarray, list[int]]:
+    lines = [np.asarray(line, dtype=np.float64).reshape(-1, 3) for line in lines]
+    nodes = np.ascontiguousarray(np.concatenate(lines)) if lines else np.zeros((0, 3))
+    return nodes, [len(line) for line in lines]
+
+
+def _unpack(packed) -> list[np.ndarray]:
+    flat, counts = packed
+    nodes = np.array(flat, dtype=np.float64).reshape(-1, 3)
+    return np.split(nodes, np.cumsum(counts)[:-1]) if counts else []
+
+
+def owners(centerlines, radii, voxels) -> np.ndarray:
+    """Owning fiber (one-based, 0 for none) of each ``(k, j, i)`` voxel (see ``_geometry.OwnerLookup``)."""
+    nodes, counts = _pack(centerlines)
+    voxels = np.ascontiguousarray(np.asarray(voxels, dtype=np.int64).reshape(-1, 3))
+    out = np.empty(len(voxels), dtype=np.int32)
+    _tangle.ct_owners(nodes, counts, [float(r) for r in radii], voxels, out)
+    return out
+
+
+def end_step(image, centerlines, radii, reach, *, step: float, max_moves: int) -> list[np.ndarray]:
+    """Fiber ends grown or trimmed (see ``_refine.end_step``)."""
+    nodes, counts = _pack(centerlines)
+    return _unpack(_tangle.ct_end_step(
+        _f32(image), nodes, counts, [float(r) for r in radii], [float(r) for r in reach], float(step), int(max_moves)
+    ))
+
+
+def cut_void(image, centerlines, radii, *, level, min_gap_radii, bridge_level, bridge_offset_radii,
+             aligned_level, aligned_angle_degrees, directions=None):
+    """``(pieces, source, (trimmed, splits, bridged))`` (see ``_refine.cut_void``)."""
+    nodes, counts = _pack(centerlines)
+    packed, source, cut = _tangle.ct_cut_void(
+        _f32(image), nodes, counts, [float(r) for r in radii], float(level), float(min_gap_radii),
+        float(bridge_level), float(bridge_offset_radii), float(aligned_level), float(aligned_angle_degrees), directions,
+    )
+    return _unpack(packed), np.array(source, dtype=int), cut
+
+
+def resample(centerlines, spacing: float) -> list[np.ndarray]:
+    """Each polyline resampled to ``spacing`` (see ``_geometry.resample``)."""
+    nodes, counts = _pack(centerlines)
+    return _unpack(_tangle.ct_resample(nodes, counts, float(spacing)))
+
+
+def support(image, centerlines) -> np.ndarray:
+    nodes, counts = _pack(centerlines)
+    return np.array(_tangle.ct_support(_f32(image), nodes, counts))
+
+
+def curvature_ratio(centerlines, min_bend_radius: float) -> np.ndarray:
+    nodes, counts = _pack(centerlines)
+    return np.array(_tangle.ct_curvature_ratio(nodes, counts, float(min_bend_radius)))

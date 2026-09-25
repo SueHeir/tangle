@@ -12,7 +12,9 @@ pub mod edt;
 pub mod filter;
 pub mod hessian;
 pub mod label;
+pub mod line;
 pub mod raster;
+pub mod refine;
 pub mod sample;
 pub mod trace;
 

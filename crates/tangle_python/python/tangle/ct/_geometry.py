@@ -18,19 +18,13 @@ def polyline_length(points: np.ndarray) -> float:
 
 
 def resample(points: np.ndarray, spacing: float) -> np.ndarray:
-    """Resample a polyline to (nearly) uniform arc-length spacing."""
-    points = np.asarray(points, dtype=np.float64)
+    """Resample a polyline to (nearly) uniform arc-length spacing; in Rust."""
+    from . import _native
+
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     if len(points) < 2:
         return points.copy()
-    steps = np.linalg.norm(np.diff(points, axis=0), axis=1)
-    keep = np.concatenate([[True], steps > 1e-9])
-    points = points[keep]
-    if len(points) < 2:
-        return points.copy()
-    arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))])
-    count = max(int(round(arc[-1] / spacing)), 1) + 1
-    targets = np.linspace(0.0, arc[-1], count)
-    return np.stack([np.interp(targets, arc, points[:, axis]) for axis in range(3)], axis=1)
+    return _native.resample([points], spacing)[0]
 
 
 def tangents(points: np.ndarray) -> np.ndarray:
@@ -232,36 +226,20 @@ class OwnerLookup:
     For callers that read the labels at a few voxels only: the owner of a
     voxel is the fiber whose capsule surface is nearest its center among the
     segments within the fiber's radius of it (0 for none), ties going to the
-    lower segment, as :func:`rasterize` decides it.
+    lower segment, as :func:`rasterize` decides it; in Rust.
     """
 
     def __init__(self, shape: tuple[int, int, int], centerlines: list[np.ndarray], radii: np.ndarray) -> None:
-        self.shape = np.array(shape)
-        radii = np.asarray(radii, dtype=np.float64)
-        line_of = segment_lines(centerlines)
-        pieces = [np.asarray(line, dtype=np.float64).reshape(-1, 3) for line in centerlines]
-        self.a = np.concatenate([p[:-1] for p in pieces]) if len(line_of) else np.zeros((0, 3))
-        b = np.concatenate([p[1:] for p in pieces]) if len(line_of) else np.zeros((0, 3))
-        self.ab = b - self.a
-        denominator = np.einsum("ij,ij->i", self.ab, self.ab)
-        self.degenerate = denominator <= 1e-12
-        self.denominator = np.where(self.degenerate, 1.0, denominator)
-        self.label = line_of + 1
-        self.radius = radii[line_of]
+        self.shape = tuple(shape)
+        self.centerlines = [np.asarray(line, dtype=np.float64).reshape(-1, 3) for line in centerlines]
+        self.radii = np.asarray(radii, dtype=np.float64)
 
     def __call__(self, index_zyx: tuple[int, int, int]) -> int:
-        if not len(self.label):
+        from . import _native
+
+        if not self.centerlines:
             return 0
-        center = np.asarray(index_zyx[::-1], dtype=np.float64) + 0.5
-        offset = center - self.a
-        t = np.clip(np.einsum("ij,ij->i", offset, self.ab) / self.denominator, 0.0, 1.0)
-        t = np.where(self.degenerate, 0.0, t)
-        distance = np.linalg.norm(offset - t[:, None] * self.ab, axis=1)
-        near = np.flatnonzero(distance <= self.radius)
-        if not len(near):
-            return 0
-        surface = distance[near] - self.radius[near]
-        return int(self.label[near[np.argmin(surface)]])  # argmin: first (lowest) segment on ties
+        return int(_native.owners(self.centerlines, self.radii, [index_zyx])[0])
 
 
 def rasterize(

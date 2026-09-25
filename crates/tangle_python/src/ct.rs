@@ -9,6 +9,8 @@ use pyo3::buffer::{Element, PyBuffer};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use tangle_ct::hessian::HessianField;
+use tangle_ct::line::resample;
+use tangle_ct::refine::{curvature_ratio, cut_void, end_step, support, OwnerLookup, VoidRules};
 use tangle_ct::trace::{trace_fibers, FiberSearch, TraceSettings, Tracer};
 use tangle_ct::Shape;
 
@@ -359,4 +361,173 @@ pub(crate) fn ct_trace_fibers(
         read(&peak, "peak")?,
         search,
     ))
+}
+
+/// Lines as flat `(x, y, z)` values and node counts, for returning to Python.
+type Packed = (Vec<f64>, Vec<usize>);
+
+fn pack(lines: &[Vec<[f64; 3]>]) -> Packed {
+    let counts = lines.iter().map(Vec::len).collect();
+    let flat = lines.iter().flatten().flatten().copied().collect();
+    (flat, counts)
+}
+
+fn lines_of(nodes: &PyBuffer<f64>, counts: &[usize]) -> PyResult<Vec<Vec<[f64; 3]>>> {
+    split_lines(&points(nodes, "nodes")?, counts)
+}
+
+fn per_line(values: &[f64], counts: &[usize], name: &str) -> PyResult<()> {
+    if values.len() != counts.len() {
+        return Err(PyValueError::new_err(format!("give one {name} per line")));
+    }
+    Ok(())
+}
+
+/// Owners of voxels `(k, j, i)` (see `_geometry.OwnerLookup`) into `out`.
+#[pyfunction]
+pub(crate) fn ct_owners(
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+    radii: Vec<f64>,
+    voxels: PyBuffer<i64>,
+    out: PyBuffer<i32>,
+) -> PyResult<()> {
+    per_line(&radii, &counts, "radius")?;
+    let owners = OwnerLookup::new(&lines_of(&nodes, &counts)?, &radii);
+    let voxels = read(&voxels, "voxels")?;
+    let out = write(&out, "out")?;
+    if voxels.len() != 3 * out.len() {
+        return Err(PyValueError::new_err("voxels must be (n, 3) and out (n,)"));
+    }
+    for (o, v) in out.iter_mut().zip(voxels.chunks_exact(3)) {
+        if v.iter().any(|&c| c < 0) {
+            return Err(PyValueError::new_err("voxel indices must not be negative"));
+        }
+        *o = owners.owner([v[0] as usize, v[1] as usize, v[2] as usize]);
+    }
+    Ok(())
+}
+
+/// Fiber ends grown or trimmed (see `_refine.end_step`); returns packed lines.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ct_end_step(
+    image: PyBuffer<f32>,
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+    radii: Vec<f64>,
+    reach: Vec<f64>,
+    step: f64,
+    max_moves: usize,
+) -> PyResult<Packed> {
+    let shape = volume_shape(&image, "image")?;
+    per_line(&radii, &counts, "radius")?;
+    per_line(&reach, &counts, "reach")?;
+    let lines = lines_of(&nodes, &counts)?;
+    let owners = OwnerLookup::new(&lines, &radii);
+    let out = end_step(
+        read(&image, "image")?,
+        shape,
+        &lines,
+        &reach,
+        step,
+        &owners,
+        max_moves,
+    );
+    Ok(pack(&out))
+}
+
+/// Fits cut where they sit in void (see `_refine.cut_void`). `directions`,
+/// when given, is called as `directions(fit, points)` with a (2, 3) array
+/// and returns the scan's fiber axis at both points. Returns the packed
+/// pieces, each piece's source fit, and the trimmed, split and bridged counts.
+#[pyfunction]
+#[pyo3(signature = (image, nodes, counts, radii, level, min_gap_radii, bridge_level, bridge_offset_radii, aligned_level, aligned_angle_degrees, directions=None))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ct_cut_void(
+    py: Python<'_>,
+    image: PyBuffer<f32>,
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+    radii: Vec<f64>,
+    level: f64,
+    min_gap_radii: f64,
+    bridge_level: f64,
+    bridge_offset_radii: f64,
+    aligned_level: f64,
+    aligned_angle_degrees: f64,
+    directions: Option<Py<PyAny>>,
+) -> PyResult<(Packed, Vec<usize>, (usize, usize, usize))> {
+    let shape = volume_shape(&image, "image")?;
+    per_line(&radii, &counts, "radius")?;
+    let lines = lines_of(&nodes, &counts)?;
+    let rules = VoidRules {
+        level,
+        min_gap_radii,
+        bridge_level,
+        bridge_offset_radii,
+        aligned_level,
+        aligned_angle_degrees,
+    };
+    let array = py.import("numpy")?.getattr("array")?;
+    let mut failure: Option<PyErr> = None;
+    let mut call = |index: usize, ends: [[f64; 3]; 2]| -> [[f64; 3]; 2] {
+        let result = (|| -> PyResult<[[f64; 3]; 2]> {
+            let callback = directions.as_ref().expect("only called with directions");
+            let points = array.call1((ends.to_vec(),))?;
+            let axes: Vec<[f64; 3]> = callback.call1(py, (index, points))?.extract(py)?;
+            match axes.as_slice() {
+                [a, b] => Ok([*a, *b]),
+                _ => Err(PyValueError::new_err("directions must return two axes")),
+            }
+        })();
+        result.unwrap_or_else(|error| {
+            failure.get_or_insert(error);
+            [[0.0; 3]; 2]
+        })
+    };
+    let (pieces, source, cut) = cut_void(
+        read(&image, "image")?,
+        shape,
+        &lines,
+        &radii,
+        rules,
+        if directions.is_some() {
+            Some(&mut call as &mut dyn FnMut(usize, [[f64; 3]; 2]) -> [[f64; 3]; 2])
+        } else {
+            None
+        },
+    );
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    Ok((pack(&pieces), source, (cut.trimmed, cut.splits, cut.bridged)))
+}
+
+/// Each line resampled to `spacing` (see `_geometry.resample`); returns packed lines.
+#[pyfunction]
+pub(crate) fn ct_resample(nodes: PyBuffer<f64>, counts: Vec<usize>, spacing: f64) -> PyResult<Packed> {
+    if !(spacing > 0.0) {
+        return Err(PyValueError::new_err("spacing must be positive"));
+    }
+    let lines = lines_of(&nodes, &counts)?;
+    let out: Vec<Vec<[f64; 3]>> = lines.iter().map(|line| resample(line, spacing)).collect();
+    Ok(pack(&out))
+}
+
+/// Mean image value along each line (see `_refine.support`).
+#[pyfunction]
+pub(crate) fn ct_support(image: PyBuffer<f32>, nodes: PyBuffer<f64>, counts: Vec<usize>) -> PyResult<Vec<f64>> {
+    let shape = volume_shape(&image, "image")?;
+    Ok(support(read(&image, "image")?, shape, &lines_of(&nodes, &counts)?))
+}
+
+/// Largest curvature times `min_bend_radius`, per line (see `_refine.curvature_ratio`).
+#[pyfunction]
+pub(crate) fn ct_curvature_ratio(
+    nodes: PyBuffer<f64>,
+    counts: Vec<usize>,
+    min_bend_radius: f64,
+) -> PyResult<Vec<f64>> {
+    Ok(curvature_ratio(&lines_of(&nodes, &counts)?, min_bend_radius))
 }
