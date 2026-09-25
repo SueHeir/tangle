@@ -134,7 +134,10 @@ pub fn core_holes(mask: &[bool], shape: Shape, max_area: f64) -> Vec<bool> {
                     })
                 })
                 .collect();
-            workers.into_iter().map(|w| w.join().expect("hole worker")).collect()
+            workers
+                .into_iter()
+                .map(|w| w.join().expect("hole worker"))
+                .collect()
         });
         for index in found.into_iter().flatten() {
             holes[index] = true;
@@ -268,7 +271,10 @@ mod tests {
             .map(|i| (i.wrapping_mul(2654435761) >> 7) % 10 < 6)
             .collect();
         for max_area in [1.0, 4.0, 40.0] {
-            assert_eq!(core_holes(&mask, shape, max_area), holes_by_labeling(&mask, shape, max_area));
+            assert_eq!(
+                core_holes(&mask, shape, max_area),
+                holes_by_labeling(&mask, shape, max_area)
+            );
         }
     }
 }
