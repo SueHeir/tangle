@@ -262,3 +262,41 @@ def resolve_side_by_side(image, centerlines, radii, *, min_length, reach, end_co
         _f32(image), nodes, counts, [float(r) for r in radii], float(min_length), float(reach), float(end_cost),
         float(scale), float(max_angle_degrees),
     ))
+
+
+def render_grey(low, high, centerlines, radii, profiles, void: float, edge: float) -> np.ndarray:
+    """The grey the fibers should show over box ``[low, high)`` (see ``_grey.render_grey``)."""
+    low, high = _box(low), _box(high)
+    out = np.full(tuple(max(high[a] - low[a], 0) for a in (2, 1, 0)), float(void))
+    if len(centerlines) and out.size:
+        nodes, counts = _pack(centerlines)
+        _tangle.ct_render_grey(
+            low, high, nodes, counts, [float(r) for r in radii],
+            [[float(v) for v in np.asarray(p).ravel()] for p in profiles], float(void), float(edge), out,
+        )
+    return out
+
+
+def node_confidence(image, depth, centerlines, radii, *, spacing, margin, thickness_margin, ring,
+                    thickness_tolerance, previous=None):
+    """``(per_node, settled, per_sample, parts)`` (see ``_confidence.node_confidence``)."""
+    nodes, counts = _pack(centerlines)
+    previous_nodes = previous_counts = None
+    if previous is not None:
+        previous_nodes, previous_counts = _pack(previous)
+    per_node, settled, per_sample, parts = _tangle.ct_node_confidence(
+        _f32(image), _f32(depth), nodes, counts, [float(r) for r in radii], float(spacing), float(margin),
+        float(thickness_margin), int(ring), float(thickness_tolerance), previous_nodes, previous_counts,
+    )
+    as_arrays = lambda rows: [np.array(row, dtype=np.float64) for row in rows]  # noqa: E731
+    return as_arrays(per_node), as_arrays(settled), as_arrays(per_sample), [as_arrays(part) for part in parts]
+
+
+def overlap(low, high, centerlines, radii) -> np.ndarray:
+    """Per voxel of box ``[low, high)``, how many fits beyond the first contain it."""
+    low, high = _box(low), _box(high)
+    out = np.zeros(tuple(max(high[a] - low[a], 0) for a in (2, 1, 0)), dtype=np.uint16)
+    if len(centerlines) and out.size:
+        nodes, counts = _pack(centerlines)
+        _tangle.ct_overlap(low, high, nodes, counts, [float(r) for r in radii], out)
+    return out

@@ -97,31 +97,10 @@ def render_grey(
     void: float,
     edge: float = EDGE,
 ) -> np.ndarray:
-    """The grey the fibers should show over the voxel box ``[low, high)`` (x, y, z)."""
-    from ._geometry import nearest_segments, segment_lines, segment_voxels
+    """The grey the fibers should show over the voxel box ``[low, high)`` (x, y, z); in Rust."""
+    from . import _native
 
-    low = np.asarray(low, dtype=int)
-    high = np.asarray(high, dtype=int)
-    shape = tuple(int(n) for n in (high - low)[::-1])
-    value = np.full(shape, void, dtype=np.float64)
-    if not len(lines):
-        return value
-    radii = np.asarray(radii, dtype=np.float64)
-    line_of = segment_lines(lines)
-    chunks = segment_voxels(lines, radii + 2 * edge, radii + 2 * edge, low, high)
-    surface, owner = nearest_segments(int(np.prod(shape)), chunks, key=-radii[line_of])
-    drawn = np.nonzero((owner >= 0) & (surface < 2 * edge))[0]
-    fiber = line_of[owner[drawn]]
-    radius = radii[fiber]
-    fraction = np.minimum((surface[drawn] + radius) / np.maximum(radius, 1e-6), 1.0)
-    inside = np.empty(len(drawn))
-    for f in np.unique(fiber):
-        mine = fiber == f
-        profile = np.asarray(profiles[f], dtype=np.float64)
-        inside[mine] = np.interp(fraction[mine], profile_radii(profile), profile)
-    weight = np.clip(1.0 - surface[drawn] / (2 * edge), 0.0, 1.0)
-    value.ravel()[drawn] = void + weight * (inside - void)
-    return value
+    return _native.render_grey(low, high, lines, radii, profiles, void, edge)
 
 
 def squared_residual_map(
