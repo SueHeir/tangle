@@ -1135,6 +1135,8 @@ class _Fitter:
             merged_types = np.concatenate([new_types[keep_new], types[keep_old]]).astype(int)
             before_coverage = float(old_map.sum(dtype=np.float64)) / max(float(self.foreground.sum()), 1.0)
             kept = bool(accepted.any()) and bool(merged)
+            if _REDRAW_PROBE is not None:
+                _REDRAW_PROBE({"pass": pass_index, "step": "merged", "lines": merged, "radii": merged_radii})
             if kept and keep_old:
                 # Old and new fibers meet at the edges of reverted regions:
                 # settle the merged fit (every node pinned for the image run,
@@ -1169,6 +1171,8 @@ class _Fitter:
                 sure_coverage_before=round(before_coverage, 4), residual_change=round(residual_change, 4), kept=kept,
                 seconds=round(time.perf_counter() - started, 2),
             )
+            if kept and _REDRAW_PROBE is not None:
+                _REDRAW_PROBE({"pass": pass_index, "step": "settled", "lines": merged, "radii": merged_radii})
             if kept:
                 lines, radii, types = merged, merged_radii, merged_types
                 confidence, settled = merged_confidence, merged_settled
