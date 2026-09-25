@@ -248,7 +248,8 @@ def two_types(cache: Path, *, noisy: bool = False, halo: bool = False, scanner: 
         # two_types' fibers scanned by a simulated scanner (ct.Scanner):
         # photon noise, detector blur and filtered back-projection, with a
         # weakly absorbing, phase-shifting sample and a short propagation
-        # distance, so the edges show phase fringes. Both fiber types are
+        # distance, so the edges show phase fringes; a 3 µm resolution
+        # softens the fibers so touching ones are hard to tell apart. Both fiber types are
         # solid; the coarse ones are half as dense and, being the lighter
         # material, shift the phase more for what they absorb (a higher
         # delta/beta), so any bright rim they show comes from the phase
@@ -257,9 +258,8 @@ def two_types(cache: Path, *, noisy: bool = False, halo: bool = False, scanner: 
             (7 * um, ct.CrossSection()),
             (19 * um, ct.CrossSection(brightness=0.5)),
         ]
-        full = render_scan(
-            truth, voxel, seed=21, profiles=profiles, scanner=ct.Scanner(delta_beta=(5.0, 20.0), propagation=1.5)
-        )
+        scanner = ct.Scanner(photons=1500, resolution=3 * um, delta_beta=(5.0, 20.0), propagation=4.0)
+        full = render_scan(truth, voxel, seed=21, profiles=profiles, scanner=scanner)
     elif halo:
         # two_types' scan with a phase-contrast halo at unit strength (a
         # dark band outside every surface, deeper where surfaces face each

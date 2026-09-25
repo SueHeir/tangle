@@ -202,7 +202,12 @@ def synthetic_ct(
             scaled = [(d, replace(p, brightness=p.brightness * r)) for (d, p), r in zip(profiles, ratios)]
             weighted, _ = _apply_profiles(base, centerlines, radii, voxel_size, scaled, period)
             phase = (scanner.fiber_attenuation * weighted).astype(np.float32)
-        attenuation = acquire(sample.astype(np.float32), scanner, rng, voxel_size, phase)
+        warp = None
+        if scanner.fiber_motion > 0 or scanner.drift > 0:
+            from ._scanner import motion_warp
+
+            warp = motion_warp(labels, scanner, voxel_size, rng)
+        attenuation = acquire(sample.astype(np.float32), scanner, rng, voxel_size, phase, warp)
         attenuation /= scanner.fiber_attenuation  # fiber 1, void about 0, as below
         if drift:
             z, y, x = np.indices(attenuation.shape, dtype=np.float32)

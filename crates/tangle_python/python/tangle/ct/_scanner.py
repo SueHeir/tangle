@@ -25,6 +25,14 @@ and adding noise to it:
 4. The log of flat-field-corrected intensity is reconstructed slice by
    slice by filtered back-projection with a Shepp-Logan filter.
 
+The sample may move while it turns. ``fiber_motion`` (meters, root mean
+square) moves each fiber on its own smooth random path, as loose fibers
+settle or sway; ``drift`` (meters, root mean square) moves the whole
+sample along one such path. The scan is split into ``motion_steps``
+stretches of angles, each seeing the sample where it was then, so moving
+fibers come out blurred and doubled while still ones stay sharp. The
+truth is the fibers' rest position.
+
 The noise texture, the blur and the edge fringes then come from the same
 physics as a real scan's. Every setting is a physical one; none is fitted.
 Voxels are the detector pixels (unit magnification).
@@ -57,6 +65,9 @@ class Scanner:
     # physical size whatever the voxel size.
     resolution: float | None = None
     ring_strength: float = 0.0
+    fiber_motion: float = 0.0  # meters, RMS displacement of each fiber over the scan
+    drift: float = 0.0  # meters, RMS displacement of the whole sample over the scan
+    motion_steps: int = 8
 
 
 def acquire(
@@ -65,6 +76,7 @@ def acquire(
     rng: np.random.Generator,
     voxel_size: float | None = None,
     phase: np.ndarray | None = None,
+    warp=None,
 ) -> np.ndarray:
     """The reconstructed attenuation per voxel of ``attenuation`` (``(z, y, x)``, per voxel) scanned by ``scanner``.
 
@@ -72,6 +84,9 @@ def acquire(
     ``phase`` is the phase shift per voxel times two (``delta_beta`` times
     the attenuation, voxel by voxel, for a sample of several materials);
     by default ``scanner.delta_beta`` (a single ratio) times ``attenuation``.
+    ``warp(step, volume)`` is the volume as the sample stood during
+    stretch ``step`` of ``scanner.motion_steps`` (the motion); None for a
+    still sample.
     """
     from scipy.ndimage import gaussian_filter
 
@@ -82,15 +97,21 @@ def acquire(
     width = int(np.ceil(np.hypot(ny, nx))) + 4
     count = scanner.angles or width
     angles = np.arange(count) * (np.pi / count)
-    line = _native.project(attenuation, angles, width)  # (angle, z, u)
+    steps = max(int(scanner.motion_steps), 1) if warp is not None else 1
+    blocks = np.array_split(np.arange(count), steps)
+    line = np.empty((count, nz, width), dtype=np.float32)  # (angle, z, u)
+    phase_line = np.empty_like(line) if phase is not None else None
+    for step, block in enumerate(blocks):
+        # Each stretch of angles sees the sample where it stood then.
+        moved = attenuation if warp is None else warp(step, attenuation)
+        line[block] = _native.project(moved, angles[block], width)
+        if phase is not None:
+            moved = phase if warp is None else warp(step, phase)
+            phase_line[block] = _native.project(moved, angles[block], width)
 
     intensity = np.exp(-line)
-    if phase is not None:
-        phase_line = _native.project(phase, angles, width)
-    elif np.ndim(scanner.delta_beta) == 0 and scanner.delta_beta > 0:
+    if phase_line is None and np.ndim(scanner.delta_beta) == 0 and scanner.delta_beta > 0:
         phase_line = float(scanner.delta_beta) * line
-    else:
-        phase_line = None
     if scanner.propagation > 0 and phase_line is not None:
         intensity = _propagate(line, phase_line, scanner.propagation)
     blur = scanner.detector_blur
@@ -140,3 +161,45 @@ def _filter(sinogram: np.ndarray) -> np.ndarray:
     ramp = np.abs(f) * np.sinc(f)  # |f| (cycles/pixel) times the Shepp-Logan window
     spectrum = np.fft.rfft(sinogram, n=size, axis=-1) * ramp
     return np.fft.irfft(spectrum, n=size, axis=-1)[..., :width].astype(np.float32)
+
+
+def motion_warp(labels: np.ndarray, scanner: Scanner, voxel_size: float, rng: np.random.Generator):
+    """``warp(step, volume)`` for ``acquire``: each fiber (``labels``, one-based) and the whole sample moving.
+
+    Every voxel moves with the fiber it belongs to, or the nearest one; each
+    fiber's path and the sample's drift are smooth random walks over the
+    steps, centered on the rest position, with the requested RMS size.
+    """
+    from scipy.ndimage import distance_transform_edt, map_coordinates
+
+    steps = max(int(scanner.motion_steps), 1)
+    count = int(labels.max())
+
+    def paths(n: int, rms: float) -> np.ndarray:
+        """(steps, n, 3) smooth random displacements in voxels (z, y, x), RMS ``rms``."""
+        walk = np.cumsum(rng.standard_normal((steps, n, 3)), axis=0)
+        walk -= walk.mean(axis=0)
+        size = np.sqrt((walk**2).sum(axis=2).mean())
+        return walk * (rms / voxel_size / size) if size > 0 else walk
+
+    fibers = paths(count + 1, scanner.fiber_motion) if scanner.fiber_motion > 0 and count else None
+    drift = paths(1, scanner.drift)[:, 0] if scanner.drift > 0 else None
+    owner = labels
+    if fibers is not None:
+        # The void moves with its nearest fiber, so partial-volume edges go along.
+        _, index = distance_transform_edt(labels == 0, return_indices=True)
+        owner = labels[tuple(index)]
+    grid = np.indices(labels.shape, dtype=np.float32)
+
+    def warp(step: int, volume: np.ndarray) -> np.ndarray:
+        shift = np.zeros((3,) + labels.shape, dtype=np.float32)
+        if fibers is not None:
+            for axis in range(3):
+                shift[axis] = fibers[step, :, axis].astype(np.float32)[owner]
+        if drift is not None:
+            shift += drift[step].astype(np.float32)[:, None, None, None]
+        # A voxel shows what was a shift behind it.
+        return map_coordinates(volume, grid - shift, order=1, mode="nearest").astype(np.float32)
+
+    return warp
+
