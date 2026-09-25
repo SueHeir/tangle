@@ -128,6 +128,7 @@ def synthetic_ct(
     profiles=None,
     noise_correlation: float = 0.0,
     phase_contrast: float = 0.0,
+    phase_sigma_voxels: float | None = None,
 ) -> SyntheticScan:
     """Render ``source`` (an ``Assembly`` or ``RunResult``) as a CT-like volume.
 
@@ -143,12 +144,15 @@ def synthetic_ct(
 
     ``phase_contrast`` adds the edge fringe of propagation-based phase
     contrast: the blurred image minus ``phase_contrast`` times its
-    Laplacian (scaled by the blur's variance, so the setting does not
-    depend on the blur width). Every surface gets a dark band just outside
-    and a bright one just inside; at 1, a lone straight edge's dark band dips
-    about a quarter of the fiber contrast below the void. Where two surfaces
-    come close the fringes add, so the gap between touching fibers reads
-    darkest. 0 (the default) renders plain attenuation.
+    Laplacian of the occupancy at ``phase_sigma_voxels`` (default the blur),
+    scaled by that variance so the setting does not depend on the width.
+    Every surface gets a dark band just outside and a bright one just
+    inside, deepest about ``phase_sigma_voxels`` from the surface and gone
+    by about 2.5 times that; at 1, a lone straight edge's dark band dips
+    about a quarter of the fiber contrast below the void. Where two
+    surfaces come close the fringes add, so the gap between touching fibers
+    reads darkest; in noise the shallow band breaks up into dark spots
+    along the edges. 0 (the default) renders plain attenuation.
 
     ``profiles`` renders several fiber types with their own brightness:
     a sequence of ``(diameter, CrossSection)`` pairs. Each fiber gets the
@@ -179,7 +183,7 @@ def synthetic_ct(
     if phase_contrast:
         from scipy.ndimage import gaussian_laplace
 
-        sigma = max(psf_sigma_voxels, 0.5)
+        sigma = max(phase_sigma_voxels if phase_sigma_voxels is not None else psf_sigma_voxels, 0.5)
         attenuation -= phase_contrast * (1.0 - void_level) * sigma**2 * gaussian_laplace(occupancy, sigma)
     if noise_correlation > 0:
         field = gaussian_filter(rng.normal(0.0, 1.0, size=attenuation.shape).astype(np.float32), noise_correlation)
