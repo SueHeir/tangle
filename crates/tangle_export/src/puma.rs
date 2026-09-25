@@ -102,7 +102,8 @@ pub enum PumaExportError {
         /// Nearest integer voxel counts.
         suggested_counts: [usize; 3],
     },
-    /// Elliptical sections require material director frames that are not yet present.
+    /// A section the voxel exporter cannot represent. Not produced since
+    /// elliptical sections are voxelized with their directors.
     UnsupportedSection {
         /// Zero-based section-table index.
         section_index: usize,
@@ -139,7 +140,7 @@ impl fmt::Display for PumaExportError {
             ),
             Self::UnsupportedSection { section_index } => write!(
                 formatter,
-                "section {section_index} is elliptical; exact voxel export requires future material director frames"
+                "section {section_index} cannot be voxelized"
             ),
             Self::TooManyMaterials(count) => {
                 write!(formatter, "{count} materials exceed the UInt16 phase-ID limit")
@@ -536,11 +537,15 @@ fn voxelize(
 
     for (fiber_index, fiber) in assembly.topology.fibers.iter().enumerate() {
         let section_index = fiber.section.0 as usize;
-        let radius = match assembly.sections.entries.get(section_index) {
-            Some(Section::Circular { radius }) => *radius,
-            Some(Section::Elliptical { .. }) => {
-                return Err(PumaExportError::UnsupportedSection { section_index })
+        let (radius, oval) = match assembly.sections.entries.get(section_index) {
+            Some(Section::Circular { radius }) => (*radius, None),
+            Some(section @ Section::Elliptical { semi_axes }) if section.is_circular() => {
+                (semi_axes[0], None)
             }
+            Some(Section::Elliptical { semi_axes }) => (
+                semi_axes[0].max(semi_axes[1]),
+                Some((*semi_axes, assembly.fiber_directors(fiber_index))),
+            ),
             None => continue,
         };
         let start = fiber.vertices.start as usize;
@@ -550,7 +555,7 @@ fn voxelize(
         let Some(points) = assembly.geometry.placed.positions.get(start..end) else {
             continue;
         };
-        for segment in points.windows(2) {
+        for (local_segment, segment) in points.windows(2).enumerate() {
             let base_a = segment[0];
             let base_b = segment[1];
             let delta = sub(base_b, base_a);
@@ -594,8 +599,19 @@ fn voxelize(
                                         origin[1] + (y as f64 + 0.5) * config.voxel_size,
                                         origin[2] + (z as f64 + 0.5) * config.voxel_size,
                                     ];
-                                    let signed_distance =
-                                        point_segment_distance(center, a, b) - radius;
+                                    let signed_distance = match &oval {
+                                        None => point_segment_distance(center, a, b) - radius,
+                                        Some((semi_axes, directors)) => {
+                                            oval_segment_signed_distance(
+                                                center,
+                                                a,
+                                                b,
+                                                directors[local_segment],
+                                                directors[local_segment + 1],
+                                                *semi_axes,
+                                            )
+                                        }
+                                    };
                                     if signed_distance > interface_half_width {
                                         continue;
                                     }
@@ -712,6 +728,56 @@ fn point_segment_distance(point: Vec3, a: Vec3, b: Vec3) -> f64 {
         0.0
     };
     norm(sub(point, add(a, scale(ab, parameter))))
+}
+
+/// Approximate signed distance from a point to an elliptical tube around one
+/// segment: the first semi-axis lies along the director (interpolated between
+/// the segment's two vertices), the second across it. Past the segment ends
+/// the tube closes with an ellipsoidal cap whose third semi-axis is the short
+/// one, as round fibers close with hemispheres. The first-order estimate
+/// f / |grad f| is exact in sign and accurate within the interface band;
+/// deep inside it is limited to the short semi-axis.
+fn oval_segment_signed_distance(
+    point: Vec3,
+    a: Vec3,
+    b: Vec3,
+    director_a: Vec3,
+    director_b: Vec3,
+    semi_axes: [f64; 2],
+) -> f64 {
+    let delta = sub(b, a);
+    let length_squared = dot(delta, delta);
+    let length = length_squared.sqrt();
+    let raw = dot(sub(point, a), delta) / length_squared;
+    let along = raw.clamp(0.0, 1.0);
+    let tangent = scale(delta, length.recip());
+    let offset = sub(point, add(a, scale(delta, along)));
+    let overshoot = (raw - along) * length;
+    let aligned_b = if dot(director_a, director_b) < 0.0 {
+        scale(director_b, -1.0)
+    } else {
+        director_b
+    };
+    let blended = add(scale(director_a, 1.0 - along), scale(aligned_b, along));
+    let director = sub(blended, scale(tangent, dot(blended, tangent)));
+    let director = scale(director, norm(director).max(f64::MIN_POSITIVE).recip());
+    let binormal = [
+        tangent[1] * director[2] - tangent[2] * director[1],
+        tangent[2] * director[0] - tangent[0] * director[2],
+        tangent[0] * director[1] - tangent[1] * director[0],
+    ];
+    let [long, across] = semi_axes;
+    let cap = long.min(across);
+    let u = dot(offset, director) / long;
+    let v = dot(offset, binormal) / across;
+    let w = overshoot / cap;
+    let level = u * u + v * v + w * w - 1.0;
+    let gradient =
+        2.0 * ((u / long).powi(2) + (v / across).powi(2) + (w / cap).powi(2)).sqrt();
+    if gradient <= f64::MIN_POSITIVE {
+        return -cap;
+    }
+    (level / gradient).max(-cap)
 }
 
 fn interface_value(signed_distance: f64, half_width: f64) -> u8 {
@@ -1019,4 +1085,52 @@ mod tests {
             .all(|(phase, owner)| **phase == 2 && **owner == 2));
         assert!(fields.ambiguous.iter().any(|value| *value));
     }
+
+    #[test]
+    fn oval_distance_is_zero_on_the_ellipse() {
+        let a = [0.0, 0.0, 0.0];
+        let b = [1.0, 0.0, 0.0];
+        let director = [0.0, 1.0, 0.0];
+        let flipped = [0.0, -1.0, 0.0];
+        let distance = |point: Vec3| {
+            oval_segment_signed_distance(point, a, b, director, flipped, [0.3, 0.15])
+        };
+        assert!(distance([0.5, 0.3, 0.0]).abs() < 1.0e-12);
+        assert!(distance([0.5, 0.0, 0.15]).abs() < 1.0e-12);
+        assert!(distance([0.5, 0.35, 0.0]) > 0.0);
+        assert!(distance([0.5, 0.0, 0.2]) > 0.0);
+        assert!(distance([0.5, 0.2, 0.1]) < 0.0);
+        assert!((distance([0.5, 0.0, 0.0]) + 0.15).abs() < 1.0e-12);
+        // Ellipsoidal caps past the ends.
+        assert!(distance([1.1, 0.0, 0.0]) < 0.0);
+        assert!(distance([1.2, 0.0, 0.0]) > 0.0);
+    }
+
+    #[test]
+    fn oval_fiber_voxelizes_to_its_volume() {
+        let directory = temporary_bundle("puma-oval");
+        let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([1.0; 3], [false; 3]));
+        let material = assembly.materials.add("oval");
+        let section = assembly.sections.add(Section::Elliptical {
+            semi_axes: [0.3, 0.15],
+        });
+        let points = [[0.2, 0.5, 0.5], [0.5, 0.5, 0.5], [0.8, 0.5, 0.5]];
+        assembly
+            .add_fiber(FiberId(1), material, section, &points, &points)
+            .unwrap();
+        let voxel = 0.02;
+        let report =
+            write_puma_bundle(&assembly, &PumaVoxelExportConfig::new(&directory, voxel)).unwrap();
+        // Elliptical tube plus two half-ellipsoid caps (third semi-axis 0.15).
+        let volume = std::f64::consts::PI * 0.3 * 0.15 * 0.6
+            + 4.0 / 3.0 * std::f64::consts::PI * 0.3 * 0.15 * 0.15;
+        let expected = volume / voxel.powi(3);
+        let occupied = report.occupied_voxels as f64;
+        assert!(
+            (occupied / expected - 1.0).abs() < 0.03,
+            "{occupied} voxels, expected {expected}"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
+
