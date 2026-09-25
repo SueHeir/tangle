@@ -11,45 +11,10 @@
 //! order), so traces match it up to floating-point rounding.
 
 use crate::hessian::HessianField;
+use crate::line::{add, cross, dot, norm, polyline_length, resample, scale, sub, Point};
 use crate::raster::paint;
 use crate::sample::{trilinear, voxel_of};
 use crate::{strides, Shape};
-
-type Point = [f64; 3];
-
-#[inline]
-fn add(a: Point, b: Point) -> Point {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-#[inline]
-fn sub(a: Point, b: Point) -> Point {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-#[inline]
-fn scale(a: Point, s: f64) -> Point {
-    [a[0] * s, a[1] * s, a[2] * s]
-}
-
-#[inline]
-fn dot(a: Point, b: Point) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-#[inline]
-fn norm(a: Point) -> f64 {
-    dot(a, a).sqrt()
-}
-
-#[inline]
-fn cross(a: Point, b: Point) -> Point {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
 
 /// Two unit vectors perpendicular to `direction` and to each other.
 fn perpendicular_basis(direction: Point) -> (Point, Point) {
@@ -76,59 +41,6 @@ pub fn disk_offsets(radius: f64, spacing: f64) -> Vec<[f64; 2]> {
                 out.push([u, v]);
             }
         }
-    }
-    out
-}
-
-/// Arc length of a polyline.
-pub fn polyline_length(points: &[Point]) -> f64 {
-    points.windows(2).map(|p| norm(sub(p[1], p[0]))).sum()
-}
-
-/// A polyline resampled to (nearly) uniform arc-length `spacing`, as
-/// `_geometry.resample` (`np.linspace` targets, `np.interp` per axis).
-pub fn resample(points: &[Point], spacing: f64) -> Vec<Point> {
-    if points.len() < 2 {
-        return points.to_vec();
-    }
-    let mut kept = vec![points[0]];
-    for pair in points.windows(2) {
-        if norm(sub(pair[1], pair[0])) > 1e-9 {
-            kept.push(pair[1]);
-        }
-    }
-    if kept.len() < 2 {
-        return kept;
-    }
-    let mut arc = vec![0.0];
-    for pair in kept.windows(2) {
-        let last = *arc.last().unwrap();
-        arc.push(last + norm(sub(pair[1], pair[0])));
-    }
-    let total = *arc.last().unwrap();
-    let count = ((total / spacing).round_ties_even() as usize).max(1) + 1;
-    let step = total / (count - 1) as f64;
-    let mut out = Vec::with_capacity(count);
-    let mut j = 0;
-    for t in 0..count {
-        let target = if t + 1 == count {
-            total
-        } else {
-            t as f64 * step
-        };
-        if target >= total {
-            out.push(*kept.last().unwrap());
-            continue;
-        }
-        while j + 2 < arc.len() && arc[j + 1] <= target {
-            j += 1;
-        }
-        let mut point = [0.0; 3];
-        for (axis, value) in point.iter_mut().enumerate() {
-            let slope = (kept[j + 1][axis] - kept[j][axis]) / (arc[j + 1] - arc[j]);
-            *value = slope * (target - arc[j]) + kept[j][axis];
-        }
-        out.push(point);
     }
     out
 }
@@ -469,17 +381,6 @@ mod tests {
         assert_eq!(offsets.len(), 13);
         assert_eq!(offsets[0], [0.0, -1.0]);
         assert_eq!(offsets[12], [0.0, 1.0]);
-    }
-
-    #[test]
-    fn resample_spaces_nodes_evenly() {
-        let line = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]];
-        let out = resample(&line, 2.5);
-        assert_eq!(out.len(), 5);
-        assert_eq!(out[1], [2.5, 0.0, 0.0]);
-        assert_eq!(out[4], [10.0, 0.0, 0.0]);
-        // round half to even, as numpy: 5 / 2 = 2.5 → 2 segments
-        assert_eq!(resample(&[[0.0; 3], [5.0, 0.0, 0.0]], 2.0).len(), 3);
     }
 
     #[test]

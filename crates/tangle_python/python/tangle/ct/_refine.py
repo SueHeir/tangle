@@ -1,12 +1,14 @@
-"""Host-side steps of the continuous fit: fiber ends, node spacing, support.
+"""Host-side steps of the continuous fit: fiber ends, node spacing, support (in Rust).
 
-The fibers themselves move in Tangle's solver (``_device``).
+The fibers themselves move in Tangle's solver (``_device``). The work
+happens in the ``tangle_ct`` crate (``refine.rs``); this module keeps the
+Python signatures.
 """
 from __future__ import annotations
 
 import numpy as np
 
-from ._geometry import resample, sample_image, tangents
+from . import _native
 
 
 def end_step(
@@ -15,7 +17,6 @@ def end_step(
     radii: np.ndarray,
     *,
     step: float,
-    occupied,
     max_moves: int = 3,
     reach: np.ndarray | None = None,
 ) -> list[np.ndarray]:
@@ -28,47 +29,11 @@ def end_step(
     while it is void half a step short of it, which leaves the tip within
     half a step of the true end.
 
-    ``occupied`` gives each voxel's owning fiber (one-based, 0 for none): a
-    ``(z, y, x)`` label array, or a callable taking a ``(z, y, x)`` index
-    (such as :class:`_geometry.OwnerLookup`).
+    An end does not grow into a voxel another of ``centerlines`` owns (the
+    nearest capsule surface within its radius, as :class:`_geometry.OwnerLookup`).
     """
-    upper = np.array(image.shape[::-1], dtype=np.float64)
     reach = np.asarray(radii if reach is None else reach, dtype=np.float64)
-
-    def inside(point: np.ndarray) -> bool:
-        return bool(np.all(point >= 0.5) and np.all(point <= upper - 0.5))
-
-    def value(point: np.ndarray) -> float:
-        return float(sample_image(image, point[None])[0])
-
-    adjusted = []
-    for index, line in enumerate(centerlines):
-        line = line.copy()
-        cap = float(reach[index])
-        for end in (0, -1):
-            for _ in range(max_moves):
-                if len(line) < 3:
-                    break
-                inner = line[1] if end == 0 else line[-2]
-                tip = line[end]
-                direction = tip - inner
-                direction /= max(np.linalg.norm(direction), 1e-12)
-                ahead = tip + (cap + 0.5 * step) * direction
-                short = tip + max(cap - 0.5 * step, 0.0) * direction
-                owner = 0
-                if inside(ahead):
-                    voxel = tuple(np.clip(np.floor(ahead[::-1]).astype(int), 0, np.array(image.shape) - 1))
-                    owner = int(occupied(voxel) if callable(occupied) else occupied[voxel])
-                if inside(ahead) and value(ahead) > 0.55 and owner in (0, index + 1):
-                    extended = tip + step * direction
-                    line = np.vstack([extended[None], line]) if end == 0 else np.vstack([line, extended[None]])
-                elif value(tip) < 0.45 or (inside(short) and value(short) < 0.45):
-                    # (A fiber that leaves the scan is not trimmed at the boundary.)
-                    line = line[1:] if end == 0 else line[:-1]
-                else:
-                    break
-        adjusted.append(line)
-    return adjusted
+    return _native.end_step(image, centerlines, radii, reach, step=step, max_moves=max_moves)
 
 
 def cut_void(
@@ -109,88 +74,23 @@ def cut_void(
     each came from, and the numbers of nodes dropped (``"trimmed"``), of
     splits and of stretches bridged (``"bridged"``).
     """
-    upper = np.array(image.shape[::-1], dtype=np.float64)
-    radii = np.asarray(radii, dtype=np.float64)
-    pieces: list[np.ndarray] = []
-    source: list[int] = []
-    counts = {"trimmed": 0, "splits": 0, "bridged": 0}
-    for index, line in enumerate(centerlines):
-        line = np.asarray(line, dtype=np.float64)
-        if len(line) < 2:
-            pieces.append(line)
-            source.append(index)
-            continue
-        inside = np.all((line >= 0.5) & (line <= upper - 0.5), axis=1)
-        keep = ~((sample_image(image, line) < level) & inside)
-        arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(line, axis=0), axis=1))])
-        spacing = max(arc[-1] / (len(line) - 1), 1e-6)
-        bridges: list[tuple[int, int, np.ndarray]] = []  # (first void node, first node after, new nodes)
-        start = None
-        for k in range(len(line) + 1):
-            weak = k < len(line) and not keep[k]
-            if weak and start is None:
-                start = k
-            elif not weak and start is not None:
-                if start > 0 and k < len(line):
-                    if arc[k] - arc[start - 1] < min_gap_radii * radii[index]:
-                        keep[start:k] = True
-                    else:
-                        a, b = line[start - 1], line[k]
-                        count = max(int(np.ceil(np.linalg.norm(b - a) / spacing)), 2)
-                        across = a + (b - a) * np.linspace(0.0, 1.0, count + 1)[1:-1, None]
-                        chord = b - a
-                        away = line[start:k] - a
-                        along = np.clip(away @ chord / max(float(chord @ chord), 1e-12), 0.0, 1.0)
-                        offset = float(np.linalg.norm(away - along[:, None] * chord, axis=1).max())
-                        lowest = float(sample_image(image, across).min())
-                        bow = offset >= bridge_offset_radii * radii[index] and lowest >= bridge_level
-                        aligned = False
-                        if not bow and directions is not None and lowest >= aligned_level:
-                            unit = chord / max(float(np.linalg.norm(chord)), 1e-12)
-                            axes = np.asarray(directions(index, np.stack([a, b])), dtype=np.float64)
-                            cosine = float(np.abs(axes @ unit).min())
-                            aligned = cosine >= np.cos(np.radians(aligned_angle_degrees))
-                        if bow or aligned:
-                            bridges.append((start, k, across))
-                            keep[start:k] = True
-                start = None
-        counts["trimmed"] += int((~keep).sum())
-        if bridges:
-            parts, flags, previous = [], [], 0
-            for first, after, across in bridges:
-                parts += [line[previous:first], across]
-                flags += [keep[previous:first], np.ones(len(across), dtype=bool)]
-                previous = after
-            parts.append(line[previous:])
-            flags.append(keep[previous:])
-            line, keep = np.vstack(parts), np.concatenate(flags)
-            counts["bridged"] += len(bridges)
-        runs = np.split(np.arange(len(line)), np.flatnonzero(np.diff(keep.astype(int))) + 1)
-        kept = [line[run] for run in runs if keep[run[0]] and len(run) >= 2]
-        counts["splits"] += max(len(kept) - 1, 0)
-        pieces += kept
-        source += [index] * len(kept)
-    return pieces, np.array(source, dtype=int), counts
+    pieces, source, (trimmed, splits, bridged) = _native.cut_void(
+        image, centerlines, np.asarray(radii, dtype=np.float64), level=level, min_gap_radii=min_gap_radii,
+        bridge_level=bridge_level, bridge_offset_radii=bridge_offset_radii, aligned_level=aligned_level,
+        aligned_angle_degrees=aligned_angle_degrees, directions=directions,
+    )
+    return pieces, source, {"trimmed": trimmed, "splits": splits, "bridged": bridged}
 
 
 def respace(centerlines: list[np.ndarray], spacing: float) -> list[np.ndarray]:
-    return [resample(line, spacing) for line in centerlines]
+    return _native.resample(centerlines, spacing)
 
 
 def support(image: np.ndarray, centerlines: list[np.ndarray]) -> np.ndarray:
     """Mean normalized intensity along each centerline (about 1 on a real fiber)."""
-    return np.array([float(sample_image(image, line).mean()) if len(line) else 0.0 for line in centerlines])
+    return _native.support(image, centerlines)
 
 
 def curvature_ratio(centerlines: list[np.ndarray], min_bend_radius: float) -> np.ndarray:
     """Largest discrete curvature times the admissible bend radius, per fiber."""
-    ratios = []
-    for line in centerlines:
-        if len(line) < 3:
-            ratios.append(0.0)
-            continue
-        t = tangents(line)
-        turn = np.arccos(np.clip((t[1:] * t[:-1]).sum(axis=1), -1.0, 1.0))
-        spacing = np.linalg.norm(np.diff(line, axis=0), axis=1)
-        ratios.append(float((turn / np.maximum(spacing, 1e-9)).max() * min_bend_radius))
-    return np.array(ratios)
+    return _native.curvature_ratio(centerlines, min_bend_radius)

@@ -19,7 +19,7 @@ from typing import Any
 import numpy as np
 
 from . import _refine
-from ._geometry import OwnerLookup, resample
+from ._geometry import resample
 
 
 def available() -> bool:
@@ -124,10 +124,7 @@ def relax(
     settings = tangle.RelaxationSettings(**options)
 
     lines = _refine.respace(lines, spacing)
-    # End growth reads the labels at a few voxels ahead of each end; a whole
-    # rasterized label volume was a tenth of a tile's fit time.
-    occupied = OwnerLookup(image.shape, lines, radii)
-    lines = _refine.end_step(image, lines, radii, step=spacing, occupied=occupied, reach=reach)
+    lines = _refine.end_step(image, lines, radii, step=spacing, reach=reach)
     coarse = [resample(line, max(2.5 * float(r), spacing)) for line, r in zip(lines, radii)]
     payload = np.ascontiguousarray(image, dtype="<f4").tobytes()
     relaxer = _relaxer(image, payload, coarse, radii, bends, voxel_size=h, pad=pad, settings=settings)
