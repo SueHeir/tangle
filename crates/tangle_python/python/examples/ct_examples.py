@@ -240,18 +240,14 @@ def two_types(cache: Path, *, noisy: bool = False, halo: bool = False) -> Exampl
         profiles = [(7 * um, ct.CrossSection()), (19 * um, ct.CrossSection(brightness=0.45))]
         full = render_scan(truth, voxel, seed=21, profiles=profiles, noise=0.19, noise_correlation=0.9)
     elif halo:
-        # two_types' grey levels with a phase-contrast halo: a dark band
-        # outside every surface, deepest 2.5 voxels out, about 2 noise
-        # levels deep on a lone edge of a fine fiber and deeper where
-        # surfaces face each other; noise correlated over about a voxel.
+        # two_types' scan with a phase-contrast halo at unit strength (a
+        # dark band outside every surface, deeper where surfaces face each
+        # other).
         profiles = [
             (7 * um, ct.CrossSection()),
             (19 * um, ct.CrossSection(brightness=0.75, rim=2 * um, core=1 / 3)),
         ]
-        full = render_scan(
-            truth, voxel, seed=21, profiles=profiles, noise=0.1, noise_correlation=0.8,
-            phase_contrast=0.75, phase_sigma_voxels=2.5,
-        )
+        full = render_scan(truth, voxel, seed=21, profiles=profiles, phase_contrast=1.0)
     else:
         # Grey levels as in the scans this imitates: small fibers brightest (1),
         # large fibers a rim at 0.75 around a core at 0.25.
