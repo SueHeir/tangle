@@ -1,6 +1,6 @@
 //! The Gaussian-scale Hessian of a scan and the local tube direction.
 
-use crate::filter::gaussian_filter;
+use crate::filter::{filter_axis, gaussian_kernel, kernel_radius};
 use crate::sample::trilinear;
 use crate::Shape;
 
@@ -25,12 +25,33 @@ pub struct HessianField {
 }
 
 impl HessianField {
+    /// Each component is `gaussian_filter(image, sigma, order)` times `sigma²`,
+    /// with the passes along `z` and then `y` shared between the components
+    /// that need the same ones (15 axis passes rather than 18).
     pub fn new(image: &[f32], shape: Shape, sigma: f64) -> Self {
         let scale = (sigma * sigma) as f32;
+        let radius = kernel_radius(sigma);
+        let kernels: Vec<Vec<f64>> = (0..3)
+            .map(|order| gaussian_kernel(sigma, order, radius))
+            .collect();
+        let along_z: Vec<Vec<f32>> = kernels
+            .iter()
+            .map(|kernel| filter_axis(image, shape, 0, kernel))
+            .collect();
+        let mut along_zy: Vec<([usize; 2], Vec<f32>)> = Vec::new();
         let components = COMPONENTS
             .iter()
-            .map(|(_, orders)| {
-                let mut values = gaussian_filter(image, shape, sigma, *orders);
+            .map(|(_, [oz, oy, ox])| {
+                let key = [*oz, *oy];
+                let position = match along_zy.iter().position(|(k, _)| *k == key) {
+                    Some(position) => position,
+                    None => {
+                        let values = filter_axis(&along_z[*oz], shape, 1, &kernels[*oy]);
+                        along_zy.push((key, values));
+                        along_zy.len() - 1
+                    }
+                };
+                let mut values = filter_axis(&along_zy[position].1, shape, 2, &kernels[*ox]);
                 values.iter_mut().for_each(|v| *v *= scale);
                 values
             })

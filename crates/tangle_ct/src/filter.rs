@@ -79,29 +79,93 @@ pub(crate) fn line_starts(shape: Shape, axis: usize) -> Vec<usize> {
 }
 
 /// Correlates every line of `input` along `axis` with `kernel` (SciPy's
-/// `gaussian_filter1d`: `correlate1d` with the kernel reversed), mirror boundaries.
-fn filter_axis(input: &[f32], shape: Shape, axis: usize, kernel: &[f64]) -> Vec<f32> {
+/// `gaussian_filter1d`: `correlate1d` with the kernel reversed), mirror
+/// boundaries, accumulated in `f64` as SciPy does.
+///
+/// Along `x` each line is mirror-padded once and swept tap by tap. Along `y`
+/// and `z` the lines are strided, so each output row (all voxels sharing the
+/// other two indices, contiguous in memory) is summed from whole input rows
+/// instead, which reads memory in order. Rows are split across threads.
+pub(crate) fn filter_axis(input: &[f32], shape: Shape, axis: usize, kernel: &[f64]) -> Vec<f32> {
     let n = shape[axis];
-    let stride = strides(shape)[axis];
-    let radius = (kernel.len() / 2) as i64;
-    // correlate1d with weights = kernel[::-1]: out[i] = Σ_k kernel[r − k] · in[i + k].
+    let radius = kernel.len() / 2;
+    // correlate1d with weights = kernel[::-1]: out[i] = Σ_k kernel[r − k] · in[i + k − r].
     let weights: Vec<f64> = kernel.iter().rev().copied().collect();
     let mut out = vec![0.0_f32; input.len()];
-    let mut line = vec![0.0_f64; n];
-    for start in line_starts(shape, axis) {
-        for (i, value) in line.iter_mut().enumerate() {
-            *value = input[start + i * stride] as f64;
-        }
-        for i in 0..n {
-            let mut sum = 0.0;
-            for (k, weight) in weights.iter().enumerate() {
-                let m = reflect(i as i64 + k as i64 - radius, n as i64);
-                sum += weight * line[m];
-            }
-            out[start + i * stride] = sum as f32;
-        }
+    if out.is_empty() {
+        return out;
     }
+    if axis == 2 {
+        parallel_rows(&mut out, n, |row, target| {
+            let line = &input[row * n..(row + 1) * n];
+            let padded: Vec<f64> = (0..n + 2 * radius)
+                .map(|m| line[reflect(m as i64 - radius as i64, n as i64)] as f64)
+                .collect();
+            for (i, value) in target.iter_mut().enumerate() {
+                let window = &padded[i..i + weights.len()];
+                let mut sum = 0.0;
+                for (a, w) in window.iter().zip(&weights) {
+                    sum += w * a;
+                }
+                *value = sum as f32;
+            }
+        });
+        return out;
+    }
+    // Rows of `inner` contiguous voxels; row `o * n + i` is index `i` along `axis`.
+    let inner: usize = shape[axis + 1..].iter().product();
+    parallel_rows(&mut out, inner, |row, target| {
+        let (o, i) = (row / n, row % n);
+        let mut sum = vec![0.0_f64; inner];
+        for (k, weight) in weights.iter().enumerate() {
+            let m = reflect(i as i64 + k as i64 - radius as i64, n as i64);
+            let source = &input[(o * n + m) * inner..(o * n + m + 1) * inner];
+            for (s, v) in sum.iter_mut().zip(source) {
+                *s += weight * *v as f64;
+            }
+        }
+        for (t, s) in target.iter_mut().zip(&sum) {
+            *t = *s as f32;
+        }
+    });
     out
+}
+
+/// Runs `work(row, slice)` on every `row_len`-long row of `out`, spreading
+/// contiguous runs of rows over the available cores.
+fn parallel_rows<F>(out: &mut [f32], row_len: usize, work: F)
+where
+    F: Fn(usize, &mut [f32]) + Sync,
+{
+    let rows = out.len() / row_len;
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(rows)
+        .max(1);
+    // Small volumes are not worth the threads.
+    if threads == 1 || out.len() < 1 << 16 {
+        for (row, slice) in out.chunks_mut(row_len).enumerate() {
+            work(row, slice);
+        }
+        return;
+    }
+    let per_thread = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (block, slab) in out.chunks_mut(per_thread * row_len).enumerate() {
+            let work = &work;
+            scope.spawn(move || {
+                for (offset, slice) in slab.chunks_mut(row_len).enumerate() {
+                    work(block * per_thread + offset, slice);
+                }
+            });
+        }
+    });
+}
+
+/// The kernel radius SciPy uses for `sigma` with `truncate = 4`.
+pub fn kernel_radius(sigma: f64) -> usize {
+    (4.0 * sigma + 0.5) as usize
 }
 
 /// `gaussian_filter(image, sigma, order=orders)` for a `(z, y, x)` `f32`
@@ -112,7 +176,7 @@ pub fn gaussian_filter(image: &[f32], shape: Shape, sigma: f64, orders: [usize; 
     if sigma <= 1e-15 {
         return current;
     }
-    let radius = (4.0 * sigma + 0.5) as usize;
+    let radius = kernel_radius(sigma);
     for axis in 0..3 {
         let kernel = gaussian_kernel(sigma, orders[axis], radius);
         current = filter_axis(&current, shape, axis, &kernel);
@@ -168,6 +232,47 @@ mod tests {
         assert!(smooth.iter().all(|v| (v - 2.0).abs() < 1e-5));
         let slope = gaussian_filter(&image, shape, 1.2, [0, 0, 1]);
         assert!(slope.iter().all(|v| v.abs() < 1e-5));
+    }
+
+    /// The direct line-by-line correlation the fast passes replace.
+    fn reference_axis(input: &[f32], shape: Shape, axis: usize, kernel: &[f64]) -> Vec<f32> {
+        let n = shape[axis];
+        let stride = strides(shape)[axis];
+        let radius = (kernel.len() / 2) as i64;
+        let weights: Vec<f64> = kernel.iter().rev().copied().collect();
+        let mut out = vec![0.0_f32; input.len()];
+        for start in line_starts(shape, axis) {
+            for i in 0..n {
+                let mut sum = 0.0;
+                for (k, weight) in weights.iter().enumerate() {
+                    let m = reflect(i as i64 + k as i64 - radius, n as i64);
+                    sum += weight * input[start + m * stride] as f64;
+                }
+                out[start + i * stride] = sum as f32;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_axis_pass_matches_the_direct_correlation() {
+        // The second volume is large enough to take the threaded path; the
+        // short z axis mirrors past both ends.
+        let small = [3, 50, 47];
+        let big = [4, 130, 129];
+        for (seed, shape) in [(7919, small), (104729, big)] {
+            let image: Vec<f32> = (0..voxel_count(shape))
+                .map(|i| ((i * seed) % 101) as f32 / 101.0)
+                .collect();
+            for axis in 0..3 {
+                for order in 0..3 {
+                    let kernel = gaussian_kernel(1.7, order, kernel_radius(1.7));
+                    let fast = filter_axis(&image, shape, axis, &kernel);
+                    let direct = reference_axis(&image, shape, axis, &kernel);
+                    assert_eq!(fast, direct, "axis {axis} order {order}");
+                }
+            }
+        }
     }
 
     #[test]
