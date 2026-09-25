@@ -150,6 +150,11 @@ class FitSettings:
     redraw_plans: int = 3
     # After redraw passes that kept anything, one unpinned solve of the whole fit.
     redraw_polish: bool = True
+    # Redraw around every fiber end inside the scan too, sure or not (and
+    # the fits its tip touches), so split fibers can be joined and fits
+    # that ran onto another fiber at a crossing re-paired
+    # (``_regrow.end_hotspots``).
+    redraw_ends: bool = True
     # A region's 2nd and 3rd plans are solved only when their host score is
     # within this many nats of its best (close calls); clear winners are
     # built without a GPU comparison.
@@ -1028,6 +1033,7 @@ class _Fitter:
             cut = _regrow.cut_unsure(
                 lines, confidence if pass_index == 0 else settled, radii, threshold=s.confidence_threshold,
                 spacing=self.spacing, widen=widen, skip=given_up,
+                hotspots=_regrow.end_hotspots(lines, radii, self.image.shape) if s.redraw_ends else None,
             )
             if cut is None or not lines:
                 break
