@@ -14,6 +14,7 @@ pub mod hessian;
 pub mod label;
 pub mod raster;
 pub mod sample;
+pub mod trace;
 
 /// `[nz, ny, nx]`.
 pub type Shape = [usize; 3];

@@ -9,6 +9,7 @@ use pyo3::buffer::{Element, PyBuffer};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use tangle_ct::hessian::HessianField;
+use tangle_ct::trace::{trace_fibers, FiberSearch, TraceSettings, Tracer};
 use tangle_ct::Shape;
 
 fn read<'a, T: Element>(buffer: &'a PyBuffer<T>, name: &str) -> PyResult<&'a [T]> {
@@ -277,4 +278,79 @@ impl PyCtHessian {
         }
         Ok(())
     }
+}
+
+fn trace_settings(radius: f64, min_bend_radius: f64, step: f64) -> PyResult<TraceSettings> {
+    if !(radius > 0.0 && step > 0.0) {
+        return Err(PyValueError::new_err("radius and step must be positive"));
+    }
+    Ok(TraceSettings {
+        radius,
+        min_bend_radius,
+        step,
+    })
+}
+
+/// One-way trace from `start` along `direction` (see `_trace.Tracer.trace_one_way`).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ct_trace_one_way(
+    image: PyBuffer<f32>,
+    hessian: PyRef<'_, PyCtHessian>,
+    claimed: PyBuffer<i32>,
+    radius: f64,
+    min_bend_radius: f64,
+    step: f64,
+    start: [f64; 3],
+    direction: [f64; 3],
+    max_steps: usize,
+    own_label: i32,
+) -> PyResult<Vec<[f64; 3]>> {
+    let shape = volume_shape(&image, "image")?;
+    same_shape(&image, &claimed, "claimed")?;
+    let settings = trace_settings(radius, min_bend_radius, step)?;
+    let tracer = Tracer::new(read(&image, "image")?, shape, &hessian.field, settings);
+    Ok(tracer.trace_one_way(start, direction, max_steps, read(&claimed, "claimed")?, own_label))
+}
+
+/// Traces fibers from ridge seeds, painting `claimed` in place (see `_trace.trace_fibers`).
+#[pyfunction]
+#[pyo3(signature = (image, hessian, claimed, edt, peak, radius, min_bend_radius, step, min_length, node_spacing, label_offset, max_fibers, seed_depth_radii))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ct_trace_fibers(
+    image: PyBuffer<f32>,
+    hessian: PyRef<'_, PyCtHessian>,
+    claimed: PyBuffer<i32>,
+    edt: PyBuffer<f32>,
+    peak: PyBuffer<f32>,
+    radius: f64,
+    min_bend_radius: f64,
+    step: f64,
+    min_length: f64,
+    node_spacing: f64,
+    label_offset: i32,
+    max_fibers: Option<usize>,
+    seed_depth_radii: f64,
+) -> PyResult<Vec<Vec<[f64; 3]>>> {
+    let shape = volume_shape(&image, "image")?;
+    same_shape(&image, &claimed, "claimed")?;
+    same_shape(&image, &edt, "edt")?;
+    same_shape(&image, &peak, "peak")?;
+    let search = FiberSearch {
+        trace: trace_settings(radius, min_bend_radius, step)?,
+        min_length,
+        node_spacing,
+        label_offset,
+        max_fibers,
+        seed_depth_radii,
+    };
+    Ok(trace_fibers(
+        read(&image, "image")?,
+        shape,
+        &hessian.field,
+        write(&claimed, "claimed")?,
+        read(&edt, "edt")?,
+        read(&peak, "peak")?,
+        search,
+    ))
 }

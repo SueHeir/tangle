@@ -109,5 +109,7 @@ fn _tangle(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(ct::ct_core_holes, module)?)?;
     module.add_function(wrap_pyfunction!(ct::ct_rasterize, module)?)?;
     module.add_function(wrap_pyfunction!(ct::ct_paint, module)?)?;
+    module.add_function(wrap_pyfunction!(ct::ct_trace_one_way, module)?)?;
+    module.add_function(wrap_pyfunction!(ct::ct_trace_fibers, module)?)?;
     Ok(())
 }
