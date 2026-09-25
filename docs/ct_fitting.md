@@ -341,6 +341,11 @@ fit.write("scan_fit/result")
   the manifest), so fibers are typed and sized the same way everywhere, and
   a tile with little fiber in it is not mis-levelled. Pass
   `FitSettings(levels=...)` to set them yourself.
+- **Tiles side by side.** `workers=N` fits N tiles at once, each in its own
+  process. Most of a tile's fit is single-threaded Python and the GPU solve
+  is a small share of it, so this scales with the CPU cores; memory grows
+  with N. Workers are spawned processes, so a script that calls it needs
+  the `if __name__ == "__main__":` guard.
 
 Tile size trades memory and time per tile against the share of each tile
 spent on padding: a tile fits `(1 + 2 overlap / tile)³` times its core's

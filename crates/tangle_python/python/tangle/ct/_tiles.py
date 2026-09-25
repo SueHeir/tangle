@@ -178,6 +178,7 @@ def fit_tiled(
     restart: bool = False,
     tiles: Iterable[Sequence[int]] | None = None,
     exclude: Any | None = None,
+    workers: int = 1,
     verbose: bool = False,
 ) -> FitResult:
     """:func:`fit_fibers` on a scan of any size, one tile at a time.
@@ -197,6 +198,13 @@ def fit_tiled(
     only the listed ``(z, y, x)`` tile indices (the checkpoint then holds a
     part of the scan, e.g. for several processes or machines sharing one
     run); the result stitches every tile the checkpoint holds.
+
+    ``workers`` > 1 fits that many tiles at once, each in its own process
+    (most of a tile's fit is single-threaded Python, and the GPU solve is a
+    small share of it, so tiles run side by side scale with the CPU cores).
+    Each worker reads one tile and holds its own copies of it, so memory
+    grows with ``workers``. Worker processes are spawned, so a script that
+    calls this needs the ``if __name__ == "__main__":`` guard.
 
     Returns the stitched fit of the whole scan (``history`` holds one entry
     per tile). Settings and specs are those of :func:`fit_fibers`.
@@ -253,10 +261,12 @@ def fit_tiled(
         center = grid.central()
         todo.sort(key=lambda index: 0 if index == center else 1)
     started = time.perf_counter()
-    for count, index in enumerate(todo):
-        tile_settings = settings if levels is None or not plain_grey else settings.replace(levels=levels)
-        fit = _fit_tile(volume, exclude, grid, index, voxel_size, specs, tile_settings, mask_value)
-        done[index] = fit
+    finished = 0
+
+    def finish(fit: TileFit) -> None:
+        nonlocal levels, finished
+        done[fit.index] = fit
+        finished += 1
         if plain_grey and levels is None:
             levels = fit.levels
             if store is not None:
@@ -265,24 +275,61 @@ def fit_tiled(
             store.save(fit)
         if verbose:
             elapsed = time.perf_counter() - started
-            left = elapsed / (count + 1) * (len(todo) - count - 1)
+            left = elapsed / finished * (len(todo) - finished)
             print(
-                f"tile {tile_key(index)} ({count + 1}/{len(todo)}): {len(fit.centerlines)} fibers in "
+                f"tile {tile_key(fit.index)} ({finished}/{len(todo)}): {len(fit.centerlines)} fibers in "
                 f"{fit.seconds:.1f} s; about {left / 60:.1f} min left"
             )
+
+    def job(index: tuple[int, int, int]) -> tuple:
+        tile_settings = settings.replace(levels=levels) if plain_grey and levels is not None else settings
+        return (index, *_read_tile(volume, exclude, grid, index, mask_value), voxel_size, specs, tile_settings, mask_value)
+
+    queue = list(todo)
+    if plain_grey and levels is None and queue:
+        finish(_fit_crop(*job(queue.pop(0))))  # the levels tile, before any other
+    if workers <= 1 or len(queue) <= 1:
+        for index in queue:
+            finish(_fit_crop(*job(index)))
+    else:
+        import multiprocessing
+        from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+
+        waiting = iter(queue)
+        with ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+            running = set()
+
+            def submit() -> None:
+                index = next(waiting, None)
+                if index is not None:  # only ``workers`` tiles are read into memory at a time
+                    running.add(pool.submit(_fit_crop, *job(index)))
+
+            for _ in range(workers):
+                submit()
+            while running:
+                complete, _ = wait(running, return_when=FIRST_COMPLETED)
+                for future in complete:
+                    running.discard(future)
+                    finish(future.result())
+                    submit()
     if levels is None and done:
         levels = next(iter(done.values())).levels
     return stitch(grid, list(done.values()), specs, voxel_size, levels or Levels(0.0, 1.0, 0.5))
 
 
-def _fit_tile(volume, exclude, grid, index, voxel_size, specs, settings, mask_value) -> TileFit:
+def _read_tile(volume, exclude, grid, index, mask_value) -> tuple:
+    """The padded tile's scan (as the fit takes it), its exclude mask and its origin (x, y, z)."""
     low, high = grid.padded(index)
     window = tuple(slice(int(a), int(b)) for a, b in zip(low, high))
     crop = np.asarray(volume[window])
     if mask_value is not None:
         crop = crop.astype(bool) if crop.dtype == bool else crop == mask_value
     blocked = np.asarray(exclude[window], dtype=bool) if exclude is not None else None
-    shift = low[::-1].astype(np.float64)  # (x, y, z)
+    return crop, blocked, low[::-1].astype(np.float64)
+
+
+def _fit_crop(index, crop, blocked, shift, voxel_size, specs, settings, mask_value) -> TileFit:
+    """One tile's fit, in scan coordinates (runs in a worker process with ``workers`` > 1)."""
     started = time.perf_counter()
     if mask_value is not None and not crop.any():
         empty = np.zeros(0)
