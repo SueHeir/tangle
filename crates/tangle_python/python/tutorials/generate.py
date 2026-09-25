@@ -779,14 +779,16 @@ NOTEBOOKS: dict[str, list[dict]] = {
         preserve the resident formation state and operation cursor for
         continuation.
 
-        The CPU backend executes the same CubeCL kernels without a GPU. Change
-        `backend` to `"wgpu"` for a supported accelerator.
+        The default `"wgpu"` backend runs on a supported GPU (Metal, Vulkan,
+        or DirectX). Set `backend="cpu"` on a machine without one; it executes
+        the same CubeCL kernels, but compiles each kernel through LLVM the first
+        time a process uses it, which can take minutes, and then runs one to two
+        orders of magnitude slower per iteration.
         """),
         code("""
         # These are global defaults; a recipe policy or override may adjust
         # selected values for one manufacturing stage.
         settings = tangle.RelaxationSettings(
-            backend="cpu",
             motion_model="flexible",
             penetration_tolerance=0.1 * um,
             # An excess above one: accept curvature ratios up to 1.05.
@@ -1472,7 +1474,8 @@ NOTEBOOKS: dict[str, list[dict]] = {
         """),
         code("""
         # Deliberately give a stage one iteration to show the error fields.
-        # Running it takes a few seconds on the CPU backend, so it is opt-in.
+        # It runs the solver, so it is opt-in. The default backend is "wgpu";
+        # add backend="cpu" on a machine without a supported GPU.
         RUN_SOLVER = False
         if RUN_SOLVER:
             cell = tangle.Cell([1 * mm, 1 * mm, 1 * mm])
@@ -1486,7 +1489,7 @@ NOTEBOOKS: dict[str, list[dict]] = {
             failing.insert(fibers)
             failing.solve(final.replace(name="too short", max_iterations=1))
             try:
-                failing.run(tangle.RelaxationSettings(backend="cpu"))
+                failing.run(tangle.RelaxationSettings())
             except tangle.RecipeError as error:
                 print(error.operation_index, error.operation, error.iteration)
                 print(error.reason)
