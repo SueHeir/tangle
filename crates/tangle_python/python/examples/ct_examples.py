@@ -70,8 +70,9 @@ Examples:
 * ``scanner_two_types``: two_types' fibers scanned by a simulated scanner
   (``ct.Scanner``: projections, propagation phase contrast, detector blur,
   photon noise, filtered back-projection), so the noise texture, blur and
-  edge fringes come from the acquisition, as in a real scan. Both types are
-  solid, the coarse ones half as dense as the fine ones.
+  edge fringes come from the acquisition, as in a real scan: 2 µm
+  resolution, and each fiber moving about 1 µm during the scan. Both types
+  are solid, the coarse ones half as dense as the fine ones.
 * ``varied_1`` … ``varied_8``: fresh structures drawn from seeds, for
   checking the fitter on structures it was not tuned on: 8-16 µm fibers
   at 2.5-4.5 voxels radius, planar, aligned, biaxial and isotropic (two
@@ -248,17 +249,19 @@ def two_types(cache: Path, *, noisy: bool = False, halo: bool = False, scanner: 
         # two_types' fibers scanned by a simulated scanner (ct.Scanner):
         # photon noise, detector blur and filtered back-projection, with a
         # weakly absorbing, phase-shifting sample and a short propagation
-        # distance, so the edges show phase fringes; a 3 µm resolution
-        # softens the fibers so touching ones are hard to tell apart. Both fiber types are
-        # solid; the coarse ones are half as dense and, being the lighter
-        # material, shift the phase more for what they absorb (a higher
-        # delta/beta), so any bright rim they show comes from the phase
+        # distance, so the edges show phase fringes; a 2 µm resolution softens
+        # the fibers, and each fiber moves about 1 µm during the scan. Both
+        # fiber types are solid; the coarse ones are half as dense and, being
+        # the lighter material, shift the phase more for what they absorb (a
+        # higher delta/beta), so any bright rim they show comes from the phase
         # contrast, not the material.
         profiles = [
             (7 * um, ct.CrossSection()),
             (19 * um, ct.CrossSection(brightness=0.5)),
         ]
-        scanner = ct.Scanner(photons=1500, resolution=3 * um, delta_beta=(5.0, 20.0), propagation=4.0)
+        scanner = ct.Scanner(
+            photons=1500, resolution=2 * um, delta_beta=(5.0, 20.0), propagation=4.0, fiber_motion=1 * um
+        )
         full = render_scan(truth, voxel, seed=21, profiles=profiles, scanner=scanner)
     elif halo:
         # two_types' scan with a phase-contrast halo at unit strength (a
