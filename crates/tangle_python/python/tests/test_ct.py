@@ -157,6 +157,25 @@ class CtToolTests(unittest.TestCase):
         self.assertLess(lag_one(white), 0.1)
         self.assertGreater(lag_one(blurred), 0.6)
 
+    def test_scanner_reconstructs_a_rod_and_its_phase_fringe(self):
+        from tangle.ct._scanner import Scanner, acquire
+
+        z, y, x = np.indices((4, 40, 40), dtype=np.float32)
+        distance = np.hypot(x + 0.5 - 20.0, y + 0.5 - 20.0)
+        rod = np.clip(6.0 - distance + 0.5, 0.0, 1.0)  # a rod of radius 6 along z
+        sample = (0.02 * rod).astype(np.float32)
+        rng = np.random.default_rng(0)
+        plain = acquire(sample, Scanner(photons=1e7, detector_blur=0.0, void_attenuation=0.0), rng)
+        inside, outside = plain[:, distance < 4], plain[:, distance > 9]
+        self.assertAlmostEqual(float(inside.mean()), 0.02, delta=0.003)
+        self.assertLess(abs(float(outside.mean())), 0.002)
+        phase = acquire(
+            sample, Scanner(photons=1e7, detector_blur=0.0, void_attenuation=0.0, delta_beta=100.0, propagation=2.0), rng
+        )
+        rim = phase[:, (distance > 6.5) & (distance < 8.0)].mean()
+        far = phase[:, distance > 12].mean()
+        self.assertLess(float(rim), float(far) - 0.002)  # dark just outside the surface
+
     def test_cross_section_width_survives_noise_that_breaks_the_depth(self):
         from scipy.ndimage import gaussian_filter
 

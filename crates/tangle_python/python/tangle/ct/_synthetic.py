@@ -129,6 +129,7 @@ def synthetic_ct(
     noise_correlation: float = 0.0,
     phase_contrast: float = 0.0,
     phase_sigma_voxels: float | None = None,
+    scanner=None,
 ) -> SyntheticScan:
     """Render ``source`` (an ``Assembly`` or ``RunResult``) as a CT-like volume.
 
@@ -153,6 +154,13 @@ def synthetic_ct(
     surfaces come close the fringes add, so the gap between touching fibers
     reads darkest; in noise the shallow band breaks up into dark spots
     along the edges. 0 (the default) renders plain attenuation.
+
+    ``scanner`` (a :class:`Scanner`) simulates the acquisition instead:
+    projections, free-space propagation (phase contrast), detector blur,
+    photon noise and filtered back-projection (see ``_scanner``). The
+    blur, noise and fringes then come from the scanner, so
+    ``psf_sigma_voxels``, ``noise``, ``noise_correlation`` and
+    ``phase_contrast`` are ignored; ``drift`` still applies.
 
     ``profiles`` renders several fiber types with their own brightness:
     a sequence of ``(diameter, CrossSection)`` pairs. Each fiber gets the
@@ -179,6 +187,19 @@ def synthetic_ct(
     if profiles:
         occupancy, types = _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles, period)
     rng = np.random.default_rng(seed)
+    if scanner is not None:
+        from ._scanner import acquire
+
+        sample = scanner.void_attenuation + (scanner.fiber_attenuation - scanner.void_attenuation) * occupancy
+        attenuation = acquire(sample.astype(np.float32), scanner, rng)
+        attenuation /= scanner.fiber_attenuation  # fiber 1, void about 0, as below
+        if drift:
+            z, y, x = np.indices(attenuation.shape, dtype=np.float32)
+            ny, nx = attenuation.shape[1:]
+            attenuation += drift * np.cos(np.pi * (x - nx / 2) / nx) * np.cos(np.pi * (y - ny / 2) / ny)
+        low, high = np.percentile(attenuation, [0.5, 99.5])
+        volume = np.clip((attenuation - low) / (high - low) * 65535, 0, 65535).astype(np.uint16)
+        return SyntheticScan(volume, labels, centerlines, radii, voxel_size, period, types)
     attenuation = void_level + (1.0 - void_level) * gaussian_filter(occupancy, psf_sigma_voxels)
     if phase_contrast:
         from scipy.ndimage import gaussian_laplace
