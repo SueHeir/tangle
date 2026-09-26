@@ -789,6 +789,26 @@ class CtToolTests(unittest.TestCase):
         self.assertEqual(float(image[10, 5, 5]), 0.5)  # the fine fit: graded
         self.assertIs(fitter.solve_image([fine], np.array([2.0]), np.array([0])), graded)
 
+    def test_recenter_moves_a_fit_onto_the_grey_peak(self):
+        from tangle.ct._fit import _Fitter
+
+        settings = ct.FitSettings(recenter_on_grey=True)
+        spec = ct.FiberSpec(diameter=6 * VOXEL)
+        z, y, x = np.mgrid[0:16, 0:24, 0:24]
+        grey = np.exp(-((x - 10.0) ** 2 + (y - 10.0) ** 2) / 8.0).astype(np.float32)
+        fitter = _Fitter(grey, [spec], settings, VOXEL, lambda *args, **kwargs: None)
+        fitter.peak_grey, fitter.peak_void = grey, 0.0
+        off = np.array([[11.2, 10.0, z] for z in np.linspace(2.0, 13.0, 8)])
+        lines, moved = fitter.recenter([off], np.array([3.0]), np.array([0]))
+        self.assertEqual(moved, 1)
+        self.assertLess(float(np.abs(lines[0][:, 0] - 10.0).max()), 0.6)
+        np.testing.assert_allclose(lines[0][:, 2], off[:, 2], atol=0.2)
+        # Another fit already on the peak: the off-centre one stays put.
+        on = np.array([[10.0, 10.0, z] for z in np.linspace(2.0, 13.0, 8)])
+        lines, moved = fitter.recenter([off, on], np.array([3.0, 3.0]), np.array([0, 0]))
+        self.assertEqual(moved, 0)
+        np.testing.assert_array_equal(lines[0], off)
+
     def test_grey_profiles_draw_measure_and_type_fibers(self):
         from tangle.ct import _grey
 

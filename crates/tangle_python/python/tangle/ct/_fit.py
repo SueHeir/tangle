@@ -148,6 +148,17 @@ class FitSettings:
     # blurred fiber; two real ones side by side read wider). Grey scans only.
     merge_straddling: bool = False
     merge_straddling_width_radii: float = 4.0
+    # After the final solve, move each fit of the smallest type across
+    # itself onto the brightest grey there, by at most ``recenter_max_radii``
+    # radii. In a packed bundle the fit image is flat across touching fibers
+    # and the solver's contact alone places fits, often on the dim contact
+    # between two fibers; the grey still peaks on each fiber's axis. A node
+    # does not move closer than ``recenter_spacing_radii`` radii to another
+    # fit's, and a fit keeps its move only if the grey along it rises.
+    # Grey scans only.
+    recenter_on_grey: bool = False
+    recenter_max_radii: float = 0.5
+    recenter_spacing_radii: float = 1.5
     # Fill enclosed foreground holes up to a fiber's cross-section (a dim
     # core, or noise speckle in a dim fiber) in a mask, grey ranges or a
     # plain grey scan.
@@ -755,7 +766,7 @@ def fit_fibers(
             )
             foreground = flat > 0.5
             evidence = flat
-        if settings.merge_straddling:
+        if settings.merge_straddling or settings.recenter_on_grey:
             from . import _native
 
             peak_grey = grey_model[0] if grey_model is not None else np.asarray(volume, dtype=np.float32)
@@ -798,7 +809,7 @@ def fit_fibers(
         fitter.grey, fitter.profiles, fitter.grey_void = grey_model
     if type_levels is not None:
         fitter.checked_grey, fitter.type_levels = checked, type_levels
-    if settings.merge_straddling:
+    if settings.merge_straddling or settings.recenter_on_grey:
         fitter.peak_grey, fitter.peak_void = peak_grey, peak_void
     lines = fitter.trace([], np.zeros(0))
     radii, types = fitter.classify(lines)
@@ -848,6 +859,9 @@ def fit_fibers(
         lines, radii, types, cut = fitter.cut_void(lines, radii, types, final=True)
         before = [before[i] for i in cut.pop("source")]
         log("final solve", lines, types=fitter.counts(types), **cut)
+        if settings.recenter_on_grey and fitter.peak_grey is not None:
+            lines, moved = fitter.recenter(lines, radii, types)
+            log("recenter", lines, moved=moved)
         confidence, settled, summary = fitter.scores(lines, radii, previous=before)
         coverage = _confidence.sure_coverage(fitter.foreground, lines, radii, settled)
         log("confidence", lines, **summary, sure_coverage=round(coverage, 4))
@@ -1266,6 +1280,76 @@ class _Fitter:
             reach=np.asarray(radii, dtype=np.float64) + self.margin, log=self.log,
             anchors=anchors, anchor_tolerance=0.3 * float(self.radius.min()),
         )
+
+    def recenter(
+        self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray
+    ) -> tuple[list[np.ndarray], int]:
+        """Fits of the smallest type moved across themselves onto the
+        brightest grey (``FitSettings.recenter_on_grey``); returns the lines
+        and how many fits moved.
+
+        At each node the grey is sampled on a disc across the fiber, one
+        radius wide; the node moves to the centroid of the samples above
+        the disc's upper quartile (weighted by how far above), at most
+        ``recenter_max_radii`` radii, smoothed over five nodes. Moves that
+        bring a node within ``recenter_spacing_radii`` radii of another
+        fit's nodes are dropped, and a fit keeps its move only if the mean
+        grey at its nodes rises.
+        """
+        from scipy.spatial import cKDTree
+
+        from ._geometry import sample_image
+
+        s = self.settings
+        grey = self.peak_grey
+        types = np.asarray(types, dtype=int)
+        smallest = int(np.argmin(self.radius))
+        chosen = [i for i, k in enumerate(types) if int(k) == smallest and len(lines[i]) >= 2]
+        if not chosen:
+            return lines, 0
+        lines = [np.array(line, dtype=np.float64) for line in lines]
+        nodes = np.concatenate(lines)
+        owner = np.repeat(np.arange(len(lines)), [len(line) for line in lines])
+        tree = cKDTree(nodes)
+        moved = 0
+        for i in chosen:
+            line = lines[i]
+            r = float(radii[i])
+            t = tangents(line)
+            helper = np.where(np.abs(t[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
+            e1 = np.cross(t, helper)
+            e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
+            e2 = np.cross(t, e1)
+            steps = np.arange(-r, r + 1e-9, 0.5)
+            u, v = np.meshgrid(steps, steps)
+            keep = u**2 + v**2 <= r**2
+            u, v = u[keep], v[keep]
+            points = line[:, None, :] + u[None, :, None] * e1[:, None, :] + v[None, :, None] * e2[:, None, :]
+            values = sample_image(grey, points.reshape(-1, 3)).reshape(len(line), len(u))
+            floor = np.percentile(values, 75, axis=1, keepdims=True)
+            weight = np.maximum(values - floor, 0.0)
+            total = weight.sum(axis=1)
+            du = np.where(total > 0, (weight * u).sum(axis=1) / np.maximum(total, 1e-12), 0.0)
+            dv = np.where(total > 0, (weight * v).sum(axis=1) / np.maximum(total, 1e-12), 0.0)
+            shift = du[:, None] * e1 + dv[:, None] * e2
+            if len(shift) >= 3:
+                padded = np.concatenate([shift[:1], shift[:1], shift, shift[-1:], shift[-1:]])
+                shift = sum(padded[j : j + len(shift)] for j in range(5)) / 5.0
+            length = np.linalg.norm(shift, axis=1, keepdims=True)
+            limit = s.recenter_max_radii * r
+            shift *= np.minimum(1.0, limit / np.maximum(length, 1e-12))
+            candidate = line + shift
+            for m, near in enumerate(tree.query_ball_point(candidate, s.recenter_spacing_radii * r)):
+                if any(owner[q] != i for q in near):
+                    candidate[m] = line[m]
+            if np.array_equal(candidate, line):
+                continue
+            if sample_image(grey, candidate).mean() > sample_image(grey, line).mean():
+                lines[i] = candidate
+                nodes[owner == i] = candidate  # later fits keep their spacing from where this one went
+                tree = cKDTree(nodes)
+                moved += 1
+        return lines, moved
 
     def cut_void(
         self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray, *, final: bool = False
