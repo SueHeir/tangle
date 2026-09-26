@@ -215,7 +215,8 @@ def synthetic_ct(
     base = occupancy
     factor = None
     if brightness_spread > 0:
-        # Its own stream, so the noise below is the same with or without it.
+        # Its own stream, so the factors depend only on the seed (the noise below still changes with
+        # them: its draws follow the pixel means).
         factor = np.exp(np.random.default_rng([seed, 1]).normal(0.0, brightness_spread, len(centerlines)))
     if factor is not None and not profiles:
         raise ValueError("brightness_spread needs profiles")

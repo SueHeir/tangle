@@ -34,7 +34,7 @@ square) moves each fiber on its own smooth random path, as loose fibers
 settle or sway; ``drift`` (meters, root mean square) moves the whole
 sample along one such path. The scan is split into ``motion_steps``
 stretches of angles, each seeing the sample where it was then, so moving
-fibers come out blurred and doubled while still ones stay sharp. The
+fibers come out blurred while still ones stay sharp. The
 truth is the fibers' rest position.
 
 The noise texture, the blur and the edge fringes then come from the same

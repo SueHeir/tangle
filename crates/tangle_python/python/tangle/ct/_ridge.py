@@ -1,4 +1,4 @@
-"""Ridge finish (``FitSettings.ridge_finish``): a last pass over the smallest type's fits on the grey ridge.
+"""Ridge finish (``FitSettings.ridge_finish``): a pass over the smallest type's fits on the grey ridge.
 
 Inside a packed bundle the range image is saturated, so a fit has nothing to keep it on its own fiber: where
 a neighbour comes close it slides across and carries on along the neighbour (the fiber it left looks chopped
@@ -9,17 +9,27 @@ voxel:
 
 1. recenter each fit onto the ridge (disc argmax, half a radius reach, smoothed along the fit);
 2. cut out every run of samples off the ridge at least ``_CUT_RUN`` voxels long (a hop's crossing, a stretch
-   between fibers, an overhanging end): interior runs split the fit, end runs trim it;
-3. grow each end along the ridge while the grey stays at least ``ridge_finish_extend`` of the fit's own median
-   grey and no other fit is within half a fiber pitch;
+   between fibers, an overhanging end): interior runs split the fit, end runs trim it. With
+   ``ridge_rim_share``, then drop the pieces that run on a larger type's rim, beside its fit (``_on_rim``);
+3. grow each end along the ridge (each step to the brightest point of a disc ``ridge_extend_reach`` radii
+   wide) while the grey stays at least ``ridge_finish_extend`` of the fit's own median grey and no other fit
+   is within half a fiber pitch;
 4. join ends of pieces that meet: within 6 voxels, and either both end directions within 30 degrees of the
    bridge, or the ends parallel within 30 degrees and at most 0.6 radius apart across the fiber, or within 4
    voxels running on past each other (the second piece's overlapping start is dropped); at least 80% of the
-   straight bridge must be on the ridge;
-5. drop pieces shorter than the type's minimum length.
+   straight bridge must be on the ridge. With ``ridge_refine``, every piece is then recentered once more
+   with a short reach (``_refine_center``);
+5. drop pieces shorter than ``ridge_min_length_scale`` of the type's minimum length.
 
-A larger type's fiber is off limits throughout: fine samples inside a coarse fit's oval section are cut (its
-bright rim is a ridge too, and a fine fit can follow it), and ends are not grown into one.
+Steps 2 to 4 (the off-ridge cut, the end growth and the join) read the grey smoothed by ``ridge_sigma_voxels``
+when it is set; the recenter, the rim test and ``ridge_refine`` keep the broader grey. A larger type's fiber is
+off limits throughout: fine samples inside a coarse fit's oval section are cut (its bright rim is a ridge too,
+and a fine fit can follow it), and ends are not grown into one.
+
+``finish_holes`` finishes the hole births (``FitSettings.hole_births``) on their own, on the broader grey:
+off-ridge runs cut with the rim exemption (``ridge_rim_sigma``), samples inside a larger type's fit cut, runs
+under the grey floor cut (``hole_birth_grey_min``), pieces shorter than the type's minimum length dropped and,
+with ``hole_birth_rim_drop``, pieces on a larger type's rim dropped.
 """
 
 from __future__ import annotations
@@ -37,8 +47,10 @@ _JOIN_RIDGE = 0.8
 _JOIN_OVERLAP = 4.0  # voxels: ends this close that run on past each other (side by side) also join
 
 
-def ridge_finish(fitter, lines, radii, types, grey: np.ndarray):
-    """``(lines, radii, types, info)`` after the ridge finish (see the module notes)."""
+def ridge_finish(fitter, lines, radii, types, grey: np.ndarray, sharp: np.ndarray | None = None):
+    """``(lines, radii, types, info)`` after the ridge finish (see the module notes). ``sharp``: the grey the
+    cut, growth and join read (``FitSettings.ridge_sigma_voxels``); None = ``grey``."""
+    sharp = grey if sharp is None else sharp
     types = np.asarray(types, dtype=int)
     radii = np.asarray(radii, dtype=np.float64)
     shape = tuple(int(n) for n in grey.shape)
@@ -58,7 +70,7 @@ def ridge_finish(fitter, lines, radii, types, grey: np.ndarray):
         if not ok:
             others.append((s, k, radius))
             continue
-        _, dist = _argmax_offset(grey, s, _tangents(s), r, smooth=7)
+        _, dist = _argmax_offset(sharp, s, _tangents(s), r, smooth=7)
         keep = np.ones(len(s), dtype=bool)
         for a, b in _runs(dist > 0.5 * r):
             if (b - a) * _STEP >= _CUT_RUN:
@@ -66,22 +78,35 @@ def ridge_finish(fitter, lines, radii, types, grey: np.ndarray):
         keep &= ~inside_coarse(s)
         cut_samples += int((~keep).sum())
         pieces += [(p, radius) for p in _pieces(s, keep) if len(p) >= 4]
+    # 2b. (ridge_rim_share) drop pieces that run on a larger type's rim, beside its fit
+    rim_dropped = 0
+    if fitter.settings.ridge_rim_share is not None and pieces:
+        beside = _coarse_sections(fitter, lines, radii, types, fine, full=True)
+        reference = float(np.median(sample_image(grey, np.concatenate([p for p, _ in pieces]))))
+        kept = [(p, radius) for p, radius in pieces
+                if not _on_rim(fitter, beside, grey, p, reference, fitter.settings.ridge_rim_share)]
+        rim_dropped = len(pieces) - len(kept)
+        pieces = kept
     # 3. extend along the ridge
     grown = 0
+    reach = float(fitter.settings.ridge_extend_reach)
     all_points = [p for p, _ in pieces] + [s for s, _, _ in others if len(s)]
     for i, (p, radius) in enumerate(pieces):
         if len(p) < 12:
             continue
         rest = [q for j, q in enumerate(all_points) if j != i and len(q)]
-        p2, added = _extend(grey, p, rest, r, alpha, shape, forbidden=inside_coarse)
+        p2, added = _extend(sharp, p, rest, r, alpha, shape, forbidden=inside_coarse, reach=reach)
         pieces[i] = (p2, radius)
         all_points[i] = p2
         grown += added
     # 4. join
-    joined_pieces, joined = _join(grey, [p for p, _ in pieces], r, shape)
+    joined_pieces, joined = _join(sharp, [p for p, _ in pieces], r, shape)
+    if fitter.settings.ridge_refine:
+        joined_pieces = [_refine_center(grey, p, r, shape) if len(p) >= 5 else p for p in joined_pieces]
     radius_of_piece = float(np.median([rad for _, rad in pieces])) if pieces else r
     # 5. minimum length
-    kept = [p for p in joined_pieces if len(p) * _STEP >= min_length]
+    shortest = fitter.settings.ridge_min_length_scale * min_length
+    kept = [p for p in joined_pieces if len(p) >= 2 and len(p) * _STEP >= shortest]
     out_lines = [_to_nodes(p, fitter.spacing) for p in kept] + [
         _to_nodes(s, fitter.spacing) if len(s) >= 2 else s for s, _, _ in others
     ]
@@ -90,9 +115,22 @@ def ridge_finish(fitter, lines, radii, types, grey: np.ndarray):
     keep = [i for i, line in enumerate(out_lines) if len(line) >= 2]
     info = {
         "cut_voxels": round(cut_samples * _STEP, 1), "grown_voxels": round(grown * _STEP, 1), "joins": joined,
-        "short_dropped": len(joined_pieces) - len(kept),
+        "short_dropped": len(joined_pieces) - len(kept), "rim_dropped": rim_dropped,
     }
     return [out_lines[i] for i in keep], out_radii[keep], out_types[keep], info
+
+
+def _on_rim(fitter, beside, grey, p, reference, share) -> bool:
+    """The ridge_rim test on one piece ``p`` (samples): whether it runs on a larger type's rim, beside its fit:
+    at least ``share`` of its samples lie within ``ridge_rim_reach`` of a larger fit's oval section (``beside``:
+    the scaled distance of ``_coarse_sections(full=True)``) and their median ``grey`` is at most
+    ``ridge_rim_grey`` of the way from void to ``reference`` (the fine fits' median grey)."""
+    near = beside(p) <= fitter.settings.ridge_rim_reach
+    if near.mean() < share:
+        return False
+    void = float(getattr(fitter, "peak_void", 0.0))
+    level = (float(np.median(sample_image(grey, p[near]))) - void) / max(reference - void, 1e-9)
+    return level <= fitter.settings.ridge_rim_grey
 
 
 def _to_nodes(samples: np.ndarray, spacing: float) -> np.ndarray:
@@ -145,6 +183,17 @@ def _recenter(grey, s, r, shape):
     return _samples_inside(s + shift, shape, _STEP)
 
 
+def _refine_center(grey, s, r, shape, reach=0.3, values=21, shift_over=11):
+    """A short-reach recenter: the brightest point of a disc ``reach`` radii wide across the fit, the disc values
+    averaged over ``values`` samples along it, the shift averaged over ``shift_over`` samples."""
+    shift, _ = _argmax_offset(grey, s, _tangents(s), reach * r, smooth=values)
+    if len(shift) >= shift_over:
+        h = shift_over // 2
+        padded = np.concatenate([np.repeat(shift[:1], h, 0), shift, np.repeat(shift[-1:], h, 0)])
+        shift = sum(padded[j : j + len(shift)] for j in range(shift_over)) / shift_over
+    return _samples_inside(s + shift, shape, _STEP)
+
+
 def _runs(mask):
     m = np.asarray(mask, dtype=bool)
     edges = np.flatnonzero(np.diff(np.r_[0, m.astype(int), 0]))
@@ -155,37 +204,45 @@ def _pieces(s, keep):
     return [s[a:b] for a, b in _runs(keep)]
 
 
-def _coarse_sections(fitter, lines, radii, types, fine):
-    """A test ``points -> bool per point``: inside the oval section of a larger type's fit."""
+def _coarse_sections(fitter, lines, radii, types, fine, full=False):
+    """A test ``points -> bool per point``: inside the oval section of a larger type's fit (``full``: instead the
+    oval-scaled distance per point to the nearest larger fit, sections at the type's radius)."""
     from ._rescue import _coarse_index, _scaled_distance
 
     larger = [i for i, k in enumerate(types) if int(k) != fine and len(lines[i]) >= 2]
     if not larger:
+        if full:
+            return lambda points: np.full(len(points), np.inf)
         return lambda points: np.zeros(len(points), dtype=bool)
     by_kind = {}
     for i in larger:
         by_kind.setdefault(int(types[i]), []).append(i)
     tests = []
     for kind, ids in by_kind.items():
+        section_radii = np.full(len(ids), float(fitter.radius[kind])) if full else np.asarray(radii, dtype=np.float64)[ids]
         index = _coarse_index(
-            [np.asarray(lines[i], dtype=np.float64) for i in ids], np.asarray(radii, dtype=np.float64)[ids],
+            [np.asarray(lines[i], dtype=np.float64) for i in ids], section_radii,
             [fitter.long_axes(np.asarray(lines[i], dtype=np.float64), kind) for i in ids],
         )
         tests.append((index, float(fitter.ratio[kind])))
+    if full:
+        return lambda points: np.minimum.reduce(
+            [_scaled_distance(index, np.asarray(points, dtype=np.float64).reshape(-1, 3), ratio) for index, ratio in tests]
+        )
     return lambda points: np.logical_or.reduce(
         [_scaled_distance(index, np.asarray(points, dtype=np.float64).reshape(-1, 3), ratio) <= 1.0
          for index, ratio in tests]
     )
 
 
-def _extend(grey, s, others, r, alpha, shape, pitch_half=None, max_steps=80, forbidden=None):
+def _extend(grey, s, others, r, alpha, shape, pitch_half=None, max_steps=80, forbidden=None, reach=0.5):
     """``s`` grown at both ends along the ridge; returns it and how many samples were added."""
     from scipy.spatial import cKDTree
 
     tree = cKDTree(np.concatenate(others)) if others else None
     near = pitch_half if pitch_half is not None else 1.02 * r  # about half the pitch of touching fibers
     reference = float(np.median(sample_image(grey, s)))
-    u, v = _disc(0.5 * r)
+    u, v = _disc(reach * r)
     upper = np.array(shape[::-1], dtype=np.float64)
     added = 0
     line = s
@@ -292,3 +349,60 @@ def _join(grey, pieces, r, shape):
         if not merged:
             break
     return list(pieces.values()), joined
+
+
+def finish_holes(fitter, holes, lines, radii, types, grey: np.ndarray):
+    """The hole births (``FitSettings.hole_births``) finished on their own: off-ridge runs (with the rim
+    exemption) of at least ``_CUT_RUN`` cut out, samples inside a larger type's fit cut, with
+    ``hole_birth_grey_min`` runs of at least ``_CUT_RUN`` below the grey floor cut, pieces shorter than the
+    type's minimum length dropped; with ``hole_birth_rim_drop``, pieces that run on a larger type's rim, beside
+    its fit, dropped too (``_on_rim``)."""
+    if not holes:
+        return []
+    settings = fitter.settings
+    types = np.asarray(types, dtype=int)
+    radii = np.asarray(radii, dtype=np.float64)
+    shape = tuple(int(n) for n in grey.shape)
+    fine = int(np.argmin(fitter.radius))
+    r = float(fitter.radius[fine])
+    min_length = float(fitter.min_length[fine])
+    inside_coarse = _coarse_sections(fitter, lines, radii, types, fine)
+    grey_min = settings.hole_birth_grey_min
+    rim_share = float(settings.hole_birth_rim_share) if settings.hole_birth_rim_drop else None
+    floor = reference = beside = None
+    if grey_min is not None or rim_share is not None:
+        own = [_samples_inside(np.asarray(line, dtype=np.float64), shape, _STEP) for line, k in zip(lines, types)
+               if int(k) == fine and len(line) >= 2]
+        own = [q for q in own if len(q)]
+        if own:
+            reference = float(np.median(sample_image(grey, np.concatenate(own))))
+            if grey_min is not None and settings.hole_birth_grey_void:
+                void = float(getattr(fitter, "peak_void", 0.0) or 0.0)
+                floor = void + grey_min * (reference - void)
+            elif grey_min is not None:
+                floor = grey_min * reference
+            if rim_share is not None:
+                beside = _coarse_sections(fitter, lines, radii, types, fine, full=True)
+    out = []
+    for line in holes:
+        s = _samples_inside(np.asarray(line, dtype=np.float64), shape, _STEP)
+        if len(s) < 5:
+            continue
+        t = _tangents(s)
+        _, dist = _argmax_offset(grey, s, t, r, smooth=7)
+        if getattr(fitter, "rim_hessian", None) is not None:
+            dist = np.where((dist >= r - 0.5) & fitter.curves_down(s, t), 0.0, dist)
+        keep = np.ones(len(s), dtype=bool)
+        for a, b in _runs(dist > 0.5 * r):
+            if (b - a) * _STEP >= _CUT_RUN:
+                keep[a:b] = False
+        keep &= ~inside_coarse(s)
+        if floor is not None:
+            for a, b in _runs(sample_image(grey, s) < floor):
+                if (b - a) * _STEP >= _CUT_RUN:
+                    keep[a:b] = False
+        pieces = [p for p in _pieces(s, keep) if len(p) * _STEP >= min_length]
+        if beside is not None:  # hole_birth_rim_drop
+            pieces = [p for p in pieces if not _on_rim(fitter, beside, grey, p, reference, rim_share)]
+        out += [_to_nodes(p, fitter.spacing) for p in pieces]
+    return [line for line in out if len(line) >= 2]

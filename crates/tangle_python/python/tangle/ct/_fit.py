@@ -163,6 +163,20 @@ class FitSettings:
     # fiber, but a coarse fiber with a dim core does not read that bright
     # along its axis). None = off.
     coarse_axis_grey_max: float | None = None
+    # Grey ranges: a fit that the depth types as the smallest type is a larger
+    # type when its median axis grey sits below this fraction of the smallest
+    # type's grey range (0 = the range's low end; no fine fiber's axis reads
+    # that dim, while a dim-cored coarse fiber's core does, and its depth
+    # under-reads through the holes the dim core leaves in the foreground), its
+    # cross-section reads nearer a larger type's radius, and its depth is at
+    # least coarse_axis_depth_min voxels. Needs coarse_axis_grey_max (its
+    # grey). None = off.
+    coarse_axis_grey_min: float | None = None
+    coarse_axis_depth_min: float = 4.0
+    # coarse_axis_grey_min only where the 90th percentile of the grey over a
+    # disc the larger type's radius wide across the fit stays below this
+    # fraction of the smallest type's range (no fine-bright fiber inside it).
+    coarse_axis_disc_max: float = 0.3
     # A fit's radius never exceeds its type's (the depth of a packed bundle
     # inflates it, and the inflated fits push the bundle apart in the solve).
     radius_cap_prior: bool = False
@@ -187,6 +201,88 @@ class FitSettings:
     # (A coarse fit laid over a bundle often has its axis on the dark gaps, so
     # coarse_axis_grey_max misses it.) Needs coarse_axis_grey_max. None = off.
     coarse_disc_max: float | None = None
+    # With coarse_disc_max: classify() also types a fit whose depth reads as a
+    # larger type but whose disc holds fine-bright grey (_holds_fine) as the
+    # smallest type. In a packed bundle the foreground depth of a fine fit is
+    # the whole bundle's, so the per-batch typing turns fine fits between the
+    # bundle's fibers coarse; their axis sits on the dark gaps, so
+    # coarse_axis_grey_max misses them, and with one broad grey range for every
+    # type grey_checked_traces cannot tell the types apart either.
+    coarse_disc_classify: bool = False
+    # With coarse_disc_max: where it applies. coarse_disc_trace drops the
+    # larger types' new traces; coarse_disc_end removes such fits at the end,
+    # before the final births. Both off with coarse_disc_classify leaves only
+    # the typing.
+    coarse_disc_trace: bool = True
+    coarse_disc_end: bool = True
+    # At the end, before the final births: join a larger type's pieces that
+    # continue each other, across a gap of up to four radii the scan fills, or
+    # running past each other side by side (both fits on the rims of one
+    # fiber: no bright band between them) for up to four radii, where the
+    # overlap is replaced by the midline (see _join). The side-by-side test
+    # reads the coarse_axis_grey_max grey; without it only gaps are joined.
+    coarse_join: bool = False
+    # After the ridge finish and the hole births: join pieces that continue
+    # each other in a straight line (fibers that run straight through the
+    # scan, broken into pieces by crossings, dim stretches or the hole births'
+    # second pieces). Ends antiparallel within straight_join_angle degrees,
+    # each piece's extended axis within straight_join_offset radii of the
+    # other's end, and either a gap of at most straight_join_gap voxels whose
+    # bridge reads at least straight_join_support in the fit image (None = no
+    # check), or an overlap along the same axis of at most
+    # straight_join_overlap voxels. straight_join_types: "smallest" or "all".
+    straight_join: bool = False
+    straight_join_types: str = "smallest"
+    straight_join_gap: float = 30.0
+    straight_join_angle: float = 15.0
+    straight_join_offset: float = 1.0
+    straight_join_overlap: float = 20.0
+    straight_join_support: float | None = 0.5
+    # After straight_join: smooth every fit of bend_finish_types ("smallest"
+    # or "all") toward its type's bend limit (min_bend_radius), which the
+    # steps after the last solve (ridge finish, hole births, joins) do not
+    # enforce; then cut runs where the smoothed fit reads below
+    # bend_finish_grey_min of the way from void to the fits' median grey
+    # (None = no cut): a trace that wandered along noise has no fiber under
+    # its smoothed path. The void is the grey ranges' or profiles' void grey
+    # (zero on a plain grey scan). The smoothing stops after 400 sweeps and
+    # sets its tolerance from the node spacing before smoothing, so a long fit
+    # under a very large limit (bend_finish_diameters) and a rough trace,
+    # whose segments the smoothing shortens, keep bends tighter than the
+    # limit.
+    bend_finish: bool = False
+    bend_finish_types: str = "smallest"
+    bend_finish_grey_min: float | None = 0.6
+    # With bend_finish: the bend limit it smooths to, in diameters of each
+    # type (None = the type's min_bend_radius, which the tracer and solver use).
+    bend_finish_diameters: float | None = None
+    # After bend_finish: cut stretches where two fits of the smallest type run
+    # on one fiber (within clean_finish_reach_radii radii, with no darker gap
+    # between them) out of the shorter one; with clean_finish_min_length
+    # (voxels), then drop the smallest type's pieces shorter than that.
+    clean_finish: bool = False
+    clean_finish_reach_radii: float = 1.25
+    clean_finish_min_length: float | None = None
+    # After clean_finish: add the smallest type's pieces shorter than
+    # merge_short_length voxels (None = the type's minimum length) to the end
+    # of a longer fit they continue (on its extended axis, within
+    # merge_short_gap voxels ahead of its end), join what now meets with the
+    # straight join's gates across up to merge_short_join_gap voxels, smooth
+    # the junctions (bend_finish without its grey cut) and drop the short
+    # pieces left over.
+    merge_short: bool = False
+    merge_short_length: float | None = None
+    merge_short_gap: float = 30.0
+    merge_short_join_gap: float = 60.0
+    # For scans whose fibers run through the whole block (none end inside it):
+    # after the other final passes, join the smallest type's pieces across
+    # long gaps and walk each end still inside the block along its own grey
+    # ridge, under the bend limit (bend_finish_diameters, else the type's),
+    # toward the faces (_join.extend_through_ridge; a walk only crosses dim
+    # stretches that come back onto bright fiber), then cut runs left on
+    # void-like grey (void as for bend_finish_grey_min). Off by default: most
+    # scans have fiber ends.
+    through_block: bool = False
     # With recenter_on_grey: also recenter after each round's cleanup, before
     # new fibers are traced around the fits.
     recenter_each_round: bool = False
@@ -206,13 +302,45 @@ class FitSettings:
     coarse_rescue: bool = False
     coarse_rescue_grey: float = 0.8
     coarse_rescue_shared: float = 0.3
-    # A last pass over the smallest type's fits on the grey ridge (the scan
-    # smoothed by recenter_sigma_voxels, default 1.6): recenter, cut out
-    # stretches off the ridge (where a fit slides across onto a neighbour),
-    # grow ends along the ridge, join ends that meet, drop short pieces (see
-    # _ridge).
+    # After the final births, a pass over the smallest type's fits on the grey
+    # ridge (the scan smoothed by recenter_sigma_voxels, default 1.6):
+    # recenter, cut out stretches off the ridge (where a fit slides across
+    # onto a neighbour), grow ends along the ridge, join ends that meet, drop
+    # short pieces (see _ridge). The hole births and the joins below come
+    # after it.
     ridge_finish: bool = False
     ridge_finish_extend: float = 0.85
+    # With ridge_finish: the grey the off-ridge cut, the end growth and the
+    # join test read, the scan smoothed by this Gaussian sigma (voxels); None
+    # = the recenter's grey (recenter_sigma_voxels). The recenter itself keeps
+    # the broader grey (its basin must reach fits half a radius off). At 1.6 a
+    # dim fiber beside a brighter one has no ridge of its own (the neighbour's
+    # blur tilts it over), so the cut removes correct fits along their whole
+    # length; about 1.2 keeps each fiber's own ridge.
+    ridge_sigma_voxels: float | None = None
+    # With ridge_finish: pieces shorter than this share of the type's minimum
+    # length are dropped at the end (1 = the minimum length itself).
+    ridge_min_length_scale: float = 1.0
+    # With ridge_finish: after the join, recenter every piece once more with a
+    # short reach (0.3 radius) on the recenter grey, averaged over 21 samples
+    # (10 voxels) along the fit: settles grown ends and bridges without letting
+    # a fit slide onto a neighbour.
+    ridge_refine: bool = False
+    # With ridge_finish: the end growth steps to the brightest point of a disc
+    # this many fine radii wide across the end (a narrower disc, 0.25 to 0.3,
+    # keeps a growing end from stepping onto a neighbour's flank).
+    ridge_extend_reach: float = 0.5
+    # With ridge_finish: drop a smallest-type piece that runs beside a larger
+    # type's fit, on its rim: at least ridge_rim_share of its samples within
+    # ridge_rim_reach of the larger fit's oval section (its type's radius, in
+    # units of the section) and their median grey at most ridge_rim_grey of
+    # the way from void (as for bend_finish_grey_min) to the fine fits' median
+    # grey (a dim-cored coarse fiber's rim lobe is a ridge a fine fit can
+    # follow, just outside the coarse fit's section once the solver has pushed
+    # the two apart). None = off.
+    ridge_rim_share: float | None = None
+    ridge_rim_reach: float = 1.35
+    ridge_rim_grey: float = 0.58
     # New fibers traced among existing ones (a round's births, a redraw's new
     # fibers) are kept only if at least this share of their nodes sit on a
     # grey ridge: the brightest point of the grey (smoothed by
@@ -222,6 +350,82 @@ class FitSettings:
     # the ridge most of its length. None = keep every trace.
     birth_ridge_min: float | None = None
     birth_ridge_sigma_voxels: float = 1.6
+    # With birth_ridge_min: apply it to the smallest type's new traces only. A
+    # dim-cored coarse fiber's oval is brighter on its rims than on its axis,
+    # so a coarse trace on it is off the ridge along its whole length and the
+    # ridge test drops every coarse birth: a coarse fiber lost in a round or a
+    # redraw is never traced again, only its rims are, by fine fits. Pair it
+    # with coarse_birth_disc_max, which gates the larger types' births instead.
+    birth_ridge_smallest_only: bool = False
+    # New traces of a larger type among existing fits (a round's births, a
+    # redraw's new fibers, the final births; not the first trace) are dropped
+    # when their cross-section holds fine-fiber-bright grey above this fraction
+    # of the smallest type's grey range (the coarse_disc_max test, _holds_fine,
+    # at this level): a coarse trace over a bundle of fine fibers, not a
+    # dim-cored coarse fiber. Applied after the grey_checked_traces and
+    # coarse_trace_axis_check tests. Needs coarse_axis_grey_max (its grey).
+    # None = off.
+    coarse_birth_disc_max: float | None = None
+    # The hole births' ridge tests (hole_birth_ridge_min, and the off-ridge
+    # cut that finishes the hole fits) ask whether the brightest grey on a
+    # disc a radius wide across the fit lies within half a radius of it. A dim
+    # fiber packed beside a brighter one fails that although it is traced
+    # right: the smoothed grey rises all the way across its axis onto the
+    # bright neighbour's flank, so the disc's brightest point sits on the
+    # disc's rim, toward the neighbour. With ridge_rim_sigma (voxels), a node
+    # whose disc argmax is on the rim (within half a voxel of it) still counts
+    # as on the ridge where the grey (smoothed by this sigma) curves down
+    # across the fit both ways (the Hessian's two eigenvalues across the fit
+    # negative: the node sits on a tube of its own). A trace between two
+    # fibers sits in a dip across the contact and still fails; a fit half a
+    # radius or more off its own axis has the brighter axis inside the disc,
+    # not on the rim, and still fails. Needed by hole_births. None = off.
+    ridge_rim_sigma: float | None = None
+    # With final_births and ridge_rim_sigma: after the ridge finish (which
+    # puts the neighbours back on their axes and so opens the holes), also
+    # trace fibers in the holes the fits leave. A dim fiber in a packed bundle
+    # is never traced: the graded image, divided by the bright neighbours'
+    # grey, reads under the tracer's 0.5 on its axis, so it is not seeded and
+    # a trace from it stops at once. Once its neighbours are fitted, it is a
+    # fiber-wide stretch of foreground no fit claims. Hole births are seeded
+    # on the distance-transform ridge of the unclaimed foreground (at least
+    # hole_birth_depth_radii deep), traced on the flat range image with the
+    # fits' claim down-weighting the recentering (so the trace keeps to the
+    # hole), and kept when at least hole_birth_ridge_min of their nodes are on
+    # the ridge with the rim exemption (read on the grey smoothed by
+    # birth_ridge_sigma_voxels). The new fits are then finished on their own:
+    # off-ridge runs cut with the rim exemption, samples inside a larger
+    # type's fit cut, pieces shorter than the type's minimum length dropped.
+    hole_births: bool = False
+    hole_birth_ridge_min: float = 0.5
+    hole_birth_depth_radii: float = 0.6
+    # How far (radii) each fit claims the foreground around it for the hole
+    # births (the round births use 1.2).
+    hole_birth_claim_radii: float = 1.2
+    # With hole_births: also cut the hole fits where the smoothed grey on them
+    # is below this share of the median grey along the smallest type's fits (a
+    # hole trace that runs out of the bundle into the dim halo between fibers
+    # or along the void). None = off.
+    hole_birth_grey_min: float | None = None
+    # With hole_births: repeat them up to this many times (each pass traces
+    # around the fits the last one added; stops early when a pass adds
+    # nothing).
+    hole_birth_passes: int = 1
+    # With hole_birth_grey_min: read the floor as a share of the way from the
+    # void grey (as for bend_finish_grey_min) to the fine fits' median grey (a
+    # scan whose void is far above zero grey, where a plain share of the
+    # median lies below the void).
+    hole_birth_grey_void: bool = False
+    # With hole_births: also drop a hole fit's piece (after the off-ridge and
+    # grey-floor cuts) that runs on a larger type's rim, beside its fit. The
+    # hole cut only removes samples inside a larger fit's own section and the
+    # grey floor keeps the rim (it is bright), so beside a coarse fit pushed
+    # off its axis the rim lobe, just outside that section, is traced as a
+    # hole. The test is the ridge finish's ridge_rim test (ridge_rim_reach;
+    # ridge_rim_grey against the smallest type's fits' median grey) with
+    # hole_birth_rim_share as its share, so it works with ridge_rim_share off.
+    hole_birth_rim_drop: bool = False
+    hole_birth_rim_share: float = 0.7
     recenter_on_grey: bool = False
     recenter_max_radii: float = 0.5
     recenter_spacing_radii: float = 1.5
@@ -496,6 +700,7 @@ class FitResult:
                 max_step=0.25 * float(self.radii.mean()) * self.voxel_size,
                 penetration_tolerance=0.02 * self.spec.diameter,
             )
+        recipe.relax_until_converged(max_iterations=int(settings.max_iterations))
         run = recipe.run(settings)
         relaxed = [np.asarray(line) / self.voxel_size for line in run.centerlines()]
         return replace(self, centerlines=relaxed, confidence=None, history=self.history + [{"stage": "tangle relax", "max_penetration_m": run.max_penetration}]), run
@@ -876,13 +1081,14 @@ def fit_fibers(
             )
             foreground = flat > 0.5
             evidence = flat
+        # the void grey: merge_straddling's, and the final passes' void-relative floors
+        peak_void = float(grey_model[2]) if grey_model is not None else float(void)
         if settings.merge_straddling or settings.recenter_on_grey:
             from . import _native
 
             peak_grey = grey_model[0] if grey_model is not None else np.asarray(volume, dtype=np.float32)
             if grey_model is None and settings.denoise_sigma_voxels > 0:
                 peak_grey = _native.gaussian(peak_grey, settings.denoise_sigma_voxels)
-            peak_void = float(grey_model[2]) if grey_model is not None else float(void)
             if settings.recenter_on_grey and settings.recenter_sigma_voxels is not None:
                 recenter_grey = _native.gaussian(np.asarray(volume, dtype=np.float32), settings.recenter_sigma_voxels)
         if settings.coarse_axis_grey_max is not None:
@@ -933,15 +1139,18 @@ def fit_fibers(
         fitter.grey, fitter.profiles, fitter.grey_void = grey_model
     if type_levels is not None:
         fitter.checked_grey, fitter.type_levels = checked, type_levels
+    fitter.peak_void = peak_void
     if settings.merge_straddling or settings.recenter_on_grey:
-        fitter.peak_grey, fitter.peak_void = peak_grey, peak_void
+        fitter.peak_grey = peak_grey
         fitter.recenter_grey = recenter_grey
     if settings.coarse_axis_grey_max is not None and axis_grey is not None:
         fitter.axis_grey, fitter.axis_range = axis_grey, axis_range
-    if settings.birth_ridge_min is not None and not binary:
+    if (settings.birth_ridge_min is not None or settings.hole_births) and not binary:
         from . import _native
 
         fitter.ridge_grey = _native.gaussian(np.asarray(volume, dtype=np.float32), settings.birth_ridge_sigma_voxels)
+    if settings.ridge_rim_sigma is not None and not binary:
+        fitter.rim_hessian = HessianField(np.asarray(volume, dtype=np.float32), float(settings.ridge_rim_sigma))
     lines = fitter.trace([], np.zeros(0))
     radii, types = fitter.classify(lines)
     log("trace", lines, types=fitter.counts(types), thickness_margin=round(fitter.margin, 2))
@@ -1044,7 +1253,7 @@ def fit_fibers(
         confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
         log("coarse rescue", lines, **info)
         fitter.snap("coarse rescue", lines, radii, types)
-    if lines and settings.coarse_disc_max is not None and fitter.axis_grey is not None:
+    if lines and settings.coarse_disc_max is not None and settings.coarse_disc_end and fitter.axis_grey is not None:
         smallest_kind = int(np.argmin(fitter.radius))
         drop = np.zeros(len(lines), dtype=bool)
         for kind in {int(k) for k in types if int(k) != smallest_kind}:
@@ -1053,7 +1262,16 @@ def fit_fibers(
         if drop.any():
             keep = np.flatnonzero(~drop)
             lines, radii, types = [lines[i] for i in keep], np.asarray(radii)[keep], np.asarray(types)[keep]
+            confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
         log("coarse on bundles removed", lines, removed=int(drop.sum()))
+    if lines and settings.coarse_join and not binary:
+        from ._join import coarse_join
+
+        lines, radii, types, info = coarse_join(fitter, lines, radii, types)
+        lines = _refine.respace(lines, fitter.spacing)
+        confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
+        log("coarse join", lines, **info)
+        fitter.snap("coarse join", lines, radii, types)
     if lines and settings.final_births:
         born = fitter.trace(lines, radii)
         if born:
@@ -1076,10 +1294,131 @@ def fit_fibers(
         grey = fitter.recenter_grey if fitter.recenter_grey is not None else _native.gaussian(
             np.asarray(volume, dtype=np.float32), settings.recenter_sigma_voxels or 1.6
         )
-        lines, radii, types, info = ridge_finish(fitter, lines, radii, types, grey)
+        sharp = None
+        if settings.ridge_sigma_voxels is not None:
+            sharp = _native.gaussian(np.asarray(volume, dtype=np.float32), settings.ridge_sigma_voxels)
+        lines, radii, types, info = ridge_finish(fitter, lines, radii, types, grey, sharp=sharp)
         confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
         log("ridge finish", lines, **info)
         fitter.snap("ridge finish", lines, radii, types)
+    if lines and settings.final_births and settings.hole_births and fitter.rim_hessian is not None and not binary:
+        from . import _native
+        from ._ridge import finish_holes
+
+        grey = fitter.recenter_grey if fitter.recenter_grey is not None else _native.gaussian(
+            np.asarray(volume, dtype=np.float32), settings.recenter_sigma_voxels or 1.6
+        )
+        fine = int(np.argmin(fitter.radius))
+        born_total = 0
+        for _ in range(max(int(settings.hole_birth_passes), 1)):
+            holes = finish_holes(fitter, fitter.hole_births(lines, radii), lines, radii, types, grey)
+            if not holes:
+                break
+            lines = lines + holes
+            radii = np.concatenate([radii, np.full(len(holes), float(fitter.radius[fine]))])
+            types = np.concatenate([types, np.full(len(holes), fine, dtype=int)]).astype(int)
+            born_total += len(holes)
+        if born_total:
+            confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
+        log("hole births", lines, born=born_total)
+        fitter.snap("hole births", lines, radii, types)
+    if lines and settings.straight_join and not binary:
+        from ._join import straight_join
+
+        kinds = (
+            {int(np.argmin(fitter.radius))} if settings.straight_join_types == "smallest" else set(range(len(fitter.specs)))
+        )
+        lines, radii, types, joins = straight_join(
+            fitter, lines, radii, types, kinds, settings.straight_join_gap, settings.straight_join_angle,
+            settings.straight_join_offset, settings.straight_join_overlap, settings.straight_join_support,
+        )
+        lines = _refine.respace(lines, fitter.spacing)
+        confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
+        log("straight join", lines, joins=joins)
+        fitter.snap("straight join", lines, radii, types)
+    if lines and settings.bend_finish and not binary:
+        from . import _native
+        from ._join import bend_finish
+
+        kinds = (
+            {int(np.argmin(fitter.radius))} if settings.bend_finish_types == "smallest" else set(range(len(fitter.specs)))
+        )
+        grey = fitter.recenter_grey if fitter.recenter_grey is not None else _native.gaussian(
+            np.asarray(volume, dtype=np.float32), settings.recenter_sigma_voxels or 1.6
+        )
+        bends = None
+        if settings.bend_finish_diameters is not None:
+            bends = np.array([settings.bend_finish_diameters * item.diameter / fitter.h for item in fitter.specs])
+        lines, radii, types, info = bend_finish(
+            fitter, lines, radii, types, kinds, grey, settings.bend_finish_grey_min, bends=bends
+        )
+        confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
+        log("bend finish", lines, **info)
+        fitter.snap("bend finish", lines, radii, types)
+    if lines and settings.clean_finish and not binary:
+        from . import _native
+        from ._join import clean_finish
+
+        grey = fitter.axis_grey if fitter.axis_grey is not None else _native.gaussian(
+            np.asarray(volume, dtype=np.float32), max(settings.denoise_sigma_voxels, 0.7)
+        )
+        lines, radii, types, info = clean_finish(
+            fitter, lines, radii, types, {int(np.argmin(fitter.radius))}, grey,
+            settings.clean_finish_reach_radii, settings.clean_finish_min_length,
+        )
+        confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
+        log("clean finish", lines, **info)
+        fitter.snap("clean finish", lines, radii, types)
+    if lines and settings.merge_short and not binary:
+        from . import _native
+        from ._join import bend_finish, merge_short, straight_join
+        from ._geometry import polyline_length
+
+        fine = int(np.argmin(fitter.radius))
+        short = float(fitter.min_length[fine]) if settings.merge_short_length is None else settings.merge_short_length
+        lines, radii, types, merged = merge_short(
+            fitter, lines, radii, types, {fine}, short, settings.merge_short_gap, 1.5
+        )
+        lines, radii, types, joins = straight_join(
+            fitter, lines, radii, types, {fine}, settings.merge_short_join_gap, settings.straight_join_angle,
+            settings.straight_join_offset, settings.straight_join_overlap, settings.straight_join_support,
+        )
+        lines = _refine.respace(lines, fitter.spacing)
+        grey = fitter.recenter_grey if fitter.recenter_grey is not None else _native.gaussian(
+            np.asarray(volume, dtype=np.float32), settings.recenter_sigma_voxels or 1.6
+        )
+        bends = None
+        if settings.bend_finish_diameters is not None:
+            bends = np.array([settings.bend_finish_diameters * item.diameter / fitter.h for item in fitter.specs])
+        lines, radii, types, _ = bend_finish(fitter, lines, radii, types, {fine}, grey, None, bends=bends)
+        keep = [
+            i for i, (line, kind) in enumerate(zip(lines, types))
+            if int(kind) != fine or (len(line) >= 2 and polyline_length(line) >= short)
+        ]
+        dropped = len(lines) - len(keep)
+        lines, radii, types = [lines[i] for i in keep], np.asarray(radii)[keep], np.asarray(types)[keep]
+        confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
+        log("merge short", lines, merged=merged, joins=joins, short_dropped=dropped)
+        fitter.snap("merge short", lines, radii, types)
+    if lines and settings.through_block and not binary:
+        from . import _native
+        from ._join import through_block
+
+        grey = fitter.recenter_grey if fitter.recenter_grey is not None else _native.gaussian(
+            np.asarray(volume, dtype=np.float32), settings.recenter_sigma_voxels or 1.6
+        )
+        sharp = _native.gaussian(np.asarray(volume, dtype=np.float32), settings.ridge_sigma_voxels or 1.2)
+        fine = int(np.argmin(fitter.radius))
+        bend = (
+            settings.bend_finish_diameters * fitter.specs[fine].diameter / fitter.h
+            if settings.bend_finish_diameters is not None else float(fitter.bend[fine])
+        )
+        lines, radii, types, info = through_block(
+            fitter, lines, radii, types, {fine}, grey, sharp, float(fitter.peak_void or 0.0), bend
+        )
+        confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
+        log("through block", lines, **info)
+        fitter.snap("through block", lines, radii, types)
     if fitter.snapshots is not None:
         fitter.snapshots.close()
     return FitResult(
@@ -1188,7 +1527,8 @@ class _Fitter:
         self.type_levels: np.ndarray | None = None  # and each type's grey
         self.snapshots = None  # fit_fibers(snapshots=...): a _snapshots.Snapshots
         self.recenter_grey: np.ndarray | None = None  # recenter_sigma_voxels: the grey the recenter reads
-        self.ridge_grey: np.ndarray | None = None  # birth_ridge_min: the smoothed grey births are checked on
+        self.ridge_grey: np.ndarray | None = None  # birth_ridge_min, hole_births: the grey births are checked on
+        self.rim_hessian: HessianField | None = None  # ridge_rim_sigma: the grey's Hessian for the rim exemption
         self.axis_grey: np.ndarray | None = None  # coarse_axis_grey_max: the denoised grey, and the range it is read against
         self.axis_range: tuple[float, float] = (0.0, 1.0)
         self.frozen_points: np.ndarray | None = None  # nodes a redraw froze (redraw_freeze_radii), for snapshots
@@ -1196,7 +1536,7 @@ class _Fitter:
         self.surround_weight = float(weights[0]) if weights else 1.0  # the confidence's surround exponent now
         self.snap_stage = self.snap_base = ""  # the redraw pass (and plan) the next snapshots belong to
         self.peak_grey: np.ndarray | None = None  # merge_straddling: the denoised grey
-        self.peak_void = 0.0
+        self.peak_void = 0.0  # its void grey; the final passes' floors read it (see bend_finish_grey_min)
         self._match_cache: tuple | None = None  # (cut, ranking): reused by a pass's candidates
         self.flat_kinds: frozenset[int] = frozenset()  # types traced and relaxed on ``evidence``
         self.set_image(image)
@@ -1335,11 +1675,11 @@ class _Fitter:
             return None
         return {item.name: int((np.asarray(types) == k).sum()) for k, item in enumerate(self.specs)}
 
-    def claim(self, lines: list[np.ndarray], radii: np.ndarray) -> np.ndarray | None:
+    def claim(self, lines: list[np.ndarray], radii: np.ndarray, reach_radii: float = 1.2) -> np.ndarray | None:
         if not lines:
             return None
         claimed, _, _ = rasterize(
-            self.image.shape, lines, np.asarray(radii), reach=1.2 * np.asarray(radii),
+            self.image.shape, lines, np.asarray(radii), reach=reach_radii * np.asarray(radii),
             sections=self.sections(lines, radii),
         )
         return claimed
@@ -1369,17 +1709,23 @@ class _Fitter:
                 bright = self._bright_axis(new)
                 if bright is not None:
                     new = [line for line, b in zip(new, bright) if not b]
-            if self.settings.coarse_disc_max is not None and new and r > smallest:
+            if self.settings.coarse_disc_max is not None and self.settings.coarse_disc_trace and new and r > smallest:
                 holds = self._holds_fine(new, kind)
                 new = [line for line, h in zip(new, holds) if not h]
-            if self.settings.birth_ridge_min is not None and new and lines:
+            if self.settings.birth_ridge_min is not None and new and lines and (
+                not self.settings.birth_ridge_smallest_only or r <= smallest
+            ):
                 new = [line for line in new if self._ridge_share(line, r) >= self.settings.birth_ridge_min]
+            if self.settings.coarse_birth_disc_max is not None and new and lines and r > smallest:
+                holds = self._holds_fine(new, kind, self.settings.coarse_birth_disc_max)
+                new = [line for line, h in zip(new, holds) if not h]
             found += new
             found_radii += [r] * len(new)
         return found
 
-    def _ridge_share(self, line: np.ndarray, r: float) -> float:
-        """Share of ``line``'s nodes on a grey ridge (see ``FitSettings.birth_ridge_min``)."""
+    def _ridge_share(self, line: np.ndarray, r: float, rim: bool = False) -> float:
+        """Share of ``line``'s nodes on a grey ridge (see ``FitSettings.birth_ridge_min``; with
+        ``rim``, the rim exemption of ``ridge_rim_sigma`` too)."""
         from ._geometry import sample_image
 
         if self.ridge_grey is None:
@@ -1399,7 +1745,47 @@ class _Fitter:
         points = line[:, None, :] + u[None, :, None] * e1[:, None, :] + v[None, :, None] * e2[:, None, :]
         values = sample_image(self.ridge_grey, points.reshape(-1, 3)).reshape(len(line), len(u))
         best = np.argmax(values, axis=1)
-        return float(np.mean(np.hypot(u[best], v[best]) <= 0.5 * r))
+        off = np.hypot(u[best], v[best])
+        on = off <= 0.5 * r
+        if rim and self.rim_hessian is not None:
+            on |= (off >= r - 0.5) & self.curves_down(line, t)
+        return float(np.mean(on))
+
+    def curves_down(self, points: np.ndarray, t: np.ndarray) -> np.ndarray:
+        """Per point, whether the grey curves down both ways across the direction ``t`` there (the two
+        eigenvalues of ``rim_hessian`` in the plane across ``t`` negative; see ``ridge_rim_sigma``)."""
+        points = np.ascontiguousarray(points, dtype=np.float64).reshape(-1, 3)
+        t = np.asarray(t, dtype=np.float64).reshape(-1, 3)
+        helper = np.where(np.abs(t[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
+        e1 = np.cross(t, helper)
+        e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
+        e2 = np.cross(t, e1)
+        h = self.rim_hessian.at(points)
+        a = np.einsum("ni,nij,nj->n", e1, h, e1)
+        b = np.einsum("ni,nij,nj->n", e1, h, e2)
+        c = np.einsum("ni,nij,nj->n", e2, h, e2)
+        return 0.5 * (a + c) + np.sqrt(0.25 * (a - c) ** 2 + b * b) < 0.0
+
+    def hole_births(self, lines: list[np.ndarray], radii: np.ndarray) -> list[np.ndarray]:
+        """Fibers of the smallest type traced in the foreground the fits leave unclaimed (see
+        ``FitSettings.hole_births``)."""
+        from . import _native
+
+        kind = int(np.argmin(self.radius))
+        r = float(self.radius[kind])
+        claimed = self.claim(lines, radii, reach_radii=self.settings.hole_birth_claim_radii)
+        claimed = np.zeros(self.image.shape, dtype=np.int32) if claimed is None else np.asarray(claimed, dtype=np.int32)
+        edt, peak = _native.foreground_depth(self.foreground & (claimed == 0))
+        found = _native.trace_fibers(
+            np.ascontiguousarray(self.evidence, dtype=np.float32), self.hessian(kind).native, claimed, edt, peak,
+            radius=r, min_bend_radius=float(self.bend[kind]), step=max(0.75, 0.5 * r),
+            min_length=float(self.min_length[kind]), node_spacing=self.spacing, label_offset=len(lines),
+            max_fibers=None, seed_depth_radii=self.settings.hole_birth_depth_radii, bright_seed_strength=None,
+            peak_floor=0.0, claim_radii=self.settings.trace_claim_radii,
+        )
+        return [
+            line for line in found if self._ridge_share(line, r, rim=True) >= self.settings.hole_birth_ridge_min
+        ]
 
     def _grey_checked(self, lines: list[np.ndarray], kind: int) -> list[np.ndarray]:
         """``lines`` traced as type ``kind`` less those that are a bundle of a brighter type (see grey_checked_traces)."""
@@ -1495,6 +1881,21 @@ class _Fitter:
         } if self.settings.grey_checked_traces and brightest >= 0 else {}
 
         bright_axis = self._bright_axis(lines)
+        dim_axis = self._dim_axis(lines)
+        long_enough = np.array([len(line) >= 10 for line in lines])
+        fine_disc: dict[int, np.ndarray] = {}
+        if self.settings.coarse_disc_classify and self.settings.coarse_disc_max is not None and self.axis_grey is not None:
+            smallest_kind = int(np.argmin(self.radius))
+            # the margin is at least -0.5, so a line typed smallest at measured + 0.5 is never a larger type
+            could = self._nearest(measured + 0.5)
+            for k in range(len(self.specs)):
+                if k == smallest_kind or self.radius[k] <= self.radius[smallest_kind]:
+                    continue
+                pick = np.flatnonzero(self.radius[could] >= self.radius[k])
+                flags = np.zeros(len(lines), dtype=bool)
+                if pick.size:
+                    flags[pick] = self._holds_fine([lines[i] for i in pick], k)
+                fine_disc[k] = flags
 
         def typed(margin: float) -> np.ndarray:
             types = self._nearest(measured - margin)
@@ -1505,6 +1906,18 @@ class _Fitter:
             if bright_axis is not None:
                 smallest = int(np.argmin(self.radius))
                 types = np.where(bright_axis, smallest, types)
+            if dim_axis is not None:
+                smallest = int(np.argmin(self.radius))
+                by_width = self._nearest(np.maximum(width - self.width_margin, 0.5))
+                flagged = np.zeros(len(lines), dtype=bool)
+                for k, f in holds.items():
+                    if f is not None:
+                        flagged |= f
+                dim = (dim_axis & (types == smallest) & (by_width != smallest) & ~flagged & long_enough
+                       & (depth >= self.settings.coarse_axis_depth_min))
+                types = np.where(dim, by_width, types)
+            for k, flags in fine_disc.items():
+                types = np.where((types == k) & flags, int(np.argmin(self.radius)), types)
             return types
 
         def excess(values: np.ndarray, types: np.ndarray) -> float:
@@ -1527,15 +1940,17 @@ class _Fitter:
             radii = np.minimum(radii, prior)
         return radii, types
 
-    def _holds_fine(self, lines: list[np.ndarray], kind: int) -> np.ndarray:
-        """Per line of type ``kind``: whether its cross-section holds fine-bright grey (see coarse_disc_max)."""
+    def _holds_fine(self, lines: list[np.ndarray], kind: int, fraction: float | None = None) -> np.ndarray:
+        """Per line of type ``kind``: whether its cross-section holds fine-bright grey (see coarse_disc_max; with
+        ``fraction``, at that level instead, see coarse_birth_disc_max)."""
         from ._geometry import sample_image
 
         out = np.zeros(len(lines), dtype=bool)
-        if self.settings.coarse_disc_max is None or self.axis_grey is None:
+        fraction = self.settings.coarse_disc_max if fraction is None else fraction
+        if fraction is None or self.axis_grey is None:
             return out
         low, high = self.axis_range
-        level = low + self.settings.coarse_disc_max * (high - low)
+        level = low + fraction * (high - low)
         r = float(self.radius[kind])
         steps = np.arange(-r, r + 1e-9, 0.75)
         u, v = np.meshgrid(steps, steps)
@@ -1570,6 +1985,30 @@ class _Fitter:
             float(np.median(sample_image(self.axis_grey, line[1:-1] if len(line) > 2 else line))) > level
             for line in lines
         ])
+
+    def _dim_axis(self, lines: list[np.ndarray]) -> np.ndarray | None:
+        """Per fit, whether its median axis grey is below ``coarse_axis_grey_min`` of the smallest type's grey range
+        (None when that setting is off or there is no grey)."""
+        from ._geometry import sample_image
+
+        cut = self.settings.coarse_axis_grey_min
+        if cut is None or self.axis_grey is None or len(self.specs) < 2:
+            return None
+        from ._rescue import _disc_p90
+
+        low, high = self.axis_range
+        level = low + cut * (high - low)
+        disc_level = low + self.settings.coarse_axis_disc_max * (high - low)
+        r = float(self.radius.max())
+        out = np.zeros(len(lines), dtype=bool)
+        for i, line in enumerate(lines):
+            line = np.asarray(line, dtype=np.float64)
+            if float(np.median(sample_image(self.axis_grey, line[1:-1] if len(line) > 2 else line))) >= level:
+                continue
+            # A dark axis between the packed fibers of a bundle holds their bright axes within a coarse radius;
+            # a dim-cored coarse fiber's section holds only its dim rim.
+            out[i] = len(line) >= 3 and _disc_p90(self.axis_grey, line, r) < disc_level
+        return out
 
     def _grey_types(self, lines: list[np.ndarray]) -> np.ndarray | None:
         """Each fiber's type by the grey range its core falls in (-1 where no range has 60%)."""

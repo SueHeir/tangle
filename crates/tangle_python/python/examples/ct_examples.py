@@ -800,6 +800,7 @@ def scanned_settings(index: int) -> dict:
 
 
 DENSE_HARD = range(1, 19)
+DENSE_HARD_CHECK = range(19, 37)  # fresh structures, to check a fix tuned on DENSE_HARD
 
 
 def dense_hard_settings(index: int) -> dict:
@@ -902,7 +903,9 @@ def scanned(index: int, settings: Callable[[int], dict] = scanned_settings) -> C
 
 
 EXAMPLES.update({f"scanned_{index}": scanned(index) for index in [*SCANNED_TUNE, *SCANNED_CHECK, *SCANNED_OVAL]})
-EXAMPLES.update({f"dense_hard_{index}": scanned(index, dense_hard_settings) for index in DENSE_HARD})
+EXAMPLES.update(
+    {f"dense_hard_{index}": scanned(index, dense_hard_settings) for index in [*DENSE_HARD, *DENSE_HARD_CHECK]}
+)
 
 # -- the runner -----------------------------------------------------------------
 
