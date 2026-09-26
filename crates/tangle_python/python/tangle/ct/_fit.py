@@ -1288,10 +1288,13 @@ class _Fitter:
         brightest grey (``FitSettings.recenter_on_grey``); returns the lines
         and how many fits moved.
 
-        At each node the grey is sampled on a disc across the fiber, one
-        radius wide; the node moves to the centroid of the samples above
-        the disc's upper quartile (weighted by how far above), at most
-        ``recenter_max_radii`` radii, smoothed over five nodes. Moves that
+        At each node the grey is sampled on a disc across the fiber,
+        ``recenter_max_radii`` radii wide, and averaged with the discs of
+        the nodes on either side against noise; the node moves to the
+        disc's brightest point, the moves smoothed over five nodes. (Not
+        the bright samples' centroid: a fit on the contact between two
+        fibers has one bright axis on either side, and their centroid is
+        where it already is.) Moves that
         bring a node within ``recenter_spacing_radii`` radii of another
         fit's nodes are dropped, and a fit keeps its move only if the mean
         grey at its nodes rises.
@@ -1320,18 +1323,18 @@ class _Fitter:
             e1 = np.cross(t, helper)
             e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
             e2 = np.cross(t, e1)
-            steps = np.arange(-r, r + 1e-9, 0.5)
+            reach = max(s.recenter_max_radii, 0.1) * r
+            steps = np.arange(-reach, reach + 1e-9, 0.5)
             u, v = np.meshgrid(steps, steps)
-            keep = u**2 + v**2 <= r**2
+            keep = u**2 + v**2 <= reach**2
             u, v = u[keep], v[keep]
             points = line[:, None, :] + u[None, :, None] * e1[:, None, :] + v[None, :, None] * e2[:, None, :]
             values = sample_image(grey, points.reshape(-1, 3)).reshape(len(line), len(u))
-            floor = np.percentile(values, 75, axis=1, keepdims=True)
-            weight = np.maximum(values - floor, 0.0)
-            total = weight.sum(axis=1)
-            du = np.where(total > 0, (weight * u).sum(axis=1) / np.maximum(total, 1e-12), 0.0)
-            dv = np.where(total > 0, (weight * v).sum(axis=1) / np.maximum(total, 1e-12), 0.0)
-            shift = du[:, None] * e1 + dv[:, None] * e2
+            if len(values) >= 3:
+                padded = np.concatenate([values[:1], values, values[-1:]])
+                values = (padded[:-2] + padded[1:-1] + padded[2:]) / 3.0
+            best = np.argmax(values, axis=1)
+            shift = u[best][:, None] * e1 + v[best][:, None] * e2
             if len(shift) >= 3:
                 padded = np.concatenate([shift[:1], shift[:1], shift, shift[-1:], shift[-1:]])
                 shift = sum(padded[j : j + len(shift)] for j in range(5)) / 5.0
