@@ -328,13 +328,24 @@ pub fn bright_seeds(
         if value < min_strength || image[v] < 0.5 || exclude[v] != 0 {
             continue;
         }
-        let (k, j, i) = ((v / s[0]) as isize, ((v / s[1]) % shape[1]) as isize, (v % shape[2]) as isize);
+        let (k, j, i) = (
+            (v / s[0]) as isize,
+            ((v / s[1]) % shape[1]) as isize,
+            (v % shape[2]) as isize,
+        );
         let mut peak = true;
         'around: for dk in -1..=1isize {
             for dj in -1..=1isize {
                 for di in -1..=1isize {
                     let (kk, jj, ii) = (k + dk, j + dj, i + di);
-                    if (dk, dj, di) == (0, 0, 0) || kk < 0 || jj < 0 || ii < 0 || kk >= nz || jj >= ny || ii >= nx {
+                    if (dk, dj, di) == (0, 0, 0)
+                        || kk < 0
+                        || jj < 0
+                        || ii < 0
+                        || kk >= nz
+                        || jj >= ny
+                        || ii >= nx
+                    {
                         continue;
                     }
                     if strength[kk as usize * s[0] + jj as usize * s[1] + ii as usize] > value {
@@ -511,8 +522,16 @@ mod tests {
                 for i in 6..58 {
                     let (y, z) = (j as f64 + 0.5, k as f64 + 0.5);
                     let hull = ((y - center).powi(2) + (z - center).powi(2)).sqrt() < pitch + r;
-                    let rod = axes.iter().any(|[ay, az]| ((y - ay).powi(2) + (z - az).powi(2)).sqrt() < r);
-                    image[k * s[0] + j * s[1] + i] = if rod { 1.0 } else if hull { 0.7 } else { 0.0 };
+                    let rod = axes
+                        .iter()
+                        .any(|[ay, az]| ((y - ay).powi(2) + (z - az).powi(2)).sqrt() < r);
+                    image[k * s[0] + j * s[1] + i] = if rod {
+                        1.0
+                    } else if hull {
+                        0.7
+                    } else {
+                        0.0
+                    };
                 }
             }
         }
