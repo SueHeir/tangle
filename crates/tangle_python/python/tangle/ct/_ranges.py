@@ -113,6 +113,10 @@ def graded_image(
     bright as a dimmer type's core. ``reach`` is about the smallest fiber
     radius. Voxels ``range_image`` filled as dim cores (fiber there though
     darker than every range) stay 1.
+
+    Only voxels with the brightest type's grey within ``reach`` are dimmed:
+    elsewhere the brightest grey nearby is a dim fiber's own noise, and in a
+    dim, noisy fiber dividing by it would dim the fiber itself.
     """
     from . import _native
 
@@ -135,6 +139,8 @@ def graded_image(
             np.maximum(grown[tuple(tail)], behind, out=grown[tuple(tail)])
             local = grown
     relative = np.clip(above / np.maximum(local, np.float32(1e-12)), 0.0, 1.0)
+    brightest = max(low for low, _ in ranges) - void
+    relative[local < brightest] = 1.0
     image = (np.asarray(flat, dtype=np.float32) * relative).astype(np.float32)
     filled = (flat >= 1.0) & (grey < min(low for low, _ in ranges))
     image[filled] = 1.0
