@@ -56,7 +56,9 @@ def cross_frames(line: np.ndarray, nodes: int) -> tuple[np.ndarray, np.ndarray] 
 def sample_image(image: np.ndarray, points: np.ndarray, *, fill: float = 0.0) -> np.ndarray:
     """Trilinear samples of a ``(z, y, x)`` array at voxel coordinates ``(x, y, z)``.
 
-    As ``map_coordinates(order=1, mode="constant", cval=fill)``; in Rust.
+    Voxel ``(k, j, i)`` spans ``i … i + 1`` (and so on), so its value is read at
+    ``(i + 0.5, j + 0.5, k + 0.5)``: ``map_coordinates(order=1, mode="constant",
+    cval=fill)`` at the point minus 0.5; in Rust.
     """
     from . import _native
 
