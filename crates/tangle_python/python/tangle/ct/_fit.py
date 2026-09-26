@@ -198,6 +198,13 @@ class FitSettings:
     coarse_rescue: bool = False
     coarse_rescue_grey: float = 0.8
     coarse_rescue_shared: float = 0.3
+    # A last pass over the smallest type's fits on the grey ridge (the scan
+    # smoothed by recenter_sigma_voxels, default 1.6): recenter, cut out
+    # stretches off the ridge (where a fit slides across onto a neighbour),
+    # grow ends along the ridge, join ends that meet, drop short pieces (see
+    # _ridge).
+    ridge_finish: bool = False
+    ridge_finish_extend: float = 0.85
     # New fibers traced among existing ones (a round's births, a redraw's new
     # fibers) are kept only if at least this share of their nodes sit on a
     # grey ridge: the brightest point of the grey (smoothed by
@@ -1044,6 +1051,17 @@ def fit_fibers(
             confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
         log("final births", lines, born=len(born))
         fitter.snap("final births", lines, radii, types)
+    if lines and settings.ridge_finish and not binary:
+        from . import _native
+        from ._ridge import ridge_finish
+
+        grey = fitter.recenter_grey if fitter.recenter_grey is not None else _native.gaussian(
+            np.asarray(volume, dtype=np.float32), settings.recenter_sigma_voxels or 1.6
+        )
+        lines, radii, types, info = ridge_finish(fitter, lines, radii, types, grey)
+        confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
+        log("ridge finish", lines, **info)
+        fitter.snap("ridge finish", lines, radii, types)
     if fitter.snapshots is not None:
         fitter.snapshots.close()
     return FitResult(
