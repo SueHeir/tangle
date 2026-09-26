@@ -321,7 +321,8 @@ fit.write("scan_fit/result")
   into the padding, which is the neighbouring core. There the neighbour's
   own fit of that fiber leaves toward this core. When the two fits lie on
   each other within half the overlap of the wall (on average closer than
-  three quarters of the smaller radius, and of the same type), they are
+  three quarters of the smaller radius, and of the same type) and the
+  joined fiber goes on the way it was going (within 60 degrees), they are
   joined into one fiber; otherwise the fiber is cut at the wall. Joins are
   made best first, one per end, so a fiber that crosses many cores comes out
   whole. A short piece that ends at a wall without a partner is dropped.
