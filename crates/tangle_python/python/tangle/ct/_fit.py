@@ -647,6 +647,7 @@ def fit_fibers(
     grey_model = None
     checked, type_levels = None, None  # the denoised grey and each type's grey, for grey_checked_traces
     foreground = None  # what is fiber, when it is not simply image > 0.5
+    evidence = None  # what judges fits, when it is not the traced image
     if binary:
         image, levels = _mask_image(volume, exclude, settings, largest)
         source = "mask"
@@ -683,6 +684,7 @@ def fit_fibers(
                 denoise_sigma=settings.denoise_sigma_voxels, exclude=exclude,
             )
             foreground = flat > 0.5
+            evidence = flat
         if settings.grey_checked_traces:
             from . import _native
 
@@ -708,7 +710,7 @@ def fit_fibers(
 
     fitter = _Fitter(image, specs, settings, voxel_size, log)
     if foreground is not None:
-        fitter.set_image(image, foreground=foreground)
+        fitter.set_image(image, foreground=foreground, evidence=evidence)
     fitter.width_typing = source == "grey"
     fitter.type_bits = type_bits
     if grey_model is not None:
@@ -878,10 +880,17 @@ class _Fitter:
         self._match_cache: tuple | None = None  # (cut, ranking): reused by a pass's candidates
         self.set_image(image)
 
-    def set_image(self, image: np.ndarray, foreground: np.ndarray | None = None) -> None:
+    def set_image(
+        self, image: np.ndarray, foreground: np.ndarray | None = None, evidence: np.ndarray | None = None
+    ) -> None:
         from ._trace import foreground_depth
 
         self.image = image
+        # What decides whether a fit is backed by fiber (void cuts, support,
+        # confidence, gap evidence); tracing and relaxing use ``image``. The
+        # two differ with a graded image, which dims dim fibers' own noisy
+        # cores too much to judge by.
+        self.evidence = image if evidence is None else evidence
         self.foreground = image > 0.5 if foreground is None else foreground
         # Local thickness: distance to the nearest void voxel center, taken
         # as the maximum over the 3x3x3 neighborhood so a centerline between
@@ -1113,7 +1122,7 @@ class _Fitter:
             extra = {"source": np.arange(len(lines))} if final else {}
             return lines, radii, types, extra
         pieces, source, cut = _refine.cut_void(
-            self.image, lines, radii, level=s.void_level, min_gap_radii=s.void_gap_radii,
+            self.evidence, lines, radii, level=s.void_level, min_gap_radii=s.void_gap_radii,
             bridge_level=s.void_bridge_level, bridge_offset_radii=s.void_bridge_offset_radii,
             directions=(
                 (lambda index, points: self.hessian(int(types[index])).directions(points)[0])
@@ -1616,7 +1625,7 @@ class _Fitter:
             scale = self.grey_scale(cut.pieces, piece_radii, piece_types)
             grey_args = {"grey": self.grey, "void": self.grey_void}
         else:
-            scale = evidence_scale(self.image, cut.pieces, piece_radii, float(self.radius.min()))
+            scale = evidence_scale(self.evidence, cut.pieces, piece_radii, float(self.radius.min()))
             grey_args = {}
         diameter = 2.0 * self.radius
         ranked: dict[int, tuple] = {}
@@ -1662,7 +1671,7 @@ class _Fitter:
             low, high = cut.regions[k]
             nearby = near_box(cut.pieces, piece_radii, low, high)
             plans = _junctions.rank_plans(
-                self.image, (low, high), region_ports, pairs, region_extensions,
+                self.evidence, (low, high), region_ports, pairs, region_extensions,
                 [cut.pieces[i] for i in nearby], piece_radii[nearby],
                 margin=self.margin, scale=scale, end_costs=np.array(end_costs), interior=interior,
                 join_costs=join_costs, **grey_args,
@@ -1687,7 +1696,7 @@ class _Fitter:
         if previous is not None and len(previous) != len(lines):
             previous = None
         per_node, summary = _confidence.node_confidence(
-            self.image, self.depth, lines, radii, spacing=self.spacing, margin=self.margin,
+            self.evidence, self.depth, lines, radii, spacing=self.spacing, margin=self.margin,
             thickness_margin=self.width_margin,
             previous=previous,
         )
@@ -1713,7 +1722,7 @@ class _Fitter:
             group_radii = np.asarray(radii)[pick]
             r, bend, min_length = float(self.radius[kind]), float(self.bend[kind]), float(self.min_length[kind])
             cost = float(self.cost[kind])
-            scale = evidence_scale(self.image, group, group_radii, r) if cost > 0 else 1.0
+            scale = evidence_scale(self.evidence, group, group_radii, r) if cost > 0 else 1.0
             group, group_radii, splits = _moves.split_kinks(
                 group, group_radii, min_bend_radius=bend, min_length=min_length, max_length=self.max_length[kind],
                 threshold=s.kink_threshold, image=self.image, end_cost=cost, scale=scale,
@@ -1723,10 +1732,10 @@ class _Fitter:
             )
             group, group_radii = _moves.trim_duplicates(group, group_radii, min_length=min_length)
             group, group_radii = _moves.remove_unsupported(
-                self.image, group, group_radii, min_length=min_length, min_support=s.min_support
+                self.evidence, group, group_radii, min_length=min_length, min_support=s.min_support
             )
             group, group_radii, merges = _moves.merge_fragments(
-                self.image, group, group_radii, max_gap=s.merge_gap_radii * r,
+                self.evidence, group, group_radii, max_gap=s.merge_gap_radii * r,
                 min_bend_radius=bend, kink_threshold=s.kink_threshold,
                 end_cost=cost, scale=scale, max_prior_gap=s.prior_merge_gap_radii * r,
                 max_prior_angle_degrees=s.prior_merge_angle_degrees,
