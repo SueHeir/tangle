@@ -49,6 +49,9 @@ def coarse_rescue(fitter, lines, radii, types, void: float):
         bright = fitter._bright_axis(candidates)
         if bright is not None:
             candidates = [line for line, b in zip(candidates, bright) if not b]
+    if s.coarse_disc_max is not None and candidates:
+        holds = fitter._holds_fine(candidates, coarse)
+        candidates = [line for line, h in zip(candidates, holds) if not h]
     grey = fitter.axis_grey
     fine_lines = [line for line, k in zip(lines, types) if k == fine and len(line) >= 2]
     if grey is None or not fine_lines or not candidates:

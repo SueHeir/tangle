@@ -12,10 +12,14 @@ voxel:
    between fibers, an overhanging end): interior runs split the fit, end runs trim it;
 3. grow each end along the ridge while the grey stays at least ``ridge_finish_extend`` of the fit's own median
    grey and no other fit is within half a fiber pitch;
-4. join ends of pieces that meet: within 6 voxels, both end directions within 30 degrees of the bridge, and
-   at least 80% of the straight bridge on the ridge; or ends within 4 voxels whose pieces run on past each
-   other, parallel (the second piece's overlapping start is dropped);
+4. join ends of pieces that meet: within 6 voxels, and either both end directions within 30 degrees of the
+   bridge, or the ends parallel within 30 degrees and at most 0.6 radius apart across the fiber, or within 4
+   voxels running on past each other (the second piece's overlapping start is dropped); at least 80% of the
+   straight bridge must be on the ridge;
 5. drop pieces shorter than the type's minimum length.
+
+A larger type's fiber is off limits throughout: fine samples inside a coarse fit's oval section are cut (its
+bright rim is a ridge too, and a fine fit can follow it), and ends are not grown into one.
 """
 
 from __future__ import annotations
@@ -44,6 +48,7 @@ def ridge_finish(fitter, lines, radii, types, grey: np.ndarray):
     alpha = float(fitter.settings.ridge_finish_extend)
     samples = [_samples_inside(np.asarray(line, dtype=np.float64), shape, _STEP) for line in lines]
     is_fine = [int(k) == fine and len(s) >= 5 for s, k in zip(samples, types)]
+    inside_coarse = _coarse_sections(fitter, lines, radii, types, fine)
     # 1. recenter
     samples = [_recenter(grey, s, r, shape) if ok else s for s, ok in zip(samples, is_fine)]
     # 2. cut off-ridge runs
@@ -58,6 +63,7 @@ def ridge_finish(fitter, lines, radii, types, grey: np.ndarray):
         for a, b in _runs(dist > 0.5 * r):
             if (b - a) * _STEP >= _CUT_RUN:
                 keep[a:b] = False
+        keep &= ~inside_coarse(s)
         cut_samples += int((~keep).sum())
         pieces += [(p, radius) for p in _pieces(s, keep) if len(p) >= 4]
     # 3. extend along the ridge
@@ -67,7 +73,7 @@ def ridge_finish(fitter, lines, radii, types, grey: np.ndarray):
         if len(p) < 12:
             continue
         rest = [q for j, q in enumerate(all_points) if j != i and len(q)]
-        p2, added = _extend(grey, p, rest, r, alpha, shape)
+        p2, added = _extend(grey, p, rest, r, alpha, shape, forbidden=inside_coarse)
         pieces[i] = (p2, radius)
         all_points[i] = p2
         grown += added
@@ -149,7 +155,30 @@ def _pieces(s, keep):
     return [s[a:b] for a, b in _runs(keep)]
 
 
-def _extend(grey, s, others, r, alpha, shape, pitch_half=None, max_steps=80):
+def _coarse_sections(fitter, lines, radii, types, fine):
+    """A test ``points -> bool per point``: inside the oval section of a larger type's fit."""
+    from ._rescue import _coarse_index, _scaled_distance
+
+    larger = [i for i, k in enumerate(types) if int(k) != fine and len(lines[i]) >= 2]
+    if not larger:
+        return lambda points: np.zeros(len(points), dtype=bool)
+    by_kind = {}
+    for i in larger:
+        by_kind.setdefault(int(types[i]), []).append(i)
+    tests = []
+    for kind, ids in by_kind.items():
+        index = _coarse_index(
+            [np.asarray(lines[i], dtype=np.float64) for i in ids], np.asarray(radii, dtype=np.float64)[ids],
+            [fitter.long_axes(np.asarray(lines[i], dtype=np.float64), kind) for i in ids],
+        )
+        tests.append((index, float(fitter.ratio[kind])))
+    return lambda points: np.logical_or.reduce(
+        [_scaled_distance(index, np.asarray(points, dtype=np.float64).reshape(-1, 3), ratio) <= 1.0
+         for index, ratio in tests]
+    )
+
+
+def _extend(grey, s, others, r, alpha, shape, pitch_half=None, max_steps=80, forbidden=None):
     """``s`` grown at both ends along the ridge; returns it and how many samples were added."""
     from scipy.spatial import cKDTree
 
@@ -176,6 +205,8 @@ def _extend(grey, s, others, r, alpha, shape, pitch_half=None, max_steps=80):
             if values[j] < alpha * reference or np.any(q < 0) or np.any(q >= upper):
                 break
             if tree is not None and tree.query(q)[0] < near:
+                break
+            if forbidden is not None and forbidden(q[None])[0]:
                 break
             grown.append(q)
             step = q - p
@@ -220,7 +251,11 @@ def _join(grey, pieces, r, shape):
                 or length > 1e-6 and ta @ (gap / length) >= _JOIN_COS and tb @ (-gap / length) >= _JOIN_COS
             )
             overlapping = length <= _JOIN_OVERLAP and ta @ (-tb) >= _JOIN_COS
-            if facing or overlapping:
+            # Ends that continue each other with a small sideways offset (the facing test fails at a
+            # short gap even for a voxel or two sideways): parallel, within half a radius or so across.
+            sideways = float(np.linalg.norm(gap - (gap @ ta) * ta)) if length > 1e-6 else 0.0
+            aligned = length <= _JOIN_GAP and ta @ (-tb) >= _JOIN_COS and sideways <= 0.6 * r
+            if facing or overlapping or aligned:
                 candidates.append((length, a, b))
         candidates.sort()
         used, merged = set(), False
@@ -232,7 +267,8 @@ def _join(grey, pieces, r, shape):
             n = max(int(np.ceil(length / _STEP)), 1)
             bridge = pa[None] + (pb - pa)[None] * (np.arange(1, n) / n)[:, None]
             if len(bridge):
-                t = np.repeat(((pb - pa) / max(length, 1e-9))[None], len(bridge), 0)
+                ta_end = _end_direction(pieces[ia], ea == 1)
+                t = np.repeat(ta_end[None], len(bridge), 0)  # across the fiber, not across the bridge
                 _, dist = _argmax_offset(grey, bridge, t, r)
                 if np.mean(dist <= 0.5 * r) < _JOIN_RIDGE:
                     continue

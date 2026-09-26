@@ -179,6 +179,14 @@ class FitSettings:
     # coarse fiber), so they do not claim the bundle before the fine type is
     # traced.
     coarse_trace_axis_check: bool = False
+    # A larger type's trace or fit whose cross-section holds fine-fiber-bright
+    # grey (the median over its nodes of the brightest grey on a disc its short
+    # radius wide) above this fraction of the smallest type's grey range is a
+    # bundle of smaller fibers, not a dim-cored coarse fiber: its traces are
+    # dropped, and such fits are removed at the end before the final births.
+    # (A coarse fit laid over a bundle often has its axis on the dark gaps, so
+    # coarse_axis_grey_max misses it.) Needs coarse_axis_grey_max. None = off.
+    coarse_disc_max: float | None = None
     # With recenter_on_grey: also recenter after each round's cleanup, before
     # new fibers are traced around the fits.
     recenter_each_round: bool = False
@@ -1036,6 +1044,16 @@ def fit_fibers(
         confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
         log("coarse rescue", lines, **info)
         fitter.snap("coarse rescue", lines, radii, types)
+    if lines and settings.coarse_disc_max is not None and fitter.axis_grey is not None:
+        smallest_kind = int(np.argmin(fitter.radius))
+        drop = np.zeros(len(lines), dtype=bool)
+        for kind in {int(k) for k in types if int(k) != smallest_kind}:
+            ids = [i for i, k in enumerate(types) if int(k) == kind]
+            drop[ids] = fitter._holds_fine([lines[i] for i in ids], kind)
+        if drop.any():
+            keep = np.flatnonzero(~drop)
+            lines, radii, types = [lines[i] for i in keep], np.asarray(radii)[keep], np.asarray(types)[keep]
+        log("coarse on bundles removed", lines, removed=int(drop.sum()))
     if lines and settings.final_births:
         born = fitter.trace(lines, radii)
         if born:
@@ -1351,6 +1369,9 @@ class _Fitter:
                 bright = self._bright_axis(new)
                 if bright is not None:
                     new = [line for line, b in zip(new, bright) if not b]
+            if self.settings.coarse_disc_max is not None and new and r > smallest:
+                holds = self._holds_fine(new, kind)
+                new = [line for line, h in zip(new, holds) if not h]
             if self.settings.birth_ridge_min is not None and new and lines:
                 new = [line for line in new if self._ridge_share(line, r) >= self.settings.birth_ridge_min]
             found += new
@@ -1505,6 +1526,35 @@ class _Fitter:
         if self.settings.radius_cap_prior:
             radii = np.minimum(radii, prior)
         return radii, types
+
+    def _holds_fine(self, lines: list[np.ndarray], kind: int) -> np.ndarray:
+        """Per line of type ``kind``: whether its cross-section holds fine-bright grey (see coarse_disc_max)."""
+        from ._geometry import sample_image
+
+        out = np.zeros(len(lines), dtype=bool)
+        if self.settings.coarse_disc_max is None or self.axis_grey is None:
+            return out
+        low, high = self.axis_range
+        level = low + self.settings.coarse_disc_max * (high - low)
+        r = float(self.radius[kind])
+        steps = np.arange(-r, r + 1e-9, 0.75)
+        u, v = np.meshgrid(steps, steps)
+        keep = u**2 + v**2 <= r * r
+        u, v = u[keep], v[keep]
+        for i, line in enumerate(lines):
+            line = np.asarray(line, dtype=np.float64)
+            inner = line[1:-1] if len(line) > 2 else line
+            if len(inner) < 2:
+                continue
+            t = tangents(inner)
+            helper = np.where(np.abs(t[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
+            e1 = np.cross(t, helper)
+            e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
+            e2 = np.cross(t, e1)
+            points = inner[:, None, :] + u[None, :, None] * e1[:, None, :] + v[None, :, None] * e2[:, None, :]
+            values = sample_image(self.axis_grey, points.reshape(-1, 3)).reshape(len(inner), len(u))
+            out[i] = float(np.median(values.max(axis=1))) > level
+        return out
 
     def _bright_axis(self, lines: list[np.ndarray]) -> np.ndarray | None:
         """Per fit, whether its median axis grey is above ``coarse_axis_grey_max`` of the
