@@ -98,10 +98,15 @@ class FitSettings:
     # across touching fibers; what counts as fiber (the foreground, its
     # depth and the types) still comes from the range image.
     graded_image: bool = False
-    # Drop a larger type's new traces whose core grey reads as another type
-    # (by the grey ranges or profiles) before the smaller types are traced:
-    # a bundle of fine fibers is about as wide as a coarse fiber, and traced
-    # as one it claims the bundle, so its fibers are never traced.
+    # Drop a larger type's new traces that are really a bundle of a brighter,
+    # smaller type before the smaller types are traced: a bundle of fine
+    # fibers is about as wide as a coarse fiber, and traced as one it claims
+    # the bundle, so its fibers are never traced. Such a trace's axis runs
+    # between the bundle's fibers, at about the coarse grey, but its
+    # cross-section holds them: dropped when the core grey reads as another
+    # type, or when the brightest tenth of its cross-section is most of the
+    # way (0.8) from its type's grey to a brighter type's. Grey ranges or
+    # profiles only.
     grey_checked_traces: bool = False
     # Fill enclosed foreground holes up to a fiber's cross-section (a dim
     # core, or noise speckle in a dim fiber) in a mask, grey ranges or a
@@ -633,6 +638,7 @@ def fit_fibers(
     largest = max(0.5 * item.diameter for item in specs) / voxel_size
     type_bits = None
     grey_model = None
+    checked, type_levels = None, None  # the denoised grey and each type's grey, for grey_checked_traces
     foreground = None  # what is fiber, when it is not simply image > 0.5
     if binary:
         image, levels = _mask_image(volume, exclude, settings, largest)
@@ -670,6 +676,20 @@ def fit_fibers(
                 denoise_sigma=settings.denoise_sigma_voxels, exclude=exclude,
             )
             foreground = flat > 0.5
+        if settings.grey_checked_traces:
+            from . import _native
+
+            if grey_model is not None:
+                checked = grey_model[0]
+            else:
+                checked = np.asarray(volume, dtype=np.float32)
+                if settings.denoise_sigma_voxels > 0:
+                    checked = _native.gaussian(checked, settings.denoise_sigma_voxels)
+            type_levels = []
+            for low, high in ranges:
+                inside = (checked >= low) & (checked <= high)
+                type_levels.append(float(np.median(checked[inside])) if inside.any() else 0.5 * (low + high))
+            type_levels = np.array(type_levels)
     else:
         image, levels = normalize(volume, denoise_sigma=settings.denoise_sigma_voxels, levels=settings.levels)
         if settings.fill_mask_holes:
@@ -686,6 +706,8 @@ def fit_fibers(
     fitter.type_bits = type_bits
     if grey_model is not None:
         fitter.grey, fitter.profiles, fitter.grey_void = grey_model
+    if type_levels is not None:
+        fitter.checked_grey, fitter.type_levels = checked, type_levels
     lines = fitter.trace([], np.zeros(0))
     radii, types = fitter.classify(lines)
     log("trace", lines, types=fitter.counts(types), thickness_margin=round(fitter.margin, 2))
@@ -844,6 +866,8 @@ class _Fitter:
         self.grey_void = 0.0
         self._grey_scale: float | None = None
         self._plain_scale: float | None = None
+        self.checked_grey: np.ndarray | None = None  # grey_checked_traces: the denoised grey
+        self.type_levels: np.ndarray | None = None  # and each type's grey
         self._match_cache: tuple | None = None  # (cut, ranking): reused by a pass's candidates
         self.set_image(image)
 
@@ -897,12 +921,44 @@ class _Fitter:
                 bright_seed_strength=self.settings.bright_seed_strength,
             )
             if self.settings.grey_checked_traces and new and r > smallest:
-                grey_types = self._grey_types(new)
-                if grey_types is not None:
-                    new = [line for line, t in zip(new, grey_types) if t < 0 or t == kind]
+                new = self._grey_checked(new, kind)
             found += new
             found_radii += [r] * len(new)
         return found
+
+    def _grey_checked(self, lines: list[np.ndarray], kind: int) -> list[np.ndarray]:
+        """``lines`` traced as type ``kind`` less those that are a bundle of a brighter type (see grey_checked_traces)."""
+        grey_types = self._grey_types(lines)
+        if grey_types is not None:
+            lines = [line for line, t in zip(lines, grey_types) if t < 0 or t == kind]
+        if self.checked_grey is None or self.type_levels is None or not lines:
+            return lines
+        own = float(self.type_levels[kind])
+        brighter = float(self.type_levels.max())
+        if brighter <= own:
+            return lines
+        from ._geometry import sample_image
+
+        limit = own + 0.8 * (brighter - own)
+        r = float(self.radius[kind])
+        ticks = np.arange(-r, r + 0.25, 0.5)
+        u, v = np.meshgrid(ticks, ticks)
+        disk = (u**2 + v**2) <= r * r
+        u, v = u[disk], v[disk]
+        kept = []
+        for line in lines:
+            inner = line[1:-1] if len(line) > 2 else line
+            tangent = np.gradient(line, axis=0)[1:-1] if len(line) > 2 else np.gradient(line, axis=0)
+            tangent = tangent / np.maximum(np.linalg.norm(tangent, axis=1, keepdims=True), 1e-12)
+            helper = np.where(np.abs(tangent[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
+            e1 = np.cross(tangent, helper)
+            e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
+            e2 = np.cross(tangent, e1)
+            points = inner[:, None, :] + u[None, :, None] * e1[:, None, :] + v[None, :, None] * e2[:, None, :]
+            values = sample_image(self.checked_grey, points.reshape(-1, 3))
+            if float(np.percentile(values, 90)) < limit:
+                kept.append(line)
+        return kept
 
     def classify(self, lines: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
         """Each fiber's type (the diameter nearest its thickness) and radius.
