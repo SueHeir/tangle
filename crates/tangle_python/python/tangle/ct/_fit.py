@@ -931,12 +931,23 @@ class _Fitter:
         grey_types = self._grey_types(lines)
         if grey_types is not None:
             lines = [line for line, t in zip(lines, grey_types) if t < 0 or t == kind]
+        brighter = self._holds_brighter(lines, kind)
+        return lines if brighter is None else [line for line, b in zip(lines, brighter) if not b]
+
+    def _holds_brighter(self, lines: list[np.ndarray], kind: int) -> np.ndarray | None:
+        """Per line, whether its cross-section at type ``kind``'s radius holds a brighter type's fibers.
+
+        True when the brightest tenth of the grey over the cross-section is
+        more than 0.8 of the way from ``kind``'s grey to the brightest type's;
+        None without ``grey_checked_traces``' grey, or when ``kind`` is the
+        brightest type.
+        """
         if self.checked_grey is None or self.type_levels is None or not lines:
-            return lines
+            return None
         own = float(self.type_levels[kind])
         brighter = float(self.type_levels.max())
         if brighter <= own:
-            return lines
+            return None
         from ._geometry import sample_image
 
         limit = own + 0.8 * (brighter - own)
@@ -945,20 +956,19 @@ class _Fitter:
         u, v = np.meshgrid(ticks, ticks)
         disk = (u**2 + v**2) <= r * r
         u, v = u[disk], v[disk]
-        kept = []
-        for line in lines:
-            inner = line[1:-1] if len(line) > 2 else line
-            tangent = np.gradient(line, axis=0)[1:-1] if len(line) > 2 else np.gradient(line, axis=0)
+        out = np.zeros(len(lines), dtype=bool)
+        for i, line in enumerate(lines):
+            tangent = np.gradient(line, axis=0)
+            if len(line) > 2:
+                line, tangent = line[1:-1], tangent[1:-1]
             tangent = tangent / np.maximum(np.linalg.norm(tangent, axis=1, keepdims=True), 1e-12)
             helper = np.where(np.abs(tangent[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
             e1 = np.cross(tangent, helper)
             e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
             e2 = np.cross(tangent, e1)
-            points = inner[:, None, :] + u[None, :, None] * e1[:, None, :] + v[None, :, None] * e2[:, None, :]
-            values = sample_image(self.checked_grey, points.reshape(-1, 3))
-            if float(np.percentile(values, 90)) < limit:
-                kept.append(line)
-        return kept
+            points = line[:, None, :] + u[None, :, None] * e1[:, None, :] + v[None, :, None] * e2[:, None, :]
+            out[i] = float(np.percentile(sample_image(self.checked_grey, points.reshape(-1, 3)), 90)) >= limit
+        return out
 
     def classify(self, lines: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
         """Each fiber's type (the diameter nearest its thickness) and radius.
@@ -1001,10 +1011,21 @@ class _Fitter:
         measured = np.maximum(width if self.width_typing else depth, 0.5)
         given = self.settings.thickness_margin_voxels
         by_grey = self._grey_types(lines)
+        # grey_checked_traces: a fit whose cross-section at a dimmer type's
+        # radius holds brighter fibers is the brighter type (a fiber in a
+        # packed bundle reads deep, as the whole bundle is one foreground).
+        brightest = int(np.argmax(self.type_levels)) if self.type_levels is not None else -1
+        holds = {
+            k: self._holds_brighter(lines, k) for k in range(len(self.specs)) if k != brightest
+        } if self.settings.grey_checked_traces and brightest >= 0 else {}
 
         def typed(margin: float) -> np.ndarray:
             types = self._nearest(measured - margin)
-            return np.where(by_grey >= 0, by_grey, types) if by_grey is not None else types
+            types = np.where(by_grey >= 0, by_grey, types) if by_grey is not None else types
+            for k, flagged in holds.items():
+                if flagged is not None:
+                    types = np.where((types == k) & flagged, brightest, types)
+            return types
 
         def excess(values: np.ndarray, types: np.ndarray) -> float:
             return float(np.clip(np.median(values - self.radius[types]), -0.5, float(self.radius.min())))
