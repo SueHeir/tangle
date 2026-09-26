@@ -234,6 +234,8 @@ class Material:
         name: str,
         diameter: float,
         min_bend_radius: float | None = ...,
+        *,
+        thickness: float | None = ...,
     ) -> None: ...
     @property
     def name(self) -> str: ...
@@ -243,6 +245,10 @@ class Material:
     def radius(self) -> float: ...
     @property
     def min_bend_radius(self) -> float | None: ...
+    @property
+    def thickness(self) -> float | None: ...
+    @property
+    def is_oval(self) -> bool: ...
 
 class Assembly:
     def __init__(self, cell: Cell) -> None: ...
@@ -251,6 +257,7 @@ class Assembly:
     @property
     def cell(self) -> Cell: ...
     def centerlines(self) -> list[list[list[float]]]: ...
+    def long_axes(self) -> list[list[list[float]]]: ...
     def insert(
         self,
         collection: FiberCollection,
@@ -301,6 +308,7 @@ class FiberCollection:
         rest_centerline: Centerline | None = ...,
         tags: Mapping[str, str] | None = ...,
         formation_layer: int | None = ...,
+        long_axis: Point | Sequence[Point] | None = ...,
     ) -> int: ...
     @classmethod
     def from_centerlines(
@@ -313,6 +321,7 @@ class FiberCollection:
     ) -> FiberCollection: ...
     def centerlines(self) -> list[list[list[float]]]: ...
     def rest_centerlines(self) -> list[list[list[float]]]: ...
+    def long_axes(self) -> list[list[list[float]]]: ...
     def extend(self, other: FiberCollection) -> None: ...
     def __add__(self, other: FiberCollection) -> FiberCollection: ...
     def layer_ids(self) -> list[int]: ...
@@ -668,6 +677,7 @@ class RelaxationSettings:
     curvature_ratio_tolerance: float
     constraint_iterations: int
     curvature_cleanup_sweeps: int
+    twist_stiffness: float
     max_step: float
     max_iterations: int
     iterations_per_batch: int
@@ -694,6 +704,7 @@ class RelaxationSettings:
         curvature_ratio_tolerance: float = ...,
         constraint_iterations: int = ...,
         curvature_cleanup_sweeps: int = ...,
+        twist_stiffness: float = ...,
         max_step: float = ...,
         max_iterations: int = ...,
         iterations_per_batch: int = ...,

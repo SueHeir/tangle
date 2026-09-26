@@ -386,7 +386,9 @@ impl Position {
 /// A reproducible description of a biased fiber population.
 ///
 /// Every field can be passed to the constructor as a keyword. `diameter=None`
-/// uses the material's diameter; ranges are `(min, max)` tuples.
+/// uses the material's diameter; ranges are `(min, max)` tuples. An oval
+/// material keeps its thickness-to-width ratio for every sampled diameter,
+/// and its fibers start with the long axis lying flat.
 #[pyclass(name = "FiberPopulation", module = "tangle._tangle")]
 #[derive(Clone, Debug)]
 pub(crate) struct PyFiberPopulation {
@@ -424,6 +426,7 @@ impl Default for PyFiberPopulation {
                 name: spec.material_name,
                 diameter: mean_diameter,
                 min_bend_radius: spec.minimum_bend_radius,
+                thickness: None,
             },
             count: spec.count,
             segments_per_fiber: spec.segments_per_fiber,
@@ -562,6 +565,10 @@ impl PyFiberPopulation {
             length: self.length,
             nominal_parent_length: self.nominal_parent_length,
             radius: scale_range(diameter, 0.5),
+            thickness_ratio: self
+                .material
+                .thickness
+                .map(|thickness| thickness / self.material.diameter),
             intrinsic_curvature_amplitude: self.curvature_amplitude,
             orientation: self.orientation.to_rust(stack_axis),
             position: self.position.to_rust(stack_axis),
@@ -575,14 +582,21 @@ impl PyFiberPopulation {
 
 // --- Generators --------------------------------------------------------------
 
-fn material_or_default(material: Option<PyRef<'_, PyMaterial>>, diameter: f64) -> PyMaterial {
-    material
+fn material_or_default(
+    material: Option<PyRef<'_, PyMaterial>>,
+    diameter: f64,
+    generator: &str,
+) -> PyResult<PyMaterial> {
+    let material = material
         .map(|material| material.clone())
         .unwrap_or(PyMaterial {
             name: "fiber".to_string(),
             diameter,
             min_bend_radius: None,
-        })
+            thickness: None,
+        });
+    material.require_round(generator)?;
+    Ok(material)
 }
 
 /// Gives every generated fiber the caller's bend limit when the native
@@ -603,7 +617,7 @@ pub(crate) fn generate_point_crossing_py(
     length: f64,
     name: String,
 ) -> PyResult<PyFiberCollection> {
-    let material = material_or_default(material, 0.05);
+    let material = material_or_default(material, 0.05, "generate_point_crossing")?;
     let mut assembly = FiberAssembly::new(cell.inner);
     generate_point_crossing(
         &mut assembly,
@@ -637,7 +651,7 @@ pub(crate) fn generate_multisegment_crossing_py(
     placed_amplitude: f64,
     name: String,
 ) -> PyResult<PyFiberCollection> {
-    let material = material_or_default(material, 0.036);
+    let material = material_or_default(material, 0.036, "generate_multisegment_crossing")?;
     let mut assembly = FiberAssembly::new(cell.inner);
     generate_multisegment_crossing(
         &mut assembly,
@@ -669,7 +683,7 @@ pub(crate) fn generate_fiber_pair_crossing_py(
     crossing_angle_degrees: f64,
     name: String,
 ) -> PyResult<PyFiberCollection> {
-    let material = material_or_default(material, 0.05);
+    let material = material_or_default(material, 0.05, "generate_fiber_pair_crossing")?;
     let mut assembly = FiberAssembly::new(cell.inner);
     generate_fiber_pair_crossing(
         &mut assembly,

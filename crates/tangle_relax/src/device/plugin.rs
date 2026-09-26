@@ -109,6 +109,10 @@ pub struct RelaxationConfig {
     /// Forward/backward in-place curvature sweeps performed after each contact
     /// correction before the next hard convergence audit.
     pub curvature_cleanup_sweeps: usize,
+    /// Oval fibers only: fraction of the difference between a vertex's
+    /// long-axis direction and its neighbours' mean removed per iteration.
+    /// Larger values make ovals resist twisting more.
+    pub twist_stiffness: f32,
     /// Maximum contact displacement of one vertex in an iteration.
     pub max_step: f32,
     /// Maximum device-side correction iterations.
@@ -143,6 +147,7 @@ impl Default for RelaxationConfig {
             curvature_ratio_tolerance: 1.0e-5,
             constraint_iterations: 2,
             curvature_cleanup_sweeps: 4,
+            twist_stiffness: 0.1,
             max_step: 0.006,
             max_iterations: 2_000,
             iterations_per_batch: 128,

@@ -4,7 +4,10 @@ mod packed;
 mod plugin;
 mod world;
 
-pub use packed::{AdaptiveSegmentationConfig, PackedAssembly, PackingError};
+pub use packed::{
+    oval_lane_count, AdaptiveSegmentationConfig, PackedAssembly, PackingError, MAXIMUM_OVAL_LANES,
+    OVAL_LANE_SPACING,
+};
 pub use plugin::{
     ContactAggregation, DeviceState, DeviceWorld, FiberMotion, RelaxationBackend, RelaxationConfig,
     RelaxationOverrides, RelaxationPlugin, RelaxationState, WorkflowControl,

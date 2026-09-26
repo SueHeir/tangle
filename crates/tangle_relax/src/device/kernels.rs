@@ -790,9 +790,7 @@ pub(crate) fn compact_affine_vertices(
 #[cube(launch_unchecked)]
 pub(crate) fn compact_moving_walls(
     positions: &mut [f32],
-    segment_radii: &[f32],
-    vertex_fibers: &[u32],
-    fiber_segment_spans: &[u32],
+    vertex_wall_extents: &[f32],
     vertex_active: &[u32],
     new_lower: &[f32],
     new_upper: &[f32],
@@ -804,12 +802,10 @@ pub(crate) fn compact_moving_walls(
         terminate!();
     }
     let index = vertex as usize;
-    let fiber = vertex_fibers[index] as usize;
-    let segment = fiber_segment_spans[2 * fiber] as usize;
-    let radius = segment_radii[segment];
     for axis in 0..3 {
         let coordinate = 3 * index + axis;
         if cell_periodic[axis] == 0 {
+            let radius = vertex_wall_extents[coordinate];
             let previous = positions[coordinate];
             let projected = previous.clamp(new_lower[axis] + radius, new_upper[axis] - radius);
             positions[coordinate] = projected;
@@ -1178,7 +1174,7 @@ fn project_curvature_triplet_in_place(
     previous: usize,
     center: usize,
     next: usize,
-    radius: f32,
+    vertex_wall_extents: &[f32],
     stiffness: f32,
     safety_margin: f32,
 ) {
@@ -1271,11 +1267,21 @@ fn project_curvature_triplet_in_place(
                             if cell_periodic[axis] == 0 {
                                 // Clamp to the walls and record the reaction,
                                 // as the other position updates do.
-                                let lower = cell_lower[axis] + radius;
-                                let upper = cell_upper[axis] - radius;
-                                previous_value = moved_previous.clamp(lower, upper);
-                                center_value = moved_center.clamp(lower, upper);
-                                next_value = moved_next.clamp(lower, upper);
+                                let previous_extent = vertex_wall_extents[previous_coordinate];
+                                let center_extent = vertex_wall_extents[center_coordinate];
+                                let next_extent = vertex_wall_extents[next_coordinate];
+                                previous_value = moved_previous.clamp(
+                                    cell_lower[axis] + previous_extent,
+                                    cell_upper[axis] - previous_extent,
+                                );
+                                center_value = moved_center.clamp(
+                                    cell_lower[axis] + center_extent,
+                                    cell_upper[axis] - center_extent,
+                                );
+                                next_value = moved_next.clamp(
+                                    cell_lower[axis] + next_extent,
+                                    cell_upper[axis] - next_extent,
+                                );
                                 if previous_weight > 0.0 {
                                     wall_reactions[previous_coordinate] +=
                                         moved_previous - previous_value;
@@ -1312,9 +1318,8 @@ fn project_curvature_triplet_in_place(
 pub(crate) fn project_fiber_curvature_in_place(
     positions: &mut [f32],
     wall_reactions: &mut [f32],
-    fiber_segment_spans: &[u32],
     fiber_vertex_spans: &[u32],
-    segment_radii: &[f32],
+    vertex_wall_extents: &[f32],
     vertex_max_curvature: &[f32],
     vertex_active: &[u32],
     vertex_pinned: &[u32],
@@ -1336,8 +1341,6 @@ pub(crate) fn project_fiber_curvature_in_place(
     if count < 3 || vertex_active[start] == 0 {
         terminate!();
     }
-    let segment_start = fiber_segment_spans[2 * fiber_index] as usize;
-    let radius = segment_radii[segment_start];
     // Plain counted loops over the span: CubeCL's SSA verifier rejects the
     // equivalent early-exit `while` scans. Inactive (unrefined) midpoint slots
     // are skipped, so each sweep visits the active chain in material order.
@@ -1360,7 +1363,7 @@ pub(crate) fn project_fiber_curvature_in_place(
                         older as usize,
                         newer as usize,
                         vertex as usize,
-                        radius,
+                        vertex_wall_extents,
                         stiffness,
                         safety_margin,
                     );
@@ -1388,7 +1391,7 @@ pub(crate) fn project_fiber_curvature_in_place(
                         vertex as usize,
                         middle as usize,
                         later as usize,
-                        radius,
+                        vertex_wall_extents,
                         stiffness,
                         safety_margin,
                     );
@@ -1405,9 +1408,7 @@ pub(crate) fn project_fiber_curvature_in_place(
 pub(crate) fn apply_internal_corrections(
     positions: &mut [f32],
     internal_corrections: &[f32],
-    segment_radii: &[f32],
-    vertex_fibers: &[u32],
-    fiber_segment_spans: &[u32],
+    vertex_wall_extents: &[f32],
     active_vertices: &[u32],
     active_counts: &[Atomic<u32>],
     vertex_active: &[u32],
@@ -1426,11 +1427,9 @@ pub(crate) fn apply_internal_corrections(
     if vertex_active[index] == 0 || vertex_pinned[index] != 0 {
         terminate!();
     }
-    let fiber = vertex_fibers[index] as usize;
-    let segment_start = fiber_segment_spans[2 * fiber] as usize;
-    let radius = segment_radii[segment_start];
     for axis in 0..3 {
         let coordinate = 3 * index + axis;
+        let radius = vertex_wall_extents[coordinate];
         let moved = positions[coordinate] + internal_corrections[coordinate];
         positions[coordinate] = if cell_periodic[axis] != 0 {
             moved
@@ -1448,9 +1447,7 @@ pub(crate) fn apply_contact_corrections(
     positions: &mut [f32],
     corrections: &[f32],
     vertex_segments: &[u32],
-    segment_radii: &[f32],
-    vertex_fibers: &[u32],
-    fiber_segment_spans: &[u32],
+    vertex_wall_extents: &[f32],
     active_vertices: &[u32],
     active_counts: &[Atomic<u32>],
     vertex_active: &[u32],
@@ -1496,16 +1493,16 @@ pub(crate) fn apply_contact_corrections(
         cy *= scale;
         cz *= scale;
     }
-    let fiber = vertex_fibers[index] as usize;
-    let segment_start = fiber_segment_spans[2 * fiber] as usize;
-    let radius = segment_radii[segment_start];
+    let radius_x = vertex_wall_extents[3 * index];
+    let radius_y = vertex_wall_extents[3 * index + 1];
+    let radius_z = vertex_wall_extents[3 * index + 2];
     let moved_x = positions[3 * index] + cx;
     let moved_y = positions[3 * index + 1] + cy;
     let moved_z = positions[3 * index + 2] + cz;
     positions[3 * index] = if cell_periodic[0] != 0 {
         moved_x
     } else {
-        moved_x.clamp(cell_lower[0] + radius, cell_upper[0] - radius)
+        moved_x.clamp(cell_lower[0] + radius_x, cell_upper[0] - radius_x)
     };
     if cell_periodic[0] == 0 {
         wall_reactions[3 * index] += moved_x - positions[3 * index];
@@ -1513,7 +1510,7 @@ pub(crate) fn apply_contact_corrections(
     positions[3 * index + 1] = if cell_periodic[1] != 0 {
         moved_y
     } else {
-        moved_y.clamp(cell_lower[1] + radius, cell_upper[1] - radius)
+        moved_y.clamp(cell_lower[1] + radius_y, cell_upper[1] - radius_y)
     };
     if cell_periodic[1] == 0 {
         wall_reactions[3 * index + 1] += moved_y - positions[3 * index + 1];
@@ -1521,7 +1518,7 @@ pub(crate) fn apply_contact_corrections(
     positions[3 * index + 2] = if cell_periodic[2] != 0 {
         moved_z
     } else {
-        moved_z.clamp(cell_lower[2] + radius, cell_upper[2] - radius)
+        moved_z.clamp(cell_lower[2] + radius_z, cell_upper[2] - radius_z)
     };
     if cell_periodic[2] == 0 {
         wall_reactions[3 * index + 2] += moved_z - positions[3 * index + 2];
@@ -1535,7 +1532,7 @@ pub(crate) fn apply_rigid_contact_corrections(
     corrections: &[f32],
     fiber_segment_spans: &[u32],
     fiber_vertex_spans: &[u32],
-    segment_radii: &[f32],
+    vertex_wall_extents: &[f32],
     cell_lower: &[f32],
     cell_upper: &[f32],
     cell_periodic: &[u32],
@@ -1585,39 +1582,42 @@ pub(crate) fn apply_rigid_contact_corrections(
     let requested_ty = ty;
     let requested_tz = tz;
 
-    let radius = segment_radii[segment_start];
-    let mut minimum_x = positions[3 * vertex_start];
-    let mut maximum_x = minimum_x;
-    let mut minimum_y = positions[3 * vertex_start + 1];
-    let mut maximum_y = minimum_y;
-    let mut minimum_z = positions[3 * vertex_start + 2];
-    let mut maximum_z = minimum_z;
+    // Each vertex bounds the translation that keeps it inside the walls.
+    let mut lower_x =
+        cell_lower[0] + vertex_wall_extents[3 * vertex_start] - positions[3 * vertex_start];
+    let mut upper_x =
+        cell_upper[0] - vertex_wall_extents[3 * vertex_start] - positions[3 * vertex_start];
+    let mut lower_y =
+        cell_lower[1] + vertex_wall_extents[3 * vertex_start + 1] - positions[3 * vertex_start + 1];
+    let mut upper_y =
+        cell_upper[1] - vertex_wall_extents[3 * vertex_start + 1] - positions[3 * vertex_start + 1];
+    let mut lower_z =
+        cell_lower[2] + vertex_wall_extents[3 * vertex_start + 2] - positions[3 * vertex_start + 2];
+    let mut upper_z =
+        cell_upper[2] - vertex_wall_extents[3 * vertex_start + 2] - positions[3 * vertex_start + 2];
     for local in 1..vertex_count {
         let vertex = vertex_start + local;
-        minimum_x = minimum_x.min(positions[3 * vertex]);
-        maximum_x = maximum_x.max(positions[3 * vertex]);
-        minimum_y = minimum_y.min(positions[3 * vertex + 1]);
-        maximum_y = maximum_y.max(positions[3 * vertex + 1]);
-        minimum_z = minimum_z.min(positions[3 * vertex + 2]);
-        maximum_z = maximum_z.max(positions[3 * vertex + 2]);
+        lower_x =
+            lower_x.max(cell_lower[0] + vertex_wall_extents[3 * vertex] - positions[3 * vertex]);
+        upper_x =
+            upper_x.min(cell_upper[0] - vertex_wall_extents[3 * vertex] - positions[3 * vertex]);
+        lower_y = lower_y
+            .max(cell_lower[1] + vertex_wall_extents[3 * vertex + 1] - positions[3 * vertex + 1]);
+        upper_y = upper_y
+            .min(cell_upper[1] - vertex_wall_extents[3 * vertex + 1] - positions[3 * vertex + 1]);
+        lower_z = lower_z
+            .max(cell_lower[2] + vertex_wall_extents[3 * vertex + 2] - positions[3 * vertex + 2]);
+        upper_z = upper_z
+            .min(cell_upper[2] - vertex_wall_extents[3 * vertex + 2] - positions[3 * vertex + 2]);
     }
     if cell_periodic[0] == 0 {
-        tx = tx.clamp(
-            cell_lower[0] + radius - minimum_x,
-            cell_upper[0] - radius - maximum_x,
-        );
+        tx = tx.clamp(lower_x, upper_x);
     }
     if cell_periodic[1] == 0 {
-        ty = ty.clamp(
-            cell_lower[1] + radius - minimum_y,
-            cell_upper[1] - radius - maximum_y,
-        );
+        ty = ty.clamp(lower_y, upper_y);
     }
     if cell_periodic[2] == 0 {
-        tz = tz.clamp(
-            cell_lower[2] + radius - minimum_z,
-            cell_upper[2] - radius - maximum_z,
-        );
+        tz = tz.clamp(lower_z, upper_z);
     }
     let applied = (tx * tx + ty * ty + tz * tz).sqrt();
     let reaction_x = (requested_tx - tx) / vertex_count as f32;
@@ -1679,5 +1679,187 @@ pub(crate) fn total_active_list_weight(
     if ABSOLUTE_POS == 0 {
         let last = active_weights.len() - 1;
         total[0] = list_offsets[last] + active_weights[last];
+    }
+}
+
+/// Turns, re-projects and smooths the long-axis directors of oval fibers,
+/// then refreshes their per-axis wall extents. One thread owns each fiber, so
+/// the forward smoothing sweep updates directors in place. Round fibers and
+/// fibers not yet inserted are skipped.
+#[cube(launch_unchecked)]
+pub(crate) fn update_fiber_directors(
+    positions: &[f32],
+    directors: &mut [f32],
+    director_corrections: &[f32],
+    vertex_wall_extents: &mut [f32],
+    fiber_segment_spans: &[u32],
+    fiber_vertex_spans: &[u32],
+    segment_radii: &[f32],
+    segment_lane_offsets: &[f32],
+    vertex_active: &[u32],
+    control: &[u32],
+    twist_stiffness: f32,
+    max_turn: f32,
+) {
+    let fiber = ABSOLUTE_POS;
+    if fiber >= fiber_vertex_spans.len() / 2 || control[0] == 0 {
+        terminate!();
+    }
+    let fiber_index = fiber as usize;
+    let start = fiber_vertex_spans[2 * fiber_index] as usize;
+    let count = fiber_vertex_spans[2 * fiber_index + 1] as usize;
+    let segment_start = fiber_segment_spans[2 * fiber_index] as usize;
+    let offset = segment_lane_offsets[segment_start];
+    if offset <= 0.0 || count < 2 || vertex_active[start] == 0 {
+        terminate!();
+    }
+    let lane_radius = segment_radii[segment_start] - offset;
+
+    // Contact turns: each vertex sums the turns its two segments asked for,
+    // then the director is made perpendicular to the moved tangent.
+    let mut previous_x = 0.0_f32;
+    let mut previous_y = 0.0_f32;
+    let mut previous_z = 0.0_f32;
+    for local in 0..count {
+        let vertex = start + local;
+        let mut before = vertex;
+        let mut after = vertex;
+        let mut turn = 0.0_f32;
+        if local > 0 {
+            before = vertex - 1;
+            turn += director_corrections[2 * (segment_start + local - 1) + 1];
+        }
+        if local + 1 < count {
+            after = vertex + 1;
+            turn += director_corrections[2 * (segment_start + local)];
+        }
+        turn = turn.clamp(-max_turn, max_turn);
+        let mut tx = positions[3 * after] - positions[3 * before];
+        let mut ty = positions[3 * after + 1] - positions[3 * before + 1];
+        let mut tz = positions[3 * after + 2] - positions[3 * before + 2];
+        let tangent_length = (tx * tx + ty * ty + tz * tz).sqrt().max(1.0e-20_f32);
+        tx /= tangent_length;
+        ty /= tangent_length;
+        tz /= tangent_length;
+        let mut dx = directors[3 * vertex];
+        let mut dy = directors[3 * vertex + 1];
+        let mut dz = directors[3 * vertex + 2];
+        let along = dx * tx + dy * ty + dz * tz;
+        dx -= along * tx;
+        dy -= along * ty;
+        dz -= along * tz;
+        let mut length = (dx * dx + dy * dy + dz * dz).sqrt();
+        if length <= 1.0e-6_f32 {
+            // The tangent swung onto the director: lie flat instead.
+            dx = -ty;
+            dy = tx;
+            dz = 0.0;
+            length = (dx * dx + dy * dy).sqrt();
+            if length <= 1.0e-6_f32 {
+                dx = 1.0;
+                dy = 0.0;
+                dz = 0.0;
+                length = 1.0;
+            }
+        }
+        dx /= length;
+        dy /= length;
+        dz /= length;
+        // Small-angle turn about the tangent, renormalized.
+        let ex = ty * dz - tz * dy;
+        let ey = tz * dx - tx * dz;
+        let ez = tx * dy - ty * dx;
+        dx += turn * ex;
+        dy += turn * ey;
+        dz += turn * ez;
+        let turned_length = (dx * dx + dy * dy + dz * dz).sqrt();
+        dx /= turned_length;
+        dy /= turned_length;
+        dz /= turned_length;
+        // An oval is unchanged by flipping its director; keep neighbours on
+        // the same side so smoothing does not fight a sign.
+        if local > 0 && dx * previous_x + dy * previous_y + dz * previous_z < 0.0 {
+            dx = -dx;
+            dy = -dy;
+            dz = -dz;
+        }
+        directors[3 * vertex] = dx;
+        directors[3 * vertex + 1] = dy;
+        directors[3 * vertex + 2] = dz;
+        previous_x = dx;
+        previous_y = dy;
+        previous_z = dz;
+    }
+
+    // Twist stiffness: pull each director toward its neighbours' mean,
+    // measured in the plane perpendicular to the local tangent.
+    if twist_stiffness > 0.0 {
+        for local in 0..count {
+            let vertex = start + local;
+            let mut before = vertex;
+            let mut after = vertex;
+            let mut mx = 0.0_f32;
+            let mut my = 0.0_f32;
+            let mut mz = 0.0_f32;
+            if local > 0 {
+                before = vertex - 1;
+                mx += directors[3 * before];
+                my += directors[3 * before + 1];
+                mz += directors[3 * before + 2];
+            }
+            if local + 1 < count {
+                after = vertex + 1;
+                let nx = directors[3 * after];
+                let ny = directors[3 * after + 1];
+                let nz = directors[3 * after + 2];
+                let same_side = nx * directors[3 * vertex]
+                    + ny * directors[3 * vertex + 1]
+                    + nz * directors[3 * vertex + 2];
+                if same_side < 0.0 {
+                    mx -= nx;
+                    my -= ny;
+                    mz -= nz;
+                } else {
+                    mx += nx;
+                    my += ny;
+                    mz += nz;
+                }
+            }
+            let mut tx = positions[3 * after] - positions[3 * before];
+            let mut ty = positions[3 * after + 1] - positions[3 * before + 1];
+            let mut tz = positions[3 * after + 2] - positions[3 * before + 2];
+            let tangent_length = (tx * tx + ty * ty + tz * tz).sqrt().max(1.0e-20_f32);
+            tx /= tangent_length;
+            ty /= tangent_length;
+            tz /= tangent_length;
+            let mean_length = (mx * mx + my * my + mz * mz).sqrt();
+            if mean_length > 1.0e-6_f32 {
+                let mut dx = directors[3 * vertex];
+                let mut dy = directors[3 * vertex + 1];
+                let mut dz = directors[3 * vertex + 2];
+                dx += twist_stiffness * (mx / mean_length - dx);
+                dy += twist_stiffness * (my / mean_length - dy);
+                dz += twist_stiffness * (mz / mean_length - dz);
+                let along = dx * tx + dy * ty + dz * tz;
+                dx -= along * tx;
+                dy -= along * ty;
+                dz -= along * tz;
+                let length = (dx * dx + dy * dy + dz * dz).sqrt();
+                if length > 1.0e-6_f32 {
+                    directors[3 * vertex] = dx / length;
+                    directors[3 * vertex + 1] = dy / length;
+                    directors[3 * vertex + 2] = dz / length;
+                }
+            }
+        }
+    }
+
+    // A wall touches the outer lane nearest to it.
+    for local in 0..count {
+        let vertex = start + local;
+        for axis in 0..3 {
+            vertex_wall_extents[3 * vertex + axis] =
+                lane_radius + offset * directors[3 * vertex + axis].abs();
+        }
     }
 }

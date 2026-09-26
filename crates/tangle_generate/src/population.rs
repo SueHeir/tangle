@@ -123,8 +123,11 @@ pub struct FiberPopulationSpec {
     /// Optional physical parent-fiber length represented by the generated
     /// local centerline window.
     pub nominal_parent_length: Option<f64>,
-    /// Circular-radius distribution.
+    /// Radius distribution: the circle radius, or an oval's long semi-axis.
     pub radius: ScalarDistribution,
+    /// Oval sections: short width over long width, in (0, 1). `None` (or 1)
+    /// gives round fibers. Ovals start with their long axis lying flat.
+    pub thickness_ratio: Option<f64>,
     /// Natural waviness-amplitude distribution.
     pub intrinsic_curvature_amplitude: ScalarDistribution,
     /// Fiber orientation distribution.
@@ -152,6 +155,7 @@ impl Default for FiberPopulationSpec {
                 maximum: 0.6,
             },
             nominal_parent_length: None,
+            thickness_ratio: None,
             radius: ScalarDistribution::Uniform {
                 minimum: 0.01,
                 maximum: 0.015,
@@ -304,7 +308,12 @@ pub fn generate_biased_fiber_population(
         let Some((intrinsic, placed, radius, formation_layer)) = generated else {
             return Err(PopulationGenerationError::PlacementExhausted(fiber_index));
         };
-        let section = assembly.sections.add(Section::Circular { radius });
+        let section = assembly.sections.add(match spec.thickness_ratio {
+            Some(ratio) if ratio < 1.0 => Section::Elliptical {
+                semi_axes: [radius, ratio * radius],
+            },
+            _ => Section::Circular { radius },
+        });
         let id = FiberId(first_id + fiber_index as u32);
         assembly
             .add_fiber(id, material, section, &intrinsic, &placed)
@@ -399,6 +408,14 @@ fn validate_spec(spec: &FiberPopulationSpec) -> Result<(), PopulationGenerationE
         ));
     }
     validate_scalar(spec.radius, "radius", true)?;
+    if spec
+        .thickness_ratio
+        .is_some_and(|ratio| !ratio.is_finite() || ratio <= 0.0 || ratio > 1.0)
+    {
+        return Err(PopulationGenerationError::InvalidDistribution(
+            "thickness_ratio",
+        ));
+    }
     validate_scalar(
         spec.intrinsic_curvature_amplitude,
         "intrinsic curvature amplitude",
@@ -830,10 +847,7 @@ mod tests {
 
         for fiber in &assembly.topology.fibers {
             assert!(fiber.formation_layer.is_some_and(|layer| layer < 4));
-            let radius = match assembly.sections.entries[fiber.section.0 as usize] {
-                Section::Circular { radius } => radius,
-                Section::Elliptical { .. } => unreachable!(),
-            };
+            let radius = assembly.sections.entries[fiber.section.0 as usize].bounding_radius();
             let start = fiber.vertices.start as usize;
             let end = fiber.vertices.checked_end().unwrap() as usize;
             for point in &assembly.geometry.placed.positions[start..end] {
@@ -940,5 +954,25 @@ mod tests {
 
     fn unit_assembly() -> FiberAssembly {
         FiberAssembly::new(PeriodicCell::orthorhombic([1.0; 3], [false; 3]))
+    }
+
+    #[test]
+    fn thickness_ratio_makes_flat_ovals() {
+        let spec = FiberPopulationSpec {
+            count: 8,
+            thickness_ratio: Some(0.5),
+            ..FiberPopulationSpec::default()
+        };
+        let mut assembly = unit_assembly();
+        generate_biased_fiber_population(&mut assembly, &spec).unwrap();
+        assembly.validate().unwrap();
+        for fiber in &assembly.topology.fibers {
+            let Section::Elliptical { semi_axes } =
+                assembly.sections.entries[fiber.section.0 as usize]
+            else {
+                panic!("expected an oval section");
+            };
+            assert!((semi_axes[1] - 0.5 * semi_axes[0]).abs() < 1.0e-15);
+        }
     }
 }

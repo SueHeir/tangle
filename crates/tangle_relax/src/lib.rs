@@ -12,10 +12,11 @@ mod device;
 pub use compaction::{CompactionEnergyModel, CompactionKinematics, CompactionMetrics};
 
 pub use device::{
-    AdaptiveSegmentationConfig, BatchStatus, ContactAggregation, ContactCapture, DeviceFiberWorld,
-    DeviceState, DeviceWorld, DeviceWorldCheckpoint, FiberMotion, FormationTargetError,
-    ImageForceSettings, LayerTargetCheckpoint, PackedAssembly, PackingError, RelaxationBackend,
-    RelaxationConfig, RelaxationOverrides, RelaxationPlugin, RelaxationSnapshot, RelaxationState,
-    SegmentContactCandidate, VertexTargetCheckpoint, WorkflowControl,
+    oval_lane_count, AdaptiveSegmentationConfig, BatchStatus, ContactAggregation, ContactCapture,
+    DeviceFiberWorld, DeviceState, DeviceWorld, DeviceWorldCheckpoint, FiberMotion,
+    FormationTargetError, ImageForceSettings, LayerTargetCheckpoint, PackedAssembly, PackingError,
+    RelaxationBackend, RelaxationConfig, RelaxationOverrides, RelaxationPlugin, RelaxationSnapshot,
+    RelaxationState, SegmentContactCandidate, VertexTargetCheckpoint, WorkflowControl,
+    MAXIMUM_OVAL_LANES, OVAL_LANE_SPACING,
 };
 pub use tangle_contact::CellListConfig;
