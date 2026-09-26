@@ -118,6 +118,11 @@ class FitSettings:
     # coarse fiber's own noisy core is not dimmed and broken up. In the
     # solve, the flat image is kept within reach of the larger types' fits.
     graded_smallest_only: bool = False
+    # Blur (voxels) of the grey the graded image's dips are read from (None:
+    # ``denoise_sigma_voxels``). Noise dips inside a fiber's own core dim it
+    # like the dip between two fibers; a wider blur, still well under the
+    # spacing of touching fibers, keeps the second and smooths the first.
+    graded_sigma_voxels: float | None = None
     # Drop a larger type's new traces that are really a bundle of a brighter,
     # smaller type before the smaller types are traced: a bundle of fine
     # fibers is about as wide as a coarse fiber, and traced as one it claims
@@ -742,7 +747,11 @@ def fit_fibers(
             flat = image
             image = graded_image(
                 volume, ranges, void, flat, reach=min(0.5 * item.diameter for item in specs) / voxel_size,
-                denoise_sigma=settings.denoise_sigma_voxels, exclude=exclude,
+                denoise_sigma=(
+                    settings.denoise_sigma_voxels if settings.graded_sigma_voxels is None
+                    else settings.graded_sigma_voxels
+                ),
+                exclude=exclude,
             )
             foreground = flat > 0.5
             evidence = flat
