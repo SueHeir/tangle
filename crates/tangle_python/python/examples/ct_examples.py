@@ -708,9 +708,9 @@ def scanned_settings(index: int) -> dict:
         "coarse_fraction": round(float(rng.uniform(0.02, 0.06)), 3) if coarse else 0.0,
         "coarse_brightness": round(float(rng.uniform(0.4, 0.7)), 2),
         "length_fraction": [round(float(rng.uniform(0.5, 0.7)), 2), round(float(rng.uniform(0.75, 0.95)), 2)],
-        # The noise blur averages the noise down (by about 1 / (2 sqrt(pi) sigma)),
-        # so the photons drop with it to keep the contrast to noise.
-        "photons": round(SCANNER.photons * float(rng.uniform(0.6, 1.6)) / max(1.0, 4 * np.pi * blur**2)),
+        # The noise blur averages the noise down, so the photons drop with it to
+        # keep the contrast to noise (as bundled_two_types: 1300 / 56 at sigma 1).
+        "photons": round(SCANNER.photons * float(rng.uniform(0.6, 1.6)) / max(1.0, 23 * blur**2)),
         "noise_blur": blur,
         "resolution_um": round(float(rng.uniform(1.5, 3.0)), 2),
         "fiber_motion_um": round(float(rng.uniform(0.0, 1.5)), 2),
