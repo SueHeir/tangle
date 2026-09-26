@@ -436,7 +436,14 @@ pub fn trace_fibers(
         let label = search.label_offset + fibers.len() as i32 + 1;
         if line.len() >= 2 && polyline_length(&line) >= search.min_length {
             let line = resample(&line, search.node_spacing);
-            paint(claimed, shape, &line, search.claim_radii * radius, label, false);
+            paint(
+                claimed,
+                shape,
+                &line,
+                search.claim_radii * radius,
+                label,
+                false,
+            );
             fibers.push(line);
             search.max_fibers.is_some_and(|m| fibers.len() >= m)
         } else {

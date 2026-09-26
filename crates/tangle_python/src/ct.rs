@@ -289,7 +289,12 @@ impl PyCtHessian {
     }
 }
 
-fn trace_settings(radius: f64, min_bend_radius: f64, step: f64, peak_floor: f64) -> PyResult<TraceSettings> {
+fn trace_settings(
+    radius: f64,
+    min_bend_radius: f64,
+    step: f64,
+    peak_floor: f64,
+) -> PyResult<TraceSettings> {
     if !(radius > 0.0 && step > 0.0) {
         return Err(PyValueError::new_err("radius and step must be positive"));
     }
