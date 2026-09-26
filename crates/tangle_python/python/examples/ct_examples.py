@@ -321,15 +321,16 @@ def scanner_two_types(cache: Path) -> Example:
     return two_types(cache.with_name("two_types.json"), scanner=True)  # the same fibers as two_types
 
 
-def bundles(cell: tangle.Cell, material: tangle.Material, count: int, per_bundle: int, seed: int, length, segments):
-    """(FiberCollection, material) for relaxed_truth: ``count`` bundles of ``per_bundle`` fibers of ``material``.
+def bundles(cell: tangle.Cell, leaders: tangle.FiberPopulation, per_bundle: int):
+    """(FiberCollection, material) for relaxed_truth: a bundle of ``per_bundle`` fibers along each of ``leaders``.
 
-    Each bundle follows one fiber drawn like planar_population's, its members
+    Each bundle follows one fiber drawn from ``leaders``, its members
     hexagonally packed around it (a center and a ring of six, then the next
     ring), a hair apart, with their ends staggered by up to a fifth of the
     length, as the filaments of a yarn or tow lie.
     """
-    leaders = tangle.generate_fiber_population(cell, planar_population(material, count, seed, length, segments))
+    material, seed = leaders.material, leaders.seed
+    leaders = tangle.generate_fiber_population(cell, leaders)
     rng = np.random.default_rng(seed)
     pitch = 1.02 * material.diameter
     slots = [(0.0, 0.0)]
@@ -365,7 +366,7 @@ def bundled_two_types(cache: Path) -> Example:
     coarse = tangle.Material("coarse_19um", diameter=19 * um, min_bend_radius=95 * um)
     cell = tangle.Cell([cell_side] * 3, periodic="xy")
     truth = relaxed_truth(
-        cache, cell, [bundles(cell, fine, 6, 19, 23, length, 16), planar_population(coarse, 14, 22, length, 16)]
+        cache, cell, [bundles(cell, planar_population(fine, 6, 23, length, 16), 19), planar_population(coarse, 14, 22, length, 16)]
     )
     # The scintillator spreads each counted photon over about a pixel, so the
     # noise comes out blotchy instead of pixel to pixel; that blur also
@@ -673,6 +674,115 @@ VARIED = [f"varied_{index}" for index in range(1, VARIED_COUNT + 1)]
 EXAMPLES.update({name: varied(index) for index, name in enumerate(VARIED, start=1)})
 
 
+
+# -- scanned structures -----------------------------------------------------------
+#
+# The test loop on simulated scans: ``scanned_<n>`` draws a structure and a
+# scanner from seed n (one or two fiber types, loose or in bundles, planar,
+# aligned or biaxial, and the scanner's photons, resolution, motion, phase and
+# noise grain around SCANNER's), scans it with ct.Scanner and fits it. Tune on
+# ``scanned_1`` … ``scanned_16`` and check on ``scanned_101`` … (``--scanned``),
+# so a fix that only suits the tuning set shows up. 160 voxels a side.
+
+SCANNED_VOXELS = 160
+
+
+def scanned_settings(index: int) -> dict:
+    """The structure and scanner ``scanned_<index>`` uses (lengths in µm)."""
+    rng = np.random.default_rng(5000 + index)
+    voxel = round(float(rng.uniform(1.0, 1.5)), 3)
+    side = SCANNED_VOXELS * voxel
+    fine = round(float(rng.uniform(5.0, 9.0)), 1)
+    coarse = round(float(rng.uniform(14.0, 22.0)), 1) if rng.random() < 0.7 else None
+    orientation = ["planar", "planar", "aligned", "biaxial"][int(rng.integers(4))]
+    blur = float(rng.choice([0.0, 0.5, 1.0]))
+    return {
+        "voxel_um": voxel,
+        "side_um": round(side, 1),
+        "orientation": orientation,
+        "tilt": round(float(rng.uniform(0.15, 0.45)), 2),
+        "fine_um": fine,
+        "fine_fraction": round(float(rng.uniform(0.04, 0.12)), 3),
+        "per_bundle": int(rng.choice([1, 7, 19])),
+        "coarse_um": coarse,
+        "coarse_fraction": round(float(rng.uniform(0.02, 0.06)), 3) if coarse else 0.0,
+        "coarse_brightness": round(float(rng.uniform(0.4, 0.7)), 2),
+        "length_fraction": [round(float(rng.uniform(0.5, 0.7)), 2), round(float(rng.uniform(0.75, 0.95)), 2)],
+        # The noise blur averages the noise down (by about 1 / (2 sqrt(pi) sigma)),
+        # so the photons drop with it to keep the contrast to noise.
+        "photons": round(SCANNER.photons * float(rng.uniform(0.6, 1.6)) / max(1.0, 4 * np.pi * blur**2)),
+        "noise_blur": blur,
+        "resolution_um": round(float(rng.uniform(1.5, 3.0)), 2),
+        "fiber_motion_um": round(float(rng.uniform(0.0, 1.5)), 2),
+        "delta_beta": [round(float(rng.uniform(6.0, 16.0)), 1), round(float(rng.uniform(5.0, 12.0)), 1)],
+        "seed": 5000 + index,
+    }
+
+
+def scanned(index: int) -> Callable[[Path], Example]:
+    def build(cache: Path) -> Example:
+        v = scanned_settings(index)
+        side = SCANNED_VOXELS * v["voxel_um"] * um
+        cell = tangle.Cell([side] * 3)
+        length = tuple(f * side for f in v["length_fraction"])
+        orientation = {
+            "planar": lambda: tangle.PlanarOrientation(max_tilt=v["tilt"]),
+            "aligned": lambda: tangle.AlignedOrientation("x", max_angle=v["tilt"]),
+            "biaxial": lambda: tangle.LayeredBiaxialOrientation(max_tilt=v["tilt"], seed=v["seed"]),
+        }[v["orientation"]]
+        types = [("fine", v["fine_um"], v["fine_fraction"], v["per_bundle"])]
+        if v["coarse_um"]:
+            types.append(("coarse", v["coarse_um"], v["coarse_fraction"], 1))
+        populations, specs, profiles = [], [], []
+        for offset, (kind, diameter_um, fraction, per_bundle) in enumerate(types):
+            diameter = diameter_um * um
+            bend = 5 * diameter
+            material = tangle.Material(f"{kind}_{diameter_um:g}um", diameter=diameter, min_bend_radius=bend)
+            mean_length = 0.5 * sum(length)
+            count = max(int(round(fraction * side**3 / (np.pi * (diameter / 2) ** 2 * mean_length))), 4)
+            population = tangle.FiberPopulation(
+                material=material,
+                count=max(count // per_bundle, 1),
+                segments_per_fiber=max(4, int(length[0] / (1.25 * diameter))),
+                seed=v["seed"] + offset,
+                length=length,
+                curvature_amplitude=(0.15 * diameter, 0.6 * diameter),
+                orientation=orientation(),
+                position=(
+                    tangle.LayeredPosition(max(3, int(side / (4 * diameter))), jitter_fraction=0.25)
+                    if v["orientation"] == "biaxial"
+                    else tangle.UniformPosition()
+                ),
+            )
+            populations.append(bundles(cell, population, per_bundle) if per_bundle > 1 else population)
+            specs.append(ct.FiberSpec(diameter=diameter, min_bend_radius=bend, length=mean_length, name=material.name))
+            profiles.append((diameter, ct.CrossSection(brightness=1.0 if kind == "fine" else v["coarse_brightness"])))
+        key = hashlib.sha1(json.dumps(v, sort_keys=True).encode()).hexdigest()[:8]
+        truth = relaxed_truth(cache.with_name(f"{cache.stem}-{key}.json"), cell, populations)
+        scanner = replace(
+            SCANNER,
+            photons=v["photons"],
+            noise_blur=v["noise_blur"],
+            resolution=v["resolution_um"] * um,
+            fiber_motion=v["fiber_motion_um"] * um,
+            delta_beta=tuple(v["delta_beta"][: len(types)]),
+        )
+        scan = render_scan(truth, v["voxel_um"] * um, seed=v["seed"], profiles=profiles, scanner=scanner)
+        smallest = min(s.min_bend_radius for s in specs)
+        return Example(
+            scan,
+            specs if len(specs) > 1 else specs[0],
+            smallest,
+            lambda fit, scan: {"settings": v, "per_type": ct.score(fit, scan)["per_type"]},
+        )
+
+    return build
+
+
+SCANNED_TUNE = range(1, 17)
+SCANNED_CHECK = range(101, 109)
+EXAMPLES.update({f"scanned_{index}": scanned(index) for index in [*SCANNED_TUNE, *SCANNED_CHECK]})
+
 # -- the runner -----------------------------------------------------------------
 
 
@@ -937,6 +1047,10 @@ def main() -> None:
     parser.add_argument("--list", action="store_true", help="list the examples and exit")
     parser.add_argument("--varied", action="store_true", help="also run the varied_* structures")
     parser.add_argument(
+        "--scanned", choices=("tune", "check", "all"), default=None,
+        help="run the scanned_* structures: the tuning set (1-16), the check set (101-108) or both",
+    )
+    parser.add_argument(
         "--input", choices=("grey", "plain", "mask"), default=None,
         help="fit every example from the raw scan with grey profiles, the raw scan alone, or a generous mask "
         "(default: each example's own; grey, and plain for noisy_two_types)",
@@ -958,11 +1072,22 @@ def main() -> None:
         parser.error(f"unknown examples: {', '.join(unknown)} (see --list)")
     output = args.output or Path(os.environ.get("TANGLE_CT_OUTPUT", Path(__file__).with_name("output") / "ct"))
     output.mkdir(parents=True, exist_ok=True)
-    names = args.names or [name for name in EXAMPLES if name not in VARIED]
+    scanned_names = [name for name in EXAMPLES if name.startswith("scanned_")]
+    if args.scanned:
+        chosen = {"tune": SCANNED_TUNE, "check": SCANNED_CHECK, "all": [*SCANNED_TUNE, *SCANNED_CHECK]}[args.scanned]
+        names = args.names + [f"scanned_{index}" for index in chosen]
+    else:
+        names = args.names or [name for name in EXAMPLES if name not in VARIED and name not in scanned_names]
     if args.varied:
         names += [name for name in VARIED if name not in names]
     rows = [run(name, output) for name in names]
     write_summary(output, rows)
+    for label, chosen in (("tune", SCANNED_TUNE), ("check", SCANNED_CHECK)):
+        f1 = [row["centerline recall / precision / F1"].split("/")[2] for row in rows if row["example"] in
+              {f"scanned_{index}" for index in chosen}]
+        f1 = [float(value) for value in f1 if value != "-"]
+        if f1:
+            print(f"scanned {label}: mean F1 {np.mean(f1):.3f} over {len(f1)}")
     print(f"summary: {output / 'summary.md'}")
 
 
