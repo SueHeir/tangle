@@ -330,7 +330,7 @@ pub(crate) fn ct_trace_one_way(
 
 /// Traces fibers from ridge seeds, painting `claimed` in place (see `_trace.trace_fibers`).
 #[pyfunction]
-#[pyo3(signature = (image, hessian, claimed, edt, peak, radius, min_bend_radius, step, min_length, node_spacing, label_offset, max_fibers, seed_depth_radii))]
+#[pyo3(signature = (image, hessian, claimed, edt, peak, radius, min_bend_radius, step, min_length, node_spacing, label_offset, max_fibers, seed_depth_radii, bright_seed_strength=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ct_trace_fibers(
     image: PyBuffer<f32>,
@@ -346,6 +346,7 @@ pub(crate) fn ct_trace_fibers(
     label_offset: i32,
     max_fibers: Option<usize>,
     seed_depth_radii: f64,
+    bright_seed_strength: Option<f32>,
 ) -> PyResult<Vec<Vec<[f64; 3]>>> {
     let shape = volume_shape(&image, "image")?;
     same_shape(&image, &claimed, "claimed")?;
@@ -358,6 +359,7 @@ pub(crate) fn ct_trace_fibers(
         label_offset,
         max_fibers,
         seed_depth_radii,
+        bright_seed_strength,
     };
     Ok(trace_fibers(
         read(&image, "image")?,

@@ -88,6 +88,11 @@ class FitSettings:
     """
 
     denoise_sigma_voxels: float = 0.7
+    # Also seed traces on the peaks of the Hessian's tube strength at least
+    # this high, after the foreground-depth seeds (None: depth seeds only).
+    # Fibers packed in a bundle share one foreground blob whose depth ridge
+    # runs down the middle fiber only (see _trace.trace_fibers).
+    bright_seed_strength: float | None = None
     # Fill enclosed foreground holes up to a fiber's cross-section (a dim
     # core, or noise speckle in a dim fiber) in a mask, grey ranges or a
     # plain grey scan.
@@ -867,6 +872,7 @@ class _Fitter:
                 # A larger type is only seeded where the foreground is thicker
                 # than the smaller types could make it.
                 seed_depth_radii=0.7 if r > smallest else 0.5,
+                bright_seed_strength=self.settings.bright_seed_strength,
             )
             found += new
             found_radii += [r] * len(new)

@@ -122,6 +122,7 @@ BACKEND = os.environ.get("TANGLE_BACKEND", "wgpu")
 MASK_LEVEL = 0.35  # of the way from void to fiber grey level: a generous threshold
 # "grey" (raw scan + profiles), "plain" (raw scan alone) or "mask" for every example; None: each example's own (grey by default)
 INPUT = os.environ.get("TANGLE_CT_INPUT")
+SETTINGS: dict = {}  # FitSettings overrides for every example (--set)
 BLUR = None  # scan blur (PSF sigma, voxels) for every example; None keeps each example's own
 DIFF_COLORS = {"missed": (230, 50, 50), "extra": (60, 120, 255), "wrong_fiber": (255, 200, 0)}
 FILES = ("raw.tif", "input.tif", "true.tif", "segment.tif", "diff.tif", "confidence.tif", "fit.json", "score.json")
@@ -932,7 +933,7 @@ def run(name: str, output: Path) -> dict:
     source = INPUT or example.input
     volume, spec, seen = fit_input(scan, example.spec, source)
     started = time.perf_counter()
-    fit = ct.fit_fibers(volume, h, spec, ct.FitSettings(backend=BACKEND))
+    fit = ct.fit_fibers(volume, h, spec, ct.FitSettings(backend=BACKEND, **SETTINGS))
     seconds = time.perf_counter() - started
 
     report = ct.score(fit, scan)
@@ -1059,7 +1060,14 @@ def main() -> None:
         "--blur", type=float, default=None,
         help="render every scan with this blur (PSF sigma, voxels); default: each example's own (0.9; 0.7-1.2 for varied_*)",
     )
+    parser.add_argument(
+        "--set", action="append", default=[], metavar="NAME=VALUE",
+        help="a FitSettings field for every example, e.g. --set bright_seed_strength=0.05 (repeatable)",
+    )
     args = parser.parse_args()
+    for item in args.set:
+        name, _, value = item.partition("=")
+        SETTINGS[name] = json.loads(value)
     global INPUT, BLUR
     if args.input:
         INPUT = args.input
