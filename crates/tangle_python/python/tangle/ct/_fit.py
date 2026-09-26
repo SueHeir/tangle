@@ -113,6 +113,11 @@ class FitSettings:
     # across touching fibers; what counts as fiber (the foreground, its
     # depth and the types) still comes from the range image.
     graded_image: bool = False
+    # With graded_image, only the smallest fiber type traces and relaxes on
+    # the graded image; larger types keep the flat range image, where a dim
+    # coarse fiber's own noisy core is not dimmed and broken up. In the
+    # solve, the flat image is kept within reach of the larger types' fits.
+    graded_smallest_only: bool = False
     # Drop a larger type's new traces that are really a bundle of a brighter,
     # smaller type before the smaller types are traced: a bundle of fine
     # fibers is about as wide as a coarse fiber, and traced as one it claims
@@ -775,6 +780,9 @@ def fit_fibers(
     fitter = _Fitter(image, specs, settings, voxel_size, log)
     if foreground is not None:
         fitter.set_image(image, foreground=foreground, evidence=evidence)
+        if settings.graded_image and settings.graded_smallest_only:
+            fitter.flat_kinds = frozenset(k for k in range(len(specs)) if fitter.radius[k] > fitter.radius.min())
+            fitter.hessians = {}
     fitter.width_typing = source == "grey"
     fitter.type_bits = type_bits
     if grey_model is not None:
@@ -954,6 +962,7 @@ class _Fitter:
         self.peak_grey: np.ndarray | None = None  # merge_straddling: the denoised grey
         self.peak_void = 0.0
         self._match_cache: tuple | None = None  # (cut, ranking): reused by a pass's candidates
+        self.flat_kinds: frozenset[int] = frozenset()  # types traced and relaxed on ``evidence``
         self.set_image(image)
 
     def set_image(
@@ -978,10 +987,32 @@ class _Fitter:
         self.edt, self.depth = foreground_depth(self.foreground)
         self.hessians = {}
 
+    def trace_image(self, kind: int) -> np.ndarray:
+        """The image a type-``kind`` fiber is traced on (``graded_smallest_only``)."""
+        return self.evidence if kind in self.flat_kinds else self.image
+
     def hessian(self, kind: int) -> HessianField:
         if kind not in self.hessians:
-            self.hessians[kind] = HessianField(self.image, sigma=max(0.6 * float(self.radius[kind]), 1.0))
+            self.hessians[kind] = HessianField(self.trace_image(kind), sigma=max(0.6 * float(self.radius[kind]), 1.0))
         return self.hessians[kind]
+
+    def solve_image(self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray) -> np.ndarray:
+        """``image``, with ``evidence`` within reach of the fits whose type
+        is traced on it (``graded_smallest_only``)."""
+        types = np.asarray(types, dtype=int)
+        keep = [i for i, k in enumerate(types) if int(k) in self.flat_kinds]
+        if not keep:
+            return self.image
+        chosen = [lines[i] for i in keep]
+        chosen_radii = np.asarray(radii, dtype=np.float64)[keep]
+        owned, _, _ = rasterize(
+            self.image.shape, chosen, chosen_radii, reach=chosen_radii * self.settings.solver_reach_radii + self.margin,
+            sections=self.sections(chosen, types=types[keep]),
+        )
+        image = self.image.copy()
+        flat = owned > 0
+        image[flat] = self.evidence[flat]
+        return image
 
     def long_axes(self, line: np.ndarray, kind: int) -> np.ndarray:
         """Unit long axis of a type-``kind`` oval fit at each node: across the
@@ -1049,7 +1080,7 @@ class _Fitter:
             known = lines + found
             claimed = self.claim(known, np.concatenate([np.asarray(radii, dtype=np.float64), found_radii]))
             new = trace_fibers(
-                self.image, self.hessian(kind), radius=r, min_bend_radius=float(self.bend[kind]),
+                self.trace_image(kind), self.hessian(kind), radius=r, min_bend_radius=float(self.bend[kind]),
                 min_length=float(self.min_length[kind]), node_spacing=self.spacing, claimed=claimed,
                 foreground=self.foreground, depth=(self.edt, self.depth), label_offset=len(known),
                 # A larger type is only seeded where the foreground is thicker
@@ -1220,7 +1251,7 @@ class _Fitter:
 
         s = self.settings
         return _device.relax(
-            self.image, lines, radii, self.bend[np.asarray(types, dtype=int)], voxel_size=self.h,
+            self.solve_image(lines, radii, types), lines, radii, self.bend[np.asarray(types, dtype=int)], voxel_size=self.h,
             spacing=self.spacing, rate=s.solver_image_rate, reach_radii=s.solver_reach_radii,
             iterations=s.solver_iterations, settle=s.solver_settle_iterations if settle else 0, backend=s.backend,
             reach=np.asarray(radii, dtype=np.float64) + self.margin, log=self.log,
@@ -1618,7 +1649,7 @@ class _Fitter:
             kind = int(piece_types[index])
             r = float(self.radius[kind])
             return Tracer(
-                self.image, self.hessian(kind), radius=r, min_bend_radius=float(self.bend[kind]),
+                self.trace_image(kind), self.hessian(kind), radius=r, min_bend_radius=float(self.bend[kind]),
                 step=max(0.75, 0.5 * r), claimed=claimed,
             )
 

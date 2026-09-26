@@ -770,6 +770,25 @@ class CtToolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             range_image(volume, [(0.0, 0.5)], denoise_sigma=0.0)  # nothing darker: no void
 
+    def test_graded_smallest_only_keeps_larger_types_on_the_flat_image(self):
+        from tangle.ct._fit import _Fitter
+
+        settings = ct.FitSettings(graded_image=True, graded_smallest_only=True)
+        specs = [ct.FiberSpec(diameter=4 * VOXEL, name="fine"), ct.FiberSpec(diameter=10 * VOXEL, name="coarse")]
+        graded = np.full((20, 30, 30), 0.5, dtype=np.float32)
+        flat = np.ones_like(graded)
+        fitter = _Fitter(graded, specs, settings, VOXEL, lambda *args, **kwargs: None)
+        fitter.set_image(graded, foreground=flat > 0.5, evidence=flat)
+        fitter.flat_kinds = frozenset({1})
+        self.assertIs(fitter.trace_image(0), graded)
+        self.assertIs(fitter.trace_image(1), flat)
+        coarse = np.array([[20.0, 20.0, z] for z in np.linspace(0.0, 20.0, 6)])
+        fine = np.array([[5.0, 5.0, z] for z in np.linspace(0.0, 20.0, 6)])
+        image = fitter.solve_image([fine, coarse], np.array([2.0, 5.0]), np.array([0, 1]))
+        self.assertEqual(float(image[10, 20, 20]), 1.0)  # within reach of the coarse fit: flat
+        self.assertEqual(float(image[10, 5, 5]), 0.5)  # the fine fit: graded
+        self.assertIs(fitter.solve_image([fine], np.array([2.0]), np.array([0])), graded)
+
     def test_grey_profiles_draw_measure_and_type_fibers(self):
         from tangle.ct import _grey
 
