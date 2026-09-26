@@ -1746,9 +1746,16 @@ class _Fitter:
             out_lines += group
             out_radii.append(np.asarray(group_radii, dtype=np.float64))
             out_types.append(np.full(len(group), kind, dtype=int))
-        lines = _refine.respace(out_lines, self.spacing)
         radii = np.concatenate(out_radii) if out_radii else np.zeros(0)
         types = np.concatenate(out_types) if out_types else np.zeros(0, dtype=int)
+        if len(self.specs) > 1 and out_lines:
+            # A fit of one type retracing a fiber of another (a fine fit
+            # inside a coarse fiber, or the reverse) is a duplicate the
+            # per-type pass above cannot see.
+            out_lines, radii, types, counts["cross_type_duplicates"] = _cross_type_duplicates(
+                out_lines, radii, types, min_length=float(self.min_length.min())
+            )
+        lines = _refine.respace(out_lines, self.spacing)
         counts["explained"] = _explained_fraction(self.foreground, lines, radii)
         counts["types"] = self.counts(types)
         return lines, radii, types, counts
@@ -1783,6 +1790,23 @@ def _relevel(image: np.ndarray, levels: Levels, lines: list[np.ndarray], radius:
         threshold=levels.void + 0.5 * (void + core) * scale,
     )
     return (image - void) / (core - void), new
+
+
+def _cross_type_duplicates(
+    lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray, *, min_length: float
+) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, int]:
+    """``_moves.trim_duplicates`` over every type at once, keeping each survivor's type."""
+    kept, kept_radii = _moves.trim_duplicates(lines, radii, min_length=min_length)
+    # Survivors keep their order and are runs of their own nodes: match each
+    # to the next line holding its first node.
+    kept_types = []
+    j = 0
+    for line in kept:
+        while not np.any(np.all(lines[j] == line[0], axis=1)):
+            j += 1
+        kept_types.append(types[j])
+        j += 1
+    return kept, np.asarray(kept_radii, dtype=np.float64), np.asarray(kept_types, dtype=int), len(lines) - len(kept)
 
 
 def _explained_fraction(foreground: np.ndarray, lines: list[np.ndarray], radii: np.ndarray) -> float:
