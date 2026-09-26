@@ -549,12 +549,15 @@ impl PyAssembly {
             .topology
             .fibers
             .iter()
-            .map(|fiber| match assembly.sections.entries[fiber.section.0 as usize] {
-                Section::Circular { radius } => (radius, radius),
-                Section::Elliptical { semi_axes } => {
-                    (semi_axes[0].max(semi_axes[1]), semi_axes[0].min(semi_axes[1]))
-                }
-            })
+            .map(
+                |fiber| match assembly.sections.entries[fiber.section.0 as usize] {
+                    Section::Circular { radius } => (radius, radius),
+                    Section::Elliptical { semi_axes } => (
+                        semi_axes[0].max(semi_axes[1]),
+                        semi_axes[0].min(semi_axes[1]),
+                    ),
+                },
+            )
             .collect()
     }
 

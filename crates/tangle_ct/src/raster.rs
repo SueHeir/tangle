@@ -49,7 +49,11 @@ impl Section<'_> {
         let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
         let ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
         let length2 = dot(ab, ab);
-        let t = if length2 <= 1e-12 { 0.0 } else { (dot(ap, ab) / length2).clamp(0.0, 1.0) };
+        let t = if length2 <= 1e-12 {
+            0.0
+        } else {
+            (dot(ap, ab) / length2).clamp(0.0, 1.0)
+        };
         let d = [ap[0] - t * ab[0], ap[1] - t * ab[1], ap[2] - t * ab[2]];
         let (la, lb) = (axes[s], axes[(s + 1).min(axes.len() - 1)]);
         let mut long = [
@@ -59,7 +63,11 @@ impl Section<'_> {
         ];
         if length2 > 1e-12 {
             let along = dot(long, ab) / length2;
-            long = [long[0] - along * ab[0], long[1] - along * ab[1], long[2] - along * ab[2]];
+            long = [
+                long[0] - along * ab[0],
+                long[1] - along * ab[1],
+                long[2] - along * ab[2],
+            ];
         }
         let norm = dot(long, long).sqrt();
         let squared = dot(d, d);
@@ -67,7 +75,9 @@ impl Section<'_> {
             return squared.sqrt();
         }
         let u = dot(d, long) / norm;
-        (squared - u * u + (u / ratio) * (u / ratio)).max(0.0).sqrt()
+        (squared - u * u + (u / ratio) * (u / ratio))
+            .max(0.0)
+            .sqrt()
     }
 }
 
@@ -145,14 +155,14 @@ pub fn rasterize_sections(
         let limit = reach[f];
         let key = if signed { radii[f] } else { 0.0 };
         let section = sections.map_or(Section::Round, |all| all[f]);
-        for (s, pair) in line.windows(2).enumerate() {
+        for (k_seg, pair) in line.windows(2).enumerate() {
             let (a, b) = (pair[0], pair[1]);
             if let Some((low, high)) = segment_box(shape, a, b, limit * section.stretch() + 0.5) {
                 for k in low[2]..high[2] {
                     for j in low[1]..high[1] {
                         for i in low[0]..high[0] {
                             let p = [i as f64 + 0.5, j as f64 + 0.5, k as f64 + 0.5];
-                            let distance = section.distance(p, a, b, s);
+                            let distance = section.distance(p, a, b, k_seg);
                             if distance > limit {
                                 continue;
                             }
@@ -187,7 +197,15 @@ pub fn paint(
     value: i32,
     only_empty: bool,
 ) {
-    paint_section(target, shape, line, reach, value, only_empty, Section::Round);
+    paint_section(
+        target,
+        shape,
+        line,
+        reach,
+        value,
+        only_empty,
+        Section::Round,
+    );
 }
 
 /// `paint` of a line with the given cross-section (`reach` in units of an
@@ -217,7 +235,9 @@ pub fn paint_section(
                     for i in low[0]..high[0] {
                         let p = [i as f64 + 0.5, j as f64 + 0.5, k as f64 + 0.5];
                         let index = k * s[0] + j * s[1] + i;
-                        if (only_empty && target[index] != 0) || section.distance(p, a, b, segment) > reach {
+                        if (only_empty && target[index] != 0)
+                            || section.distance(p, a, b, segment) > reach
+                        {
                             continue;
                         }
                         target[index] = value;
@@ -254,8 +274,12 @@ mod tests {
         // A line along x through the middle, long axis along y, 2:1.
         let line = vec![[2.5, 10.5, 10.5], [18.5, 10.5, 10.5]];
         let axes = [[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]];
-        let oval = Section::Oval { ratio: 2.0, axes: &axes };
-        let raster = rasterize_sections(shape, &[line.clone()], &[3.0], &[3.0], false, Some(&[oval]));
+        let oval = Section::Oval {
+            ratio: 2.0,
+            axes: &axes,
+        };
+        let raster =
+            rasterize_sections(shape, &[line.clone()], &[3.0], &[3.0], false, Some(&[oval]));
         let at = |x: usize, y: usize, z: usize| raster.labels[z * 21 * 21 + y * 21 + x];
         assert_eq!(at(10, 15, 10), 1); // 5 along the long axis: inside 6
         assert_eq!(at(10, 17, 10), 0); // 7 along it: outside

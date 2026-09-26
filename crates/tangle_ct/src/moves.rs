@@ -1083,7 +1083,7 @@ mod tests {
         let thick = straight(0.0, 40.0, 10.0, 2.0);
         let thin = straight(10.0, 20.0, 14.0, 2.0);
         let (lines, radii) = trim_duplicates(&[thick.clone(), thin], &[8.0, 2.5], 4.0, 0.8);
-        assert_eq!(lines, vec![thick]);
+        assert_eq!(lines, vec![thick.clone()]);
         assert_eq!(radii, vec![8.0]);
         // A thin fiber touching the thick one is kept.
         let beside = straight(10.0, 20.0, 20.5, 2.0);

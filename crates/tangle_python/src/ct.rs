@@ -16,8 +16,8 @@ use tangle_ct::moves::{
     merge_fragments, remove_unsupported, resolve_side_by_side, split_kinks, trim_duplicates,
     MergeSettings, SideBySide, SplitSettings,
 };
-use tangle_ct::refine::{curvature_ratio, cut_void, end_step, support, OwnerLookup, VoidRules};
 use tangle_ct::raster::Section;
+use tangle_ct::refine::{curvature_ratio, cut_void, end_step, support, OwnerLookup, VoidRules};
 use tangle_ct::render::{box_size, local_residual, render_occupancy_sections, Corner};
 use tangle_ct::trace::{trace_fibers, FiberSearch, TraceSettings, Tracer};
 use tangle_ct::Shape;
@@ -182,7 +182,10 @@ fn axes_of(axes: &Option<PyBuffer<f64>>, counts: &[usize]) -> PyResult<Option<Ve
 
 /// Each line's `Section`: an oval where its `ratios` entry (long over short
 /// semi-axis) is above 1, round elsewhere; `None` when all are round.
-fn sections_of<'a>(ratios: &Option<Vec<f64>>, axes: &'a Option<Vec<Vec<[f64; 3]>>>) -> PyResult<Option<Vec<Section<'a>>>> {
+fn sections_of<'a>(
+    ratios: &Option<Vec<f64>>,
+    axes: &'a Option<Vec<Vec<[f64; 3]>>>,
+) -> PyResult<Option<Vec<Section<'a>>>> {
     match (ratios, axes) {
         (Some(ratios), Some(axes)) => {
             if ratios.len() != axes.len() {
@@ -203,7 +206,9 @@ fn sections_of<'a>(ratios: &Option<Vec<f64>>, axes: &'a Option<Vec<Vec<[f64; 3]>
             ))
         }
         (None, None) => Ok(None),
-        _ => Err(PyValueError::new_err("give both ratios and axes, or neither")),
+        _ => Err(PyValueError::new_err(
+            "give both ratios and axes, or neither",
+        )),
     }
 }
 
@@ -234,7 +239,14 @@ pub(crate) fn ct_rasterize(
     let lines = split_lines(&points(&nodes, "nodes")?, &counts)?;
     let axes = axes_of(&axes, &counts)?;
     let sections = sections_of(&ratios, &axes)?;
-    let raster = tangle_ct::raster::rasterize_sections(shape, &lines, &radii, &reach, signed, sections.as_deref());
+    let raster = tangle_ct::raster::rasterize_sections(
+        shape,
+        &lines,
+        &radii,
+        &reach,
+        signed,
+        sections.as_deref(),
+    );
     write(&labels, "labels")?.copy_from_slice(&raster.labels);
     write(&distance, "distance")?.copy_from_slice(&raster.distance);
     write(&segment, "segment")?.copy_from_slice(&raster.segment);
@@ -261,7 +273,10 @@ pub(crate) fn ct_paint(
     if line.is_empty() {
         return Ok(());
     }
-    let axes = axes.as_ref().map(|buffer| points(buffer, "axes")).transpose()?;
+    let axes = axes
+        .as_ref()
+        .map(|buffer| points(buffer, "axes"))
+        .transpose()?;
     let section = match &axes {
         Some(axes) if ratio > 1.0 => {
             if axes.len() != line.len() {
