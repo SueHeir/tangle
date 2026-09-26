@@ -17,6 +17,75 @@ pub fn segment_distance(p: [f64; 3], a: [f64; 3], b: [f64; 3]) -> f64 {
     (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
 }
 
+/// A fit's cross-section, for drawing it: round, or an oval whose long
+/// semi-axis is `ratio` times the fit's radius (its short one), lying along
+/// `axes` (one unit vector per node, across the centerline, consecutive
+/// ones pointing the same way).
+#[derive(Clone, Copy, Debug)]
+pub enum Section<'a> {
+    Round,
+    Oval { ratio: f64, axes: &'a [[f64; 3]] },
+}
+
+impl Section<'_> {
+    /// How much farther than a round section's the section reaches.
+    pub fn stretch(&self) -> f64 {
+        match self {
+            Section::Round => 1.0,
+            Section::Oval { ratio, .. } => ratio.max(1.0),
+        }
+    }
+
+    /// The distance from `p` to segment `s` (nodes `a`, `b`), with the offset
+    /// along an oval's long axis divided by its ratio: an oval of short
+    /// semi-axis r then reads as a round fiber of radius r (the long axis at
+    /// the nearest point is interpolated between the two nodes', less its
+    /// part along the segment).
+    #[inline]
+    pub fn distance(&self, p: [f64; 3], a: [f64; 3], b: [f64; 3], s: usize) -> f64 {
+        let Section::Oval { ratio, axes } = *self else {
+            return segment_distance(p, a, b);
+        };
+        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
+        let length2 = dot(ab, ab);
+        let t = if length2 <= 1e-12 {
+            0.0
+        } else {
+            (dot(ap, ab) / length2).clamp(0.0, 1.0)
+        };
+        let d = [ap[0] - t * ab[0], ap[1] - t * ab[1], ap[2] - t * ab[2]];
+        let (la, lb) = (axes[s], axes[(s + 1).min(axes.len() - 1)]);
+        let mut long = [
+            la[0] + t * (lb[0] - la[0]),
+            la[1] + t * (lb[1] - la[1]),
+            la[2] + t * (lb[2] - la[2]),
+        ];
+        if length2 > 1e-12 {
+            let along = dot(long, ab) / length2;
+            long = [
+                long[0] - along * ab[0],
+                long[1] - along * ab[1],
+                long[2] - along * ab[2],
+            ];
+        }
+        let norm = dot(long, long).sqrt();
+        let squared = dot(d, d);
+        if norm < 1e-9 {
+            return squared.sqrt();
+        }
+        let u = dot(d, long) / norm;
+        (squared - u * u + (u / ratio) * (u / ratio))
+            .max(0.0)
+            .sqrt()
+    }
+}
+
+#[inline]
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
 /// Voxel index box `[low, high)` (`x, y, z`) around segment `ab` grown by `pad`, clipped to the volume.
 fn segment_box(
     shape: Shape,
@@ -62,6 +131,20 @@ pub fn rasterize(
     reach: &[f64],
     signed: bool,
 ) -> Raster {
+    rasterize_sections(shape, lines, radii, reach, signed, None)
+}
+
+/// `rasterize` with each line's cross-section (`None`: all round). An oval
+/// fit's distances are `Section::distance`, so its radius and reach are in
+/// units of its short semi-axis.
+pub fn rasterize_sections(
+    shape: Shape,
+    lines: &[Vec<[f64; 3]>],
+    radii: &[f64],
+    reach: &[f64],
+    signed: bool,
+    sections: Option<&[Section]>,
+) -> Raster {
     let n = voxel_count(shape);
     let s = strides(shape);
     let mut best = vec![f64::INFINITY; n];
@@ -71,14 +154,15 @@ pub fn rasterize(
     for (f, line) in lines.iter().enumerate() {
         let limit = reach[f];
         let key = if signed { radii[f] } else { 0.0 };
-        for pair in line.windows(2) {
+        let section = sections.map_or(Section::Round, |all| all[f]);
+        for (k_seg, pair) in line.windows(2).enumerate() {
             let (a, b) = (pair[0], pair[1]);
-            if let Some((low, high)) = segment_box(shape, a, b, limit + 0.5) {
+            if let Some((low, high)) = segment_box(shape, a, b, limit * section.stretch() + 0.5) {
                 for k in low[2]..high[2] {
                     for j in low[1]..high[1] {
                         for i in low[0]..high[0] {
                             let p = [i as f64 + 0.5, j as f64 + 0.5, k as f64 + 0.5];
-                            let distance = segment_distance(p, a, b);
+                            let distance = section.distance(p, a, b, k_seg);
                             if distance > limit {
                                 continue;
                             }
@@ -113,6 +197,28 @@ pub fn paint(
     value: i32,
     only_empty: bool,
 ) {
+    paint_section(
+        target,
+        shape,
+        line,
+        reach,
+        value,
+        only_empty,
+        Section::Round,
+    );
+}
+
+/// `paint` of a line with the given cross-section (`reach` in units of an
+/// oval's short semi-axis).
+pub fn paint_section(
+    target: &mut [i32],
+    shape: Shape,
+    line: &[[f64; 3]],
+    reach: f64,
+    value: i32,
+    only_empty: bool,
+    section: Section,
+) {
     let s = strides(shape);
     let doubled;
     let line = if line.len() == 1 {
@@ -121,15 +227,17 @@ pub fn paint(
     } else {
         line
     };
-    for pair in line.windows(2) {
+    for (segment, pair) in line.windows(2).enumerate() {
         let (a, b) = (pair[0], pair[1]);
-        if let Some((low, high)) = segment_box(shape, a, b, reach + 0.5) {
+        if let Some((low, high)) = segment_box(shape, a, b, reach * section.stretch() + 0.5) {
             for k in low[2]..high[2] {
                 for j in low[1]..high[1] {
                     for i in low[0]..high[0] {
                         let p = [i as f64 + 0.5, j as f64 + 0.5, k as f64 + 0.5];
                         let index = k * s[0] + j * s[1] + i;
-                        if (only_empty && target[index] != 0) || segment_distance(p, a, b) > reach {
+                        if (only_empty && target[index] != 0)
+                            || section.distance(p, a, b, segment) > reach
+                        {
                             continue;
                         }
                         target[index] = value;
@@ -158,6 +266,28 @@ mod tests {
         assert_eq!(raster.segment[3], 1);
         let plain = rasterize(shape, &lines, &[1.0, 4.0], &[6.0, 6.0], false);
         assert_eq!(plain.labels[3], 1);
+    }
+
+    #[test]
+    fn an_oval_section_reaches_along_its_long_axis() {
+        let shape = [21, 21, 21];
+        // A line along x through the middle, long axis along y, 2:1.
+        let line = vec![[2.5, 10.5, 10.5], [18.5, 10.5, 10.5]];
+        let axes = [[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]];
+        let oval = Section::Oval {
+            ratio: 2.0,
+            axes: &axes,
+        };
+        let raster =
+            rasterize_sections(shape, &[line.clone()], &[3.0], &[3.0], false, Some(&[oval]));
+        let at = |x: usize, y: usize, z: usize| raster.labels[z * 21 * 21 + y * 21 + x];
+        assert_eq!(at(10, 15, 10), 1); // 5 along the long axis: inside 6
+        assert_eq!(at(10, 17, 10), 0); // 7 along it: outside
+        assert_eq!(at(10, 10, 14), 0); // 4 along the short one: outside 3
+        assert_eq!(at(10, 10, 12), 1);
+        let mut target = vec![0i32; 21 * 21 * 21];
+        paint_section(&mut target, shape, &line, 3.0, 1, false, oval);
+        assert_eq!(target, raster.labels);
     }
 
     #[test]

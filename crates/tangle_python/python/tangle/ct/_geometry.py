@@ -56,7 +56,9 @@ def cross_frames(line: np.ndarray, nodes: int) -> tuple[np.ndarray, np.ndarray] 
 def sample_image(image: np.ndarray, points: np.ndarray, *, fill: float = 0.0) -> np.ndarray:
     """Trilinear samples of a ``(z, y, x)`` array at voxel coordinates ``(x, y, z)``.
 
-    As ``map_coordinates(order=1, mode="constant", cval=fill)``; in Rust.
+    Voxel ``(k, j, i)`` spans ``i … i + 1`` (and so on), so its value is read at
+    ``(i + 0.5, j + 0.5, k + 0.5)``: ``map_coordinates(order=1, mode="constant",
+    cval=fill)`` at the point minus 0.5; in Rust.
     """
     from . import _native
 
@@ -206,16 +208,20 @@ def segment_lines(lines: list[np.ndarray]) -> np.ndarray:
     return np.repeat(np.arange(len(lines)), counts)
 
 
-def paint(target: np.ndarray, line: np.ndarray, reach: float, value: int, *, only_empty: bool = False) -> None:
+def paint(
+    target: np.ndarray, line: np.ndarray, reach: float, value: int, *, only_empty: bool = False, section=None
+) -> None:
     """Set voxels of ``target`` within ``reach`` of polyline ``line`` to ``value`` in place.
 
     Works on per-segment windows, so it costs nothing proportional to the
-    whole volume (unlike :func:`rasterize`); in Rust.
+    whole volume (unlike :func:`rasterize`); in Rust. ``section``: an oval's
+    ``(ratio, long axes)`` (see :func:`rasterize`), ``reach`` then in units
+    of its short semi-axis.
     """
     from . import _native
 
     work = target if target.dtype == np.int32 and target.flags.c_contiguous else np.ascontiguousarray(target, dtype=np.int32)
-    _native.paint(work, line, reach, value, only_empty=only_empty)
+    _native.paint(work, line, reach, value, only_empty=only_empty, section=section)
     if work is not target:
         target[...] = work
 
@@ -249,6 +255,7 @@ def rasterize(
     *,
     reach: float | np.ndarray | None = None,
     signed: bool = False,
+    sections: list | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Nearest-fiber ownership of every voxel within ``reach`` of a centerline.
 
@@ -258,9 +265,15 @@ def rasterize(
     ownership then follows the nearest capsule surface as in Tangle's exporter.
     ``segment`` is a global segment index (``-1`` = unowned); segment ``s`` of
     fiber ``f`` is ``offsets[f] + s`` with offsets from the node counts minus one.
+
+    ``sections``: per line, None (round) or an oval's ``(ratio, axes)``,
+    its long semi-axis ``ratio`` times its radius (the short one) along
+    ``axes``, one unit vector per node. An oval's distances have their part
+    along the long axis divided by ``ratio``, so its radius and reach are
+    in units of its short semi-axis.
     """
     from . import _native
 
     radii = np.asarray(radii, dtype=np.float64)
     reaches = radii if reach is None else np.broadcast_to(np.asarray(reach, dtype=np.float64), radii.shape)
-    return _native.rasterize(shape, centerlines, radii, reaches, signed)
+    return _native.rasterize(shape, centerlines, radii, reaches, signed, sections)

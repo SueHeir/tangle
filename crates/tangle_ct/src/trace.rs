@@ -51,6 +51,11 @@ pub struct TraceSettings {
     pub radius: f64,
     pub min_bend_radius: f64,
     pub step: f64,
+    /// Recentering weighs each cross-section sample by how far it is above
+    /// this fraction of the brightest one (0: by its value). Above 0 a
+    /// trace follows its own fiber's axis past a touching neighbour rather
+    /// than the centroid of both.
+    pub peak_floor: f64,
 }
 
 /// Traces fibers through a normalized image (void 0, fiber 1).
@@ -61,6 +66,7 @@ pub struct Tracer<'a> {
     radius: f64,
     pub step: f64,
     max_turn: f64,
+    peak_floor: f64,
     window: Vec<[f64; 2]>,
     core: Vec<[f64; 2]>,
     upper: Point,
@@ -77,6 +83,7 @@ impl<'a> Tracer<'a> {
             radius,
             min_bend_radius,
             step,
+            peak_floor,
         } = settings;
         Self {
             image,
@@ -85,6 +92,7 @@ impl<'a> Tracer<'a> {
             radius,
             step,
             max_turn: (step / min_bend_radius.max(1e-9)).min(std::f64::consts::FRAC_PI_4),
+            peak_floor,
             window: disk_offsets(1.4 * radius, 0.5),
             core: disk_offsets((0.5 * radius).max(0.75), 0.5),
             upper: [shape[2] as f64, shape[1] as f64, shape[0] as f64],
@@ -128,8 +136,14 @@ impl<'a> Tracer<'a> {
         let mut total = 0.0;
         let mut shift = [0.0; 3];
         let mut weights = Vec::with_capacity(points.len());
-        for &p in &points {
-            let mut weight = self.sample(p).max(0.0);
+        let values: Vec<f64> = points.iter().map(|&p| self.sample(p)).collect();
+        let floor = if self.peak_floor > 0.0 {
+            self.peak_floor * values.iter().cloned().fold(0.0, f64::max)
+        } else {
+            0.0
+        };
+        for (&p, &value) in points.iter().zip(&values) {
+            let mut weight = (value - floor).max(0.0);
             let owner =
                 voxel_of(self.shape, p).map_or(0, |[k, j, i]| claimed[k * s[0] + j * s[1] + i]);
             if owner > 0 && owner != own_label {
@@ -309,6 +323,66 @@ pub fn ridge_seeds(
         .collect()
 }
 
+/// Voxel-center points where the image is fiber (at least 0.5), the tube
+/// strength (`HessianField::tube_strength`) is at least `min_strength` and
+/// no lower than at any of the 26 neighbours, and `exclude` is 0; strongest
+/// first, ties in raster order.
+pub fn bright_seeds(
+    image: &[f32],
+    strength: &[f32],
+    shape: Shape,
+    exclude: &[i32],
+    min_strength: f32,
+) -> Vec<Point> {
+    let s = strides(shape);
+    let (nz, ny, nx) = (shape[0] as isize, shape[1] as isize, shape[2] as isize);
+    let mut seeds: Vec<(usize, f32)> = Vec::new();
+    for v in 0..image.len() {
+        let value = strength[v];
+        if value < min_strength || image[v] < 0.5 || exclude[v] != 0 {
+            continue;
+        }
+        let (k, j, i) = (
+            (v / s[0]) as isize,
+            ((v / s[1]) % shape[1]) as isize,
+            (v % shape[2]) as isize,
+        );
+        let mut peak = true;
+        'around: for dk in -1..=1isize {
+            for dj in -1..=1isize {
+                for di in -1..=1isize {
+                    let (kk, jj, ii) = (k + dk, j + dj, i + di);
+                    if (dk, dj, di) == (0, 0, 0)
+                        || kk < 0
+                        || jj < 0
+                        || ii < 0
+                        || kk >= nz
+                        || jj >= ny
+                        || ii >= nx
+                    {
+                        continue;
+                    }
+                    if strength[kk as usize * s[0] + jj as usize * s[1] + ii as usize] > value {
+                        peak = false;
+                        break 'around;
+                    }
+                }
+            }
+        }
+        if peak {
+            seeds.push((v, value));
+        }
+    }
+    seeds.sort_by(|a, b| b.1.total_cmp(&a.1)); // stable
+    seeds
+        .into_iter()
+        .map(|(v, _)| {
+            let (k, j, i) = (v / s[0], (v / s[1]) % shape[1], v % shape[2]);
+            [i as f64 + 0.5, j as f64 + 0.5, k as f64 + 0.5]
+        })
+        .collect()
+}
+
 /// What `trace_fibers` needs besides the image and Hessian.
 #[derive(Clone, Copy, Debug)]
 pub struct FiberSearch {
@@ -318,6 +392,13 @@ pub struct FiberSearch {
     pub label_offset: i32,
     pub max_fibers: Option<usize>,
     pub seed_depth_radii: f64,
+    /// After the depth seeds, also seed on `bright_seeds` of the Hessian's
+    /// tube strength at least this high (None: depth seeds only). Packed
+    /// fibers share one deep foreground ridge, so only the bundle's middle
+    /// fiber gets a depth seed; each of them is a tube-strength peak.
+    pub bright_seed_strength: Option<f32>,
+    /// Each found fiber claims the voxels within this many radii of it.
+    pub claim_radii: f64,
 }
 
 /// Traces fibers from ridge seeds not yet explained by `claimed`, which is
@@ -346,25 +427,44 @@ pub fn trace_fibers(
         search.seed_depth_radii,
     );
     let mut fibers: Vec<Vec<Point>> = Vec::new();
-    for seed in seeds {
+    let follow = |seed: Point, claimed: &mut [i32], fibers: &mut Vec<Vec<Point>>| -> bool {
         let [k, j, i] = voxel_of(shape, seed).expect("seeds are voxel centers");
         if claimed[k * s[0] + j * s[1] + i] != 0 {
-            continue;
+            return false;
         }
         let line = drop_claimed(&tracer.trace(seed, max_steps, claimed), claimed, shape, 0.3);
         let label = search.label_offset + fibers.len() as i32 + 1;
         if line.len() >= 2 && polyline_length(&line) >= search.min_length {
             let line = resample(&line, search.node_spacing);
-            paint(claimed, shape, &line, 1.1 * radius, label, false);
+            paint(
+                claimed,
+                shape,
+                &line,
+                search.claim_radii * radius,
+                label,
+                false,
+            );
             fibers.push(line);
-            if search.max_fibers.is_some_and(|m| fibers.len() >= m) {
-                break;
-            }
+            search.max_fibers.is_some_and(|m| fibers.len() >= m)
         } else {
             // Mark the rejected trace (or the seed) so nearby seeds on the
             // same blob are not traced again.
             let rejected = if line.is_empty() { vec![seed] } else { line };
             paint(claimed, shape, &rejected, 0.75 * radius, -1, true);
+            false
+        }
+    };
+    for seed in seeds {
+        if follow(seed, claimed, &mut fibers) {
+            return fibers;
+        }
+    }
+    if let Some(min_strength) = search.bright_seed_strength {
+        let strength = hessian.tube_strength();
+        for seed in bright_seeds(image, &strength, shape, claimed, min_strength) {
+            if follow(seed, claimed, &mut fibers) {
+                return fibers;
+            }
         }
     }
     fibers
@@ -406,12 +506,15 @@ mod tests {
                 radius: 3.0,
                 min_bend_radius: 30.0,
                 step: 1.5,
+                peak_floor: 0.0,
             },
             min_length: 10.0,
             node_spacing: 3.0,
             label_offset: 0,
             max_fibers: None,
             seed_depth_radii: 0.5,
+            bright_seed_strength: None,
+            claim_radii: 1.1,
         };
         let fibers = trace_fibers(&image, shape, &hessian, &mut claimed, &edt, &peak, search);
         assert_eq!(fibers.len(), 1, "{fibers:?}");
@@ -424,5 +527,74 @@ mod tests {
         assert!(fibers[0]
             .iter()
             .all(|p| (p[1] - 12.0).abs() < 1.0 && (p[2] - 12.0).abs() < 1.0));
+    }
+
+    #[test]
+    fn bright_seeds_find_every_fiber_of_a_packed_bundle() {
+        // Seven rods of radius 3 along x, hexagonally packed, at grey 1 over
+        // a 0.7 fill across the bundle: one foreground blob, one deep ridge.
+        let shape = [40, 40, 64];
+        let (r, pitch, center) = (3.0, 6.2, 20.0);
+        let mut axes = vec![[center, center]];
+        for k in 0..6 {
+            let a = k as f64 * std::f64::consts::PI / 3.0;
+            axes.push([center + pitch * a.cos(), center + pitch * a.sin()]);
+        }
+        let mut image = vec![0.0f32; shape[0] * shape[1] * shape[2]];
+        let s = strides(shape);
+        for k in 0..shape[0] {
+            for j in 0..shape[1] {
+                for i in 6..58 {
+                    let (y, z) = (j as f64 + 0.5, k as f64 + 0.5);
+                    let hull = ((y - center).powi(2) + (z - center).powi(2)).sqrt() < pitch + r;
+                    let rod = axes
+                        .iter()
+                        .any(|[ay, az]| ((y - ay).powi(2) + (z - az).powi(2)).sqrt() < r);
+                    image[k * s[0] + j * s[1] + i] = if rod {
+                        1.0
+                    } else if hull {
+                        0.7
+                    } else {
+                        0.0
+                    };
+                }
+            }
+        }
+        let hessian = HessianField::new(&image, shape, 1.8);
+        let foreground: Vec<bool> = image.iter().map(|&v| v > 0.5).collect();
+        let edt = crate::edt::distance_transform(&foreground, shape);
+        let peak = crate::filter::maximum_filter3(&edt, shape);
+        let run = |bright: Option<f32>| {
+            let mut claimed = vec![0i32; image.len()];
+            let search = FiberSearch {
+                trace: TraceSettings {
+                    radius: r,
+                    min_bend_radius: 30.0,
+                    step: 1.5,
+                    peak_floor: 0.0,
+                },
+                min_length: 20.0,
+                node_spacing: 3.0,
+                label_offset: 0,
+                max_fibers: None,
+                seed_depth_radii: 0.5,
+                bright_seed_strength: bright,
+                claim_radii: 1.1,
+            };
+            trace_fibers(&image, shape, &hessian, &mut claimed, &edt, &peak, search)
+        };
+        let found = |fibers: &[Vec<Point>]| {
+            axes.iter()
+                .filter(|[ay, az]| {
+                    fibers.iter().any(|line| {
+                        let middle = line[line.len() / 2];
+                        (middle[1] - ay).abs() < 1.5 && (middle[2] - az).abs() < 1.5
+                    })
+                })
+                .count()
+        };
+        assert!(found(&run(None)) < 7);
+        let fibers = run(Some(0.02));
+        assert_eq!(found(&fibers), 7, "{} fibers", fibers.len());
     }
 }

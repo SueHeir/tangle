@@ -42,6 +42,8 @@ def node_confidence(
     previous: list[np.ndarray] | None = None,
     ring: int = 8,
     thickness_tolerance: float = 0.3,
+    surround_weight: float = 1.0,
+    surround_radii: np.ndarray | None = None,
 ) -> tuple[list[np.ndarray], dict[str, Any]]:
     """Confidence of every node of ``lines``, and a summary.
 
@@ -52,6 +54,11 @@ def node_confidence(
     cross-section radius does (``_fit._Fitter.classify``). Returns
     one array per fiber with a value in [0, 1] per node, and a summary with
     each fiber's mean and minimum and the mean of every component.
+
+    ``surround_weight`` is the surround part's exponent in the product (1
+    full, 0 left out), and ``surround_radii`` (default ``radii``) how far out
+    each fiber's surround ring sits, less ``margin`` + 1: an oval fiber's long
+    semi-axis, so the ring does not land on the fiber's own flanks.
     """
     from . import _native
 
@@ -62,6 +69,7 @@ def node_confidence(
         image, depth, lines, radii, spacing=spacing, margin=margin,
         thickness_margin=margin if thickness_margin is None else thickness_margin, ring=ring,
         thickness_tolerance=thickness_tolerance, previous=previous,
+        surround_weight=surround_weight, surround_radii=surround_radii,
     )
     parts = dict(zip(COMPONENTS, component_parts))
 
@@ -82,6 +90,7 @@ def node_confidence(
         "fiber_mean": fiber_mean,
         "fiber_min": fiber_min,
         "without_stability": settled,
+        "parts": parts,  # per component, per fiber, per sample along it (spacing apart)
     }
     return per_node, summary
 

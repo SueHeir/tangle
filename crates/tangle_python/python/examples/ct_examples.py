@@ -67,6 +67,19 @@ Examples:
   phase-contrast halo (``synthetic_ct(phase_contrast=...)``): a shallow dark
   band outside every surface that noise breaks into spots, darkest in the
   gaps between touching fibers.
+* ``scanner_two_types``: two_types' fibers scanned by a simulated scanner
+  (``ct.Scanner``: projections, propagation phase contrast, detector blur,
+  photon noise, filtered back-projection), so the noise texture, blur and
+  edge fringes come from the acquisition, as in a real scan: 2 µm
+  resolution, and each fiber moving about 1 µm during the scan. Both types
+  are solid, the coarse ones a lighter material a bit over half as dense
+  as the fine ones.
+* ``bundled_two_types``: the fine fibers packed in bundles of nineteen, with
+  staggered ends, and the coarse ones loose, scanned as scanner_two_types
+  with the noise blotchy (correlated by the scintillator's blur).
+* ``oval_two_types``: two_types' fine fibers with flat oval coarse ones
+  (19 by 12 µm, the long axis in the fibers' plane), scanned as
+  scanner_two_types.
 * ``varied_1`` … ``varied_8``: fresh structures drawn from seeds, for
   checking the fitter on structures it was not tuned on: 8-16 µm fibers
   at 2.5-4.5 voxels radius, planar, aligned, biaxial and isotropic (two
@@ -97,7 +110,7 @@ import json
 import os
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -112,6 +125,11 @@ BACKEND = os.environ.get("TANGLE_BACKEND", "wgpu")
 MASK_LEVEL = 0.35  # of the way from void to fiber grey level: a generous threshold
 # "grey" (raw scan + profiles), "plain" (raw scan alone) or "mask" for every example; None: each example's own (grey by default)
 INPUT = os.environ.get("TANGLE_CT_INPUT")
+SETTINGS: dict = {}
+SNAPSHOTS = False  # --snapshots: an OVITO frame of every fit step in <output>/<example>/snapshots
+BROAD_RANGE = (0.33, 1.32)  # --input broad: the one range, as fractions of the brightest axis grey above void
+BEND_SCALE = 1.0  # --bend-scale: the fitter's min_bend_radius times this
+ROUND_SPECS = False  # --round-specs: fit oval fibers as round ones  # FitSettings overrides for every example (--set)
 BLUR = None  # scan blur (PSF sigma, voxels) for every example; None keeps each example's own
 DIFF_COLORS = {"missed": (230, 50, 50), "extra": (60, 120, 255), "wrong_fiber": (255, 200, 0)}
 FILES = ("raw.tif", "input.tif", "true.tif", "segment.tif", "diff.tif", "confidence.tif", "fit.json", "score.json")
@@ -136,12 +154,20 @@ class Example:
 # -- shared helpers -----------------------------------------------------------
 
 
-def relaxed_truth(cache: Path, cell: tangle.Cell, populations: list[tangle.FiberPopulation]) -> tangle.Assembly:
-    """Relax the populations once and cache the centerlines (the slow step)."""
+def relaxed_truth(cache: Path, cell: tangle.Cell, populations: list) -> tangle.Assembly:
+    """Relax the populations once and cache the centerlines (the slow step).
+
+    Each population is a ``tangle.FiberPopulation`` or a ready-made
+    ``(FiberCollection, Material)`` pair (see bundles).
+    """
     if not cache.exists():
         recipe = tangle.Recipe(cell)
         for index, population in enumerate(populations):
-            recipe.insert(tangle.generate_fiber_population(cell, population), name=f"truth {index}")
+            if isinstance(population, tangle.FiberPopulation):
+                fibers = tangle.generate_fiber_population(cell, population)
+            else:
+                fibers = population[0]
+            recipe.insert(fibers, name=f"truth {index}")
         started = time.perf_counter()
         run = recipe.run(
             tangle.RelaxationSettings(
@@ -150,23 +176,38 @@ def relaxed_truth(cache: Path, cell: tangle.Cell, populations: list[tangle.Fiber
         )
         print(f"  truth relaxed: {run} ({time.perf_counter() - started:.0f} s)")
         cache.parent.mkdir(parents=True, exist_ok=True)
-        counts = [population.count for population in populations]
-        cache.write_text(json.dumps({"counts": counts, "centerlines": run.centerlines()}) + "\n")
+        counts = [p.count if isinstance(p, tangle.FiberPopulation) else len(p[0]) for p in populations]
+        data = {"counts": counts, "centerlines": run.centerlines()}
+        if any(_material(p).is_oval for p in populations):
+            data["long_axes"] = run.assembly.long_axes()
+        cache.write_text(json.dumps(data) + "\n")
     data = json.loads(cache.read_text())
     data.setdefault("counts", [len(data["centerlines"])])  # single-population caches from older examples
     assembly = tangle.Assembly(cell)
     start = 0
     for population, count in zip(populations, data["counts"]):
         lines = data["centerlines"][start : start + count]
+        axes = data["long_axes"][start : start + count] if "long_axes" in data else None
         start += count
         # float32 GPU relaxation can end a hair past the bend limit, which
         # export_puma's validator rejects; render with a 1% looser limit.
-        material = population.material
+        material = _material(population)
         looser = tangle.Material(
-            material.name, diameter=material.diameter, min_bend_radius=0.99 * material.min_bend_radius
+            material.name, diameter=material.diameter, min_bend_radius=0.99 * material.min_bend_radius,
+            thickness=material.thickness,
         )
-        assembly.insert(tangle.FiberCollection.from_centerlines(lines, looser), name=material.name)
+        if material.is_oval:
+            collection = tangle.FiberCollection(material.name)
+            for line, axis in zip(lines, axes):
+                collection.add_fiber(line, looser, long_axis=axis)
+        else:
+            collection = tangle.FiberCollection.from_centerlines(lines, looser)
+        assembly.insert(collection, name=material.name)
     return assembly
+
+
+def _material(population) -> tangle.Material:
+    return population.material if isinstance(population, tangle.FiberPopulation) else population[1]
 
 
 def planar_population(material, count, seed, length, segments) -> tangle.FiberPopulation:
@@ -226,7 +267,26 @@ def long_fibers(cache: Path) -> Example:
     return Example(scan, spec, bend, end_error_report)
 
 
-def two_types(cache: Path, *, noisy: bool = False, halo: bool = False) -> Example:
+# A simulated scanner (ct.Scanner): photon noise, detector blur and filtered
+# back-projection, with a weakly absorbing, phase-shifting sample and a short
+# propagation distance, so the edges show phase fringes; a 2 µm resolution
+# softens the fibers, and each fiber moves about 1 µm during the scan. Both
+# fiber types are solid; the coarse fibers are a lighter material, a bit over
+# half as dense as the fine ones, so the fine fibers are the brightest thing
+# in the scan, each with a dark band just outside it, and the coarse ones
+# dim with a faint rim.
+SCANNER = ct.Scanner(
+    photons=1300,
+    fiber_attenuation=0.005,
+    resolution=2 * um,
+    delta_beta=(12.0, 9.0),
+    propagation=4.0,
+    fiber_motion=1 * um,
+)
+SCANNER_PROFILES = [(7 * um, ct.CrossSection()), (19 * um, ct.CrossSection(brightness=0.55))]
+
+
+def two_types(cache: Path, *, noisy: bool = False, halo: bool = False, scanner: bool = False) -> Example:
     voxel, cell_side, crop, length = 1.25 * um, 320 * um, 200 * um, (300 * um, 500 * um)
     fine = tangle.Material("fine_7um", diameter=7 * um, min_bend_radius=35 * um)
     coarse = tangle.Material("coarse_19um", diameter=19 * um, min_bend_radius=95 * um)
@@ -239,6 +299,9 @@ def two_types(cache: Path, *, noisy: bool = False, halo: bool = False) -> Exampl
         # correlated over about a voxel.
         profiles = [(7 * um, ct.CrossSection()), (19 * um, ct.CrossSection(brightness=0.45))]
         full = render_scan(truth, voxel, seed=21, profiles=profiles, noise=0.19, noise_correlation=0.9)
+    elif scanner:
+        # two_types' fibers scanned by a simulated scanner (see SCANNER).
+        full = render_scan(truth, voxel, seed=21, profiles=SCANNER_PROFILES, scanner=SCANNER)
     elif halo:
         # two_types' scan with a phase-contrast halo at unit strength (a
         # dark band outside every surface, deeper where surfaces face each
@@ -275,6 +338,118 @@ def noisy_two_types(cache: Path) -> Example:
 
 def halo_two_types(cache: Path) -> Example:
     return two_types(cache.with_name("two_types.json"), halo=True)  # the same fibers as two_types
+
+
+def scanner_two_types(cache: Path) -> Example:
+    return two_types(cache.with_name("two_types.json"), scanner=True)  # the same fibers as two_types
+
+
+def oval_two_types(cache: Path) -> Example:
+    """scanner_two_types with flat oval coarse fibers, 19 by 12 µm, their long axis in the fibers' plane."""
+    voxel, cell_side, crop, length = 1.25 * um, 320 * um, 200 * um, (300 * um, 500 * um)
+    fine = tangle.Material("fine_7um", diameter=7 * um, min_bend_radius=35 * um)
+    coarse = tangle.Material("coarse_19x12um", diameter=19 * um, min_bend_radius=95 * um, thickness=12 * um)
+    cell = tangle.Cell([cell_side] * 3, periodic="xy")
+    truth = relaxed_truth(
+        cache, cell, [planar_population(fine, 106, 21, length, 16), planar_population(coarse, 22, 22, length, 16)]
+    )
+    full = render_scan(truth, voxel, seed=21, profiles=SCANNER_PROFILES, scanner=SCANNER)
+    low = int(round((cell_side - crop) / 2 / voxel))
+    scan = full.crop((low,) * 3, (low + int(round(crop / voxel)),) * 3)
+    specs = [
+        ct.FiberSpec(diameter=7 * um, min_bend_radius=35 * um, length=400 * um, name="fine_7um"),
+        ct.FiberSpec(diameter=19 * um, min_bend_radius=95 * um, length=400 * um, name="coarse_19x12um", **_oval(12 * um)),
+    ]
+    return Example(scan, specs, 35 * um, lambda fit, scan: {"per_type": ct.score(fit, scan)["per_type"]})
+
+
+def _oval(thickness: float) -> dict:
+    """FiberSpec's ``thickness``, where this tangle.ct takes one (not with --round-specs)."""
+    if ROUND_SPECS or "thickness" not in ct.FiberSpec.__dataclass_fields__:
+        return {}
+    return {"thickness": thickness}
+
+
+def _max_curvature(line: np.ndarray) -> float:
+    """The largest turning angle per unit length at a polyline's interior nodes."""
+    if len(line) < 3:
+        return 0.0
+    d = np.diff(line, axis=0)
+    length = np.linalg.norm(d, axis=1)
+    cos = np.einsum("ij,ij->i", d[:-1], d[1:]) / np.maximum(length[:-1] * length[1:], 1e-30)
+    return float(np.max(np.arccos(np.clip(cos, -1.0, 1.0)) / np.maximum(0.5 * (length[:-1] + length[1:]), 1e-30)))
+
+
+def bundles(cell: tangle.Cell, leaders: tangle.FiberPopulation, per_bundle: int):
+    """(FiberCollection, material) for relaxed_truth: a bundle of ``per_bundle`` fibers along each of ``leaders``.
+
+    Each bundle follows one fiber drawn from ``leaders``, its members
+    hexagonally packed around it (a center and a ring of six, then the next
+    ring), a hair apart, with their ends staggered by up to a fifth of the
+    length, as the filaments of a yarn or tow lie.
+    """
+    material, seed = leaders.material, leaders.seed
+    rng = np.random.default_rng(seed)
+    pitch = 1.02 * material.diameter
+    slots = [(0.0, 0.0)]
+    ring = 1
+    while len(slots) < per_bundle:
+        corners = [ring * np.array([np.cos(a), np.sin(a)]) for a in np.arange(6) * np.pi / 3]
+        for k in range(6):
+            for step in range(ring):
+                slots.append(tuple(corners[k] + (corners[(k + 1) % 6] - corners[k]) * step / ring))
+        ring += 1
+    # A member offset toward the inside of a bend curves more than the leader
+    # (radius R - offset), so the leader bends no tighter than the members'
+    # limit plus the widest offset, with room for the frame turning along the leader.
+    reach = pitch * max(float(np.hypot(a, b)) for a, b in slots[:per_bundle])
+    stiff = tangle.Material(material.name, diameter=material.diameter, min_bend_radius=material.min_bend_radius + 1.5 * reach)
+    leaders = tangle.generate_fiber_population(cell, leaders.replace(material=stiff))
+    bottom, top = 0.5 * material.diameter, cell.lengths[2] - 0.5 * material.diameter
+    lines = []
+    for leader in leaders.centerlines():
+        path = np.asarray(leader)
+        tangent = np.gradient(path, axis=0)
+        tangent /= np.linalg.norm(tangent, axis=1, keepdims=True)
+        # Across the bundle: one axis toward z (out of the fibers' plane), one in it.
+        up = np.array([0.0, 0.0, 1.0]) - tangent[:, 2:3] * tangent
+        up /= np.linalg.norm(up, axis=1, keepdims=True)
+        side = np.cross(tangent, up)
+        for a, b in slots[:per_bundle]:
+            member = path + pitch * (a * side + b * up)
+            cut = rng.integers(0, len(member) // 10 + 1, size=2)
+            member = member[cut[0] : len(member) - cut[1]]
+            # Clipping a member to the cell would kink it, so members that
+            # leave it or bend past the limit (the frame turns) are left out.
+            if len(member) < 2 or member[:, 2].min() < bottom or member[:, 2].max() > top:
+                continue
+            if _max_curvature(member) > 0.95 / material.min_bend_radius:
+                continue
+            lines.append(member.tolist())
+    return tangle.FiberCollection.from_centerlines(lines, material), material
+
+
+def bundled_two_types(cache: Path) -> Example:
+    """two_types with the fine fibers in bundles of nineteen, scanned by SCANNER with blotchy noise."""
+    voxel, cell_side, crop, length = 1.25 * um, 320 * um, 200 * um, (300 * um, 500 * um)
+    fine = tangle.Material("fine_7um", diameter=7 * um, min_bend_radius=35 * um)
+    coarse = tangle.Material("coarse_19um", diameter=19 * um, min_bend_radius=95 * um)
+    cell = tangle.Cell([cell_side] * 3, periodic="xy")
+    truth = relaxed_truth(
+        cache, cell, [bundles(cell, planar_population(fine, 6, 23, length, 16), 19), planar_population(coarse, 14, 22, length, 16)]
+    )
+    # The scintillator spreads each counted photon over about a pixel, so the
+    # noise comes out blotchy instead of pixel to pixel; that blur also
+    # averages the noise down, so fewer photons keep the same contrast to noise.
+    scanner = replace(SCANNER, noise_blur=1.0, photons=56)
+    full = render_scan(truth, voxel, seed=23, profiles=SCANNER_PROFILES, scanner=scanner)
+    low = int(round((cell_side - crop) / 2 / voxel))
+    scan = full.crop((low,) * 3, (low + int(round(crop / voxel)),) * 3)
+    specs = [
+        ct.FiberSpec(diameter=7 * um, min_bend_radius=35 * um, length=400 * um, name="fine_7um"),
+        ct.FiberSpec(diameter=19 * um, min_bend_radius=95 * um, length=400 * um, name="coarse_19um"),
+    ]
+    return Example(scan, specs, 35 * um, lambda fit, scan: {"per_type": ct.score(fit, scan)["per_type"]})
 
 
 BOX = 150 * um
@@ -546,6 +721,9 @@ EXAMPLES: dict[str, Callable[[Path], Example]] = {
     "two_types": two_types,
     "noisy_two_types": noisy_two_types,
     "halo_two_types": halo_two_types,
+    "scanner_two_types": scanner_two_types,
+    "bundled_two_types": bundled_two_types,
+    "oval_two_types": oval_two_types,
     **{
         f"scenario_{name}": scenario(lines, SCENARIO_LENGTH.get(name, 400 * um))
         for name, lines in SCENARIOS.items()
@@ -566,6 +744,165 @@ EXAMPLES["scenario_dense_crossing"] = scenario(
 VARIED = [f"varied_{index}" for index in range(1, VARIED_COUNT + 1)]
 EXAMPLES.update({name: varied(index) for index, name in enumerate(VARIED, start=1)})
 
+
+
+# -- scanned structures -----------------------------------------------------------
+#
+# The test loop on simulated scans: ``scanned_<n>`` draws a structure and a
+# scanner from seed n (one or two fiber types, loose or in bundles, planar,
+# aligned or biaxial, and the scanner's photons, resolution, motion, phase and
+# noise grain around SCANNER's), scans it with ct.Scanner and fits it. Tune on
+# ``scanned_1`` … ``scanned_16`` and check on ``scanned_101`` … (``--scanned``),
+# with ``scanned_201`` … the same with flat oval coarse fibers (``--scanned oval``),
+# so a fix that only suits the tuning set shows up. 160 voxels a side.
+
+SCANNED_VOXELS = 160
+SCANNED_TUNE = range(1, 17)
+SCANNED_CHECK = range(101, 109)
+SCANNED_OVAL = range(201, 209)  # as the others, with flat oval coarse fibers
+
+
+def scanned_settings(index: int) -> dict:
+    """The structure and scanner ``scanned_<index>`` uses (lengths in µm)."""
+    rng = np.random.default_rng(5000 + index)
+    voxel = round(float(rng.uniform(1.0, 1.5)), 3)
+    side = SCANNED_VOXELS * voxel
+    fine = round(float(rng.uniform(5.0, 9.0)), 1)
+    coarse = round(float(rng.uniform(14.0, 22.0)), 1) if rng.random() < 0.7 else None
+    orientation = ["planar", "planar", "aligned", "biaxial"][int(rng.integers(4))]
+    blur = float(rng.choice([0.0, 0.5, 1.0]))
+    settings = {
+        "voxel_um": voxel,
+        "side_um": round(side, 1),
+        "orientation": orientation,
+        "tilt": round(float(rng.uniform(0.15, 0.45)), 2),
+        "fine_um": fine,
+        "fine_fraction": round(float(rng.uniform(0.04, 0.12)), 3),
+        "per_bundle": int(rng.choice([1, 7, 19])),
+        "coarse_um": coarse,
+        "coarse_fraction": round(float(rng.uniform(0.02, 0.06)), 3) if coarse else 0.0,
+        "coarse_brightness": round(float(rng.uniform(0.4, 0.7)), 2),
+        "length_fraction": [round(float(rng.uniform(0.5, 0.7)), 2), round(float(rng.uniform(0.75, 0.95)), 2)],
+        # The noise blur averages the noise down, so the photons drop with it to
+        # keep the contrast to noise (as bundled_two_types: 1300 / 56 at sigma 1).
+        "photons": round(SCANNER.photons * float(rng.uniform(0.6, 1.6)) / max(1.0, 23 * blur**2)),
+        "noise_blur": blur,
+        "resolution_um": round(float(rng.uniform(1.5, 3.0)), 2),
+        "fiber_motion_um": round(float(rng.uniform(0.0, 1.5)), 2),
+        "delta_beta": [round(float(rng.uniform(6.0, 16.0)), 1), round(float(rng.uniform(5.0, 12.0)), 1)],
+        "seed": 5000 + index,
+    }
+    if index in SCANNED_OVAL and coarse:
+        # The oval set flattens the coarse fibers (thickness over width), drawn
+        # apart and only here so the other sets keep their structures (and caches).
+        settings["coarse_thickness_ratio"] = round(float(np.random.default_rng(9000 + index).uniform(0.55, 0.8)), 2)
+    return settings
+
+
+DENSE_HARD = range(1, 19)
+
+
+def dense_hard_settings(index: int) -> dict:
+    """``dense_hard_<index>``: packed bundles of fine fibers and flat oval coarse
+    fibers at 1 µm voxels, each fiber with its own brightness (``brightness_spread``)
+    and dim coarse fibers, so no grey threshold separates the types."""
+    rng = np.random.default_rng(7000 + index)
+    return {
+        "voxel_um": 1.0,
+        "side_um": float(SCANNED_VOXELS),
+        "orientation": "planar",
+        "tilt": round(float(rng.uniform(0.15, 0.3)), 2),
+        "fine_um": 6.5,
+        "fine_fraction": round(float(rng.uniform(0.10, 0.13)), 3),
+        "per_bundle": int(rng.choice([7, 19])),
+        "coarse_um": 17.3,
+        "coarse_thickness_ratio": 0.8,
+        "coarse_fraction": round(float(rng.uniform(0.03, 0.05)), 3),
+        "coarse_brightness": 0.6,
+        "coarse_rim_um": 3.0,
+        "coarse_core": 0.6,
+        "brightness_spread": 0.25,
+        "length_fraction": [0.55, 0.9],
+        "photons": round(SCANNER.photons * float(rng.uniform(0.8, 1.2))),
+        "noise_blur": 0.0,
+        "resolution_um": 2.0,
+        "fiber_motion_um": 1.0,
+        "delta_beta": [12.0, 9.0],
+        "seed": 7000 + index,
+    }
+
+
+def scanned(index: int, settings: Callable[[int], dict] = scanned_settings) -> Callable[[Path], Example]:
+    def build(cache: Path) -> Example:
+        v = settings(index)
+        side = SCANNED_VOXELS * v["voxel_um"] * um
+        cell = tangle.Cell([side] * 3)
+        length = tuple(f * side for f in v["length_fraction"])
+        orientation = {
+            "planar": lambda: tangle.PlanarOrientation(max_tilt=v["tilt"]),
+            "aligned": lambda: tangle.AlignedOrientation("x", max_angle=v["tilt"]),
+            "biaxial": lambda: tangle.LayeredBiaxialOrientation(max_tilt=v["tilt"], seed=v["seed"]),
+        }[v["orientation"]]
+        types = [("fine", v["fine_um"], v["fine_fraction"], v["per_bundle"])]
+        if v["coarse_um"]:
+            types.append(("coarse", v["coarse_um"], v["coarse_fraction"], 1))
+        populations, specs, profiles = [], [], []
+        for offset, (kind, diameter_um, fraction, per_bundle) in enumerate(types):
+            diameter = diameter_um * um
+            bend = 5 * diameter
+            ratio = v.get("coarse_thickness_ratio", 1.0) if kind == "coarse" else 1.0
+            oval = {"thickness": ratio * diameter} if ratio < 1.0 else {}
+            material = tangle.Material(f"{kind}_{diameter_um:g}um", diameter=diameter, min_bend_radius=bend, **oval)
+            mean_length = 0.5 * sum(length)
+            count = max(int(round(fraction * side**3 / (np.pi * (diameter / 2) ** 2 * mean_length))), 4)
+            population = tangle.FiberPopulation(
+                material=material,
+                count=max(count // per_bundle, 1),
+                segments_per_fiber=max(4, int(length[0] / (1.25 * diameter))),
+                seed=v["seed"] + offset,
+                length=length,
+                curvature_amplitude=(0.15 * diameter, 0.6 * diameter),
+                orientation=orientation(),
+                position=(
+                    tangle.LayeredPosition(max(3, int(side / (4 * diameter))), jitter_fraction=0.25)
+                    if v["orientation"] == "biaxial"
+                    else tangle.UniformPosition()
+                ),
+            )
+            populations.append(bundles(cell, population, per_bundle) if per_bundle > 1 else population)
+            specs.append(ct.FiberSpec(
+                diameter=diameter, min_bend_radius=bend, length=mean_length, name=material.name,
+                **(_oval(oval["thickness"]) if oval else {}),
+            ))
+            shade = {"rim": v["coarse_rim_um"] * um, "core": v["coarse_core"]} if kind == "coarse" and v.get("coarse_rim_um") else {}
+            profiles.append((diameter, ct.CrossSection(brightness=1.0 if kind == "fine" else v["coarse_brightness"], **shade)))
+        key = hashlib.sha1(json.dumps(v, sort_keys=True).encode()).hexdigest()[:8]
+        truth = relaxed_truth(cache.with_name(f"{cache.stem}-{key}.json"), cell, populations)
+        scanner = replace(
+            SCANNER,
+            photons=v["photons"],
+            noise_blur=v["noise_blur"],
+            resolution=v["resolution_um"] * um,
+            fiber_motion=v["fiber_motion_um"] * um,
+            delta_beta=tuple(v["delta_beta"][: len(types)]),
+        )
+        scan = render_scan(
+            truth, v["voxel_um"] * um, seed=v["seed"], profiles=profiles, scanner=scanner,
+            **({"brightness_spread": v["brightness_spread"]} if v.get("brightness_spread") else {}),
+        )
+        smallest = min(s.min_bend_radius for s in specs)
+        return Example(
+            scan,
+            specs if len(specs) > 1 else specs[0],
+            smallest,
+            lambda fit, scan: {"settings": v, "per_type": ct.score(fit, scan)["per_type"]},
+        )
+
+    return build
+
+
+EXAMPLES.update({f"scanned_{index}": scanned(index) for index in [*SCANNED_TUNE, *SCANNED_CHECK, *SCANNED_OVAL]})
+EXAMPLES.update({f"dense_hard_{index}": scanned(index, dense_hard_settings) for index in DENSE_HARD})
 
 # -- the runner -----------------------------------------------------------------
 
@@ -701,11 +1038,25 @@ def fit_input(scan: ct.SyntheticScan, spec, input: str = "grey") -> tuple[np.nda
         return scan.volume, spec, seen
     specs = spec if isinstance(spec, list) else [spec]
     profiles = grey_profiles(scan, len(specs))
-    specs = [item.replace(profile=profile) for item, profile in zip(specs, profiles)]
     grey = gaussian_filter(np.asarray(scan.volume, dtype=np.float32), 0.7)
-    _, _, ranges = profile_levels(grey, [np.asarray(profile) for profile in profiles])
+    void, _, ranges = profile_levels(grey, [np.asarray(profile) for profile in profiles])
+    if input == "broad":
+        # One grey range for every type, from a third of the way to the
+        # brightest type's axis grey to a third past it, as one picks by eye
+        # from a histogram: no per-type ranges read off the true fibers.
+        peak = max(float(profile[0]) for profile in profiles) - void
+        ranges = [(void + BROAD_RANGE[0] * peak, void + BROAD_RANGE[1] * peak)] * len(specs)
+        specs = [item.replace(intensity=ranges[0]) for item in specs]
+    else:
+        specs = [item.replace(profile=profile) for item, profile in zip(specs, profiles)]
     seen, _, _ = range_image(scan.volume, ranges, denoise_sigma=0.7)
     return scan.volume, specs if isinstance(spec, list) else specs[0], seen
+
+
+def _bent(spec: ct.FiberSpec) -> ct.FiberSpec:
+    """``spec`` with its bend limit scaled by ``--bend-scale`` (the truth keeps its own)."""
+    bend = spec.min_bend_radius or 5.0 * spec.diameter
+    return spec.replace(min_bend_radius=BEND_SCALE * bend)
 
 
 def run(name: str, output: Path) -> dict:
@@ -715,8 +1066,13 @@ def run(name: str, output: Path) -> dict:
     h = scan.voxel_size
     source = INPUT or example.input
     volume, spec, seen = fit_input(scan, example.spec, source)
+    if BEND_SCALE != 1.0:
+        spec = [_bent(item) for item in spec] if isinstance(spec, list) else _bent(spec)
     started = time.perf_counter()
-    fit = ct.fit_fibers(volume, h, spec, ct.FitSettings(backend=BACKEND))
+    fit = ct.fit_fibers(
+        volume, h, spec, ct.FitSettings(backend=BACKEND, **SETTINGS),
+        snapshots=output / f".{name}-snapshots" if SNAPSHOTS else None,  # moved in below
+    )
     seconds = time.perf_counter() - started
 
     report = ct.score(fit, scan)
@@ -732,6 +1088,13 @@ def run(name: str, output: Path) -> dict:
     if folder.exists():
         shutil.rmtree(folder)
     folder.mkdir(parents=True)
+    if SNAPSHOTS:
+        from tangle.ct._snapshots import Snapshots
+
+        shutil.move(output / f".{name}-snapshots", folder / "snapshots")
+        truth = Snapshots(folder / "snapshots" / "truth", h, scan.volume.shape)  # the true fibers, to compare
+        truth.write("truth", scan.centerlines, scan.radii, scan.types)
+        truth.close()
     _write_stack(folder / "raw", scan.volume, h)
     _write_stack(folder / "input", (np.clip(seen, 0.0, 1.0) * 255).astype(np.uint8), h)
     _write_stack(folder / "true", ct.overlay_volume(scan.volume, scan.labels), h, rgb=True)
@@ -831,16 +1194,43 @@ def main() -> None:
     parser.add_argument("--list", action="store_true", help="list the examples and exit")
     parser.add_argument("--varied", action="store_true", help="also run the varied_* structures")
     parser.add_argument(
-        "--input", choices=("grey", "plain", "mask"), default=None,
-        help="fit every example from the raw scan with grey profiles, the raw scan alone, or a generous mask "
+        "--scanned", choices=("tune", "check", "oval", "all"), default=None,
+        help="run the scanned_* structures: the tuning set (1-16), the check set (101-108), the oval set (201-208) "
+        "or all",
+    )
+    parser.add_argument(
+        "--input", choices=("grey", "broad", "plain", "mask"), default=None,
+        help="fit every example from the raw scan with grey profiles, one broad grey range for every type, "
+        "the raw scan alone, or a generous mask "
         "(default: each example's own; grey, and plain for noisy_two_types)",
     )
     parser.add_argument(
         "--blur", type=float, default=None,
         help="render every scan with this blur (PSF sigma, voxels); default: each example's own (0.9; 0.7-1.2 for varied_*)",
     )
+    parser.add_argument(
+        "--round-specs", action="store_true", help="fit oval fibers as round (FiberSpec without thickness), to compare"
+    )
+    parser.add_argument(
+        "--snapshots", action="store_true",
+        help="save every fit step as an OVITO trajectory frame, in <output>/<example>/snapshots",
+    )
+    parser.add_argument(
+        "--bend-scale", type=float, default=1.0,
+        help="fit with every FiberSpec's min_bend_radius times this (the true structure keeps its own)",
+    )
+    parser.add_argument(
+        "--set", action="append", default=[], metavar="NAME=VALUE",
+        help="a FitSettings field for every example, e.g. --set bright_seed_strength=0.05 (repeatable)",
+    )
     args = parser.parse_args()
-    global INPUT, BLUR
+    for item in args.set:
+        name, _, value = item.partition("=")
+        SETTINGS[name] = json.loads(value)
+    global INPUT, BLUR, ROUND_SPECS, BEND_SCALE, SNAPSHOTS
+    ROUND_SPECS = args.round_specs
+    BEND_SCALE = args.bend_scale
+    SNAPSHOTS = args.snapshots
     if args.input:
         INPUT = args.input
     BLUR = args.blur
@@ -852,11 +1242,25 @@ def main() -> None:
         parser.error(f"unknown examples: {', '.join(unknown)} (see --list)")
     output = args.output or Path(os.environ.get("TANGLE_CT_OUTPUT", Path(__file__).with_name("output") / "ct"))
     output.mkdir(parents=True, exist_ok=True)
-    names = args.names or [name for name in EXAMPLES if name not in VARIED]
+    scanned_names = [name for name in EXAMPLES if name.startswith(("scanned_", "dense_hard_"))]
+    if args.scanned:
+        chosen = {
+            "tune": SCANNED_TUNE, "check": SCANNED_CHECK, "oval": SCANNED_OVAL,
+            "all": [*SCANNED_TUNE, *SCANNED_CHECK, *SCANNED_OVAL],
+        }[args.scanned]
+        names = args.names + [f"scanned_{index}" for index in chosen]
+    else:
+        names = args.names or [name for name in EXAMPLES if name not in VARIED and name not in scanned_names]
     if args.varied:
         names += [name for name in VARIED if name not in names]
     rows = [run(name, output) for name in names]
     write_summary(output, rows)
+    for label, chosen in (("tune", SCANNED_TUNE), ("check", SCANNED_CHECK)):
+        f1 = [row["centerline recall / precision / F1"].split("/")[2] for row in rows if row["example"] in
+              {f"scanned_{index}" for index in chosen}]
+        f1 = [float(value) for value in f1 if value != "-"]
+        if f1:
+            print(f"scanned {label}: mean F1 {np.mean(f1):.3f} over {len(f1)}")
     print(f"summary: {output / 'summary.md'}")
 
 

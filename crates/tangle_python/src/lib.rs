@@ -127,5 +127,7 @@ fn _tangle(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(ct::ct_render_grey, module)?)?;
     module.add_function(wrap_pyfunction!(ct::ct_node_confidence, module)?)?;
     module.add_function(wrap_pyfunction!(ct::ct_overlap, module)?)?;
+    module.add_function(wrap_pyfunction!(ct::ct_project, module)?)?;
+    module.add_function(wrap_pyfunction!(ct::ct_back_project, module)?)?;
     Ok(())
 }

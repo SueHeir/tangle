@@ -160,21 +160,20 @@ def matchings(
     for i, j in allowed:
         partners[i].append(j)
     found: list[list[tuple[int, int]]] = []
-
-    def walk(i: int, used: set[int], chosen: list[tuple[int, int]]) -> None:
-        if len(found) >= cap:
-            return
+    # Depth first with an explicit stack (a region can have more ports than
+    # Python's recursion limit), children pushed in reverse so they are
+    # visited in order: port i ending here first, then each partner.
+    stack: list[tuple[int, frozenset[int], tuple[tuple[int, int], ...]]] = [(0, frozenset(), ())]
+    while stack and len(found) < cap:
+        i, used, chosen = stack.pop()
         while i < count and i in used:
             i += 1
         if i >= count:
             found.append(list(chosen))
-            return
-        walk(i + 1, used | {i}, chosen)  # port i ends here
-        for j in partners[i]:
-            if j not in used:
-                walk(i + 1, used | {i, j}, chosen + [(i, j)])
-
-    walk(0, set(), [])
+            continue
+        children = [(i + 1, used | {i}, chosen)]  # port i ends here
+        children += [(i + 1, used | {i, j}, chosen + ((i, j),)) for j in partners[i] if j not in used]
+        stack.extend(reversed(children))
     return found
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -61,6 +62,13 @@ class FiberSpec:
         ``intensity`` is given), fits are judged by drawing them with their
         profiles and comparing with the scan, and a fiber's type follows
         the profile that matches the grey across it. See ``_grey``.
+    ``thickness``
+        Optional short width of an oval fiber (``diameter`` is then the long
+        width), as Tangle's ``Material(thickness=...)``. Such fibers are
+        traced, typed and relaxed by their short width and drawn as ovals,
+        each node's long axis read from the scan (where the cross-section is
+        flattest), so one fit covers the whole fiber instead of two round
+        ones side by side.
     """
 
     diameter: float
@@ -72,9 +80,17 @@ class FiberSpec:
     name: str = "ct fiber"
     intensity: tuple[float, float] | None = None
     profile: tuple[float, ...] | None = None
+    thickness: float | None = None
 
     def replace(self, **changes: Any) -> "FiberSpec":
         return replace(self, **changes)
+
+    @property
+    def ratio(self) -> float:
+        """Long width over short width: 1 for a round fiber."""
+        if self.thickness is None or self.thickness >= self.diameter:
+            return 1.0
+        return self.diameter / self.thickness
 
 
 @dataclass(frozen=True)
@@ -88,6 +104,136 @@ class FitSettings:
     """
 
     denoise_sigma_voxels: float = 0.7
+    # Also seed traces on the peaks of the Hessian's tube strength at least
+    # this high, after the foreground-depth seeds (None: depth seeds only).
+    # Fibers packed in a bundle share one foreground blob whose depth ridge
+    # runs down the middle fiber only (see _trace.trace_fibers).
+    bright_seed_strength: float | None = None
+    # With grey ranges or profiles, trace and relax on the graded grey
+    # (_ranges.graded_image) rather than the range image, which is flat
+    # across touching fibers; what counts as fiber (the foreground, its
+    # depth and the types) still comes from the range image.
+    graded_image: bool = False
+    # With graded_image, only the smallest fiber type traces and relaxes on
+    # the graded image; larger types keep the flat range image, where a dim
+    # coarse fiber's own noisy core is not dimmed and broken up. In the
+    # solve, the flat image is kept within reach of the larger types' fits.
+    graded_smallest_only: bool = False
+    # Blur (voxels) of the grey the graded image's dips are read from (None:
+    # ``denoise_sigma_voxels``). Noise dips inside a fiber's own core dim it
+    # like the dip between two fibers; a wider blur, still well under the
+    # spacing of touching fibers, keeps the second and smooths the first.
+    graded_sigma_voxels: float | None = None
+    # Drop a larger type's new traces that are really a bundle of a brighter,
+    # smaller type before the smaller types are traced: a bundle of fine
+    # fibers is about as wide as a coarse fiber, and traced as one it claims
+    # the bundle, so its fibers are never traced. Such a trace's axis runs
+    # between the bundle's fibers, at about the coarse grey, but its
+    # cross-section holds them: dropped when the core grey reads as another
+    # type, or when the brightest tenth of its cross-section is most of the
+    # way (0.8) from its type's grey to a brighter type's. Grey ranges or
+    # profiles only.
+    grey_checked_traces: bool = False
+    # Tracing in packed bundles: recenter each step on the cross-section's
+    # samples above this fraction of its brightest (0: its intensity
+    # centroid, which a touching neighbour pulls off axis), and let each
+    # traced fiber claim the voxels within this many radii (a claim that
+    # reaches a neighbour's axis cuts the neighbour's trace short).
+    trace_peak_floor: float = 0.0
+    trace_claim_radii: float = 1.1
+    # Merge two parallel fits of one type that straddle one fiber: the grey
+    # between their axes at least as bright as at them (the solver keeps
+    # two capsules two radii apart, so two traces laid along one blurred
+    # fiber settle on either side of its bright axis), and the foreground
+    # across them no wider than ``merge_straddling_width_radii`` radii (one
+    # blurred fiber; two real ones side by side read wider). Grey scans only.
+    merge_straddling: bool = False
+    merge_straddling_width_radii: float = 4.0
+    # After the final solve, move each fit of the smallest type across
+    # itself onto the brightest grey there, by at most ``recenter_max_radii``
+    # radii. In a packed bundle the fit image is flat across touching fibers
+    # and the solver's contact alone places fits, often on the dim contact
+    # between two fibers; the grey still peaks on each fiber's axis. A node
+    # does not move closer than ``recenter_spacing_radii`` radii to another
+    # fit's, and a fit keeps its move only if the grey along it rises.
+    # Grey scans only.
+    # Grey ranges: a fit typed as a larger type whose median axis grey sits
+    # more than this fraction of the way up the smallest type's range is the
+    # smallest type (a bundle of bright fine fibers reads as deep as a coarse
+    # fiber, but a coarse fiber with a dim core does not read that bright
+    # along its axis). None = off.
+    coarse_axis_grey_max: float | None = None
+    # A fit's radius never exceeds its type's (the depth of a packed bundle
+    # inflates it, and the inflated fits push the bundle apart in the solve).
+    radius_cap_prior: bool = False
+    # The first solve after a round's new fibers holds the fibers that were
+    # already there (pinned), so a new fiber traced off an axis cannot drag
+    # settled ones off theirs; later solves are free again.
+    births_solve_pinned: bool = False
+    # Trace the smallest type first (default: largest first, so a larger
+    # type's traces, which can run down a whole bundle of smaller fibers,
+    # claim it before the smaller type is tried).
+    trace_smallest_first: bool = False
+    # With coarse_axis_grey_max: drop traces of a larger type whose axis is
+    # that bright as they are traced (a bundle of fine fibers, not a dim-cored
+    # coarse fiber), so they do not claim the bundle before the fine type is
+    # traced.
+    coarse_trace_axis_check: bool = False
+    # A larger type's trace or fit whose cross-section holds fine-fiber-bright
+    # grey (the median over its nodes of the brightest grey on a disc its short
+    # radius wide) above this fraction of the smallest type's grey range is a
+    # bundle of smaller fibers, not a dim-cored coarse fiber: its traces are
+    # dropped, and such fits are removed at the end before the final births.
+    # (A coarse fit laid over a bundle often has its axis on the dark gaps, so
+    # coarse_axis_grey_max misses it.) Needs coarse_axis_grey_max. None = off.
+    coarse_disc_max: float | None = None
+    # With recenter_on_grey: also recenter after each round's cleanup, before
+    # new fibers are traced around the fits.
+    recenter_each_round: bool = False
+    # With recenter_on_grey: recenter after every solve of the main rounds and
+    # the final solve (not in the redraws), so new fibers stay on their fibers
+    # through the cleanup that follows.
+    recenter_each_solve: bool = False
+    # One last round of new fibers after the final recenter, with no solve
+    # after it (each round's solve drags some good births off their fibers,
+    # and the cleanup then removes them); the new fibers are recentered.
+    final_births: bool = False
+    # At the end, trace the largest type again, ignoring the fit, and keep the
+    # dim-cored, unshared candidates in place of the coarse fits they cover,
+    # cutting the smallest type's fits out of their oval sections (see
+    # _rescue). Meant for trace_smallest_first, where fine fits claim the
+    # coarse fibers' rims. Needs coarse_axis_grey_max (its grey).
+    coarse_rescue: bool = False
+    coarse_rescue_grey: float = 0.8
+    coarse_rescue_shared: float = 0.3
+    # A last pass over the smallest type's fits on the grey ridge (the scan
+    # smoothed by recenter_sigma_voxels, default 1.6): recenter, cut out
+    # stretches off the ridge (where a fit slides across onto a neighbour),
+    # grow ends along the ridge, join ends that meet, drop short pieces (see
+    # _ridge).
+    ridge_finish: bool = False
+    ridge_finish_extend: float = 0.85
+    # New fibers traced among existing ones (a round's births, a redraw's new
+    # fibers) are kept only if at least this share of their nodes sit on a
+    # grey ridge: the brightest point of the grey (smoothed by
+    # birth_ridge_sigma_voxels) on a disc a radius wide across the fiber lies
+    # within half a radius of the node. On a flat, saturated image a trace can
+    # run straight across a bundle, between the fibers; such a trace is off
+    # the ridge most of its length. None = keep every trace.
+    birth_ridge_min: float | None = None
+    birth_ridge_sigma_voxels: float = 1.6
+    recenter_on_grey: bool = False
+    recenter_max_radii: float = 0.5
+    recenter_spacing_radii: float = 1.5
+    # The grey the recenter reads: the scan smoothed by this Gaussian sigma
+    # (voxels); None uses the fit's denoise. Around 0.4-0.5 fine radii finds
+    # an axis better than a light denoise, whose brightest point in noise
+    # lands about a voxel off it.
+    recenter_sigma_voxels: float | None = None
+    # Recenter once at the very end (after the redraws and polish, which
+    # re-solve and would move the fits off again) instead of before the
+    # confidence.
+    recenter_last: bool = False
     # Fill enclosed foreground holes up to a fiber's cross-section (a dim
     # core, or noise speckle in a dim fiber) in a mask, grey ranges or a
     # plain grey scan.
@@ -154,6 +300,33 @@ class FitSettings:
     redraw_plans: int = 3
     # After redraw passes that kept anything, one unpinned solve of the whole fit.
     redraw_polish: bool = True
+    # The surround part's weight (exponent) in the confidence, per redraw
+    # pass (the last repeats; the fit before the redraws uses the first).
+    # Surround marks foreground just outside a fit that no other fit
+    # explains, which is a missing neighbour as often as a wrong fit; fading
+    # it out lets settled structure count as sure. None = always 1.
+    confidence_surround_weights: tuple[float, ...] | None = None
+    # An oval fit's surround ring sits outside its long semi-axis (False, the
+    # default for now: its short one, where the ring lands on the fiber's own
+    # flanks along its wide side, so every oval fit reads a little unsure).
+    confidence_oval_surround: bool = False
+    # Whether the first redraw pass cuts on the confidence with its stability
+    # part (how far the last solve moved each node). A solve among packed
+    # fibers moves fits a couple of voxels whether or not they are right, so
+    # stability alone can put correct fits below the cut; later passes never
+    # use it.
+    redraw_first_cut_stability: bool = True
+    # Redraw: nodes a pass leaves within this many radii (of the smallest
+    # type) of where they were before it (a stretch cut and regrown to the
+    # same spot, or never cut) are frozen: never cut again, so later passes
+    # keep them pinned and work only on what still changes. None = off.
+    redraw_freeze_radii: float | None = None
+    # The order of a redraw pass after the cut: "seed_first" grows the sure
+    # pieces' ends, traces new fibers, cleans up, then solves; "solve_first"
+    # solves the grown pieces onto their fibers (and sizes them) before new
+    # fibers are traced around them, so the tracer does not seed a second
+    # fiber beside a grown piece that is still off its axis.
+    redraw_order: str = "seed_first"
     # Redraw around fiber ends inside the scan too, sure or not
     # (``_regrow.end_hotspots``): "free" around ends that touch no other fit,
     # so split fibers can be joined; "all" also around ends against another
@@ -208,6 +381,10 @@ class FitResult:
     types: np.ndarray | None = None
     # How sure the fit is of each node, in [0, 1] (see ``_confidence``).
     confidence: list[np.ndarray] | None = None
+    # Oval fibers (FiberSpec.thickness): each fiber's unit long axis at each
+    # node (None for a round fiber), or None when every fiber is round.
+    # ``radii`` are then the short semi-axes.
+    long_axes: list[np.ndarray | None] | None = None
 
     def spec_of(self, index: int) -> FiberSpec:
         """The spec (fiber type) of fiber ``index``."""
@@ -230,9 +407,17 @@ class FitResult:
         return [n * self.voxel_size for n in self.shape[::-1]]
 
     # -- voxel outputs ------------------------------------------------------
+    def sections(self) -> list | None:
+        """Each fiber's ``(ratio, long axes)`` for drawing (None: round; see ``_geometry.rasterize``)."""
+        if self.long_axes is None:
+            return None
+        return [
+            None if axes is None else (self.spec_of(i).ratio, axes) for i, axes in enumerate(self.long_axes)
+        ]
+
     def label_volume(self) -> np.ndarray:
         """One-based fiber id for every voxel inside a fitted capsule (0 = void)."""
-        labels, _, _ = rasterize(self.shape, self.centerlines, self.radii, signed=True)
+        labels, _, _ = rasterize(self.shape, self.centerlines, self.radii, signed=True, sections=self.sections())
         return labels
 
     def confidence_volume(self) -> np.ndarray:
@@ -240,7 +425,7 @@ class FitResult:
         values = np.full(self.shape, np.nan, dtype=np.float32)
         if not self.confidence or not self.centerlines:
             return values
-        _, _, segments = rasterize(self.shape, self.centerlines, self.radii, signed=True)
+        _, _, segments = rasterize(self.shape, self.centerlines, self.radii, signed=True, sections=self.sections())
         per_segment = [0.5 * (c[:-1] + c[1:]) for c in self.confidence]
         table = np.concatenate(per_segment).astype(np.float32)
         owned = segments >= 0
@@ -259,11 +444,20 @@ class FitResult:
             bend = spec.min_bend_radius or 5.0 * spec.diameter
             key = (spec.name, int(round(diameter / 1e-8)))
             if key not in cache:
-                cache[key] = tangle.Material(
-                    f"{spec.name} {key[1] * 1e-2:.2f}um",
-                    diameter=key[1] * 1e-8,
-                    min_bend_radius=bend,
-                )
+                if spec.ratio > 1.0 and self.long_axes is not None:
+                    # An oval: the fitted width is the short one.
+                    cache[key] = tangle.Material(
+                        f"{spec.name} {key[1] * 1e-2:.2f}um thick",
+                        diameter=spec.ratio * key[1] * 1e-8,
+                        min_bend_radius=bend,
+                        thickness=key[1] * 1e-8,
+                    )
+                else:
+                    cache[key] = tangle.Material(
+                        f"{spec.name} {key[1] * 1e-2:.2f}um",
+                        diameter=key[1] * 1e-8,
+                        min_bend_radius=bend,
+                    )
             result.append(cache[key])
         return result
 
@@ -271,8 +465,10 @@ class FitResult:
         import tangle
 
         collection = tangle.FiberCollection(name)
-        for line, material in zip(self.centerlines_m(), self.materials()):
-            collection.add_fiber(line.tolist(), material, tags={"source": "ct fit"})
+        axes = self.long_axes or [None] * self.fiber_count
+        for line, material, long_axis in zip(self.centerlines_m(), self.materials(), axes):
+            extra = {"long_axis": np.asarray(long_axis).tolist()} if long_axis is not None and material.is_oval else {}
+            collection.add_fiber(line.tolist(), material, tags={"source": "ct fit"}, **extra)
         return collection
 
     def to_assembly(self) -> Any:
@@ -454,6 +650,11 @@ class FitResult:
                         if self.confidence is not None
                         else {}
                     ),
+                    **(
+                        {"long_axis": np.round(self.long_axes[i], 4).tolist()}
+                        if self.long_axes is not None and self.long_axes[i] is not None
+                        else {}
+                    ),
                 }
                 for i, (line, d, s) in enumerate(zip(self.centerlines_m(), self.diameters_m(), self.support))
             ],
@@ -536,6 +737,10 @@ def load_fit(path: str | Path) -> FitResult:
         levels=Levels(**data["levels"]),
         history=data.get("history", []),
         confidence=[np.asarray(f["confidence"]) for f in fibers] if fibers and "confidence" in fibers[0] else None,
+        long_axes=(
+            [np.asarray(f["long_axis"]) if "long_axis" in f else None for f in fibers]
+            if any("long_axis" in f for f in fibers) else None
+        ),
     )
 
 
@@ -547,6 +752,7 @@ def fit_fibers(
     *,
     exclude: np.ndarray | None = None,
     verbose: bool = False,
+    snapshots: str | os.PathLike | None = None,
 ) -> FitResult:
     """Find the fibers in ``volume`` (a ``(z, y, x)`` array) that match ``spec``.
 
@@ -568,6 +774,11 @@ def fit_fibers(
     scan the radius of its mean cross-section) picks the nearest diameter,
     after every solver batch, and sets its radius prior, bend
     limit and length prior.
+
+    ``snapshots`` (a folder) saves the fit after every step (trace, each
+    solve and void cut, each round's cleanup and new fibers, the final solve,
+    and each step of each redraw pass) as frames of an OVITO trajectory
+    (see ``_snapshots``). Off by default; it slows the fit a little.
     """
     from . import _device
 
@@ -618,6 +829,12 @@ def fit_fibers(
     largest = max(0.5 * item.diameter for item in specs) / voxel_size
     type_bits = None
     grey_model = None
+    checked, type_levels = None, None  # the denoised grey and each type's grey, for grey_checked_traces
+    foreground = None  # what is fiber, when it is not simply image > 0.5
+    peak_grey, peak_void = None, 0.0  # merge_straddling: the denoised grey and its void
+    recenter_grey = None  # recenter_sigma_voxels: the grey the recenter reads
+    axis_grey, axis_range = None, (0.0, 1.0)  # coarse_axis_grey_max
+    evidence = None  # what judges fits, when it is not the traced image
     if binary:
         image, levels = _mask_image(volume, exclude, settings, largest)
         source = "mask"
@@ -645,6 +862,51 @@ def fit_fibers(
         low = min(r[0] for r in ranges)
         levels = Levels(void=void, fiber=float(np.mean(ranges[0])), threshold=0.5 * (void + low))
         source = "grey profiles" if grey_model is not None else "grey ranges"
+        if settings.graded_image:
+            from ._ranges import graded_image
+
+            flat = image
+            image = graded_image(
+                volume, ranges, void, flat, reach=min(0.5 * item.diameter for item in specs) / voxel_size,
+                denoise_sigma=(
+                    settings.denoise_sigma_voxels if settings.graded_sigma_voxels is None
+                    else settings.graded_sigma_voxels
+                ),
+                exclude=exclude,
+            )
+            foreground = flat > 0.5
+            evidence = flat
+        if settings.merge_straddling or settings.recenter_on_grey:
+            from . import _native
+
+            peak_grey = grey_model[0] if grey_model is not None else np.asarray(volume, dtype=np.float32)
+            if grey_model is None and settings.denoise_sigma_voxels > 0:
+                peak_grey = _native.gaussian(peak_grey, settings.denoise_sigma_voxels)
+            peak_void = float(grey_model[2]) if grey_model is not None else float(void)
+            if settings.recenter_on_grey and settings.recenter_sigma_voxels is not None:
+                recenter_grey = _native.gaussian(np.asarray(volume, dtype=np.float32), settings.recenter_sigma_voxels)
+        if settings.coarse_axis_grey_max is not None:
+            from . import _native
+
+            axis_grey = grey_model[0] if grey_model is not None else np.asarray(volume, dtype=np.float32)
+            if grey_model is None and settings.denoise_sigma_voxels > 0:
+                axis_grey = _native.gaussian(axis_grey, settings.denoise_sigma_voxels)
+            smallest_type = int(np.argmin([item.diameter / item.ratio for item in specs]))
+            axis_range = tuple(float(v) for v in ranges[smallest_type])
+        if settings.grey_checked_traces:
+            from . import _native
+
+            if grey_model is not None:
+                checked = grey_model[0]
+            else:
+                checked = np.asarray(volume, dtype=np.float32)
+                if settings.denoise_sigma_voxels > 0:
+                    checked = _native.gaussian(checked, settings.denoise_sigma_voxels)
+            type_levels = []
+            for low, high in ranges:
+                inside = (checked >= low) & (checked <= high)
+                type_levels.append(float(np.median(checked[inside])) if inside.any() else 0.5 * (low + high))
+            type_levels = np.array(type_levels)
     else:
         image, levels = normalize(volume, denoise_sigma=settings.denoise_sigma_voxels, levels=settings.levels)
         if settings.fill_mask_holes:
@@ -652,16 +914,38 @@ def fit_fibers(
         if exclude is not None:
             image = np.where(np.asarray(exclude, dtype=bool), np.float32(0.0), image)
         source = "grey"
+        peak_grey, peak_void = image, 0.0
     log("input", [], mask=binary, source=source)
 
     fitter = _Fitter(image, specs, settings, voxel_size, log)
+    if snapshots is not None:
+        from ._snapshots import Snapshots
+
+        fitter.snapshots = Snapshots(snapshots, voxel_size, volume.shape)
+    if foreground is not None:
+        fitter.set_image(image, foreground=foreground, evidence=evidence)
+        if settings.graded_image and settings.graded_smallest_only:
+            fitter.flat_kinds = frozenset(k for k in range(len(specs)) if fitter.radius[k] > fitter.radius.min())
+            fitter.hessians = {}
     fitter.width_typing = source == "grey"
     fitter.type_bits = type_bits
     if grey_model is not None:
         fitter.grey, fitter.profiles, fitter.grey_void = grey_model
+    if type_levels is not None:
+        fitter.checked_grey, fitter.type_levels = checked, type_levels
+    if settings.merge_straddling or settings.recenter_on_grey:
+        fitter.peak_grey, fitter.peak_void = peak_grey, peak_void
+        fitter.recenter_grey = recenter_grey
+    if settings.coarse_axis_grey_max is not None and axis_grey is not None:
+        fitter.axis_grey, fitter.axis_range = axis_grey, axis_range
+    if settings.birth_ridge_min is not None and not binary:
+        from . import _native
+
+        fitter.ridge_grey = _native.gaussian(np.asarray(volume, dtype=np.float32), settings.birth_ridge_sigma_voxels)
     lines = fitter.trace([], np.zeros(0))
     radii, types = fitter.classify(lines)
     log("trace", lines, types=fitter.counts(types), thickness_margin=round(fitter.margin, 2))
+    fitter.snap("trace", lines, radii, types)
     if source == "grey" and len(specs) == 1 and settings.levels is None and lines:
         # Otsu class medians put the fiber level below the fiber core (blurred
         # edge voxels are in the fiber class); re-level on the traced cores.
@@ -674,13 +958,19 @@ def fit_fibers(
         radii, types = fitter.classify(lines)
         log("relevel", lines, void=levels.void, fiber=levels.fiber)
 
+    before_births: list[np.ndarray] | None = None  # births_solve_pinned: the fits a round's births joined
     for round_index in range(settings.rounds):
         void_counts: dict[str, int] = {}
-        for _ in range(settings.solver_batches):
+        for batch in range(settings.solver_batches):
             if not lines:
                 break
-            lines = fitter.solve(lines, radii, types)
+            anchors = before_births if batch == 0 and settings.births_solve_pinned else None
+            lines = fitter.solve(lines, radii, types, anchors=anchors or None)
+            if settings.recenter_on_grey and settings.recenter_each_solve and fitter.peak_grey is not None and lines:
+                lines, _ = fitter.recenter(lines, radii, types)
+            fitter.snap(f"round {round_index + 1} solve {batch + 1}", lines, radii, types)
             lines, radii, types, cut = fitter.cut_void(lines, radii, types)
+            fitter.snap(f"round {round_index + 1} void cut {batch + 1}", lines, radii, types)
             for key, value in cut.items():
                 void_counts[key] = void_counts.get(key, 0) + value
             radii, types = fitter.classify(lines)
@@ -690,13 +980,20 @@ def fit_fibers(
             f"round {round_index + 1}", lines, **counts, **void_counts, thickness_margin=round(fitter.margin, 2),
             **fitter.end_summary(lines, radii, types),
         )
+        fitter.snap(f"round {round_index + 1} cleanup", lines, radii, types)
+        if settings.recenter_on_grey and settings.recenter_each_round and fitter.peak_grey is not None and lines:
+            lines, moved = fitter.recenter(lines, radii, types)
+            log(f"recenter {round_index + 1}", lines, moved=moved)
+            fitter.snap(f"round {round_index + 1} recenter", lines, radii, types)
         if round_index + 1 < settings.rounds:
             born = fitter.trace(lines, radii)
             born_radii, born_types = fitter.classify(born)
+            before_births = list(lines)
             lines = lines + born
             radii = np.concatenate([radii, born_radii])
             types = np.concatenate([types, born_types])
             log(f"births {round_index + 1}", lines, born=len(born), types=fitter.counts(types))
+            fitter.snap(f"round {round_index + 1} new fibers", lines, radii, types)
     confidence = None
     if lines:
         # The last round's splits and joins are not yet admissible fibers. The
@@ -704,14 +1001,22 @@ def fit_fibers(
         # types (so bend limits) it was solved with.
         before = lines
         lines = fitter.solve(lines, radii, types)
+        if settings.recenter_on_grey and settings.recenter_each_solve and fitter.peak_grey is not None:
+            lines, _ = fitter.recenter(lines, radii, types)
         lines, radii, types, cut = fitter.cut_void(lines, radii, types, final=True)
         before = [before[i] for i in cut.pop("source")]
         log("final solve", lines, types=fitter.counts(types), **cut)
-        confidence, settled, summary = fitter.scores(lines, radii, previous=before)
+        fitter.snap("final solve", lines, radii, types)
+        if settings.recenter_on_grey and fitter.peak_grey is not None and not settings.recenter_last:
+            lines, moved = fitter.recenter(lines, radii, types)
+            log("recenter", lines, moved=moved)
+            fitter.snap("recenter", lines, radii, types)
+        confidence, settled, summary = fitter.scores(lines, radii, previous=before, types=types)
         coverage = _confidence.sure_coverage(fitter.foreground, lines, radii, settled)
         log("confidence", lines, **summary, sure_coverage=round(coverage, 4))
         if settings.redraw_passes > 0:
             redrawn = fitter.redraw_loop(lines, radii, types, confidence, settled)
+            fitter.snap_stage = ""
             if redrawn[0] is not lines and settings.redraw_polish and redrawn[0]:
                 # Redrawn stretches were solved around pinned sure pieces; one
                 # unpinned solve lets the whole fit settle into the scan together.
@@ -719,12 +1024,64 @@ def fit_fibers(
                 lines = fitter.solve(lines, radii, types)
                 lines, radii, types, cut = fitter.cut_void(lines, radii, types, final=True)
                 cut.pop("source")
-                confidence, settled, summary = fitter.scores(lines, radii, previous=None)
+                confidence, settled, summary = fitter.scores(lines, radii, previous=None, types=types)
                 coverage = _confidence.sure_coverage(fitter.foreground, lines, radii, settled)
                 log("polish", lines, **summary, **cut, sure_coverage=round(coverage, 4))
+                fitter.snap("polish", lines, radii, types)
             else:
                 lines, radii, types, confidence = redrawn
 
+    if lines and settings.recenter_on_grey and settings.recenter_last and fitter.peak_grey is not None:
+        lines, moved = fitter.recenter(lines, radii, types)
+        confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
+        log("recenter", lines, moved=moved, **summary)
+        fitter.snap("recenter", lines, radii, types)
+    if lines and settings.coarse_rescue:
+        from ._rescue import coarse_rescue
+
+        lines, radii, types, info = coarse_rescue(fitter, lines, radii, types, float(levels.void))
+        lines = _refine.respace(lines, fitter.spacing)
+        confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
+        log("coarse rescue", lines, **info)
+        fitter.snap("coarse rescue", lines, radii, types)
+    if lines and settings.coarse_disc_max is not None and fitter.axis_grey is not None:
+        smallest_kind = int(np.argmin(fitter.radius))
+        drop = np.zeros(len(lines), dtype=bool)
+        for kind in {int(k) for k in types if int(k) != smallest_kind}:
+            ids = [i for i, k in enumerate(types) if int(k) == kind]
+            drop[ids] = fitter._holds_fine([lines[i] for i in ids], kind)
+        if drop.any():
+            keep = np.flatnonzero(~drop)
+            lines, radii, types = [lines[i] for i in keep], np.asarray(radii)[keep], np.asarray(types)[keep]
+        log("coarse on bundles removed", lines, removed=int(drop.sum()))
+    if lines and settings.final_births:
+        born = fitter.trace(lines, radii)
+        if born:
+            born_radii, born_types = fitter.classify(born)
+            if settings.recenter_on_grey and fitter.peak_grey is not None:
+                moved, _ = fitter.recenter(
+                    lines + born, np.concatenate([radii, born_radii]), np.concatenate([types, born_types])
+                )
+                born = moved[len(lines):]  # the fits already there keep their place
+            lines = lines + born
+            radii = np.concatenate([radii, born_radii])
+            types = np.concatenate([types, born_types]).astype(int)
+            confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
+        log("final births", lines, born=len(born))
+        fitter.snap("final births", lines, radii, types)
+    if lines and settings.ridge_finish and not binary:
+        from . import _native
+        from ._ridge import ridge_finish
+
+        grey = fitter.recenter_grey if fitter.recenter_grey is not None else _native.gaussian(
+            np.asarray(volume, dtype=np.float32), settings.recenter_sigma_voxels or 1.6
+        )
+        lines, radii, types, info = ridge_finish(fitter, lines, radii, types, grey)
+        confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
+        log("ridge finish", lines, **info)
+        fitter.snap("ridge finish", lines, radii, types)
+    if fitter.snapshots is not None:
+        fitter.snapshots.close()
     return FitResult(
         shape=tuple(int(n) for n in volume.shape),
         voxel_size=voxel_size,
@@ -737,6 +1094,10 @@ def fit_fibers(
         specs=None if len(specs) == 1 else specs,
         types=None if len(specs) == 1 else np.asarray(types, dtype=int),
         confidence=confidence,
+        long_axes=(
+            [fitter.long_axes(line, int(k)) if fitter.ratio[k] > 1.0 else None for line, k in zip(lines, types)]
+            if (fitter.ratio > 1.0).any() else None
+        ),
     )
 
 
@@ -797,7 +1158,11 @@ class _Fitter:
         self.h = voxel_size
         self.log = log
         h = voxel_size
-        self.radius = np.array([0.5 * item.diameter / h for item in specs])
+        # An oval type's radius is its short semi-axis: what the foreground's
+        # depth, the tracer and the solver see; it is drawn ``ratio`` times as
+        # wide along each node's long axis (see sections).
+        self.ratio = np.array([item.ratio for item in specs])
+        self.radius = np.array([0.5 * item.diameter / h / item.ratio for item in specs])
         self.bend = np.array([(item.min_bend_radius or 5.0 * item.diameter) / h for item in specs])
         self.min_length = np.array([(item.min_length or 3.0 * item.diameter) / h for item in specs])
         self.max_length = [item.max_length / h if item.max_length else None for item in specs]
@@ -806,6 +1171,8 @@ class _Fitter:
         self.tolerance = np.array([item.diameter_tolerance for item in specs])
         self.spacing = settings.node_spacing_radii * float(self.radius.min())
         self.order = [int(k) for k in np.argsort(-self.radius, kind="stable")]  # largest first
+        if settings.trace_smallest_first:
+            self.order = self.order[::-1]
         self.hessians: dict[int, HessianField] = {}
         self.margin = settings.thickness_margin_voxels or 0.0  # the foreground's over-reach (see classify)
         self.width_margin = self.margin  # the cross-section radius's over-reach
@@ -817,14 +1184,35 @@ class _Fitter:
         self.grey_void = 0.0
         self._grey_scale: float | None = None
         self._plain_scale: float | None = None
+        self.checked_grey: np.ndarray | None = None  # grey_checked_traces: the denoised grey
+        self.type_levels: np.ndarray | None = None  # and each type's grey
+        self.snapshots = None  # fit_fibers(snapshots=...): a _snapshots.Snapshots
+        self.recenter_grey: np.ndarray | None = None  # recenter_sigma_voxels: the grey the recenter reads
+        self.ridge_grey: np.ndarray | None = None  # birth_ridge_min: the smoothed grey births are checked on
+        self.axis_grey: np.ndarray | None = None  # coarse_axis_grey_max: the denoised grey, and the range it is read against
+        self.axis_range: tuple[float, float] = (0.0, 1.0)
+        self.frozen_points: np.ndarray | None = None  # nodes a redraw froze (redraw_freeze_radii), for snapshots
+        weights = settings.confidence_surround_weights
+        self.surround_weight = float(weights[0]) if weights else 1.0  # the confidence's surround exponent now
+        self.snap_stage = self.snap_base = ""  # the redraw pass (and plan) the next snapshots belong to
+        self.peak_grey: np.ndarray | None = None  # merge_straddling: the denoised grey
+        self.peak_void = 0.0
         self._match_cache: tuple | None = None  # (cut, ranking): reused by a pass's candidates
+        self.flat_kinds: frozenset[int] = frozenset()  # types traced and relaxed on ``evidence``
         self.set_image(image)
 
-    def set_image(self, image: np.ndarray) -> None:
+    def set_image(
+        self, image: np.ndarray, foreground: np.ndarray | None = None, evidence: np.ndarray | None = None
+    ) -> None:
         from ._trace import foreground_depth
 
         self.image = image
-        self.foreground = image > 0.5
+        # What decides whether a fit is backed by fiber (void cuts, support,
+        # confidence, gap evidence); tracing and relaxing use ``image``. The
+        # two differ with a graded image, which dims dim fibers' own noisy
+        # cores too much to judge by.
+        self.evidence = image if evidence is None else evidence
+        self.foreground = image > 0.5 if foreground is None else foreground
         # Local thickness: distance to the nearest void voxel center, taken
         # as the maximum over the 3x3x3 neighborhood so a centerline between
         # voxel centers reads the axis value rather than an interpolated,
@@ -835,10 +1223,112 @@ class _Fitter:
         self.edt, self.depth = foreground_depth(self.foreground)
         self.hessians = {}
 
+    def trace_image(self, kind: int) -> np.ndarray:
+        """The image a type-``kind`` fiber is traced on (``graded_smallest_only``)."""
+        return self.evidence if kind in self.flat_kinds else self.image
+
     def hessian(self, kind: int) -> HessianField:
         if kind not in self.hessians:
-            self.hessians[kind] = HessianField(self.image, sigma=max(0.6 * float(self.radius[kind]), 1.0))
+            self.hessians[kind] = HessianField(self.trace_image(kind), sigma=max(0.6 * float(self.radius[kind]), 1.0))
         return self.hessians[kind]
+
+    def surround_radii(self, radii, types) -> np.ndarray | None:
+        """How far out each fit's surround ring sits: an oval type's long semi-axis
+        (its radius times the type's ratio), else None (the radii)."""
+        if types is None or not (self.ratio > 1.0).any() or not self.settings.confidence_oval_surround:
+            return None
+        return np.asarray(radii, dtype=np.float64) * self.ratio[np.asarray(types, dtype=int)]
+
+    def snap(self, stage: str, lines: list[np.ndarray], radii, types, extra: dict | None = None) -> None:
+        """A snapshot of ``lines`` (see ``fit_fibers(snapshots=...)``), when asked for,
+        with each node's confidence (with and without stability), surround and
+        whether a redraw froze it."""
+        if self.snapshots is None:
+            return
+        values = None
+        lines = [np.asarray(line, dtype=np.float64) for line in lines]
+        if lines and radii is not None and len(radii) == len(lines):
+            per_node, summary = _confidence.node_confidence(
+                self.evidence, self.depth, lines, np.asarray(radii, dtype=np.float64), spacing=self.spacing,
+                margin=self.margin, thickness_margin=self.width_margin, surround_weight=self.surround_weight,
+                surround_radii=self.surround_radii(radii, types),
+            )
+            surround = []
+            for line, samples in zip(lines, summary["parts"]["surround"]):
+                index = np.round(np.linspace(0, max(len(samples) - 1, 0), len(line))).astype(int)
+                surround.append(np.asarray(samples)[index] if len(samples) else np.ones(len(line)))
+            frozen = [np.zeros(len(line)) for line in lines]
+            if self.frozen_points is not None and len(self.frozen_points):
+                from scipy.spatial import cKDTree
+
+                tree = cKDTree(self.frozen_points)
+                tolerance = (self.settings.redraw_freeze_radii or 0.5) * float(self.radius.min())
+                frozen = [(tree.query(line)[0] <= tolerance).astype(float) for line in lines]
+            values = {
+                "confidence": per_node, "settled": summary["without_stability"], "surround": surround,
+                "frozen": frozen, **(extra or {}),
+            }
+        self.snapshots.write(f"{self.snap_stage}{stage}", lines, radii, types, values)
+
+    def solve_image(self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray) -> np.ndarray:
+        """``image``, with ``evidence`` within reach of the fits whose type
+        is traced on it (``graded_smallest_only``)."""
+        types = np.asarray(types, dtype=int)
+        keep = [i for i, k in enumerate(types) if int(k) in self.flat_kinds]
+        if not keep:
+            return self.image
+        chosen = [lines[i] for i in keep]
+        chosen_radii = np.asarray(radii, dtype=np.float64)[keep]
+        owned, _, _ = rasterize(
+            self.image.shape, chosen, chosen_radii, reach=chosen_radii * self.settings.solver_reach_radii + self.margin,
+            sections=self.sections(chosen, types=types[keep]),
+        )
+        image = self.image.copy()
+        flat = owned > 0
+        image[flat] = self.evidence[flat]
+        return image
+
+    def long_axes(self, line: np.ndarray, kind: int) -> np.ndarray:
+        """Unit long axis of a type-``kind`` oval fit at each node: across the
+        centerline, where the scan's cross-section is flattest (the larger
+        eigenvalue of the Hessian in the plane across the tangent), smoothed
+        over five nodes."""
+        from ._geometry import tangents
+
+        line = np.asarray(line, dtype=np.float64).reshape(-1, 3)
+        t = tangents(line)
+        helper = np.where(np.abs(t[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
+        e1 = np.cross(t, helper)
+        e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
+        e2 = np.cross(t, e1)
+        hessian = self.hessian(kind).at(line)
+        a = np.einsum("ni,nij,nj->n", e1, hessian, e1)
+        b = np.einsum("ni,nij,nj->n", e1, hessian, e2)
+        c = np.einsum("ni,nij,nj->n", e2, hessian, e2)
+        theta = 0.5 * np.arctan2(2.0 * b, a - c)  # the 2x2 form's larger eigenvector
+        axes = np.cos(theta)[:, None] * e1 + np.sin(theta)[:, None] * e2
+        for k in range(1, len(axes)):  # one way along the fiber
+            if axes[k] @ axes[k - 1] < 0:
+                axes[k] = -axes[k]
+        if len(axes) >= 3:
+            padded = np.concatenate([axes[:1], axes[:1], axes, axes[-1:], axes[-1:]])
+            axes = sum(padded[j : j + len(axes)] for j in range(5))
+        axes -= np.sum(axes * t, axis=1, keepdims=True) * t
+        norm = np.linalg.norm(axes, axis=1, keepdims=True)
+        return np.where(norm > 1e-9, axes / np.maximum(norm, 1e-12), e1)
+
+    def sections(self, lines: list[np.ndarray], radii: np.ndarray | None = None, types: np.ndarray | None = None):
+        """Each line's ``(ratio, long axes)`` for drawing it (None: round; see
+        ``_geometry.rasterize``), or None when no type is oval. Without
+        ``types`` each line's type is the one nearest its radius."""
+        if not (self.ratio > 1.0).any() or not lines:
+            return None
+        if types is None:
+            types = self._nearest(np.asarray(radii, dtype=np.float64))
+        return [
+            (float(self.ratio[k]), self.long_axes(line, int(k))) if self.ratio[k] > 1.0 else None
+            for line, k in zip(lines, types)
+        ]
 
     def counts(self, types: np.ndarray) -> dict[str, int] | None:
         if len(self.specs) == 1:
@@ -848,7 +1338,10 @@ class _Fitter:
     def claim(self, lines: list[np.ndarray], radii: np.ndarray) -> np.ndarray | None:
         if not lines:
             return None
-        claimed, _, _ = rasterize(self.image.shape, lines, np.asarray(radii), reach=1.2 * np.asarray(radii))
+        claimed, _, _ = rasterize(
+            self.image.shape, lines, np.asarray(radii), reach=1.2 * np.asarray(radii),
+            sections=self.sections(lines, radii),
+        )
         return claimed
 
     def trace(self, lines: list[np.ndarray], radii: np.ndarray) -> list[np.ndarray]:
@@ -861,16 +1354,96 @@ class _Fitter:
             known = lines + found
             claimed = self.claim(known, np.concatenate([np.asarray(radii, dtype=np.float64), found_radii]))
             new = trace_fibers(
-                self.image, self.hessian(kind), radius=r, min_bend_radius=float(self.bend[kind]),
+                self.trace_image(kind), self.hessian(kind), radius=r, min_bend_radius=float(self.bend[kind]),
                 min_length=float(self.min_length[kind]), node_spacing=self.spacing, claimed=claimed,
                 foreground=self.foreground, depth=(self.edt, self.depth), label_offset=len(known),
                 # A larger type is only seeded where the foreground is thicker
                 # than the smaller types could make it.
                 seed_depth_radii=0.7 if r > smallest else 0.5,
+                bright_seed_strength=self.settings.bright_seed_strength,
+                peak_floor=self.settings.trace_peak_floor, claim_radii=self.settings.trace_claim_radii,
             )
+            if self.settings.grey_checked_traces and new and r > smallest:
+                new = self._grey_checked(new, kind)
+            if self.settings.coarse_trace_axis_check and new and r > smallest:
+                bright = self._bright_axis(new)
+                if bright is not None:
+                    new = [line for line, b in zip(new, bright) if not b]
+            if self.settings.coarse_disc_max is not None and new and r > smallest:
+                holds = self._holds_fine(new, kind)
+                new = [line for line, h in zip(new, holds) if not h]
+            if self.settings.birth_ridge_min is not None and new and lines:
+                new = [line for line in new if self._ridge_share(line, r) >= self.settings.birth_ridge_min]
             found += new
             found_radii += [r] * len(new)
         return found
+
+    def _ridge_share(self, line: np.ndarray, r: float) -> float:
+        """Share of ``line``'s nodes on a grey ridge (see ``FitSettings.birth_ridge_min``)."""
+        from ._geometry import sample_image
+
+        if self.ridge_grey is None:
+            return 1.0
+        line = np.asarray(line, dtype=np.float64)
+        if len(line) < 3:
+            return 0.0
+        t = tangents(line)
+        helper = np.where(np.abs(t[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
+        e1 = np.cross(t, helper)
+        e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
+        e2 = np.cross(t, e1)
+        steps = np.arange(-r, r + 1e-9, 0.5)
+        u, v = np.meshgrid(steps, steps)
+        keep = u**2 + v**2 <= r * r
+        u, v = u[keep], v[keep]
+        points = line[:, None, :] + u[None, :, None] * e1[:, None, :] + v[None, :, None] * e2[:, None, :]
+        values = sample_image(self.ridge_grey, points.reshape(-1, 3)).reshape(len(line), len(u))
+        best = np.argmax(values, axis=1)
+        return float(np.mean(np.hypot(u[best], v[best]) <= 0.5 * r))
+
+    def _grey_checked(self, lines: list[np.ndarray], kind: int) -> list[np.ndarray]:
+        """``lines`` traced as type ``kind`` less those that are a bundle of a brighter type (see grey_checked_traces)."""
+        grey_types = self._grey_types(lines)
+        if grey_types is not None:
+            lines = [line for line, t in zip(lines, grey_types) if t < 0 or t == kind]
+        brighter = self._holds_brighter(lines, kind)
+        return lines if brighter is None else [line for line, b in zip(lines, brighter) if not b]
+
+    def _holds_brighter(self, lines: list[np.ndarray], kind: int) -> np.ndarray | None:
+        """Per line, whether its cross-section at type ``kind``'s radius holds a brighter type's fibers.
+
+        True when the brightest tenth of the grey over the cross-section is
+        more than 0.8 of the way from ``kind``'s grey to the brightest type's;
+        None without ``grey_checked_traces``' grey, or when ``kind`` is the
+        brightest type.
+        """
+        if self.checked_grey is None or self.type_levels is None or not lines:
+            return None
+        own = float(self.type_levels[kind])
+        brighter = float(self.type_levels.max())
+        if brighter <= own:
+            return None
+        from ._geometry import sample_image
+
+        limit = own + 0.8 * (brighter - own)
+        r = float(self.radius[kind])
+        ticks = np.arange(-r, r + 0.25, 0.5)
+        u, v = np.meshgrid(ticks, ticks)
+        disk = (u**2 + v**2) <= r * r
+        u, v = u[disk], v[disk]
+        out = np.zeros(len(lines), dtype=bool)
+        for i, line in enumerate(lines):
+            tangent = np.gradient(line, axis=0)
+            if len(line) > 2:
+                line, tangent = line[1:-1], tangent[1:-1]
+            tangent = tangent / np.maximum(np.linalg.norm(tangent, axis=1, keepdims=True), 1e-12)
+            helper = np.where(np.abs(tangent[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
+            e1 = np.cross(tangent, helper)
+            e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
+            e2 = np.cross(tangent, e1)
+            points = line[:, None, :] + u[None, :, None] * e1[:, None, :] + v[None, :, None] * e2[:, None, :]
+            out[i] = float(np.percentile(sample_image(self.checked_grey, points.reshape(-1, 3)), 90)) >= limit
+        return out
 
     def classify(self, lines: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
         """Each fiber's type (the diameter nearest its thickness) and radius.
@@ -913,10 +1486,26 @@ class _Fitter:
         measured = np.maximum(width if self.width_typing else depth, 0.5)
         given = self.settings.thickness_margin_voxels
         by_grey = self._grey_types(lines)
+        # grey_checked_traces: a fit whose cross-section at a dimmer type's
+        # radius holds brighter fibers is the brighter type (a fiber in a
+        # packed bundle reads deep, as the whole bundle is one foreground).
+        brightest = int(np.argmax(self.type_levels)) if self.type_levels is not None else -1
+        holds = {
+            k: self._holds_brighter(lines, k) for k in range(len(self.specs)) if k != brightest
+        } if self.settings.grey_checked_traces and brightest >= 0 else {}
+
+        bright_axis = self._bright_axis(lines)
 
         def typed(margin: float) -> np.ndarray:
             types = self._nearest(measured - margin)
-            return np.where(by_grey >= 0, by_grey, types) if by_grey is not None else types
+            types = np.where(by_grey >= 0, by_grey, types) if by_grey is not None else types
+            for k, flagged in holds.items():
+                if flagged is not None:
+                    types = np.where((types == k) & flagged, brightest, types)
+            if bright_axis is not None:
+                smallest = int(np.argmin(self.radius))
+                types = np.where(bright_axis, smallest, types)
+            return types
 
         def excess(values: np.ndarray, types: np.ndarray) -> float:
             return float(np.clip(np.median(values - self.radius[types]), -0.5, float(self.radius.min())))
@@ -934,7 +1523,53 @@ class _Fitter:
         blended = (np.maximum(measured - margin, 0.5) + w * prior) / (1.0 + w)
         tolerance = self.tolerance[types]
         radii = np.clip(blended, prior * (1 - tolerance), prior * (1 + tolerance))
+        if self.settings.radius_cap_prior:
+            radii = np.minimum(radii, prior)
         return radii, types
+
+    def _holds_fine(self, lines: list[np.ndarray], kind: int) -> np.ndarray:
+        """Per line of type ``kind``: whether its cross-section holds fine-bright grey (see coarse_disc_max)."""
+        from ._geometry import sample_image
+
+        out = np.zeros(len(lines), dtype=bool)
+        if self.settings.coarse_disc_max is None or self.axis_grey is None:
+            return out
+        low, high = self.axis_range
+        level = low + self.settings.coarse_disc_max * (high - low)
+        r = float(self.radius[kind])
+        steps = np.arange(-r, r + 1e-9, 0.75)
+        u, v = np.meshgrid(steps, steps)
+        keep = u**2 + v**2 <= r * r
+        u, v = u[keep], v[keep]
+        for i, line in enumerate(lines):
+            line = np.asarray(line, dtype=np.float64)
+            inner = line[1:-1] if len(line) > 2 else line
+            if len(inner) < 2:
+                continue
+            t = tangents(inner)
+            helper = np.where(np.abs(t[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
+            e1 = np.cross(t, helper)
+            e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
+            e2 = np.cross(t, e1)
+            points = inner[:, None, :] + u[None, :, None] * e1[:, None, :] + v[None, :, None] * e2[:, None, :]
+            values = sample_image(self.axis_grey, points.reshape(-1, 3)).reshape(len(inner), len(u))
+            out[i] = float(np.median(values.max(axis=1))) > level
+        return out
+
+    def _bright_axis(self, lines: list[np.ndarray]) -> np.ndarray | None:
+        """Per fit, whether its median axis grey is above ``coarse_axis_grey_max`` of the
+        smallest type's grey range (None when that setting is off or there is no grey)."""
+        from ._geometry import sample_image
+
+        cut = self.settings.coarse_axis_grey_max
+        if cut is None or self.axis_grey is None or len(self.specs) < 2:
+            return None
+        low, high = self.axis_range
+        level = low + cut * (high - low)
+        return np.array([
+            float(np.median(sample_image(self.axis_grey, line[1:-1] if len(line) > 2 else line))) > level
+            for line in lines
+        ])
 
     def _grey_types(self, lines: list[np.ndarray]) -> np.ndarray | None:
         """Each fiber's type by the grey range its core falls in (-1 where no range has 60%)."""
@@ -973,12 +1608,85 @@ class _Fitter:
 
         s = self.settings
         return _device.relax(
-            self.image, lines, radii, self.bend[np.asarray(types, dtype=int)], voxel_size=self.h,
+            self.solve_image(lines, radii, types), lines, radii, self.bend[np.asarray(types, dtype=int)], voxel_size=self.h,
             spacing=self.spacing, rate=s.solver_image_rate, reach_radii=s.solver_reach_radii,
             iterations=s.solver_iterations, settle=s.solver_settle_iterations if settle else 0, backend=s.backend,
             reach=np.asarray(radii, dtype=np.float64) + self.margin, log=self.log,
             anchors=anchors, anchor_tolerance=0.3 * float(self.radius.min()),
         )
+
+    def recenter(
+        self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray
+    ) -> tuple[list[np.ndarray], int]:
+        """Fits of the smallest type moved across themselves onto the
+        brightest grey (``FitSettings.recenter_on_grey``); returns the lines
+        and how many fits moved.
+
+        At each node the grey is sampled on a disc across the fiber,
+        ``recenter_max_radii`` radii wide, and averaged with the discs of
+        the nodes on either side against noise; the node moves to the
+        disc's brightest point, the moves smoothed over five nodes. (Not
+        the bright samples' centroid: a fit on the contact between two
+        fibers has one bright axis on either side, and their centroid is
+        where it already is.) Moves that
+        bring a node within ``recenter_spacing_radii`` radii of another
+        fit's nodes are dropped, and a fit keeps its move only if the mean
+        grey at its nodes rises.
+        """
+        from scipy.spatial import cKDTree
+
+        from ._geometry import sample_image
+
+        s = self.settings
+        grey = self.recenter_grey if self.recenter_grey is not None else self.peak_grey
+        types = np.asarray(types, dtype=int)
+        smallest = int(np.argmin(self.radius))
+        chosen = [i for i, k in enumerate(types) if int(k) == smallest and len(lines[i]) >= 2]
+        if not chosen:
+            return lines, 0
+        lines = [np.array(line, dtype=np.float64) for line in lines]
+        nodes = np.concatenate(lines)
+        owner = np.repeat(np.arange(len(lines)), [len(line) for line in lines])
+        tree = cKDTree(nodes)
+        moved = 0
+        for i in chosen:
+            line = lines[i]
+            r = float(radii[i])
+            t = tangents(line)
+            helper = np.where(np.abs(t[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
+            e1 = np.cross(t, helper)
+            e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
+            e2 = np.cross(t, e1)
+            reach = max(s.recenter_max_radii, 0.1) * r
+            steps = np.arange(-reach, reach + 1e-9, 0.5)
+            u, v = np.meshgrid(steps, steps)
+            keep = u**2 + v**2 <= reach**2
+            u, v = u[keep], v[keep]
+            points = line[:, None, :] + u[None, :, None] * e1[:, None, :] + v[None, :, None] * e2[:, None, :]
+            values = sample_image(grey, points.reshape(-1, 3)).reshape(len(line), len(u))
+            if len(values) >= 3:
+                padded = np.concatenate([values[:1], values, values[-1:]])
+                values = (padded[:-2] + padded[1:-1] + padded[2:]) / 3.0
+            best = np.argmax(values, axis=1)
+            shift = u[best][:, None] * e1 + v[best][:, None] * e2
+            if len(shift) >= 3:
+                padded = np.concatenate([shift[:1], shift[:1], shift, shift[-1:], shift[-1:]])
+                shift = sum(padded[j : j + len(shift)] for j in range(5)) / 5.0
+            length = np.linalg.norm(shift, axis=1, keepdims=True)
+            limit = s.recenter_max_radii * r
+            shift *= np.minimum(1.0, limit / np.maximum(length, 1e-12))
+            candidate = line + shift
+            for m, near in enumerate(tree.query_ball_point(candidate, s.recenter_spacing_radii * r)):
+                if any(owner[q] != i for q in near):
+                    candidate[m] = line[m]
+            if np.array_equal(candidate, line):
+                continue
+            if sample_image(grey, candidate).mean() > sample_image(grey, line).mean():
+                lines[i] = candidate
+                nodes[owner == i] = candidate  # later fits keep their spacing from where this one went
+                tree = cKDTree(nodes)
+                moved += 1
+        return lines, moved
 
     def cut_void(
         self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray, *, final: bool = False
@@ -996,7 +1704,7 @@ class _Fitter:
             extra = {"source": np.arange(len(lines))} if final else {}
             return lines, radii, types, extra
         pieces, source, cut = _refine.cut_void(
-            self.image, lines, radii, level=s.void_level, min_gap_radii=s.void_gap_radii,
+            self.evidence, lines, radii, level=s.void_level, min_gap_radii=s.void_gap_radii,
             bridge_level=s.void_bridge_level, bridge_offset_radii=s.void_bridge_offset_radii,
             directions=(
                 (lambda index, points: self.hessian(int(types[index])).directions(points)[0])
@@ -1051,12 +1759,25 @@ class _Fitter:
         self._plain_scale = None
         old_misfit = old_nats = None
         step = 2.0 * float(self.radius.max())
+        frozen: list[np.ndarray] | None = None  # per node of ``lines``, with redraw_freeze_radii
         for pass_index in range(s.redraw_passes):
             started = time.perf_counter()
+            self.snap_base = self.snap_stage = f"redraw {pass_index + 1}: "
+            weights = s.confidence_surround_weights
+            if weights:
+                weight = float(weights[min(pass_index, len(weights) - 1)])
+                if weight != self.surround_weight:
+                    # The cut reads the confidence at this pass's weight.
+                    self.surround_weight = weight
+                    confidence, settled, _ = self.scores(lines, radii, types=types)
+                    old_misfit = old_nats = None
             widen = [(low, high, count * step) for low, high, count in failures if count < s.redraw_attempts]
             given_up = [(low, high) for low, high, count in failures if count >= s.redraw_attempts]
+            judge = confidence if pass_index == 0 and s.redraw_first_cut_stability else settled
+            if frozen is not None:
+                judge = [np.where(still, np.maximum(c, 1.0), c) for c, still in zip(judge, frozen)]
             cut = _regrow.cut_unsure(
-                lines, confidence if pass_index == 0 else settled, radii, threshold=s.confidence_threshold,
+                lines, judge, radii, threshold=s.confidence_threshold,
                 spacing=self.spacing, widen=widen, skip=given_up,
                 hotspots=(
                     _regrow.end_hotspots(lines, radii, self.image.shape, touching=s.redraw_ends == "all")
@@ -1065,13 +1786,20 @@ class _Fitter:
             )
             if cut is None or not lines:
                 break
+            if self.snapshots is not None:
+                # The whole fit, the stretches the redraw takes out flagged (cut = 1).
+                kept = self._same_spot(lines, cut.pieces, 0.25 * float(self.radius.min()))
+                self.snap(
+                    "cut unsure (cut = 1 is taken out and redrawn)", lines, radii, types,
+                    extra={"cut": [(~k).astype(float) for k in kept]},
+                )
             attempt = lambda point: self._attempt(point, failures)  # noqa: E731
             if s.redraw_moves == "match" and s.redraw_plans > 1:
                 new_lines, new_radii, new_types, info = self.pick_plans(cut, radii, types, attempt)
             else:
                 new_lines, new_radii, new_types, info = self.redraw_candidate(cut, radii, types, attempt=attempt)
                 info.pop("plan_scores", None)
-            _, new_settled, _ = self.scores(new_lines, new_radii)
+            _, new_settled, _ = self.scores(new_lines, new_radii, types=new_types)
             old_map = _confidence.coverage_map(self.foreground, lines, radii, settled)
             new_map = _confidence.coverage_map(self.foreground, new_lines, new_radii, new_settled)
             # Regions are tied together only through fibers the redraw changed:
@@ -1149,6 +1877,8 @@ class _Fitter:
             kept = bool(accepted.any()) and bool(merged)
             if _REDRAW_PROBE is not None:
                 _REDRAW_PROBE({"pass": pass_index, "step": "merged", "lines": merged, "radii": merged_radii})
+            self.snap_stage = self.snap_base
+            self.snap(f"judged ({int(accepted.sum())} of {count} regions kept)", merged, merged_radii, merged_types)
             if kept and keep_old and s.redraw_merge_settle != "off":
                 # Old and new fibers meet at the edges of reverted regions:
                 # settle the merged fit (every node pinned for the image run,
@@ -1163,12 +1893,24 @@ class _Fitter:
                 # The groups were judged one by one and are trusted: a
                 # whole-pass check threw away passes whose groups were each
                 # better. The merged fit's totals are only logged.
-                merged_confidence, merged_settled, summary = self.scores(merged, merged_radii, previous=None)
+                merged_confidence, merged_settled, summary = self.scores(
+                    merged, merged_radii, previous=None, types=merged_types
+                )
                 coverage = _confidence.sure_coverage(self.foreground, merged, merged_radii, merged_settled)
                 residual = _confidence.residual_map(self.foreground, merged, merged_radii, self.margin)
                 residual_change = (float(residual.sum(dtype=np.int64)) - float(old_residual.sum(dtype=np.int64))) / max(
                     float(self.foreground.sum()), 1.0
                 )
+            freeze_info: dict[str, Any] = {}
+            if s.redraw_freeze_radii is not None:
+                tolerance = s.redraw_freeze_radii * float(self.radius.min())
+                if kept:
+                    frozen_next = self._same_spot(merged, lines, tolerance)
+                else:
+                    again = self._same_spot(lines, new_lines, tolerance)
+                    frozen_next = again if frozen is None else [a | f for a, f in zip(again, frozen)]
+                nodes = sum(len(f) for f in frozen_next)
+                freeze_info["frozen_nodes"] = round(sum(int(f.sum()) for f in frozen_next) / max(nodes, 1), 3)
             for k, (low, high) in enumerate(cut.regions):
                 ok = kept and bool(accepted[component[k]])
                 self._record(failures, low, high, ok)
@@ -1183,10 +1925,16 @@ class _Fitter:
                 regions_given_up=len(given_up), regions_widened=len(widen),
                 sure_coverage=round(coverage if kept else before_coverage, 4),
                 sure_coverage_before=round(before_coverage, 4), residual_change=round(residual_change, 4), kept=kept,
-                seconds=round(time.perf_counter() - started, 2),
+                seconds=round(time.perf_counter() - started, 2), **freeze_info,
             )
             if kept and _REDRAW_PROBE is not None:
                 _REDRAW_PROBE({"pass": pass_index, "step": "settled", "lines": merged, "radii": merged_radii})
+            if s.redraw_freeze_radii is not None:
+                frozen = frozen_next
+                frozen_on = merged if kept else lines
+                self.frozen_points = np.concatenate(
+                    [np.asarray(line, dtype=np.float64)[still] for line, still in zip(frozen_on, frozen)] or [np.zeros((0, 3))]
+                )
             if kept:
                 lines, radii, types = merged, merged_radii, merged_types
                 confidence, settled = merged_confidence, merged_settled
@@ -1194,6 +1942,19 @@ class _Fitter:
         if _REDRAW_PROBE is not None:
             _REDRAW_PROBE({"pass": "end", "old": (lines, radii), "types": types})
         return lines, radii, types, confidence
+
+    @staticmethod
+    def _same_spot(lines: list[np.ndarray], reference: list[np.ndarray], tolerance: float) -> list[np.ndarray]:
+        """Per node of ``lines``: within ``tolerance`` of a ``reference`` centerline."""
+        from scipy.spatial import cKDTree
+
+        dense = [
+            _refine.respace([np.asarray(line, dtype=np.float64)], 0.5)[0] for line in reference if len(line) >= 2
+        ]
+        if not dense:
+            return [np.zeros(len(line), dtype=bool) for line in lines]
+        tree = cKDTree(np.concatenate(dense))
+        return [tree.query(np.asarray(line, dtype=np.float64))[0] <= tolerance for line in lines]
 
     @property
     def score_name(self) -> str:
@@ -1320,6 +2081,9 @@ class _Fitter:
                 if not close:
                     break
                 offsets[close] = c
+            self.snap_stage = f"{self.snap_base}plan {c + 1}: "
+            if self.snapshots is not None:
+                self.snapshots.hold(f"plan {c}")
             candidate = self.redraw_candidate(cut, radii, types, attempt=attempt, offsets=offsets)
             lines, cand_radii = candidate[0], candidate[1]
             if self.score_name == "nats":
@@ -1329,7 +2093,7 @@ class _Fitter:
             elif self.score_name == "mask":
                 cover = -_confidence.residual_map(self.foreground, lines, cand_radii, self.margin)
             else:
-                _, settled, _ = self.scores(lines, cand_radii)
+                _, settled, _ = self.scores(lines, cand_radii, types=candidate[2])
                 cover = _confidence.coverage_map(self.foreground, lines, cand_radii, settled)
             for k in range(regions) if c == 0 else close:
                 low, high = cut.regions[k]
@@ -1343,10 +2107,17 @@ class _Fitter:
         same = [c for c in candidates if np.array_equal(used[c], choice)]
         if same:
             lines, new_radii, new_types, info = candidates[same[0]]
+            if self.snapshots is not None:
+                self.snapshots.keep(f"plan {same[0]}")
         else:
+            self.snap_stage = f"{self.snap_base}chosen plans: "
+            if self.snapshots is not None:
+                self.snapshots.hold("chosen")
             lines, new_radii, new_types, info = self.redraw_candidate(
                 cut, radii, types, attempt=attempt, offsets=choice
             )
+            if self.snapshots is not None:
+                self.snapshots.keep("chosen")
         info = {key: value for key, value in info.items() if key != "plan_scores"}
         info.update(plans_solved=solved, plan_choices=np.bincount(choice, minlength=solved).tolist())
         return lines, new_radii, new_types, info
@@ -1371,7 +2142,7 @@ class _Fitter:
             kind = int(piece_types[index])
             r = float(self.radius[kind])
             return Tracer(
-                self.image, self.hessian(kind), radius=r, min_bend_radius=float(self.bend[kind]),
+                self.trace_image(kind), self.hessian(kind), radius=r, min_bend_radius=float(self.bend[kind]),
                 step=max(0.75, 0.5 * r), claimed=claimed,
             )
 
@@ -1387,17 +2158,30 @@ class _Fitter:
                 spacing=self.spacing, max_length=20.0 * float(self.radius.max()),
                 attempt=(lambda index, end: attempt(cut.pieces[index][end])) if attempt else None,
             )
+        self.snap("grow ends", pieces, piece_radii, piece_types)
+        if s.redraw_order == "solve_first" and pieces:
+            pieces = self.solve(pieces, piece_radii, piece_types, anchors=cut.anchors)
+            pieces, piece_radii, piece_types, _ = self.cut_void(pieces, piece_radii, piece_types)
+            piece_radii, piece_types = self.classify(pieces)
+            pieces = _refine.respace(pieces, self.spacing)
+            self.snap("solve grown pieces", pieces, piece_radii, piece_types)
+        elif s.redraw_order != "seed_first":
+            raise ValueError('redraw_order is "seed_first" or "solve_first"')
         born = self.trace(pieces, piece_radii)
         born_radii, born_types = self.classify(born)
         lines = pieces + born
         radii = np.concatenate([piece_radii, born_radii])
         types = np.concatenate([piece_types, born_types]).astype(int)
+        self.snap("new fibers", lines, radii, types)
         lines, radii, types, counts = self.topology(lines, radii, types)
-        for _ in range(s.solver_batches):
+        self.snap("cleanup", lines, radii, types)
+        for batch in range(s.solver_batches):
             if not lines:
                 break
             lines = self.solve(lines, radii, types, anchors=cut.anchors)
+            self.snap(f"solve {batch + 1}", lines, radii, types)
             lines, radii, types, _ = self.cut_void(lines, radii, types)
+            self.snap(f"void cut {batch + 1}", lines, radii, types)
             radii, types = self.classify(lines)
             lines = _refine.respace(lines, self.spacing)
         void: dict[str, Any] = {}
@@ -1405,6 +2189,7 @@ class _Fitter:
             lines = self.solve(lines, radii, types, anchors=cut.anchors)
             lines, radii, types, void = self.cut_void(lines, radii, types, final=True)
             void.pop("source", None)
+            self.snap("final solve", lines, radii, types)
         info = {
             "unsure_nodes_cut": cut.removed_nodes,
             "fibers_removed": cut.removed_fibers,
@@ -1499,7 +2284,7 @@ class _Fitter:
             scale = self.grey_scale(cut.pieces, piece_radii, piece_types)
             grey_args = {"grey": self.grey, "void": self.grey_void}
         else:
-            scale = evidence_scale(self.image, cut.pieces, piece_radii, float(self.radius.min()))
+            scale = evidence_scale(self.evidence, cut.pieces, piece_radii, float(self.radius.min()))
             grey_args = {}
         diameter = 2.0 * self.radius
         ranked: dict[int, tuple] = {}
@@ -1545,7 +2330,7 @@ class _Fitter:
             low, high = cut.regions[k]
             nearby = near_box(cut.pieces, piece_radii, low, high)
             plans = _junctions.rank_plans(
-                self.image, (low, high), region_ports, pairs, region_extensions,
+                self.evidence, (low, high), region_ports, pairs, region_extensions,
                 [cut.pieces[i] for i in nearby], piece_radii[nearby],
                 margin=self.margin, scale=scale, end_costs=np.array(end_costs), interior=interior,
                 join_costs=join_costs, **grey_args,
@@ -1562,20 +2347,26 @@ class _Fitter:
         return natural, ports, ranked
 
     def scores(
-        self, lines: list[np.ndarray], radii: np.ndarray, *, previous: list[np.ndarray] | None = None
+        self, lines: list[np.ndarray], radii: np.ndarray, *, previous: list[np.ndarray] | None = None,
+        types: np.ndarray | None = None,
     ) -> tuple[list[np.ndarray], list[np.ndarray], dict[str, Any]]:
-        """Per-node confidence, the same without stability, and a summary for the history."""
+        """Per-node confidence, the same without stability, and a summary for the history.
+
+        With ``types``, an oval fit's surround ring sits outside its long semi-axis."""
         if not lines:
             return [], [], {}
         if previous is not None and len(previous) != len(lines):
             previous = None
         per_node, summary = _confidence.node_confidence(
-            self.image, self.depth, lines, radii, spacing=self.spacing, margin=self.margin,
+            self.evidence, self.depth, lines, radii, spacing=self.spacing, margin=self.margin,
             thickness_margin=self.width_margin,
-            previous=previous,
+            previous=previous, surround_weight=self.surround_weight,
+            surround_radii=self.surround_radii(radii, types),
         )
         settled = summary.pop("without_stability")
-        summary = {key: value for key, value in summary.items() if key not in ("fiber_mean", "fiber_min", "fibers")}
+        summary = {
+            key: value for key, value in summary.items() if key not in ("fiber_mean", "fiber_min", "fibers", "parts")
+        }
         summary["mean"] = round(float(summary.get("mean", 0.0)), 3)
         return per_node, settled, summary
 
@@ -1596,20 +2387,26 @@ class _Fitter:
             group_radii = np.asarray(radii)[pick]
             r, bend, min_length = float(self.radius[kind]), float(self.bend[kind]), float(self.min_length[kind])
             cost = float(self.cost[kind])
-            scale = evidence_scale(self.image, group, group_radii, r) if cost > 0 else 1.0
+            scale = evidence_scale(self.evidence, group, group_radii, r) if cost > 0 else 1.0
             group, group_radii, splits = _moves.split_kinks(
                 group, group_radii, min_bend_radius=bend, min_length=min_length, max_length=self.max_length[kind],
                 threshold=s.kink_threshold, image=self.image, end_cost=cost, scale=scale,
             )
+            if self.ratio[kind] > 1.0:
+                group, group_radii, beside = self._oval_duplicates(group, np.asarray(group_radii), kind)
+                counts["oval_duplicates"] = counts.get("oval_duplicates", 0) + beside
+            if s.merge_straddling and self.peak_grey is not None:
+                group, group_radii, straddling = self._merge_straddling(group, np.asarray(group_radii))
+                counts["straddling"] = counts.get("straddling", 0) + straddling
             group, group_radii, duplicates = _moves.resolve_side_by_side(
                 self.image, group, group_radii, min_length=min_length, end_cost=cost, scale=scale
             )
             group, group_radii = _moves.trim_duplicates(group, group_radii, min_length=min_length)
             group, group_radii = _moves.remove_unsupported(
-                self.image, group, group_radii, min_length=min_length, min_support=s.min_support
+                self.evidence, group, group_radii, min_length=min_length, min_support=s.min_support
             )
             group, group_radii, merges = _moves.merge_fragments(
-                self.image, group, group_radii, max_gap=s.merge_gap_radii * r,
+                self.evidence, group, group_radii, max_gap=s.merge_gap_radii * r,
                 min_bend_radius=bend, kink_threshold=s.kink_threshold,
                 end_cost=cost, scale=scale, max_prior_gap=s.prior_merge_gap_radii * r,
                 max_prior_angle_degrees=s.prior_merge_angle_degrees,
@@ -1620,12 +2417,128 @@ class _Fitter:
             out_lines += group
             out_radii.append(np.asarray(group_radii, dtype=np.float64))
             out_types.append(np.full(len(group), kind, dtype=int))
-        lines = _refine.respace(out_lines, self.spacing)
         radii = np.concatenate(out_radii) if out_radii else np.zeros(0)
         types = np.concatenate(out_types) if out_types else np.zeros(0, dtype=int)
-        counts["explained"] = _explained_fraction(self.foreground, lines, radii)
+        if len(self.specs) > 1 and out_lines:
+            # A fit of one type retracing a fiber of another (a fine fit
+            # inside a coarse fiber, or the reverse) is a duplicate the
+            # per-type pass above cannot see.
+            out_lines, radii, types, counts["cross_type_duplicates"] = _cross_type_duplicates(
+                out_lines, radii, types, min_length=float(self.min_length.min())
+            )
+        lines = _refine.respace(out_lines, self.spacing)
+        counts["explained"] = _explained_fraction(self.foreground, lines, radii, self.sections(lines, types=types))
         counts["types"] = self.counts(types)
         return lines, radii, types, counts
+
+    def _merge_straddling(self, lines: list[np.ndarray], radii: np.ndarray) -> tuple[list[np.ndarray], np.ndarray, int]:
+        """Pairs of parallel fits (one type) straddling one fiber merged into one (see
+        ``FitSettings.merge_straddling``), shortest fit first.
+
+        A node of one fit is straddling when another fit has a node within
+        2.6 radii, the grey at the point half way between them is at least
+        as bright as at both (less than a tenth of the way from either
+        core down to void), and the foreground runs across both through
+        that point for no more than ``merge_straddling_width_radii`` radii.
+        A fit with most of its nodes straddling is removed and its partner's
+        nodes beside them moved to the half-way points; the solver then
+        centres the survivor.
+        """
+        from scipy.spatial import cKDTree
+
+        from ._geometry import sample_image
+
+        if len(lines) < 2:
+            return lines, radii, 0
+        grey, void = self.peak_grey, self.peak_void
+        width_limit = self.settings.merge_straddling_width_radii
+        lines = [np.array(line, dtype=np.float64) for line in lines]
+        nodes = np.concatenate(lines)
+        owner = np.repeat(np.arange(len(lines)), [len(line) for line in lines])
+        slot = np.concatenate([np.arange(len(line)) for line in lines])
+        tree = cKDTree(nodes)
+        removed = np.zeros(len(lines), dtype=bool)
+        merged = 0
+        for i in np.argsort([polyline_length(line) for line in lines], kind="stable"):
+            r = float(radii[i])
+            partners: dict[int, list[tuple[int, int]]] = {}
+            for m, (point, near) in enumerate(zip(lines[i], tree.query_ball_point(lines[i], 2.6 * r))):
+                near = [q for q in near if owner[q] != i and not removed[owner[q]]]
+                if not near:
+                    continue
+                q = min(near, key=lambda q: float(np.sum((nodes[q] - point) ** 2)))
+                partners.setdefault(int(owner[q]), []).append((m, int(slot[q])))
+            if not partners:
+                continue
+            j, pairs = max(partners.items(), key=lambda item: len(item[1]))
+            if 2 * len(pairs) <= len(lines[i]):
+                continue
+            a = lines[i][[m for m, _ in pairs]]
+            b = lines[j][[n for _, n in pairs]]
+            middle = 0.5 * (a + b)
+            core_a, core_b, mid = (sample_image(grey, points) - void for points in (a, b, middle))
+            bright = (mid >= core_a - 0.1 * np.abs(core_a)) & (mid >= core_b - 0.1 * np.abs(core_b)) & (mid > 0)
+            across = b - a
+            across /= np.maximum(np.linalg.norm(across, axis=1, keepdims=True), 1e-12)
+            steps = np.arange(-width_limit * r, width_limit * r + 0.25, 0.5)
+            samples = sample_image(
+                self.foreground.astype(np.float32), (middle[:, None, :] + steps[None, :, None] * across[:, None, :]).reshape(-1, 3)
+            ).reshape(len(middle), len(steps)) > 0.5
+            centre = len(steps) // 2
+            # The foreground run through the half-way point, and whether it ends inside the window.
+            left = np.argmin(samples[:, centre::-1], axis=1)
+            right = np.argmin(samples[:, centre:], axis=1)
+            closed = samples[:, centre] & (left > 0) & (right > 0) & ~samples[:, 0] & ~samples[:, -1]
+            narrow = closed & ((left + right) * 0.5 <= width_limit * r)
+            straddling = bright & narrow
+            if 2 * int(straddling.sum()) <= len(lines[i]):
+                continue
+            removed[i] = True
+            merged += 1
+            for (_, n), point, keep in zip(pairs, middle, straddling):
+                if keep:
+                    lines[j][n] = point
+        keep = np.flatnonzero(~removed)
+        return [lines[k] for k in keep], radii[keep], merged
+
+    def _oval_duplicates(
+        self, lines: list[np.ndarray], radii: np.ndarray, kind: int
+    ) -> tuple[list[np.ndarray], np.ndarray, int]:
+        """Type-``kind`` oval fits (shortest first) removed when most of their nodes
+        sit inside another one's oval.
+
+        Two ovals of one type that touch are two radii apart once the offset
+        along the long axis is divided by the ratio, whichever way they sit
+        (stacked or side by side), but a fit beside another inside one flat
+        fiber is closer: the solver keeps two round fits two radii apart,
+        which along the long axis is two radii over the ratio. Nodes within
+        1.5 radii by that measure are inside another fiber.
+        """
+        from scipy.spatial import cKDTree
+
+        ratio = float(self.ratio[kind])
+        if ratio <= 1.0 or len(lines) < 2:
+            return lines, radii, 0
+        axes = [self.long_axes(line, kind) for line in lines]
+        nodes = np.concatenate(lines)
+        owner = np.repeat(np.arange(len(lines)), [len(line) for line in lines])
+        tree = cKDTree(nodes)
+        removed = np.zeros(len(lines), dtype=bool)
+        for i in np.argsort([polyline_length(line) for line in lines], kind="stable"):
+            limit = 1.5 * float(radii[i])
+            inside = 0
+            for point, axis, near in zip(lines[i], axes[i], tree.query_ball_point(lines[i], ratio * limit)):
+                near = [q for q in near if owner[q] != i and not removed[owner[q]]]
+                if not near:
+                    continue
+                offset = nodes[near] - point
+                u = offset @ axis
+                scaled = np.sqrt(np.maximum(np.sum(offset**2, axis=1) - u**2 + (u / ratio) ** 2, 0.0))
+                inside += bool((scaled < limit).any())
+            if 2 * inside > len(lines[i]):
+                removed[i] = True
+        keep = np.flatnonzero(~removed)
+        return [lines[i] for i in keep], radii[keep], int(removed.sum())
 
     def end_summary(self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray) -> dict[str, Any]:
         ends = end_statistics(lines, radii, self.image.shape)
@@ -1659,8 +2572,25 @@ def _relevel(image: np.ndarray, levels: Levels, lines: list[np.ndarray], radius:
     return (image - void) / (core - void), new
 
 
-def _explained_fraction(foreground: np.ndarray, lines: list[np.ndarray], radii: np.ndarray) -> float:
+def _cross_type_duplicates(
+    lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray, *, min_length: float
+) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, int]:
+    """``_moves.trim_duplicates`` over every type at once, keeping each survivor's type."""
+    kept, kept_radii = _moves.trim_duplicates(lines, radii, min_length=min_length)
+    # Survivors keep their order and are runs of their own nodes: match each
+    # to the next line holding its first node.
+    kept_types = []
+    j = 0
+    for line in kept:
+        while not np.any(np.all(lines[j] == line[0], axis=1)):
+            j += 1
+        kept_types.append(types[j])
+        j += 1
+    return kept, np.asarray(kept_radii, dtype=np.float64), np.asarray(kept_types, dtype=int), len(lines) - len(kept)
+
+
+def _explained_fraction(foreground: np.ndarray, lines: list[np.ndarray], radii: np.ndarray, sections=None) -> float:
     if not lines or not foreground.any():
         return 0.0
-    labels, _, _ = rasterize(foreground.shape, lines, radii, signed=True)
+    labels, _, _ = rasterize(foreground.shape, lines, radii, signed=True, sections=sections)
     return float(((labels > 0) & foreground).sum()) / float(foreground.sum())

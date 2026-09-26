@@ -157,6 +157,57 @@ class CtToolTests(unittest.TestCase):
         self.assertLess(lag_one(white), 0.1)
         self.assertGreater(lag_one(blurred), 0.6)
 
+    def test_scanner_reconstructs_a_rod_and_its_phase_fringe(self):
+        from tangle.ct._scanner import Scanner, acquire
+
+        z, y, x = np.indices((4, 40, 40), dtype=np.float32)
+        distance = np.hypot(x + 0.5 - 20.0, y + 0.5 - 20.0)
+        rod = np.clip(6.0 - distance + 0.5, 0.0, 1.0)  # a rod of radius 6 along z
+        distance = distance[0]
+        sample = (0.02 * rod).astype(np.float32)
+        rng = np.random.default_rng(0)
+        plain = acquire(sample, Scanner(photons=1e7, detector_blur=0.0, void_attenuation=0.0), rng)
+        inside, outside = plain[:, distance < 4], plain[:, distance > 9]
+        self.assertAlmostEqual(float(inside.mean()), 0.02, delta=0.003)
+        self.assertLess(abs(float(outside.mean())), 0.002)
+        phase = acquire(
+            sample, Scanner(photons=1e7, detector_blur=0.0, void_attenuation=0.0, delta_beta=20.0, propagation=1.5), rng
+        )
+        rim = phase[:, (distance > 6.5) & (distance < 8.0)].mean()
+        far = phase[:, distance > 12].mean()
+        self.assertLess(float(rim), float(far) - 0.002)  # dark just outside the surface
+
+    def test_synthetic_scan_draws_oval_fibers(self):
+        material = tangle.Material("flat", diameter=2 * DIAMETER, thickness=DIAMETER)
+        fibers = tangle.FiberCollection("oval")
+        fibers.add_fiber([[8 * um, 45 * um, 45 * um], [82 * um, 45 * um, 45 * um]], material, long_axis=[0.0, 1.0, 0.0])
+        assembly = tangle.Assembly(tangle.Cell([90 * um] * 3))
+        assembly.insert(fibers)
+        profiles = [(DIAMETER / 2, ct.CrossSection()), (2 * DIAMETER, ct.CrossSection(brightness=0.5))]
+        scan = ct.synthetic_ct(assembly, VOXEL, seed=5, profiles=profiles)
+        np.testing.assert_allclose(scan.semi_axes, [[DIAMETER / VOXEL, 0.5 * DIAMETER / VOXEL]])
+        self.assertAlmostEqual(float(scan.radii[0]), DIAMETER / VOXEL / np.sqrt(2), places=6)
+        self.assertEqual(scan.types.tolist(), [1])  # typed by its long width
+        np.testing.assert_allclose(np.abs(scan.long_axes[0][:, 1]), 1.0, atol=1e-6)
+        z, y, _ = np.nonzero(scan.labels == 1)
+        self.assertAlmostEqual((y.max() - y.min()) / (z.max() - z.min()), 2.0, delta=0.3)
+        cropped = scan.crop((10, 10, 10), (60, 60, 60))
+        self.assertEqual(cropped.semi_axes.shape, (1, 2))
+        self.assertEqual(len(cropped.long_axes[0]), len(cropped.centerlines[0]))
+
+    def test_scanner_noise_blur_makes_the_noise_blotchy(self):
+        from tangle.ct._scanner import Scanner, acquire
+
+        empty = np.zeros((4, 40, 40), dtype=np.float32)
+
+        def neighbour_correlation(noise_blur):
+            scanner = Scanner(photons=2000, void_attenuation=0.0, noise_blur=noise_blur)
+            scan = acquire(empty, scanner, np.random.default_rng(0))
+            a = scan[:, 10:30, 10:30]
+            return float(np.corrcoef(a[:, :, :-1].ravel(), a[:, :, 1:].ravel())[0, 1])
+
+        self.assertGreater(neighbour_correlation(1.0), neighbour_correlation(0.0) + 0.2)
+
     def test_cross_section_width_survives_noise_that_breaks_the_depth(self):
         from scipy.ndimage import gaussian_filter
 
@@ -719,6 +770,67 @@ class CtToolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             range_image(volume, [(0.0, 0.5)], denoise_sigma=0.0)  # nothing darker: no void
 
+    def test_surround_weight_and_ring_reach(self):
+        from tangle.ct import _confidence
+
+        # Two touching tubes along x (radius 3, axes 6.5 apart); only one is fitted.
+        z, y, x = np.mgrid[0:24, 0:32, 0:40]
+        near = lambda cy: np.hypot(y + 0.5 - cy, z + 0.5 - 12.0)  # noqa: E731
+        image = np.clip(0.5 - (np.minimum(near(12.0), near(18.5)) - 3.0) / 2.4, 0.0, 1.0).astype(np.float32)
+        depth = np.maximum(3.0 - np.minimum(near(12.0), near(18.5)), 0.0).astype(np.float32)
+        line = [np.array([[x0, 12.0, 12.0] for x0 in np.linspace(8.0, 32.0, 9)])]
+        args = dict(spacing=3.0, margin=0.0, thickness_margin=0.0)
+        full, summary = _confidence.node_confidence(image, depth, line, np.array([3.0]), **args)
+        free, _ = _confidence.node_confidence(image, depth, line, np.array([3.0]), surround_weight=0.0, **args)
+        surround = float(np.mean(summary["parts"]["surround"][0]))
+        self.assertLess(surround, 1.0)  # the unfitted neighbour is foreground no fit explains
+        self.assertGreater(float(free[0].mean()), float(full[0].mean()))  # weight 0 leaves it out
+        # A ring past the neighbour (as for an oval's long semi-axis) no longer lands on it.
+        _, far = _confidence.node_confidence(
+            image, depth, line, np.array([3.0]), surround_radii=np.array([9.0]), **args
+        )
+        self.assertGreater(float(np.mean(far["parts"]["surround"][0])), surround)
+
+    def test_graded_smallest_only_keeps_larger_types_on_the_flat_image(self):
+        from tangle.ct._fit import _Fitter
+
+        settings = ct.FitSettings(graded_image=True, graded_smallest_only=True)
+        specs = [ct.FiberSpec(diameter=4 * VOXEL, name="fine"), ct.FiberSpec(diameter=10 * VOXEL, name="coarse")]
+        graded = np.full((20, 30, 30), 0.5, dtype=np.float32)
+        flat = np.ones_like(graded)
+        fitter = _Fitter(graded, specs, settings, VOXEL, lambda *args, **kwargs: None)
+        fitter.set_image(graded, foreground=flat > 0.5, evidence=flat)
+        fitter.flat_kinds = frozenset({1})
+        self.assertIs(fitter.trace_image(0), graded)
+        self.assertIs(fitter.trace_image(1), flat)
+        coarse = np.array([[20.0, 20.0, z] for z in np.linspace(0.0, 20.0, 6)])
+        fine = np.array([[5.0, 5.0, z] for z in np.linspace(0.0, 20.0, 6)])
+        image = fitter.solve_image([fine, coarse], np.array([2.0, 5.0]), np.array([0, 1]))
+        self.assertEqual(float(image[10, 20, 20]), 1.0)  # within reach of the coarse fit: flat
+        self.assertEqual(float(image[10, 5, 5]), 0.5)  # the fine fit: graded
+        self.assertIs(fitter.solve_image([fine], np.array([2.0]), np.array([0])), graded)
+
+    def test_recenter_moves_a_fit_onto_the_grey_peak(self):
+        from tangle.ct._fit import _Fitter
+
+        settings = ct.FitSettings(recenter_on_grey=True)
+        spec = ct.FiberSpec(diameter=6 * VOXEL)
+        z, y, x = np.mgrid[0:16, 0:24, 0:24]
+        grey = np.exp(-((x - 10.0) ** 2 + (y - 10.0) ** 2) / 8.0).astype(np.float32)
+        fitter = _Fitter(grey, [spec], settings, VOXEL, lambda *args, **kwargs: None)
+        fitter.peak_grey, fitter.peak_void = grey, 0.0
+        # Voxel (10, 10) spans 10 … 11 in fit coordinates: the peak is at 10.5.
+        off = np.array([[11.7, 10.5, z] for z in np.linspace(2.0, 13.0, 8)])
+        lines, moved = fitter.recenter([off], np.array([3.0]), np.array([0]))
+        self.assertEqual(moved, 1)
+        self.assertLess(float(np.abs(lines[0][:, :2] - 10.5).max()), 0.3)
+        np.testing.assert_allclose(lines[0][:, 2], off[:, 2], atol=0.2)
+        # Another fit already on the peak: the off-centre one stays put.
+        on = np.array([[10.5, 10.5, z] for z in np.linspace(2.0, 13.0, 8)])
+        lines, moved = fitter.recenter([off, on], np.array([3.0, 3.0]), np.array([0, 0]))
+        self.assertEqual(moved, 0)
+        np.testing.assert_array_equal(lines[0], off)
+
     def test_grey_profiles_draw_measure_and_type_fibers(self):
         from tangle.ct import _grey
 
@@ -771,6 +883,29 @@ class CtFitTests(unittest.TestCase):
         # One grey-scan fit, with the length prior, serves most tests: the
         # solver is slow on the CPU backend CI uses.
         cls.fit = ct.fit_fibers(cls.scan.volume, VOXEL, ct.FiberSpec(diameter=DIAMETER, length=200 * um), fit_settings())
+
+    def test_snapshots_write_one_ovito_frame_per_step(self):
+        spec = ct.FiberSpec(diameter=DIAMETER, length=200 * um)
+        with tempfile.TemporaryDirectory() as tmp:
+            fit = ct.fit_fibers(self.scan.volume, VOXEL, spec, fit_settings(redraw_passes=1, confidence_threshold=0.99), snapshots=tmp)
+            stages = (Path(tmp) / "stages.txt").read_text().splitlines()[1:]
+            dump = (Path(tmp) / "fits.dump").read_text()
+            compile((Path(tmp) / "view_fits.py").read_text(), "view_fits.py", "exec")
+        names = [line.split("\t")[1] for line in stages]
+        for expected in ("trace", "round 1 solve 1", "round 1 cleanup", "round 1 new fibers", "final solve"):
+            self.assertIn(expected, names)
+        # A confidence threshold this high cuts something, so the redraw pass runs.
+        self.assertTrue(any(name.startswith("redraw 1: ") and "cut unsure" in name for name in names), names)
+        self.assertTrue(any(name.startswith("redraw 1: ") and "judged" in name for name in names), names)
+        self.assertEqual(dump.count("ITEM: TIMESTEP"), len(stages))
+        # The last frame holds the returned fit: one spherocylinder per centerline segment.
+        last = dump.rsplit("ITEM: TIMESTEP", 1)[1]
+        count = int(last.split("ITEM: NUMBER OF ATOMS\n")[1].split("\n")[0])
+        self.assertEqual(count, sum(len(line) - 1 for line in fit.centerlines))
+        self.assertIn("confidence settled surround frozen cut", dump.split("\n", 9)[8])
+        values = [float(v) for v in last.split("ITEM: ATOMS")[1].splitlines()[1].split()[-5:]]
+        self.assertTrue(all(0.0 <= v <= 1.0 for v in values[:4]), values)  # confidence, settled, surround, frozen
+        self.assertEqual(values[4], -1.0)  # cut: only on a redraw's cut frame
 
     def test_tiled_fit_matches_whole_fit_and_resumes(self):
         from unittest import mock
@@ -931,6 +1066,25 @@ class CtFitTests(unittest.TestCase):
             self.assertEqual(report["per_type"][kind]["fitted_as_this_type"], report["per_type"][kind]["fitted"], report["per_type"])
         geometry = ct.geometry_report(fit.centerlines, fit.radii, 5 * DIAMETER / VOXEL, spacing=1.25 * DIAMETER / VOXEL)
         self.assertEqual(geometry["overlapping_pairs"], 0, geometry)
+
+
+    def test_a_flat_oval_fiber_is_fitted_once_with_its_long_axis(self):
+        material = tangle.Material("flat", diameter=2 * DIAMETER, thickness=DIAMETER)
+        fibers = tangle.FiberCollection("oval")
+        fibers.add_fiber([[8 * um, 45 * um, 45 * um], [82 * um, 45 * um, 45 * um]], material, long_axis=[0.0, 1.0, 0.0])
+        assembly = tangle.Assembly(tangle.Cell([90 * um] * 3))
+        assembly.insert(fibers)
+        scan = ct.synthetic_ct(assembly, VOXEL, seed=6)
+        spec = ct.FiberSpec(diameter=2 * DIAMETER, thickness=DIAMETER, name="flat")
+        fit = ct.fit_fibers(scan.fiber_mask(level=0.35), VOXEL, spec, fit_settings())
+        self.assertEqual(fit.fiber_count, 1, fit.history[-1])
+        axes = fit.long_axes[0]
+        self.assertGreater(float(np.median(np.abs(axes[:, 1]))), 0.9)  # along y, as drawn
+        labels = fit.label_volume()
+        z, y, _ = np.nonzero(labels == 1)
+        self.assertGreater((y.max() - y.min()) / max(z.max() - z.min(), 1), 1.5)
+        material = fit.materials()[0]
+        self.assertTrue(material.is_oval)
 
 
 if __name__ == "__main__":
