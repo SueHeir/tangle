@@ -371,7 +371,7 @@ def bundled_two_types(cache: Path) -> Example:
     # The scintillator spreads each counted photon over about a pixel, so the
     # noise comes out blotchy instead of pixel to pixel; that blur also
     # averages the noise down, so fewer photons keep the same contrast to noise.
-    scanner = replace(SCANNER, noise_blur=1.0, photons=90)
+    scanner = replace(SCANNER, noise_blur=1.0, photons=56)
     full = render_scan(truth, voxel, seed=23, profiles=SCANNER_PROFILES, scanner=scanner)
     low = int(round((cell_side - crop) / 2 / voxel))
     scan = full.crop((low,) * 3, (low + int(round(crop / voxel)),) * 3)
