@@ -314,7 +314,8 @@ def _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles, period,
 
 def _oval_sections(source, voxel_size, count):
     """Semi-axes (voxels, long first) and per-node long axes when any fiber is oval, else ``(None, None)``."""
-    assembly = source.assembly() if callable(getattr(source, "assembly", None)) else source
+    assembly = getattr(source, "assembly", source)  # a RunResult's assembly is a property
+    assembly = assembly() if callable(assembly) else assembly
     if not hasattr(assembly, "section_semi_axes"):
         return None, None
     semi_axes = np.asarray(assembly.section_semi_axes(), dtype=np.float64).reshape(-1, 2) / voxel_size
