@@ -170,6 +170,18 @@ class FitSettings:
     # already there (pinned), so a new fiber traced off an axis cannot drag
     # settled ones off theirs; later solves are free again.
     births_solve_pinned: bool = False
+    # Trace the smallest type first (default: largest first, so a larger
+    # type's traces, which can run down a whole bundle of smaller fibers,
+    # claim it before the smaller type is tried).
+    trace_smallest_first: bool = False
+    # With coarse_axis_grey_max: drop traces of a larger type whose axis is
+    # that bright as they are traced (a bundle of fine fibers, not a dim-cored
+    # coarse fiber), so they do not claim the bundle before the fine type is
+    # traced.
+    coarse_trace_axis_check: bool = False
+    # With recenter_on_grey: also recenter after each round's cleanup, before
+    # new fibers are traced around the fits.
+    recenter_each_round: bool = False
     # New fibers traced among existing ones (a round's births, a redraw's new
     # fibers) are kept only if at least this share of their nodes sit on a
     # grey ridge: the brightest point of the grey (smoothed by
@@ -936,6 +948,10 @@ def fit_fibers(
             **fitter.end_summary(lines, radii, types),
         )
         fitter.snap(f"round {round_index + 1} cleanup", lines, radii, types)
+        if settings.recenter_on_grey and settings.recenter_each_round and fitter.peak_grey is not None and lines:
+            lines, moved = fitter.recenter(lines, radii, types)
+            log(f"recenter {round_index + 1}", lines, moved=moved)
+            fitter.snap(f"round {round_index + 1} recenter", lines, radii, types)
         if round_index + 1 < settings.rounds:
             born = fitter.trace(lines, radii)
             born_radii, born_types = fitter.classify(born)
@@ -1076,6 +1092,8 @@ class _Fitter:
         self.tolerance = np.array([item.diameter_tolerance for item in specs])
         self.spacing = settings.node_spacing_radii * float(self.radius.min())
         self.order = [int(k) for k in np.argsort(-self.radius, kind="stable")]  # largest first
+        if settings.trace_smallest_first:
+            self.order = self.order[::-1]
         self.hessians: dict[int, HessianField] = {}
         self.margin = settings.thickness_margin_voxels or 0.0  # the foreground's over-reach (see classify)
         self.width_margin = self.margin  # the cross-section radius's over-reach
@@ -1142,7 +1160,7 @@ class _Fitter:
             return None
         return np.asarray(radii, dtype=np.float64) * self.ratio[np.asarray(types, dtype=int)]
 
-    def snap(self, stage: str, lines: list[np.ndarray], radii, types) -> None:
+    def snap(self, stage: str, lines: list[np.ndarray], radii, types, extra: dict | None = None) -> None:
         """A snapshot of ``lines`` (see ``fit_fibers(snapshots=...)``), when asked for,
         with each node's confidence (with and without stability), surround and
         whether a redraw froze it."""
@@ -1169,7 +1187,7 @@ class _Fitter:
                 frozen = [(tree.query(line)[0] <= tolerance).astype(float) for line in lines]
             values = {
                 "confidence": per_node, "settled": summary["without_stability"], "surround": surround,
-                "frozen": frozen,
+                "frozen": frozen, **(extra or {}),
             }
         self.snapshots.write(f"{self.snap_stage}{stage}", lines, radii, types, values)
 
@@ -1268,6 +1286,10 @@ class _Fitter:
             )
             if self.settings.grey_checked_traces and new and r > smallest:
                 new = self._grey_checked(new, kind)
+            if self.settings.coarse_trace_axis_check and new and r > smallest:
+                bright = self._bright_axis(new)
+                if bright is not None:
+                    new = [line for line, b in zip(new, bright) if not b]
             if self.settings.birth_ridge_min is not None and new and lines:
                 new = [line for line in new if self._ridge_share(line, r) >= self.settings.birth_ridge_min]
             found += new
@@ -1653,10 +1675,13 @@ class _Fitter:
             )
             if cut is None or not lines:
                 break
-            self.snap(
-                "cut unsure (sure pieces)", cut.pieces,
-                np.asarray(radii, dtype=np.float64)[cut.parent], np.asarray(types, dtype=int)[cut.parent],
-            )
+            if self.snapshots is not None:
+                # The whole fit, the stretches the redraw takes out flagged (cut = 1).
+                kept = self._same_spot(lines, cut.pieces, 0.25 * float(self.radius.min()))
+                self.snap(
+                    "cut unsure (cut = 1 is taken out and redrawn)", lines, radii, types,
+                    extra={"cut": [(~k).astype(float) for k in kept]},
+                )
             attempt = lambda point: self._attempt(point, failures)  # noqa: E731
             if s.redraw_moves == "match" and s.redraw_plans > 1:
                 new_lines, new_radii, new_types, info = self.pick_plans(cut, radii, types, attempt)

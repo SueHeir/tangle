@@ -19,9 +19,9 @@ import numpy as np
 
 _COLUMNS = (
     "id mol type AsphericalShape.X AsphericalShape.Y AsphericalShape.Z quati quatj quatk quatw x y z "
-    "fiber_type radius segment confidence settled surround frozen"
+    "fiber_type radius segment confidence settled surround frozen cut"
 )
-_VALUES = ("confidence", "settled", "surround", "frozen")
+_VALUES = ("confidence", "settled", "surround", "frozen", "cut")
 
 
 class Snapshots:
@@ -187,7 +187,8 @@ STAGES = {names}
 
 pipeline = import_file(str(HERE / "fits.dump"), sort_particles=True)
 # Color by fiber. Other columns to color by: fiber_type (fine/coarse), confidence and settled
-# (0 unsure .. 1 sure; the redraw cuts below 0.5), surround, frozen (1 = a redraw froze it).
+# (0 unsure .. 1 sure; the redraw cuts below 0.5), surround, frozen (1 = a redraw froze it),
+# cut (on a redraw's cut frame, 1 = the stretch the redraw takes out to rebuild; -1 on other frames).
 COLOR_BY = "confidence" if "--confidence" in sys.argv else "Molecule Identifier"
 if COLOR_BY == "confidence":
     pipeline.modifiers.append(ColorCodingModifier(property="confidence", start_value=0.0, end_value=1.0))

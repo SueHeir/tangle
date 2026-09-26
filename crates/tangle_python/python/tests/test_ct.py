@@ -902,9 +902,10 @@ class CtFitTests(unittest.TestCase):
         last = dump.rsplit("ITEM: TIMESTEP", 1)[1]
         count = int(last.split("ITEM: NUMBER OF ATOMS\n")[1].split("\n")[0])
         self.assertEqual(count, sum(len(line) - 1 for line in fit.centerlines))
-        self.assertIn("confidence settled surround frozen", dump.split("\n", 9)[8])
-        values = [float(v) for v in last.split("ITEM: ATOMS")[1].splitlines()[1].split()[-4:]]
-        self.assertTrue(all(0.0 <= v <= 1.0 for v in values), values)  # confidence, settled, surround, frozen
+        self.assertIn("confidence settled surround frozen cut", dump.split("\n", 9)[8])
+        values = [float(v) for v in last.split("ITEM: ATOMS")[1].splitlines()[1].split()[-5:]]
+        self.assertTrue(all(0.0 <= v <= 1.0 for v in values[:4]), values)  # confidence, settled, surround, frozen
+        self.assertEqual(values[4], -1.0)  # cut: only on a redraw's cut frame
 
     def test_tiled_fit_matches_whole_fit_and_resumes(self):
         from unittest import mock
