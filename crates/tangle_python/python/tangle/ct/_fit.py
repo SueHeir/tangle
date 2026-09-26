@@ -130,6 +130,14 @@ class FitSettings:
     # reaches a neighbour's axis cuts the neighbour's trace short).
     trace_peak_floor: float = 0.0
     trace_claim_radii: float = 1.1
+    # Merge two parallel fits of one type that straddle one fiber: the grey
+    # between their axes at least as bright as at them (the solver keeps
+    # two capsules two radii apart, so two traces laid along one blurred
+    # fiber settle on either side of its bright axis), and the foreground
+    # across them no wider than ``merge_straddling_width_radii`` radii (one
+    # blurred fiber; two real ones side by side read wider). Grey scans only.
+    merge_straddling: bool = False
+    merge_straddling_width_radii: float = 4.0
     # Fill enclosed foreground holes up to a fiber's cross-section (a dim
     # core, or noise speckle in a dim fiber) in a mask, grey ranges or a
     # plain grey scan.
@@ -694,6 +702,7 @@ def fit_fibers(
     grey_model = None
     checked, type_levels = None, None  # the denoised grey and each type's grey, for grey_checked_traces
     foreground = None  # what is fiber, when it is not simply image > 0.5
+    peak_grey, peak_void = None, 0.0  # merge_straddling: the denoised grey and its void
     evidence = None  # what judges fits, when it is not the traced image
     if binary:
         image, levels = _mask_image(volume, exclude, settings, largest)
@@ -732,6 +741,13 @@ def fit_fibers(
             )
             foreground = flat > 0.5
             evidence = flat
+        if settings.merge_straddling:
+            from . import _native
+
+            peak_grey = grey_model[0] if grey_model is not None else np.asarray(volume, dtype=np.float32)
+            if grey_model is None and settings.denoise_sigma_voxels > 0:
+                peak_grey = _native.gaussian(peak_grey, settings.denoise_sigma_voxels)
+            peak_void = float(grey_model[2]) if grey_model is not None else float(void)
         if settings.grey_checked_traces:
             from . import _native
 
@@ -753,6 +769,7 @@ def fit_fibers(
         if exclude is not None:
             image = np.where(np.asarray(exclude, dtype=bool), np.float32(0.0), image)
         source = "grey"
+        peak_grey, peak_void = image, 0.0
     log("input", [], mask=binary, source=source)
 
     fitter = _Fitter(image, specs, settings, voxel_size, log)
@@ -764,6 +781,8 @@ def fit_fibers(
         fitter.grey, fitter.profiles, fitter.grey_void = grey_model
     if type_levels is not None:
         fitter.checked_grey, fitter.type_levels = checked, type_levels
+    if settings.merge_straddling:
+        fitter.peak_grey, fitter.peak_void = peak_grey, peak_void
     lines = fitter.trace([], np.zeros(0))
     radii, types = fitter.classify(lines)
     log("trace", lines, types=fitter.counts(types), thickness_margin=round(fitter.margin, 2))
@@ -932,6 +951,8 @@ class _Fitter:
         self._plain_scale: float | None = None
         self.checked_grey: np.ndarray | None = None  # grey_checked_traces: the denoised grey
         self.type_levels: np.ndarray | None = None  # and each type's grey
+        self.peak_grey: np.ndarray | None = None  # merge_straddling: the denoised grey
+        self.peak_void = 0.0
         self._match_cache: tuple | None = None  # (cut, ranking): reused by a pass's candidates
         self.set_image(image)
 
@@ -1830,6 +1851,9 @@ class _Fitter:
             if self.ratio[kind] > 1.0:
                 group, group_radii, beside = self._oval_duplicates(group, np.asarray(group_radii), kind)
                 counts["oval_duplicates"] = counts.get("oval_duplicates", 0) + beside
+            if self.peak_grey is not None:
+                group, group_radii, straddling = self._merge_straddling(group, np.asarray(group_radii))
+                counts["straddling"] = counts.get("straddling", 0) + straddling
             group, group_radii, duplicates = _moves.resolve_side_by_side(
                 self.image, group, group_radii, min_length=min_length, end_cost=cost, scale=scale
             )
@@ -1862,6 +1886,76 @@ class _Fitter:
         counts["explained"] = _explained_fraction(self.foreground, lines, radii, self.sections(lines, types=types))
         counts["types"] = self.counts(types)
         return lines, radii, types, counts
+
+    def _merge_straddling(self, lines: list[np.ndarray], radii: np.ndarray) -> tuple[list[np.ndarray], np.ndarray, int]:
+        """Pairs of parallel fits (one type) straddling one fiber merged into one (see
+        ``FitSettings.merge_straddling``), shortest fit first.
+
+        A node of one fit is straddling when another fit has a node within
+        2.6 radii, the grey at the point half way between them is at least
+        as bright as at both (less than a tenth of the way from either
+        core down to void), and the foreground runs across both through
+        that point for no more than ``merge_straddling_width_radii`` radii.
+        A fit with most of its nodes straddling is removed and its partner's
+        nodes beside them moved to the half-way points; the solver then
+        centres the survivor.
+        """
+        from scipy.spatial import cKDTree
+
+        from ._geometry import sample_image
+
+        if len(lines) < 2:
+            return lines, radii, 0
+        grey, void = self.peak_grey, self.peak_void
+        width_limit = self.settings.merge_straddling_width_radii
+        lines = [np.array(line, dtype=np.float64) for line in lines]
+        nodes = np.concatenate(lines)
+        owner = np.repeat(np.arange(len(lines)), [len(line) for line in lines])
+        slot = np.concatenate([np.arange(len(line)) for line in lines])
+        tree = cKDTree(nodes)
+        removed = np.zeros(len(lines), dtype=bool)
+        merged = 0
+        for i in np.argsort([polyline_length(line) for line in lines], kind="stable"):
+            r = float(radii[i])
+            partners: dict[int, list[tuple[int, int]]] = {}
+            for m, (point, near) in enumerate(zip(lines[i], tree.query_ball_point(lines[i], 2.6 * r))):
+                near = [q for q in near if owner[q] != i and not removed[owner[q]]]
+                if not near:
+                    continue
+                q = min(near, key=lambda q: float(np.sum((nodes[q] - point) ** 2)))
+                partners.setdefault(int(owner[q]), []).append((m, int(slot[q])))
+            if not partners:
+                continue
+            j, pairs = max(partners.items(), key=lambda item: len(item[1]))
+            if 2 * len(pairs) <= len(lines[i]):
+                continue
+            a = lines[i][[m for m, _ in pairs]]
+            b = lines[j][[n for _, n in pairs]]
+            middle = 0.5 * (a + b)
+            core_a, core_b, mid = (sample_image(grey, points) - void for points in (a, b, middle))
+            bright = (mid >= core_a - 0.1 * np.abs(core_a)) & (mid >= core_b - 0.1 * np.abs(core_b)) & (mid > 0)
+            across = b - a
+            across /= np.maximum(np.linalg.norm(across, axis=1, keepdims=True), 1e-12)
+            steps = np.arange(-width_limit * r, width_limit * r + 0.25, 0.5)
+            samples = sample_image(
+                self.foreground.astype(np.float32), (middle[:, None, :] + steps[None, :, None] * across[:, None, :]).reshape(-1, 3)
+            ).reshape(len(middle), len(steps)) > 0.5
+            centre = len(steps) // 2
+            # The foreground run through the half-way point, and whether it ends inside the window.
+            left = np.argmin(samples[:, centre::-1], axis=1)
+            right = np.argmin(samples[:, centre:], axis=1)
+            closed = samples[:, centre] & (left > 0) & (right > 0) & ~samples[:, 0] & ~samples[:, -1]
+            narrow = closed & ((left + right) * 0.5 <= width_limit * r)
+            straddling = bright & narrow
+            if 2 * int(straddling.sum()) <= len(lines[i]):
+                continue
+            removed[i] = True
+            merged += 1
+            for (_, n), point, keep in zip(pairs, middle, straddling):
+                if keep:
+                    lines[j][n] = point
+        keep = np.flatnonzero(~removed)
+        return [lines[k] for k in keep], radii[keep], merged
 
     def _oval_duplicates(
         self, lines: list[np.ndarray], radii: np.ndarray, kind: int
