@@ -16,6 +16,12 @@ The fit image is the largest of these over the types (0 void … 1 fiber),
 so the solver sees sub-voxel edges rather than a hard mask boundary. Which
 range a fiber's core voxels fall in is kept per voxel (``types``, one bit
 per type) and helps decide each fiber's type.
+
+A range is wide enough that the dimmer grey where two fibers touch is in
+it too, so the fit image is flat across touching fibers: a packed bundle
+reads as one blob at 1. ``graded_image`` keeps that dip: each type's grey
+over its range's typical (median) value, so a fiber's axis is brighter
+than the contact beside it, for tracing and relaxing onto single fibers.
 """
 
 from __future__ import annotations
@@ -84,6 +90,42 @@ def range_image(
         image[excluded] = 0.0
         types[excluded] = 0
     return image, types, void
+
+
+def graded_image(
+    volume: np.ndarray,
+    ranges: list[tuple[float, float]],
+    void: float,
+    *,
+    denoise_sigma: float,
+    flat: np.ndarray | None = None,
+    exclude: np.ndarray | None = None,
+) -> np.ndarray:
+    """The 0…1 grey that keeps the dips between touching fibers.
+
+    Per type, ``(v - void) / (core - void)`` up to 1, where ``core`` is the
+    median grey of the voxels inside its range, fading out above the range
+    as in ``range_image``; the largest over the types. With ``flat``
+    (``range_image``'s image), the dim cores it filled read 1 here too.
+    """
+    from . import _native
+
+    grey = np.asarray(volume, dtype=np.float32)
+    if denoise_sigma > 0:
+        grey = _native.gaussian(grey, denoise_sigma)
+    image = np.zeros(grey.shape, dtype=np.float32)
+    for low, high in ranges:
+        inside = (grey >= low) & (grey <= high)
+        core = float(np.median(grey[inside])) if inside.any() else float(high)
+        rise = np.clip((grey - void) / max(core - void, 1e-12), 0.0, 1.0)
+        fall = np.clip(1.0 - (grey - high) / (high - low), 0.0, 1.0)
+        np.maximum(image, np.where(grey > high, fall, rise).astype(np.float32), out=image)
+    if flat is not None:
+        # Filled: fiber in the range image though darker than every range.
+        image[(flat >= 1.0) & (grey < min(low for low, _ in ranges))] = 1.0
+    if exclude is not None:
+        image[np.asarray(exclude, dtype=bool)] = 0.0
+    return image
 
 
 def type_fractions(types: np.ndarray, points: np.ndarray, count: int) -> np.ndarray:

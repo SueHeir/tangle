@@ -93,6 +93,11 @@ class FitSettings:
     # Fibers packed in a bundle share one foreground blob whose depth ridge
     # runs down the middle fiber only (see _trace.trace_fibers).
     bright_seed_strength: float | None = None
+    # With grey ranges or profiles, trace and relax on the graded grey
+    # (_ranges.graded_image) rather than the range image, which is flat
+    # across touching fibers; what counts as fiber (the foreground, its
+    # depth and the types) still comes from the range image.
+    graded_image: bool = False
     # Fill enclosed foreground holes up to a fiber's cross-section (a dim
     # core, or noise speckle in a dim fiber) in a mask, grey ranges or a
     # plain grey scan.
@@ -623,6 +628,7 @@ def fit_fibers(
     largest = max(0.5 * item.diameter for item in specs) / voxel_size
     type_bits = None
     grey_model = None
+    foreground = None  # what is fiber, when it is not simply image > 0.5
     if binary:
         image, levels = _mask_image(volume, exclude, settings, largest)
         source = "mask"
@@ -650,6 +656,14 @@ def fit_fibers(
         low = min(r[0] for r in ranges)
         levels = Levels(void=void, fiber=float(np.mean(ranges[0])), threshold=0.5 * (void + low))
         source = "grey profiles" if grey_model is not None else "grey ranges"
+        if settings.graded_image:
+            from ._ranges import graded_image
+
+            flat = image
+            image = graded_image(
+                volume, ranges, void, denoise_sigma=settings.denoise_sigma_voxels, exclude=exclude, flat=flat
+            )
+            foreground = flat > 0.5
     else:
         image, levels = normalize(volume, denoise_sigma=settings.denoise_sigma_voxels, levels=settings.levels)
         if settings.fill_mask_holes:
@@ -660,6 +674,8 @@ def fit_fibers(
     log("input", [], mask=binary, source=source)
 
     fitter = _Fitter(image, specs, settings, voxel_size, log)
+    if foreground is not None:
+        fitter.set_image(image, foreground=foreground)
     fitter.width_typing = source == "grey"
     fitter.type_bits = type_bits
     if grey_model is not None:
@@ -825,11 +841,11 @@ class _Fitter:
         self._match_cache: tuple | None = None  # (cut, ranking): reused by a pass's candidates
         self.set_image(image)
 
-    def set_image(self, image: np.ndarray) -> None:
+    def set_image(self, image: np.ndarray, foreground: np.ndarray | None = None) -> None:
         from ._trace import foreground_depth
 
         self.image = image
-        self.foreground = image > 0.5
+        self.foreground = image > 0.5 if foreground is None else foreground
         # Local thickness: distance to the nearest void voxel center, taken
         # as the maximum over the 3x3x3 neighborhood so a centerline between
         # voxel centers reads the axis value rather than an interpolated,
