@@ -1182,8 +1182,8 @@ the bend finish are on; the other three are off.
    void to the fits' median grey (a walk or join over empty space) are cut,
    and pieces the cut leaves shorter than the minimum length are dropped.
    The log gives `joins`, `grown_voxels`, `ghost_voxels_cut` and
-   `through_share`, the share of fits with both ends within 5 voxels of a
-   face. Most scans have fibers that end inside the block; there, joins up
+   `through_share`, the share of fits with both ends within two diameters
+   of a face (a fiber leaving the block still ends a little inside it). Most scans have fibers that end inside the block; there, joins up
    to 240 voxels long with no bridge check, and walks to the faces, would
    join fibers end to end and lengthen them. The benchmark's fibers are
    0.55 to 0.9 of the block side long (`dense_hard_settings`), so it was not

@@ -483,6 +483,18 @@ class CtFinishTests(unittest.TestCase):
         self.assertGreater(float(inside[:, 1].min()), 8.0)
         self.assertLess(float(inside[:, 1].max()), 56.0)
 
+    def test_through_share_counts_ends_near_a_face(self):
+        from tangle.ct._join import through_block
+
+        # The tube stops short of the far face (x = 63): the fit ends about 6 voxels inside it, within two
+        # diameters (8 voxels), so it counts as through.
+        grey = tubes([[-2, 20, 20], [55, 20, 20]])
+        fitter = SimpleNamespace(radius=np.array([2.0]), spacing=2.0, min_length=np.array([10.0]))
+        lines, _, _, info = through_block(fitter, [line([10, 20, 20], [48, 20, 20])], [2.0], [0], {0}, grey, grey, 0.0, 20.0)
+        self.assertEqual(len(lines), 1)
+        self.assertLess(float(lines[0][:, 0].max()), 58.0)
+        self.assertEqual(info["through_share"], 1.0)
+
 
 @unittest.skipIf(ct is None, "tangle.ct needs NumPy and SciPy")
 class CtFinishSettingsTests(unittest.TestCase):

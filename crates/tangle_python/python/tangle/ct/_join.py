@@ -630,6 +630,8 @@ _THROUGH_JOIN_OFFSET = 1.5  # radii
 _THROUGH_OVERLAP = 20.0  # voxels
 _GHOST_LEVEL = 0.3  # of the way from void to the fits' median grey
 _GHOST_RUN = 5.0  # voxels
+_THROUGH_GIVE = 2.0  # diameters: an end this close to a face counts as at the face (``through_share``); a fiber
+# leaving the block still ends a little inside it, where its last stretch blurs into the edge
 
 
 def through_block(fitter, lines, radii, types, kinds, grey, sharp, void, bend):
@@ -692,7 +694,8 @@ def through_block(fitter, lines, radii, types, kinds, grey, sharp, void, bend):
     for line, kind in zip(out_lines, out_types):
         if int(kind) in kinds and len(line) >= 2:
             total += 1
-            through += all(min(np.min(p), np.min(upper - p)) <= 5.0 for p in (line[0], line[-1]))
+            give = _THROUGH_GIVE * 2.0 * float(fitter.radius[int(kind)])
+            through += all(min(np.min(p), np.min(upper - p)) <= give for p in (line[0], line[-1]))
     info = {"joins": joins, "grown_voxels": grown, "ghost_voxels_cut": ghost,
             "through_share": round(through / max(total, 1), 3)}
     return out_lines, np.asarray(out_radii, dtype=np.float64), np.asarray(out_types, dtype=int), info
