@@ -108,6 +108,13 @@ class FitSettings:
     # way (0.8) from its type's grey to a brighter type's. Grey ranges or
     # profiles only.
     grey_checked_traces: bool = False
+    # Tracing in packed bundles: recenter each step on the cross-section's
+    # samples above this fraction of its brightest (0: its intensity
+    # centroid, which a touching neighbour pulls off axis), and let each
+    # traced fiber claim the voxels within this many radii (a claim that
+    # reaches a neighbour's axis cuts the neighbour's trace short).
+    trace_peak_floor: float = 0.0
+    trace_claim_radii: float = 1.1
     # Fill enclosed foreground holes up to a fiber's cross-section (a dim
     # core, or noise speckle in a dim fiber) in a mask, grey ranges or a
     # plain grey scan.
@@ -919,6 +926,7 @@ class _Fitter:
                 # than the smaller types could make it.
                 seed_depth_radii=0.7 if r > smallest else 0.5,
                 bright_seed_strength=self.settings.bright_seed_strength,
+                peak_floor=self.settings.trace_peak_floor, claim_radii=self.settings.trace_claim_radii,
             )
             if self.settings.grey_checked_traces and new and r > smallest:
                 new = self._grey_checked(new, kind)

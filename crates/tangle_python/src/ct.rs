@@ -289,7 +289,7 @@ impl PyCtHessian {
     }
 }
 
-fn trace_settings(radius: f64, min_bend_radius: f64, step: f64) -> PyResult<TraceSettings> {
+fn trace_settings(radius: f64, min_bend_radius: f64, step: f64, peak_floor: f64) -> PyResult<TraceSettings> {
     if !(radius > 0.0 && step > 0.0) {
         return Err(PyValueError::new_err("radius and step must be positive"));
     }
@@ -297,6 +297,7 @@ fn trace_settings(radius: f64, min_bend_radius: f64, step: f64) -> PyResult<Trac
         radius,
         min_bend_radius,
         step,
+        peak_floor,
     })
 }
 
@@ -317,7 +318,7 @@ pub(crate) fn ct_trace_one_way(
 ) -> PyResult<Vec<[f64; 3]>> {
     let shape = volume_shape(&image, "image")?;
     same_shape(&image, &claimed, "claimed")?;
-    let settings = trace_settings(radius, min_bend_radius, step)?;
+    let settings = trace_settings(radius, min_bend_radius, step, 0.0)?;
     let tracer = Tracer::new(read(&image, "image")?, shape, &hessian.field, settings);
     Ok(tracer.trace_one_way(
         start,
@@ -330,7 +331,7 @@ pub(crate) fn ct_trace_one_way(
 
 /// Traces fibers from ridge seeds, painting `claimed` in place (see `_trace.trace_fibers`).
 #[pyfunction]
-#[pyo3(signature = (image, hessian, claimed, edt, peak, radius, min_bend_radius, step, min_length, node_spacing, label_offset, max_fibers, seed_depth_radii, bright_seed_strength=None))]
+#[pyo3(signature = (image, hessian, claimed, edt, peak, radius, min_bend_radius, step, min_length, node_spacing, label_offset, max_fibers, seed_depth_radii, bright_seed_strength=None, peak_floor=0.0, claim_radii=1.1))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ct_trace_fibers(
     image: PyBuffer<f32>,
@@ -347,19 +348,22 @@ pub(crate) fn ct_trace_fibers(
     max_fibers: Option<usize>,
     seed_depth_radii: f64,
     bright_seed_strength: Option<f32>,
+    peak_floor: f64,
+    claim_radii: f64,
 ) -> PyResult<Vec<Vec<[f64; 3]>>> {
     let shape = volume_shape(&image, "image")?;
     same_shape(&image, &claimed, "claimed")?;
     same_shape(&image, &edt, "edt")?;
     same_shape(&image, &peak, "peak")?;
     let search = FiberSearch {
-        trace: trace_settings(radius, min_bend_radius, step)?,
+        trace: trace_settings(radius, min_bend_radius, step, peak_floor)?,
         min_length,
         node_spacing,
         label_offset,
         max_fibers,
         seed_depth_radii,
         bright_seed_strength,
+        claim_radii,
     };
     Ok(trace_fibers(
         read(&image, "image")?,

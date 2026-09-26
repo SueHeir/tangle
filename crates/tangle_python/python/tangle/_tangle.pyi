@@ -1105,7 +1105,8 @@ def ct_trace_one_way(
 def ct_trace_fibers(
     image: Any, hessian: CtHessian, claimed: Any, edt: Any, peak: Any, radius: float, min_bend_radius: float,
     step: float, min_length: float, node_spacing: float, label_offset: int, max_fibers: int | None,
-    seed_depth_radii: float, bright_seed_strength: float | None = ...,
+    seed_depth_radii: float, bright_seed_strength: float | None = ..., peak_floor: float = ...,
+    claim_radii: float = ...,
 ) -> list[list[list[float]]]: ...
 def ct_owners(nodes: Any, counts: list[int], radii: list[float], voxels: Any, out: Any) -> None: ...
 def ct_end_step(

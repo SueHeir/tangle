@@ -124,13 +124,14 @@ def trace_fibers(
     image: np.ndarray, hessian: Hessian, claimed: np.ndarray, edt: np.ndarray, peak: np.ndarray, *,
     radius: float, min_bend_radius: float, step: float, min_length: float, node_spacing: float,
     label_offset: int, max_fibers: int | None, seed_depth_radii: float, bright_seed_strength: float | None = None,
+    peak_floor: float = 0.0, claim_radii: float = 1.1,
 ) -> list[np.ndarray]:
     """Fibers traced from ridge seeds, painting ``claimed`` in place (see ``_trace.trace_fibers``)."""
     lines = _tangle.ct_trace_fibers(
         _f32(image), hessian.native, _claimed(claimed), _f32(edt), _f32(peak), float(radius),
         float(min_bend_radius), float(step), float(min_length), float(node_spacing), int(label_offset),
         None if max_fibers is None else int(max_fibers), float(seed_depth_radii),
-        None if bright_seed_strength is None else float(bright_seed_strength),
+        None if bright_seed_strength is None else float(bright_seed_strength), float(peak_floor), float(claim_radii),
     )
     return [np.array(line, dtype=np.float64).reshape(-1, 3) for line in lines]
 

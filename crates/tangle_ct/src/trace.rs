@@ -51,6 +51,11 @@ pub struct TraceSettings {
     pub radius: f64,
     pub min_bend_radius: f64,
     pub step: f64,
+    /// Recentering weighs each cross-section sample by how far it is above
+    /// this fraction of the brightest one (0: by its value). Above 0 a
+    /// trace follows its own fiber's axis past a touching neighbour rather
+    /// than the centroid of both.
+    pub peak_floor: f64,
 }
 
 /// Traces fibers through a normalized image (void 0, fiber 1).
@@ -61,6 +66,7 @@ pub struct Tracer<'a> {
     radius: f64,
     pub step: f64,
     max_turn: f64,
+    peak_floor: f64,
     window: Vec<[f64; 2]>,
     core: Vec<[f64; 2]>,
     upper: Point,
@@ -77,6 +83,7 @@ impl<'a> Tracer<'a> {
             radius,
             min_bend_radius,
             step,
+            peak_floor,
         } = settings;
         Self {
             image,
@@ -85,6 +92,7 @@ impl<'a> Tracer<'a> {
             radius,
             step,
             max_turn: (step / min_bend_radius.max(1e-9)).min(std::f64::consts::FRAC_PI_4),
+            peak_floor,
             window: disk_offsets(1.4 * radius, 0.5),
             core: disk_offsets((0.5 * radius).max(0.75), 0.5),
             upper: [shape[2] as f64, shape[1] as f64, shape[0] as f64],
@@ -128,8 +136,14 @@ impl<'a> Tracer<'a> {
         let mut total = 0.0;
         let mut shift = [0.0; 3];
         let mut weights = Vec::with_capacity(points.len());
-        for &p in &points {
-            let mut weight = self.sample(p).max(0.0);
+        let values: Vec<f64> = points.iter().map(|&p| self.sample(p)).collect();
+        let floor = if self.peak_floor > 0.0 {
+            self.peak_floor * values.iter().cloned().fold(0.0, f64::max)
+        } else {
+            0.0
+        };
+        for (&p, &value) in points.iter().zip(&values) {
+            let mut weight = (value - floor).max(0.0);
             let owner =
                 voxel_of(self.shape, p).map_or(0, |[k, j, i]| claimed[k * s[0] + j * s[1] + i]);
             if owner > 0 && owner != own_label {
@@ -383,6 +397,8 @@ pub struct FiberSearch {
     /// fibers share one deep foreground ridge, so only the bundle's middle
     /// fiber gets a depth seed; each of them is a tube-strength peak.
     pub bright_seed_strength: Option<f32>,
+    /// Each found fiber claims the voxels within this many radii of it.
+    pub claim_radii: f64,
 }
 
 /// Traces fibers from ridge seeds not yet explained by `claimed`, which is
@@ -420,7 +436,7 @@ pub fn trace_fibers(
         let label = search.label_offset + fibers.len() as i32 + 1;
         if line.len() >= 2 && polyline_length(&line) >= search.min_length {
             let line = resample(&line, search.node_spacing);
-            paint(claimed, shape, &line, 1.1 * radius, label, false);
+            paint(claimed, shape, &line, search.claim_radii * radius, label, false);
             fibers.push(line);
             search.max_fibers.is_some_and(|m| fibers.len() >= m)
         } else {
@@ -483,6 +499,7 @@ mod tests {
                 radius: 3.0,
                 min_bend_radius: 30.0,
                 step: 1.5,
+                peak_floor: 0.0,
             },
             min_length: 10.0,
             node_spacing: 3.0,
@@ -490,6 +507,7 @@ mod tests {
             max_fibers: None,
             seed_depth_radii: 0.5,
             bright_seed_strength: None,
+            claim_radii: 1.1,
         };
         let fibers = trace_fibers(&image, shape, &hessian, &mut claimed, &edt, &peak, search);
         assert_eq!(fibers.len(), 1, "{fibers:?}");
@@ -546,6 +564,7 @@ mod tests {
                     radius: r,
                     min_bend_radius: 30.0,
                     step: 1.5,
+                    peak_floor: 0.0,
                 },
                 min_length: 20.0,
                 node_spacing: 3.0,
@@ -553,6 +572,7 @@ mod tests {
                 max_fibers: None,
                 seed_depth_radii: 0.5,
                 bright_seed_strength: bright,
+                claim_radii: 1.1,
             };
             trace_fibers(&image, shape, &hessian, &mut claimed, &edt, &peak, search)
         };

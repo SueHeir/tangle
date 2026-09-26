@@ -76,6 +76,8 @@ def trace_fibers(
     seed_depth_radii: float = 0.5,
     depth: tuple[np.ndarray, np.ndarray] | None = None,
     bright_seed_strength: float | None = None,
+    peak_floor: float = 0.0,
+    claim_radii: float = 1.1,
 ) -> list[np.ndarray]:
     """Trace fibers from ridge seeds that are not yet explained by ``claimed``.
 
@@ -87,7 +89,12 @@ def trace_fibers(
     With ``bright_seed_strength``, the depth seeds are followed by seeds on
     the peaks of the Hessian's tube strength at least that high: fibers
     packed in a bundle share one foreground blob with a single deep ridge,
-    but each is a tube-strength peak where the grey dips between them."""
+    but each is a tube-strength peak where the grey dips between them.
+
+    ``peak_floor`` (0 … 1) recenters each step on the cross-section's
+    samples above that fraction of its brightest, so a trace keeps to its
+    own fiber's axis beside a touching one; each found fiber claims the
+    voxels within ``claim_radii`` radii of it."""
     if claimed is None:
         claimed = np.zeros(image.shape, dtype=np.int32)
     else:
@@ -99,5 +106,5 @@ def trace_fibers(
         image, hessian.native, claimed, edt, peak, radius=radius, min_bend_radius=min_bend_radius,
         step=max(0.75, 0.5 * radius), min_length=min_length, node_spacing=node_spacing,
         label_offset=label_offset, max_fibers=max_fibers, seed_depth_radii=seed_depth_radii,
-        bright_seed_strength=bright_seed_strength,
+        bright_seed_strength=bright_seed_strength, peak_floor=peak_floor, claim_radii=claim_radii,
     )
