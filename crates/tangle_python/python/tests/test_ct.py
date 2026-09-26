@@ -863,6 +863,25 @@ class CtFitTests(unittest.TestCase):
         # solver is slow on the CPU backend CI uses.
         cls.fit = ct.fit_fibers(cls.scan.volume, VOXEL, ct.FiberSpec(diameter=DIAMETER, length=200 * um), fit_settings())
 
+    def test_snapshots_write_one_ovito_frame_per_step(self):
+        spec = ct.FiberSpec(diameter=DIAMETER, length=200 * um)
+        with tempfile.TemporaryDirectory() as tmp:
+            fit = ct.fit_fibers(self.scan.volume, VOXEL, spec, fit_settings(redraw_passes=1, confidence_threshold=0.99), snapshots=tmp)
+            stages = (Path(tmp) / "stages.txt").read_text().splitlines()[1:]
+            dump = (Path(tmp) / "fits.dump").read_text()
+            compile((Path(tmp) / "view_fits.py").read_text(), "view_fits.py", "exec")
+        names = [line.split("\t")[1] for line in stages]
+        for expected in ("trace", "round 1 solve 1", "round 1 cleanup", "round 1 new fibers", "final solve"):
+            self.assertIn(expected, names)
+        # A confidence threshold this high cuts something, so the redraw pass runs.
+        self.assertTrue(any(name.startswith("redraw 1: ") and "cut unsure" in name for name in names), names)
+        self.assertTrue(any(name.startswith("redraw 1: ") and "judged" in name for name in names), names)
+        self.assertEqual(dump.count("ITEM: TIMESTEP"), len(stages))
+        # The last frame holds the returned fit: one spherocylinder per centerline segment.
+        last = dump.rsplit("ITEM: TIMESTEP", 1)[1]
+        count = int(last.split("ITEM: NUMBER OF ATOMS\n")[1].split("\n")[0])
+        self.assertEqual(count, sum(len(line) - 1 for line in fit.centerlines))
+
     def test_tiled_fit_matches_whole_fit_and_resumes(self):
         from unittest import mock
 

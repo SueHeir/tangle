@@ -126,6 +126,7 @@ MASK_LEVEL = 0.35  # of the way from void to fiber grey level: a generous thresh
 # "grey" (raw scan + profiles), "plain" (raw scan alone) or "mask" for every example; None: each example's own (grey by default)
 INPUT = os.environ.get("TANGLE_CT_INPUT")
 SETTINGS: dict = {}
+SNAPSHOTS = False  # --snapshots: an OVITO frame of every fit step in <output>/<example>/snapshots
 BROAD_RANGE = (0.33, 1.32)  # --input broad: the one range, as fractions of the brightest axis grey above void
 BEND_SCALE = 1.0  # --bend-scale: the fitter's min_bend_radius times this
 ROUND_SPECS = False  # --round-specs: fit oval fibers as round ones  # FitSettings overrides for every example (--set)
@@ -798,7 +799,7 @@ def scanned_settings(index: int) -> dict:
     return settings
 
 
-DENSE_HARD = range(1, 7)
+DENSE_HARD = range(1, 19)
 
 
 def dense_hard_settings(index: int) -> dict:
@@ -817,7 +818,9 @@ def dense_hard_settings(index: int) -> dict:
         "coarse_um": 17.3,
         "coarse_thickness_ratio": 0.8,
         "coarse_fraction": round(float(rng.uniform(0.03, 0.05)), 3),
-        "coarse_brightness": 0.45,
+        "coarse_brightness": 0.6,
+        "coarse_rim_um": 3.0,
+        "coarse_core": 0.6,
         "brightness_spread": 0.25,
         "length_fraction": [0.55, 0.9],
         "photons": round(SCANNER.photons * float(rng.uniform(0.8, 1.2))),
@@ -871,7 +874,8 @@ def scanned(index: int, settings: Callable[[int], dict] = scanned_settings) -> C
                 diameter=diameter, min_bend_radius=bend, length=mean_length, name=material.name,
                 **(_oval(oval["thickness"]) if oval else {}),
             ))
-            profiles.append((diameter, ct.CrossSection(brightness=1.0 if kind == "fine" else v["coarse_brightness"])))
+            shade = {"rim": v["coarse_rim_um"] * um, "core": v["coarse_core"]} if kind == "coarse" and v.get("coarse_rim_um") else {}
+            profiles.append((diameter, ct.CrossSection(brightness=1.0 if kind == "fine" else v["coarse_brightness"], **shade)))
         key = hashlib.sha1(json.dumps(v, sort_keys=True).encode()).hexdigest()[:8]
         truth = relaxed_truth(cache.with_name(f"{cache.stem}-{key}.json"), cell, populations)
         scanner = replace(
@@ -1065,7 +1069,10 @@ def run(name: str, output: Path) -> dict:
     if BEND_SCALE != 1.0:
         spec = [_bent(item) for item in spec] if isinstance(spec, list) else _bent(spec)
     started = time.perf_counter()
-    fit = ct.fit_fibers(volume, h, spec, ct.FitSettings(backend=BACKEND, **SETTINGS))
+    fit = ct.fit_fibers(
+        volume, h, spec, ct.FitSettings(backend=BACKEND, **SETTINGS),
+        snapshots=output / f".{name}-snapshots" if SNAPSHOTS else None,  # moved in below
+    )
     seconds = time.perf_counter() - started
 
     report = ct.score(fit, scan)
@@ -1081,6 +1088,13 @@ def run(name: str, output: Path) -> dict:
     if folder.exists():
         shutil.rmtree(folder)
     folder.mkdir(parents=True)
+    if SNAPSHOTS:
+        from tangle.ct._snapshots import Snapshots
+
+        shutil.move(output / f".{name}-snapshots", folder / "snapshots")
+        truth = Snapshots(folder / "snapshots" / "truth", h, scan.volume.shape)  # the true fibers, to compare
+        truth.write("truth", scan.centerlines, scan.radii, scan.types)
+        truth.close()
     _write_stack(folder / "raw", scan.volume, h)
     _write_stack(folder / "input", (np.clip(seen, 0.0, 1.0) * 255).astype(np.uint8), h)
     _write_stack(folder / "true", ct.overlay_volume(scan.volume, scan.labels), h, rgb=True)
@@ -1198,6 +1212,10 @@ def main() -> None:
         "--round-specs", action="store_true", help="fit oval fibers as round (FiberSpec without thickness), to compare"
     )
     parser.add_argument(
+        "--snapshots", action="store_true",
+        help="save every fit step as an OVITO trajectory frame, in <output>/<example>/snapshots",
+    )
+    parser.add_argument(
         "--bend-scale", type=float, default=1.0,
         help="fit with every FiberSpec's min_bend_radius times this (the true structure keeps its own)",
     )
@@ -1209,9 +1227,10 @@ def main() -> None:
     for item in args.set:
         name, _, value = item.partition("=")
         SETTINGS[name] = json.loads(value)
-    global INPUT, BLUR, ROUND_SPECS, BEND_SCALE
+    global INPUT, BLUR, ROUND_SPECS, BEND_SCALE, SNAPSHOTS
     ROUND_SPECS = args.round_specs
     BEND_SCALE = args.bend_scale
+    SNAPSHOTS = args.snapshots
     if args.input:
         INPUT = args.input
     BLUR = args.blur

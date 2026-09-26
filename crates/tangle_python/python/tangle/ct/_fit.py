@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -650,6 +651,7 @@ def fit_fibers(
     *,
     exclude: np.ndarray | None = None,
     verbose: bool = False,
+    snapshots: str | os.PathLike | None = None,
 ) -> FitResult:
     """Find the fibers in ``volume`` (a ``(z, y, x)`` array) that match ``spec``.
 
@@ -671,6 +673,11 @@ def fit_fibers(
     scan the radius of its mean cross-section) picks the nearest diameter,
     after every solver batch, and sets its radius prior, bend
     limit and length prior.
+
+    ``snapshots`` (a folder) saves the fit after every step (trace, each
+    solve and void cut, each round's cleanup and new fibers, the final solve,
+    and each step of each redraw pass) as frames of an OVITO trajectory
+    (see ``_snapshots``). Off by default; it slows the fit a little.
     """
     from . import _device
 
@@ -798,6 +805,10 @@ def fit_fibers(
     log("input", [], mask=binary, source=source)
 
     fitter = _Fitter(image, specs, settings, voxel_size, log)
+    if snapshots is not None:
+        from ._snapshots import Snapshots
+
+        fitter.snapshots = Snapshots(snapshots, voxel_size, volume.shape)
     if foreground is not None:
         fitter.set_image(image, foreground=foreground, evidence=evidence)
         if settings.graded_image and settings.graded_smallest_only:
@@ -814,6 +825,7 @@ def fit_fibers(
     lines = fitter.trace([], np.zeros(0))
     radii, types = fitter.classify(lines)
     log("trace", lines, types=fitter.counts(types), thickness_margin=round(fitter.margin, 2))
+    fitter.snap("trace", lines, radii, types)
     if source == "grey" and len(specs) == 1 and settings.levels is None and lines:
         # Otsu class medians put the fiber level below the fiber core (blurred
         # edge voxels are in the fiber class); re-level on the traced cores.
@@ -828,11 +840,13 @@ def fit_fibers(
 
     for round_index in range(settings.rounds):
         void_counts: dict[str, int] = {}
-        for _ in range(settings.solver_batches):
+        for batch in range(settings.solver_batches):
             if not lines:
                 break
             lines = fitter.solve(lines, radii, types)
+            fitter.snap(f"round {round_index + 1} solve {batch + 1}", lines, radii, types)
             lines, radii, types, cut = fitter.cut_void(lines, radii, types)
+            fitter.snap(f"round {round_index + 1} void cut {batch + 1}", lines, radii, types)
             for key, value in cut.items():
                 void_counts[key] = void_counts.get(key, 0) + value
             radii, types = fitter.classify(lines)
@@ -842,6 +856,7 @@ def fit_fibers(
             f"round {round_index + 1}", lines, **counts, **void_counts, thickness_margin=round(fitter.margin, 2),
             **fitter.end_summary(lines, radii, types),
         )
+        fitter.snap(f"round {round_index + 1} cleanup", lines, radii, types)
         if round_index + 1 < settings.rounds:
             born = fitter.trace(lines, radii)
             born_radii, born_types = fitter.classify(born)
@@ -849,6 +864,7 @@ def fit_fibers(
             radii = np.concatenate([radii, born_radii])
             types = np.concatenate([types, born_types])
             log(f"births {round_index + 1}", lines, born=len(born), types=fitter.counts(types))
+            fitter.snap(f"round {round_index + 1} new fibers", lines, radii, types)
     confidence = None
     if lines:
         # The last round's splits and joins are not yet admissible fibers. The
@@ -859,14 +875,17 @@ def fit_fibers(
         lines, radii, types, cut = fitter.cut_void(lines, radii, types, final=True)
         before = [before[i] for i in cut.pop("source")]
         log("final solve", lines, types=fitter.counts(types), **cut)
+        fitter.snap("final solve", lines, radii, types)
         if settings.recenter_on_grey and fitter.peak_grey is not None:
             lines, moved = fitter.recenter(lines, radii, types)
             log("recenter", lines, moved=moved)
+            fitter.snap("recenter", lines, radii, types)
         confidence, settled, summary = fitter.scores(lines, radii, previous=before)
         coverage = _confidence.sure_coverage(fitter.foreground, lines, radii, settled)
         log("confidence", lines, **summary, sure_coverage=round(coverage, 4))
         if settings.redraw_passes > 0:
             redrawn = fitter.redraw_loop(lines, radii, types, confidence, settled)
+            fitter.snap_stage = ""
             if redrawn[0] is not lines and settings.redraw_polish and redrawn[0]:
                 # Redrawn stretches were solved around pinned sure pieces; one
                 # unpinned solve lets the whole fit settle into the scan together.
@@ -877,9 +896,12 @@ def fit_fibers(
                 confidence, settled, summary = fitter.scores(lines, radii, previous=None)
                 coverage = _confidence.sure_coverage(fitter.foreground, lines, radii, settled)
                 log("polish", lines, **summary, **cut, sure_coverage=round(coverage, 4))
+                fitter.snap("polish", lines, radii, types)
             else:
                 lines, radii, types, confidence = redrawn
 
+    if fitter.snapshots is not None:
+        fitter.snapshots.close()
     return FitResult(
         shape=tuple(int(n) for n in volume.shape),
         voxel_size=voxel_size,
@@ -982,6 +1004,8 @@ class _Fitter:
         self._plain_scale: float | None = None
         self.checked_grey: np.ndarray | None = None  # grey_checked_traces: the denoised grey
         self.type_levels: np.ndarray | None = None  # and each type's grey
+        self.snapshots = None  # fit_fibers(snapshots=...): a _snapshots.Snapshots
+        self.snap_stage = self.snap_base = ""  # the redraw pass (and plan) the next snapshots belong to
         self.peak_grey: np.ndarray | None = None  # merge_straddling: the denoised grey
         self.peak_void = 0.0
         self._match_cache: tuple | None = None  # (cut, ranking): reused by a pass's candidates
@@ -1018,6 +1042,11 @@ class _Fitter:
         if kind not in self.hessians:
             self.hessians[kind] = HessianField(self.trace_image(kind), sigma=max(0.6 * float(self.radius[kind]), 1.0))
         return self.hessians[kind]
+
+    def snap(self, stage: str, lines: list[np.ndarray], radii, types) -> None:
+        """A snapshot of ``lines`` (see ``fit_fibers(snapshots=...)``), when asked for."""
+        if self.snapshots is not None:
+            self.snapshots.write(f"{self.snap_stage}{stage}", lines, radii, types)
 
     def solve_image(self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray) -> np.ndarray:
         """``image``, with ``evidence`` within reach of the fits whose type
@@ -1427,6 +1456,7 @@ class _Fitter:
         step = 2.0 * float(self.radius.max())
         for pass_index in range(s.redraw_passes):
             started = time.perf_counter()
+            self.snap_base = self.snap_stage = f"redraw {pass_index + 1}: "
             widen = [(low, high, count * step) for low, high, count in failures if count < s.redraw_attempts]
             given_up = [(low, high) for low, high, count in failures if count >= s.redraw_attempts]
             cut = _regrow.cut_unsure(
@@ -1439,6 +1469,10 @@ class _Fitter:
             )
             if cut is None or not lines:
                 break
+            self.snap(
+                "cut unsure (sure pieces)", cut.pieces,
+                np.asarray(radii, dtype=np.float64)[cut.parent], np.asarray(types, dtype=int)[cut.parent],
+            )
             attempt = lambda point: self._attempt(point, failures)  # noqa: E731
             if s.redraw_moves == "match" and s.redraw_plans > 1:
                 new_lines, new_radii, new_types, info = self.pick_plans(cut, radii, types, attempt)
@@ -1523,6 +1557,8 @@ class _Fitter:
             kept = bool(accepted.any()) and bool(merged)
             if _REDRAW_PROBE is not None:
                 _REDRAW_PROBE({"pass": pass_index, "step": "merged", "lines": merged, "radii": merged_radii})
+            self.snap_stage = self.snap_base
+            self.snap(f"judged ({int(accepted.sum())} of {count} regions kept)", merged, merged_radii, merged_types)
             if kept and keep_old and s.redraw_merge_settle != "off":
                 # Old and new fibers meet at the edges of reverted regions:
                 # settle the merged fit (every node pinned for the image run,
@@ -1694,6 +1730,7 @@ class _Fitter:
                 if not close:
                     break
                 offsets[close] = c
+            self.snap_stage = f"{self.snap_base}plan {c + 1}: "
             candidate = self.redraw_candidate(cut, radii, types, attempt=attempt, offsets=offsets)
             lines, cand_radii = candidate[0], candidate[1]
             if self.score_name == "nats":
@@ -1718,6 +1755,7 @@ class _Fitter:
         if same:
             lines, new_radii, new_types, info = candidates[same[0]]
         else:
+            self.snap_stage = f"{self.snap_base}chosen plans: "
             lines, new_radii, new_types, info = self.redraw_candidate(
                 cut, radii, types, attempt=attempt, offsets=choice
             )
@@ -1761,17 +1799,22 @@ class _Fitter:
                 spacing=self.spacing, max_length=20.0 * float(self.radius.max()),
                 attempt=(lambda index, end: attempt(cut.pieces[index][end])) if attempt else None,
             )
+        self.snap("grow ends", pieces, piece_radii, piece_types)
         born = self.trace(pieces, piece_radii)
         born_radii, born_types = self.classify(born)
         lines = pieces + born
         radii = np.concatenate([piece_radii, born_radii])
         types = np.concatenate([piece_types, born_types]).astype(int)
+        self.snap("new fibers", lines, radii, types)
         lines, radii, types, counts = self.topology(lines, radii, types)
-        for _ in range(s.solver_batches):
+        self.snap("cleanup", lines, radii, types)
+        for batch in range(s.solver_batches):
             if not lines:
                 break
             lines = self.solve(lines, radii, types, anchors=cut.anchors)
+            self.snap(f"solve {batch + 1}", lines, radii, types)
             lines, radii, types, _ = self.cut_void(lines, radii, types)
+            self.snap(f"void cut {batch + 1}", lines, radii, types)
             radii, types = self.classify(lines)
             lines = _refine.respace(lines, self.spacing)
         void: dict[str, Any] = {}
@@ -1779,6 +1822,7 @@ class _Fitter:
             lines = self.solve(lines, radii, types, anchors=cut.anchors)
             lines, radii, types, void = self.cut_void(lines, radii, types, final=True)
             void.pop("source", None)
+            self.snap("final solve", lines, radii, types)
         info = {
             "unsure_nodes_cut": cut.removed_nodes,
             "fibers_removed": cut.removed_fibers,
