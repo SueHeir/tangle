@@ -798,13 +798,14 @@ class CtToolTests(unittest.TestCase):
         grey = np.exp(-((x - 10.0) ** 2 + (y - 10.0) ** 2) / 8.0).astype(np.float32)
         fitter = _Fitter(grey, [spec], settings, VOXEL, lambda *args, **kwargs: None)
         fitter.peak_grey, fitter.peak_void = grey, 0.0
-        off = np.array([[11.2, 10.0, z] for z in np.linspace(2.0, 13.0, 8)])
+        # Voxel (10, 10) spans 10 … 11 in fit coordinates: the peak is at 10.5.
+        off = np.array([[11.7, 10.5, z] for z in np.linspace(2.0, 13.0, 8)])
         lines, moved = fitter.recenter([off], np.array([3.0]), np.array([0]))
         self.assertEqual(moved, 1)
-        self.assertLess(float(np.abs(lines[0][:, 0] - 10.0).max()), 0.6)
+        self.assertLess(float(np.abs(lines[0][:, :2] - 10.5).max()), 0.3)
         np.testing.assert_allclose(lines[0][:, 2], off[:, 2], atol=0.2)
         # Another fit already on the peak: the off-centre one stays put.
-        on = np.array([[10.0, 10.0, z] for z in np.linspace(2.0, 13.0, 8)])
+        on = np.array([[10.5, 10.5, z] for z in np.linspace(2.0, 13.0, 8)])
         lines, moved = fitter.recenter([off, on], np.array([3.0, 3.0]), np.array([0, 0]))
         self.assertEqual(moved, 0)
         np.testing.assert_array_equal(lines[0], off)
