@@ -98,6 +98,11 @@ class FitSettings:
     # across touching fibers; what counts as fiber (the foreground, its
     # depth and the types) still comes from the range image.
     graded_image: bool = False
+    # Drop a larger type's new traces whose core grey reads as another type
+    # (by the grey ranges or profiles) before the smaller types are traced:
+    # a bundle of fine fibers is about as wide as a coarse fiber, and traced
+    # as one it claims the bundle, so its fibers are never traced.
+    grey_checked_traces: bool = False
     # Fill enclosed foreground holes up to a fiber's cross-section (a dim
     # core, or noise speckle in a dim fiber) in a mask, grey ranges or a
     # plain grey scan.
@@ -891,6 +896,10 @@ class _Fitter:
                 seed_depth_radii=0.7 if r > smallest else 0.5,
                 bright_seed_strength=self.settings.bright_seed_strength,
             )
+            if self.settings.grey_checked_traces and new and r > smallest:
+                grey_types = self._grey_types(new)
+                if grey_types is not None:
+                    new = [line for line, t in zip(new, grey_types) if t < 0 or t == kind]
             found += new
             found_radii += [r] * len(new)
         return found
