@@ -471,6 +471,28 @@ class CtToolTests(unittest.TestCase):
         self.assertTrue(np.all(np.diff(whole[:, 0]) > 0))  # one fiber, in order, no doubled stretch
         self.assertEqual(len(fit.confidence[0]), len(fit.centerlines[0]))
 
+    def test_stitched_fibers_never_turn_back_at_a_wall(self):
+        from tangle.ct import _tiles
+        from tangle.ct._image import Levels
+
+        grid = _tiles.TileGrid.make((60, 60, 120), 60, 16)  # wall at x = 60, stitched within 8 voxels of it
+        levels = Levels(0.0, 1.0, 0.5)
+        x = np.arange(2.0, 70.0, 2.0)
+        left = np.stack([x, np.full(len(x), 30.0), np.full(len(x), 30.0)], axis=1)
+        # The right tile's fit ends 4 voxels past the wall and disagrees with the
+        # left one in the left core, so only its far end (x = 64) lies on the
+        # left fit's tail: joined there, the fiber would go 58 -> 64 -> 60.
+        x = np.arange(44.0, 66.0, 2.0)
+        right = np.stack([x, 30.0 + 5.0 * (x < 60), np.full(len(x), 30.0)], axis=1)
+        fits = [
+            _tiles.TileFit(index, [line], np.array([3.0]), np.array([0]), np.ones(1), levels, [np.ones(len(line))])
+            for index, line in (((0, 0, 0), left), ((0, 0, 1), right))
+        ]
+        fit = _tiles.stitch(grid, fits, [ct.FiberSpec(diameter=6e-6)], 1e-6, levels)
+        # Joined end to end at the wall instead, in order.
+        self.assertEqual(len(fit.centerlines), 1)
+        self.assertTrue(np.all(np.diff(fit.centerlines[0][:, 0]) > 0), fit.centerlines[0][:, 0])
+
     def test_tile_checkpoints_reload_and_refuse_other_inputs(self):
         from tangle.ct import _tiles
         from tangle.ct._image import Levels

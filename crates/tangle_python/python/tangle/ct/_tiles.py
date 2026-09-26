@@ -16,8 +16,9 @@ neighbouring core (the padding). The neighbour tile has its own fit of the
 same fiber there, and its kept stretch leaves toward this core in turn.
 Within ``band`` voxels of the crossing the two fits cover the same stretch of
 fiber from both sides; they are joined when they lie on each other there
-(mean distance under ``0.75`` of the smaller radius, same fiber type) and
-cut at the core wall otherwise. A fit that one tile ends just inside the
+(mean distance under ``0.75`` of the smaller radius, same fiber type, and
+the joined fiber going on the way it was going) and cut at the core wall
+otherwise. A fit that one tile ends just inside the
 neighbour's core is joined the same way to the neighbour fit's end. Joins
 are made best first, one per stretch end, and chains of joined stretches are
 the stitched fibers. Pieces shorter than the type's minimum length that end
@@ -646,8 +647,18 @@ def _distance_to_polyline(points: np.ndarray, line: np.ndarray) -> np.ndarray:
     return np.linalg.norm(points[:, None, :] - closest, axis=2).min(axis=1)
 
 
-def _match(ends: list[_End], stretches: list[dict[str, Any]]) -> dict[tuple[int, int], tuple[int, int]]:
-    """Join stretch ends across core walls where two tiles' fits agree, best first."""
+def _match(
+    ends: list[_End], stretches: list[dict[str, Any]], max_turn_degrees: float = 60.0,
+) -> dict[tuple[int, int], tuple[int, int]]:
+    """Join stretch ends across core walls where two tiles' fits agree, best first.
+
+    A join must carry the fiber on the way it was going: from ``b``'s end the
+    other stretch goes inward within ``max_turn_degrees`` of the direction
+    ``a`` leaves its end in. A short stretch lying on ``a``'s tail agrees with
+    it from either end, and entered from its far end the chain would turn
+    back on itself at the wall.
+    """
+    cos = np.cos(np.radians(max_turn_degrees))
     by_tile: dict[tuple[int, int, int], list[_End]] = {}
     for end in ends:
         by_tile.setdefault(end.tile, []).append(end)
@@ -663,6 +674,8 @@ def _match(ends: list[_End], stretches: list[dict[str, Any]]) -> dict[tuple[int,
                 continue
             if b.target is not None and (b.stretch, b.side) < (a.stretch, a.side):
                 continue  # both are wall crossings: scored once
+            if a.outward is not None and b.outward is not None and float(a.outward @ -b.outward) < cos:
+                continue  # the chain would turn back at the join
             reach = max(np.linalg.norm(a.tail[-1] - a.node), 1.0) + 2.0 * ra
             if np.linalg.norm(b.node - a.node) > reach:
                 continue
