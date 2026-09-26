@@ -539,6 +539,25 @@ impl PyAssembly {
             .collect()
     }
 
+    /// The long and short semi-axes of every fiber's cross-section, in fiber
+    /// order (`(r, r)` for a round fiber). The long one lies along
+    /// `long_axes()`.
+    fn section_semi_axes(&self) -> Vec<(f64, f64)> {
+        let model = self.model.lock().expect("assembly lock poisoned");
+        let assembly = &model.assembly;
+        assembly
+            .topology
+            .fibers
+            .iter()
+            .map(|fiber| match assembly.sections.entries[fiber.section.0 as usize] {
+                Section::Circular { radius } => (radius, radius),
+                Section::Elliptical { semi_axes } => {
+                    (semi_axes[0].max(semi_axes[1]), semi_axes[0].min(semi_axes[1]))
+                }
+            })
+            .collect()
+    }
+
     /// Adds a collection's fibers directly, without a recipe or relaxation.
     ///
     /// Use this for imported geometry, such as centerlines tracked from a CT

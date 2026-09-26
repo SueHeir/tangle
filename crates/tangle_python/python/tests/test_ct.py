@@ -177,6 +177,24 @@ class CtToolTests(unittest.TestCase):
         far = phase[:, distance > 12].mean()
         self.assertLess(float(rim), float(far) - 0.002)  # dark just outside the surface
 
+    def test_synthetic_scan_draws_oval_fibers(self):
+        material = tangle.Material("flat", diameter=2 * DIAMETER, thickness=DIAMETER)
+        fibers = tangle.FiberCollection("oval")
+        fibers.add_fiber([[8 * um, 45 * um, 45 * um], [82 * um, 45 * um, 45 * um]], material, long_axis=[0.0, 1.0, 0.0])
+        assembly = tangle.Assembly(tangle.Cell([90 * um] * 3))
+        assembly.insert(fibers)
+        profiles = [(DIAMETER / 2, ct.CrossSection()), (2 * DIAMETER, ct.CrossSection(brightness=0.5))]
+        scan = ct.synthetic_ct(assembly, VOXEL, seed=5, profiles=profiles)
+        np.testing.assert_allclose(scan.semi_axes, [[DIAMETER / VOXEL, 0.5 * DIAMETER / VOXEL]])
+        self.assertAlmostEqual(float(scan.radii[0]), DIAMETER / VOXEL / np.sqrt(2), places=6)
+        self.assertEqual(scan.types.tolist(), [1])  # typed by its long width
+        np.testing.assert_allclose(np.abs(scan.long_axes[0][:, 1]), 1.0, atol=1e-6)
+        z, y, _ = np.nonzero(scan.labels == 1)
+        self.assertAlmostEqual((y.max() - y.min()) / (z.max() - z.min()), 2.0, delta=0.3)
+        cropped = scan.crop((10, 10, 10), (60, 60, 60))
+        self.assertEqual(cropped.semi_axes.shape, (1, 2))
+        self.assertEqual(len(cropped.long_axes[0]), len(cropped.centerlines[0]))
+
     def test_scanner_noise_blur_makes_the_noise_blotchy(self):
         from tangle.ct._scanner import Scanner, acquire
 

@@ -77,6 +77,9 @@ Examples:
 * ``bundled_two_types``: the fine fibers packed in bundles of nineteen, with
   staggered ends, and the coarse ones loose, scanned as scanner_two_types
   with the noise blotchy (correlated by the scintillator's blur).
+* ``oval_two_types``: two_types' fine fibers with flat oval coarse ones
+  (19 by 12 µm, the long axis in the fibers' plane), scanned as
+  scanner_two_types.
 * ``varied_1`` … ``varied_8``: fresh structures drawn from seeds, for
   checking the fitter on structures it was not tuned on: 8-16 µm fibers
   at 2.5-4.5 voxels radius, planar, aligned, biaxial and isotropic (two
@@ -170,22 +173,37 @@ def relaxed_truth(cache: Path, cell: tangle.Cell, populations: list) -> tangle.A
         print(f"  truth relaxed: {run} ({time.perf_counter() - started:.0f} s)")
         cache.parent.mkdir(parents=True, exist_ok=True)
         counts = [p.count if isinstance(p, tangle.FiberPopulation) else len(p[0]) for p in populations]
-        cache.write_text(json.dumps({"counts": counts, "centerlines": run.centerlines()}) + "\n")
+        data = {"counts": counts, "centerlines": run.centerlines()}
+        if any(_material(p).is_oval for p in populations):
+            data["long_axes"] = run.assembly().long_axes()
+        cache.write_text(json.dumps(data) + "\n")
     data = json.loads(cache.read_text())
     data.setdefault("counts", [len(data["centerlines"])])  # single-population caches from older examples
     assembly = tangle.Assembly(cell)
     start = 0
     for population, count in zip(populations, data["counts"]):
         lines = data["centerlines"][start : start + count]
+        axes = data["long_axes"][start : start + count] if "long_axes" in data else None
         start += count
         # float32 GPU relaxation can end a hair past the bend limit, which
         # export_puma's validator rejects; render with a 1% looser limit.
-        material = population.material if isinstance(population, tangle.FiberPopulation) else population[1]
+        material = _material(population)
         looser = tangle.Material(
-            material.name, diameter=material.diameter, min_bend_radius=0.99 * material.min_bend_radius
+            material.name, diameter=material.diameter, min_bend_radius=0.99 * material.min_bend_radius,
+            thickness=material.thickness,
         )
-        assembly.insert(tangle.FiberCollection.from_centerlines(lines, looser), name=material.name)
+        if material.is_oval:
+            collection = tangle.FiberCollection(material.name)
+            for line, axis in zip(lines, axes):
+                collection.add_fiber(line, looser, long_axis=axis)
+        else:
+            collection = tangle.FiberCollection.from_centerlines(lines, looser)
+        assembly.insert(collection, name=material.name)
     return assembly
+
+
+def _material(population) -> tangle.Material:
+    return population.material if isinstance(population, tangle.FiberPopulation) else population[1]
 
 
 def planar_population(material, count, seed, length, segments) -> tangle.FiberPopulation:
@@ -320,6 +338,30 @@ def halo_two_types(cache: Path) -> Example:
 
 def scanner_two_types(cache: Path) -> Example:
     return two_types(cache.with_name("two_types.json"), scanner=True)  # the same fibers as two_types
+
+
+def oval_two_types(cache: Path) -> Example:
+    """scanner_two_types with flat oval coarse fibers, 19 by 12 µm, their long axis in the fibers' plane."""
+    voxel, cell_side, crop, length = 1.25 * um, 320 * um, 200 * um, (300 * um, 500 * um)
+    fine = tangle.Material("fine_7um", diameter=7 * um, min_bend_radius=35 * um)
+    coarse = tangle.Material("coarse_19x12um", diameter=19 * um, min_bend_radius=95 * um, thickness=12 * um)
+    cell = tangle.Cell([cell_side] * 3, periodic="xy")
+    truth = relaxed_truth(
+        cache, cell, [planar_population(fine, 106, 21, length, 16), planar_population(coarse, 22, 22, length, 16)]
+    )
+    full = render_scan(truth, voxel, seed=21, profiles=SCANNER_PROFILES, scanner=SCANNER)
+    low = int(round((cell_side - crop) / 2 / voxel))
+    scan = full.crop((low,) * 3, (low + int(round(crop / voxel)),) * 3)
+    specs = [
+        ct.FiberSpec(diameter=7 * um, min_bend_radius=35 * um, length=400 * um, name="fine_7um"),
+        ct.FiberSpec(diameter=19 * um, min_bend_radius=95 * um, length=400 * um, name="coarse_19x12um", **_oval(12 * um)),
+    ]
+    return Example(scan, specs, 35 * um, lambda fit, scan: {"per_type": ct.score(fit, scan)["per_type"]})
+
+
+def _oval(thickness: float) -> dict:
+    """FiberSpec's ``thickness``, where this tangle.ct takes one."""
+    return {"thickness": thickness} if "thickness" in ct.FiberSpec.__dataclass_fields__ else {}
 
 
 def _max_curvature(line: np.ndarray) -> float:
@@ -675,6 +717,7 @@ EXAMPLES: dict[str, Callable[[Path], Example]] = {
     "halo_two_types": halo_two_types,
     "scanner_two_types": scanner_two_types,
     "bundled_two_types": bundled_two_types,
+    "oval_two_types": oval_two_types,
     **{
         f"scenario_{name}": scenario(lines, SCENARIO_LENGTH.get(name, 400 * um))
         for name, lines in SCENARIOS.items()
@@ -704,9 +747,13 @@ EXAMPLES.update({name: varied(index) for index, name in enumerate(VARIED, start=
 # aligned or biaxial, and the scanner's photons, resolution, motion, phase and
 # noise grain around SCANNER's), scans it with ct.Scanner and fits it. Tune on
 # ``scanned_1`` … ``scanned_16`` and check on ``scanned_101`` … (``--scanned``),
+# with ``scanned_201`` … the same with flat oval coarse fibers (``--scanned oval``),
 # so a fix that only suits the tuning set shows up. 160 voxels a side.
 
 SCANNED_VOXELS = 160
+SCANNED_TUNE = range(1, 17)
+SCANNED_CHECK = range(101, 109)
+SCANNED_OVAL = range(201, 209)  # as the others, with flat oval coarse fibers
 
 
 def scanned_settings(index: int) -> dict:
@@ -718,7 +765,7 @@ def scanned_settings(index: int) -> dict:
     coarse = round(float(rng.uniform(14.0, 22.0)), 1) if rng.random() < 0.7 else None
     orientation = ["planar", "planar", "aligned", "biaxial"][int(rng.integers(4))]
     blur = float(rng.choice([0.0, 0.5, 1.0]))
-    return {
+    settings = {
         "voxel_um": voxel,
         "side_um": round(side, 1),
         "orientation": orientation,
@@ -739,6 +786,11 @@ def scanned_settings(index: int) -> dict:
         "delta_beta": [round(float(rng.uniform(6.0, 16.0)), 1), round(float(rng.uniform(5.0, 12.0)), 1)],
         "seed": 5000 + index,
     }
+    if index in SCANNED_OVAL and coarse:
+        # The oval set flattens the coarse fibers (thickness over width), drawn
+        # apart and only here so the other sets keep their structures (and caches).
+        settings["coarse_thickness_ratio"] = round(float(np.random.default_rng(9000 + index).uniform(0.55, 0.8)), 2)
+    return settings
 
 
 def scanned(index: int) -> Callable[[Path], Example]:
@@ -759,7 +811,9 @@ def scanned(index: int) -> Callable[[Path], Example]:
         for offset, (kind, diameter_um, fraction, per_bundle) in enumerate(types):
             diameter = diameter_um * um
             bend = 5 * diameter
-            material = tangle.Material(f"{kind}_{diameter_um:g}um", diameter=diameter, min_bend_radius=bend)
+            ratio = v.get("coarse_thickness_ratio", 1.0) if kind == "coarse" else 1.0
+            oval = {"thickness": ratio * diameter} if ratio < 1.0 else {}
+            material = tangle.Material(f"{kind}_{diameter_um:g}um", diameter=diameter, min_bend_radius=bend, **oval)
             mean_length = 0.5 * sum(length)
             count = max(int(round(fraction * side**3 / (np.pi * (diameter / 2) ** 2 * mean_length))), 4)
             population = tangle.FiberPopulation(
@@ -777,7 +831,10 @@ def scanned(index: int) -> Callable[[Path], Example]:
                 ),
             )
             populations.append(bundles(cell, population, per_bundle) if per_bundle > 1 else population)
-            specs.append(ct.FiberSpec(diameter=diameter, min_bend_radius=bend, length=mean_length, name=material.name))
+            specs.append(ct.FiberSpec(
+                diameter=diameter, min_bend_radius=bend, length=mean_length, name=material.name,
+                **(_oval(oval["thickness"]) if oval else {}),
+            ))
             profiles.append((diameter, ct.CrossSection(brightness=1.0 if kind == "fine" else v["coarse_brightness"])))
         key = hashlib.sha1(json.dumps(v, sort_keys=True).encode()).hexdigest()[:8]
         truth = relaxed_truth(cache.with_name(f"{cache.stem}-{key}.json"), cell, populations)
@@ -801,9 +858,7 @@ def scanned(index: int) -> Callable[[Path], Example]:
     return build
 
 
-SCANNED_TUNE = range(1, 17)
-SCANNED_CHECK = range(101, 109)
-EXAMPLES.update({f"scanned_{index}": scanned(index) for index in [*SCANNED_TUNE, *SCANNED_CHECK]})
+EXAMPLES.update({f"scanned_{index}": scanned(index) for index in [*SCANNED_TUNE, *SCANNED_CHECK, *SCANNED_OVAL]})
 
 # -- the runner -----------------------------------------------------------------
 
@@ -1069,8 +1124,9 @@ def main() -> None:
     parser.add_argument("--list", action="store_true", help="list the examples and exit")
     parser.add_argument("--varied", action="store_true", help="also run the varied_* structures")
     parser.add_argument(
-        "--scanned", choices=("tune", "check", "all"), default=None,
-        help="run the scanned_* structures: the tuning set (1-16), the check set (101-108) or both",
+        "--scanned", choices=("tune", "check", "oval", "all"), default=None,
+        help="run the scanned_* structures: the tuning set (1-16), the check set (101-108), the oval set (201-208) "
+        "or all",
     )
     parser.add_argument(
         "--input", choices=("grey", "plain", "mask"), default=None,
@@ -1103,7 +1159,10 @@ def main() -> None:
     output.mkdir(parents=True, exist_ok=True)
     scanned_names = [name for name in EXAMPLES if name.startswith("scanned_")]
     if args.scanned:
-        chosen = {"tune": SCANNED_TUNE, "check": SCANNED_CHECK, "all": [*SCANNED_TUNE, *SCANNED_CHECK]}[args.scanned]
+        chosen = {
+            "tune": SCANNED_TUNE, "check": SCANNED_CHECK, "oval": SCANNED_OVAL,
+            "all": [*SCANNED_TUNE, *SCANNED_CHECK, *SCANNED_OVAL],
+        }[args.scanned]
         names = args.names + [f"scanned_{index}" for index in chosen]
     else:
         names = args.names or [name for name in EXAMPLES if name not in VARIED and name not in scanned_names]
