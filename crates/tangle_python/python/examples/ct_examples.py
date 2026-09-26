@@ -331,7 +331,6 @@ def bundles(cell: tangle.Cell, leaders: tangle.FiberPopulation, per_bundle: int)
     length, as the filaments of a yarn or tow lie.
     """
     material, seed = leaders.material, leaders.seed
-    leaders = tangle.generate_fiber_population(cell, leaders)
     rng = np.random.default_rng(seed)
     pitch = 1.02 * material.diameter
     slots = [(0.0, 0.0)]
@@ -342,6 +341,12 @@ def bundles(cell: tangle.Cell, leaders: tangle.FiberPopulation, per_bundle: int)
             for step in range(ring):
                 slots.append(tuple(corners[k] + (corners[(k + 1) % 6] - corners[k]) * step / ring))
         ring += 1
+    # A member offset toward the inside of a bend curves more than the leader
+    # (radius R - offset), so the leader bends no tighter than the members'
+    # limit plus the widest offset.
+    reach = pitch * max(float(np.hypot(a, b)) for a, b in slots[:per_bundle])
+    stiff = tangle.Material(material.name, diameter=material.diameter, min_bend_radius=material.min_bend_radius + reach)
+    leaders = tangle.generate_fiber_population(cell, leaders.replace(material=stiff))
     bottom, top = 0.5 * material.diameter, cell.lengths[2] - 0.5 * material.diameter
     lines = []
     for leader in leaders.centerlines():
