@@ -125,7 +125,8 @@ BACKEND = os.environ.get("TANGLE_BACKEND", "wgpu")
 MASK_LEVEL = 0.35  # of the way from void to fiber grey level: a generous threshold
 # "grey" (raw scan + profiles), "plain" (raw scan alone) or "mask" for every example; None: each example's own (grey by default)
 INPUT = os.environ.get("TANGLE_CT_INPUT")
-SETTINGS: dict = {}  # FitSettings overrides for every example (--set)
+SETTINGS: dict = {}
+ROUND_SPECS = False  # --round-specs: fit oval fibers as round ones  # FitSettings overrides for every example (--set)
 BLUR = None  # scan blur (PSF sigma, voxels) for every example; None keeps each example's own
 DIFF_COLORS = {"missed": (230, 50, 50), "extra": (60, 120, 255), "wrong_fiber": (255, 200, 0)}
 FILES = ("raw.tif", "input.tif", "true.tif", "segment.tif", "diff.tif", "confidence.tif", "fit.json", "score.json")
@@ -360,8 +361,10 @@ def oval_two_types(cache: Path) -> Example:
 
 
 def _oval(thickness: float) -> dict:
-    """FiberSpec's ``thickness``, where this tangle.ct takes one."""
-    return {"thickness": thickness} if "thickness" in ct.FiberSpec.__dataclass_fields__ else {}
+    """FiberSpec's ``thickness``, where this tangle.ct takes one (not with --round-specs)."""
+    if ROUND_SPECS or "thickness" not in ct.FiberSpec.__dataclass_fields__:
+        return {}
+    return {"thickness": thickness}
 
 
 def _max_curvature(line: np.ndarray) -> float:
@@ -1138,6 +1141,9 @@ def main() -> None:
         help="render every scan with this blur (PSF sigma, voxels); default: each example's own (0.9; 0.7-1.2 for varied_*)",
     )
     parser.add_argument(
+        "--round-specs", action="store_true", help="fit oval fibers as round (FiberSpec without thickness), to compare"
+    )
+    parser.add_argument(
         "--set", action="append", default=[], metavar="NAME=VALUE",
         help="a FitSettings field for every example, e.g. --set bright_seed_strength=0.05 (repeatable)",
     )
@@ -1145,7 +1151,8 @@ def main() -> None:
     for item in args.set:
         name, _, value = item.partition("=")
         SETTINGS[name] = json.loads(value)
-    global INPUT, BLUR
+    global INPUT, BLUR, ROUND_SPECS
+    ROUND_SPECS = args.round_specs
     if args.input:
         INPUT = args.input
     BLUR = args.blur
