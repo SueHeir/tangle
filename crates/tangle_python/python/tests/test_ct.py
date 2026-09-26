@@ -493,6 +493,49 @@ class CtToolTests(unittest.TestCase):
         self.assertEqual(len(fit.centerlines), 1)
         self.assertTrue(np.all(np.diff(fit.centerlines[0][:, 0]) > 0), fit.centerlines[0][:, 0])
 
+    def test_tiles_join_ends_side_by_side_at_a_wall_and_across_types(self):
+        from tangle.ct import _tiles
+        from tangle.ct._image import Levels
+
+        grid = _tiles.TileGrid.make((60, 60, 120), 60, 16)  # wall at x = 60
+        levels = Levels(0.0, 1.0, 0.5)
+
+        def run(left, right, kinds=(0, 0), radii=(3.0, 3.0), specs=(ct.FiberSpec(diameter=6e-6),)):
+            fits = [
+                _tiles.TileFit(index, [line], np.array([r]), np.array([k]), np.ones(1), levels, [np.ones(len(line))])
+                for index, line, k, r in (((0, 0, 0), left, kinds[0], radii[0]), ((0, 0, 1), right, kinds[1], radii[1]))
+            ]
+            return _tiles.stitch(grid, fits, list(specs), 1e-6, levels)
+
+        def x_line(x0, x1, y):
+            x = np.arange(x0, x1, 2.0)
+            return np.stack([x, np.full(len(x), float(y)), np.full(len(x), 30.0)], axis=1)
+
+        # Both tiles stop their fit at the wall, 2.5 voxels apart sideways (under one radius): the ends do not
+        # point at each other, but they sit side by side on one fiber and are joined.
+        fit = run(x_line(2, 60, 30.0), x_line(62, 120, 32.5))
+        self.assertEqual(len(fit.centerlines), 1, fit.history[0])
+        self.assertEqual(fit.history[0]["gap_joins"], 1)
+        # Two radii apart (two touching fibers) they stay two fibers.
+        self.assertEqual(len(run(x_line(2, 60, 30.0), x_line(62, 120, 36.0)).centerlines), 2)
+        # One tile types the fiber coarse, the other fine: joined, typed coarse (the larger type covers a third
+        # of it or more), with the coarse radius.
+        specs = (ct.FiberSpec(diameter=12e-6), ct.FiberSpec(diameter=6e-6))
+        fit = run(x_line(2, 76, 30.0), x_line(44, 90, 30.5), kinds=(0, 1), radii=(6.0, 3.0), specs=specs)
+        self.assertEqual(len(fit.centerlines), 1, fit.history[0])
+        self.assertEqual(fit.history[0]["cross_type_joins"], 1)
+        self.assertEqual(int(fit.types[0]), 0)
+        self.assertAlmostEqual(float(fit.radii[0]), 6.0)
+        self.assertTrue(np.all(np.diff(fit.centerlines[0][:, 0]) > 0))
+        # Two touching fibers, P (y = 30) and Q (y = 36.5): the left tile fits only P, and in its padding the
+        # fit slips onto Q; the right tile fits only Q, into the left one's padding. The left fit's tail agrees
+        # with Q, but Q's tail lies a diameter from P: not the same fiber, so P ends at the wall.
+        slip = np.concatenate([x_line(2, 60, 30.0), [[60.0, 33.0, 30.0], [62.0, 36.5, 30.0], [64.0, 36.5, 30.0],
+                                                     [66.0, 36.5, 30.0]]])
+        fit = run(slip, x_line(44, 120, 36.5))
+        self.assertEqual(fit.history[0]["joins"], 0, fit.history[0])
+        self.assertEqual(len(fit.centerlines), 2)
+
     def test_tile_checkpoints_reload_and_refuse_other_inputs(self):
         from tangle.ct import _tiles
         from tangle.ct._image import Levels
