@@ -322,6 +322,16 @@ def scanner_two_types(cache: Path) -> Example:
     return two_types(cache.with_name("two_types.json"), scanner=True)  # the same fibers as two_types
 
 
+def _max_curvature(line: np.ndarray) -> float:
+    """The largest turning angle per unit length at a polyline's interior nodes."""
+    if len(line) < 3:
+        return 0.0
+    d = np.diff(line, axis=0)
+    length = np.linalg.norm(d, axis=1)
+    cos = np.einsum("ij,ij->i", d[:-1], d[1:]) / np.maximum(length[:-1] * length[1:], 1e-30)
+    return float(np.max(np.arccos(np.clip(cos, -1.0, 1.0)) / np.maximum(0.5 * (length[:-1] + length[1:]), 1e-30)))
+
+
 def bundles(cell: tangle.Cell, leaders: tangle.FiberPopulation, per_bundle: int):
     """(FiberCollection, material) for relaxed_truth: a bundle of ``per_bundle`` fibers along each of ``leaders``.
 
@@ -343,9 +353,9 @@ def bundles(cell: tangle.Cell, leaders: tangle.FiberPopulation, per_bundle: int)
         ring += 1
     # A member offset toward the inside of a bend curves more than the leader
     # (radius R - offset), so the leader bends no tighter than the members'
-    # limit plus the widest offset.
+    # limit plus the widest offset, with room for the frame turning along the leader.
     reach = pitch * max(float(np.hypot(a, b)) for a, b in slots[:per_bundle])
-    stiff = tangle.Material(material.name, diameter=material.diameter, min_bend_radius=material.min_bend_radius + reach)
+    stiff = tangle.Material(material.name, diameter=material.diameter, min_bend_radius=material.min_bend_radius + 1.5 * reach)
     leaders = tangle.generate_fiber_population(cell, leaders.replace(material=stiff))
     bottom, top = 0.5 * material.diameter, cell.lengths[2] - 0.5 * material.diameter
     lines = []
@@ -359,9 +369,15 @@ def bundles(cell: tangle.Cell, leaders: tangle.FiberPopulation, per_bundle: int)
         side = np.cross(tangent, up)
         for a, b in slots[:per_bundle]:
             member = path + pitch * (a * side + b * up)
-            member[:, 2] = np.clip(member[:, 2], bottom, top)
             cut = rng.integers(0, len(member) // 10 + 1, size=2)
-            lines.append(member[cut[0] : len(member) - cut[1]].tolist())
+            member = member[cut[0] : len(member) - cut[1]]
+            # Clipping a member to the cell would kink it, so members that
+            # leave it or bend past the limit (the frame turns) are left out.
+            if len(member) < 2 or member[:, 2].min() < bottom or member[:, 2].max() > top:
+                continue
+            if _max_curvature(member) > 0.95 / material.min_bend_radius:
+                continue
+            lines.append(member.tolist())
     return tangle.FiberCollection.from_centerlines(lines, material), material
 
 
