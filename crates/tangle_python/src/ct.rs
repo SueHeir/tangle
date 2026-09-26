@@ -964,7 +964,7 @@ type ConfidenceOut = (
 );
 
 #[pyfunction]
-#[pyo3(signature = (image, depth, nodes, counts, radii, spacing, margin, thickness_margin, ring, thickness_tolerance, previous_nodes=None, previous_counts=None))]
+#[pyo3(signature = (image, depth, nodes, counts, radii, spacing, margin, thickness_margin, ring, thickness_tolerance, previous_nodes=None, previous_counts=None, surround_weight=1.0, surround_radii=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ct_node_confidence(
     image: PyBuffer<f32>,
@@ -979,6 +979,8 @@ pub(crate) fn ct_node_confidence(
     thickness_tolerance: f64,
     previous_nodes: Option<PyBuffer<f64>>,
     previous_counts: Option<Vec<usize>>,
+    surround_weight: f64,
+    surround_radii: Option<Vec<f64>>,
 ) -> PyResult<ConfidenceOut> {
     let shape = volume_shape(&image, "image")?;
     same_shape(&image, &depth, "depth")?;
@@ -996,12 +998,21 @@ pub(crate) fn ct_node_confidence(
         }
         _ => None,
     };
+    if let Some(reach) = &surround_radii {
+        per_line(reach, &counts, "surround radius")?;
+    }
+    if surround_weight.is_nan() || surround_weight < 0.0 {
+        return Err(PyValueError::new_err(
+            "surround_weight must be zero or positive",
+        ));
+    }
     let settings = ConfidenceSettings {
         spacing,
         margin,
         thickness_margin,
         ring,
         thickness_tolerance,
+        surround_weight,
     };
     let c = node_confidence(
         read(&image, "image")?,
@@ -1010,6 +1021,7 @@ pub(crate) fn ct_node_confidence(
         &lines,
         &radii,
         previous.as_deref(),
+        surround_radii.as_deref(),
         settings,
     );
     Ok((

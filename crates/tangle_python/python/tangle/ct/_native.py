@@ -301,15 +301,22 @@ def render_grey(low, high, centerlines, radii, profiles, void: float, edge: floa
 
 
 def node_confidence(image, depth, centerlines, radii, *, spacing, margin, thickness_margin, ring,
-                    thickness_tolerance, previous=None):
+                    thickness_tolerance, previous=None, surround_weight=1.0, surround_radii=None):
     """``(per_node, settled, per_sample, parts)`` (see ``_confidence.node_confidence``)."""
     nodes, counts = _pack(centerlines)
     previous_nodes = previous_counts = None
     if previous is not None:
         previous_nodes, previous_counts = _pack(previous)
+    surround = {}
+    if surround_weight != 1.0 or surround_radii is not None:  # (builds before these took neither)
+        surround = {
+            "surround_weight": float(surround_weight),
+            "surround_radii": None if surround_radii is None else [float(r) for r in surround_radii],
+        }
     per_node, settled, per_sample, parts = _tangle.ct_node_confidence(
         _f32(image), _f32(depth), nodes, counts, [float(r) for r in radii], float(spacing), float(margin),
         float(thickness_margin), int(ring), float(thickness_tolerance), previous_nodes, previous_counts,
+        **surround,
     )
     as_arrays = lambda rows: [np.array(row, dtype=np.float64) for row in rows]  # noqa: E731
     return as_arrays(per_node), as_arrays(settled), as_arrays(per_sample), [as_arrays(part) for part in parts]

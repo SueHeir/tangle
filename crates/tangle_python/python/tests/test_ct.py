@@ -770,6 +770,27 @@ class CtToolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             range_image(volume, [(0.0, 0.5)], denoise_sigma=0.0)  # nothing darker: no void
 
+    def test_surround_weight_and_ring_reach(self):
+        from tangle.ct import _confidence
+
+        # Two touching tubes along x (radius 3, axes 6.5 apart); only one is fitted.
+        z, y, x = np.mgrid[0:24, 0:32, 0:40]
+        near = lambda cy: np.hypot(y + 0.5 - cy, z + 0.5 - 12.0)  # noqa: E731
+        image = np.clip(0.5 - (np.minimum(near(12.0), near(18.5)) - 3.0) / 2.4, 0.0, 1.0).astype(np.float32)
+        depth = np.maximum(3.0 - np.minimum(near(12.0), near(18.5)), 0.0).astype(np.float32)
+        line = [np.array([[x0, 12.0, 12.0] for x0 in np.linspace(8.0, 32.0, 9)])]
+        args = dict(spacing=3.0, margin=0.0, thickness_margin=0.0)
+        full, summary = _confidence.node_confidence(image, depth, line, np.array([3.0]), **args)
+        free, _ = _confidence.node_confidence(image, depth, line, np.array([3.0]), surround_weight=0.0, **args)
+        surround = float(np.mean(summary["parts"]["surround"][0]))
+        self.assertLess(surround, 1.0)  # the unfitted neighbour is foreground no fit explains
+        self.assertGreater(float(free[0].mean()), float(full[0].mean()))  # weight 0 leaves it out
+        # A ring past the neighbour (as for an oval's long semi-axis) no longer lands on it.
+        _, far = _confidence.node_confidence(
+            image, depth, line, np.array([3.0]), surround_radii=np.array([9.0]), **args
+        )
+        self.assertGreater(float(np.mean(far["parts"]["surround"][0])), surround)
+
     def test_graded_smallest_only_keeps_larger_types_on_the_flat_image(self):
         from tangle.ct._fit import _Fitter
 
@@ -881,6 +902,9 @@ class CtFitTests(unittest.TestCase):
         last = dump.rsplit("ITEM: TIMESTEP", 1)[1]
         count = int(last.split("ITEM: NUMBER OF ATOMS\n")[1].split("\n")[0])
         self.assertEqual(count, sum(len(line) - 1 for line in fit.centerlines))
+        self.assertIn("confidence settled surround frozen", dump.split("\n", 9)[8])
+        values = [float(v) for v in last.split("ITEM: ATOMS")[1].splitlines()[1].split()[-4:]]
+        self.assertTrue(all(0.0 <= v <= 1.0 for v in values), values)  # confidence, settled, surround, frozen
 
     def test_tiled_fit_matches_whole_fit_and_resumes(self):
         from unittest import mock
