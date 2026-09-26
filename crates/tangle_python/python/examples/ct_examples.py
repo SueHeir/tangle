@@ -176,7 +176,7 @@ def relaxed_truth(cache: Path, cell: tangle.Cell, populations: list) -> tangle.A
         counts = [p.count if isinstance(p, tangle.FiberPopulation) else len(p[0]) for p in populations]
         data = {"counts": counts, "centerlines": run.centerlines()}
         if any(_material(p).is_oval for p in populations):
-            data["long_axes"] = run.assembly().long_axes()
+            data["long_axes"] = run.assembly.long_axes()
         cache.write_text(json.dumps(data) + "\n")
     data = json.loads(cache.read_text())
     data.setdefault("counts", [len(data["centerlines"])])  # single-population caches from older examples
