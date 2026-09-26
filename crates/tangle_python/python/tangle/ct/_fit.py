@@ -661,7 +661,8 @@ def fit_fibers(
 
             flat = image
             image = graded_image(
-                volume, ranges, void, denoise_sigma=settings.denoise_sigma_voxels, exclude=exclude, flat=flat
+                volume, ranges, void, flat, reach=min(0.5 * item.diameter for item in specs) / voxel_size,
+                denoise_sigma=settings.denoise_sigma_voxels, exclude=exclude,
             )
             foreground = flat > 0.5
     else:
