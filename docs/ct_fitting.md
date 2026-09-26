@@ -359,7 +359,10 @@ for comparison) and scores it.
 ## Examples
 
 [`ct_examples.py`](../crates/tangle_python/python/examples/ct_examples.py)
-holds every example, and every example is run the same way. A synthetic
+holds every example, and every example is run the same way. The synthetic
+scans come from the simulated scanner in [ct_scanner.md](ct_scanner.md);
+the hardest set, and the settings that fit it best, are in
+[ct_dense_hard.md](ct_dense_hard.md). A synthetic
 scan with known true fibers is fitted from the raw scan, with each type's
 grey profile measured around its true fibers (as one would on a few
 fibers of a real scan), with Tangle's solver on the GPU.
