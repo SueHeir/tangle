@@ -13,7 +13,8 @@ voxel:
 3. grow each end along the ridge while the grey stays at least ``ridge_finish_extend`` of the fit's own median
    grey and no other fit is within half a fiber pitch;
 4. join ends of pieces that meet: within 6 voxels, both end directions within 30 degrees of the bridge, and
-   at least 80% of the straight bridge on the ridge;
+   at least 80% of the straight bridge on the ridge; or ends within 4 voxels whose pieces run on past each
+   other, parallel (the second piece's overlapping start is dropped);
 5. drop pieces shorter than the type's minimum length.
 """
 
@@ -29,6 +30,7 @@ _CUT_RUN = 3.0  # voxels: shortest off-ridge run cut out
 _JOIN_GAP = 6.0  # voxels
 _JOIN_COS = float(np.cos(np.radians(30.0)))
 _JOIN_RIDGE = 0.8
+_JOIN_OVERLAP = 4.0  # voxels: ends this close that run on past each other (side by side) also join
 
 
 def ridge_finish(fitter, lines, radii, types, grey: np.ndarray):
@@ -206,20 +208,20 @@ def _join(grey, pieces, r, shape):
             ends.append((i, 1, p[-1], _end_direction(p, True)))
         tree = cKDTree(np.array([e[2] for e in ends]))
         candidates = []
-        for a, b in tree.query_pairs(_JOIN_GAP):
+        for a, b in tree.query_pairs(max(_JOIN_GAP, _JOIN_OVERLAP)):
             ia, _, pa, ta = ends[a]
             ib, _, pb, tb = ends[b]
             if ia == ib:
                 continue
             gap = pb - pa
             length = float(np.linalg.norm(gap))
-            if length > 1e-6:
-                unit = gap / length
-                if ta @ unit < _JOIN_COS or tb @ (-unit) < _JOIN_COS:
-                    continue
-            elif ta @ (-tb) < _JOIN_COS:
-                continue
-            candidates.append((length, a, b))
+            facing = length <= _JOIN_GAP and (
+                length <= 1e-6 and ta @ (-tb) >= _JOIN_COS
+                or length > 1e-6 and ta @ (gap / length) >= _JOIN_COS and tb @ (-gap / length) >= _JOIN_COS
+            )
+            overlapping = length <= _JOIN_OVERLAP and ta @ (-tb) >= _JOIN_COS
+            if facing or overlapping:
+                candidates.append((length, a, b))
         candidates.sort()
         used, merged = set(), False
         for length, a, b in candidates:
@@ -236,6 +238,15 @@ def _join(grey, pieces, r, shape):
                     continue
             first = pieces[ia] if ea == 1 else pieces[ia][::-1]
             second = pieces[ib] if eb == 0 else pieces[ib][::-1]
+            # Pieces that run on past each other: drop the second's samples up to the one nearest the first's end.
+            head = second[: max(int(2 * _JOIN_OVERLAP / _STEP), 1)]
+            nearest = int(np.argmin(np.linalg.norm(head - first[-1], axis=1)))
+            if nearest > 0 and np.dot(second[min(nearest + 1, len(second) - 1)] - first[-1], first[-1] - first[-2]) > 0:
+                second = second[nearest:]
+                pb = second[0]
+                length = float(np.linalg.norm(pb - pa))
+                n = max(int(np.ceil(length / _STEP)), 1)
+                bridge = pa[None] + (pb - pa)[None] * (np.arange(1, n) / n)[:, None]
             pieces[ia] = _samples_inside(np.vstack([first, bridge, second]) if len(bridge) else np.vstack([first, second]),
                                          shape, _STEP)
             del pieces[ib]
