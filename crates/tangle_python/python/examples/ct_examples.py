@@ -126,6 +126,8 @@ MASK_LEVEL = 0.35  # of the way from void to fiber grey level: a generous thresh
 # "grey" (raw scan + profiles), "plain" (raw scan alone) or "mask" for every example; None: each example's own (grey by default)
 INPUT = os.environ.get("TANGLE_CT_INPUT")
 SETTINGS: dict = {}
+BROAD_RANGE = (0.33, 1.32)  # --input broad: the one range, as fractions of the brightest axis grey above void
+BEND_SCALE = 1.0  # --bend-scale: the fitter's min_bend_radius times this
 ROUND_SPECS = False  # --round-specs: fit oval fibers as round ones  # FitSettings overrides for every example (--set)
 BLUR = None  # scan blur (PSF sigma, voxels) for every example; None keeps each example's own
 DIFF_COLORS = {"missed": (230, 50, 50), "extra": (60, 120, 255), "wrong_fiber": (255, 200, 0)}
@@ -796,9 +798,40 @@ def scanned_settings(index: int) -> dict:
     return settings
 
 
-def scanned(index: int) -> Callable[[Path], Example]:
+DENSE_HARD = range(1, 7)
+
+
+def dense_hard_settings(index: int) -> dict:
+    """``dense_hard_<index>``: packed bundles of fine fibers and flat oval coarse
+    fibers at 1 µm voxels, each fiber with its own brightness (``brightness_spread``)
+    and dim coarse fibers, so no grey threshold separates the types."""
+    rng = np.random.default_rng(7000 + index)
+    return {
+        "voxel_um": 1.0,
+        "side_um": float(SCANNED_VOXELS),
+        "orientation": "planar",
+        "tilt": round(float(rng.uniform(0.15, 0.3)), 2),
+        "fine_um": 6.5,
+        "fine_fraction": round(float(rng.uniform(0.10, 0.13)), 3),
+        "per_bundle": int(rng.choice([7, 19])),
+        "coarse_um": 17.3,
+        "coarse_thickness_ratio": 0.8,
+        "coarse_fraction": round(float(rng.uniform(0.03, 0.05)), 3),
+        "coarse_brightness": 0.45,
+        "brightness_spread": 0.25,
+        "length_fraction": [0.55, 0.9],
+        "photons": round(SCANNER.photons * float(rng.uniform(0.8, 1.2))),
+        "noise_blur": 0.0,
+        "resolution_um": 2.0,
+        "fiber_motion_um": 1.0,
+        "delta_beta": [12.0, 9.0],
+        "seed": 7000 + index,
+    }
+
+
+def scanned(index: int, settings: Callable[[int], dict] = scanned_settings) -> Callable[[Path], Example]:
     def build(cache: Path) -> Example:
-        v = scanned_settings(index)
+        v = settings(index)
         side = SCANNED_VOXELS * v["voxel_um"] * um
         cell = tangle.Cell([side] * 3)
         length = tuple(f * side for f in v["length_fraction"])
@@ -849,7 +882,10 @@ def scanned(index: int) -> Callable[[Path], Example]:
             fiber_motion=v["fiber_motion_um"] * um,
             delta_beta=tuple(v["delta_beta"][: len(types)]),
         )
-        scan = render_scan(truth, v["voxel_um"] * um, seed=v["seed"], profiles=profiles, scanner=scanner)
+        scan = render_scan(
+            truth, v["voxel_um"] * um, seed=v["seed"], profiles=profiles, scanner=scanner,
+            **({"brightness_spread": v["brightness_spread"]} if v.get("brightness_spread") else {}),
+        )
         smallest = min(s.min_bend_radius for s in specs)
         return Example(
             scan,
@@ -862,6 +898,7 @@ def scanned(index: int) -> Callable[[Path], Example]:
 
 
 EXAMPLES.update({f"scanned_{index}": scanned(index) for index in [*SCANNED_TUNE, *SCANNED_CHECK, *SCANNED_OVAL]})
+EXAMPLES.update({f"dense_hard_{index}": scanned(index, dense_hard_settings) for index in DENSE_HARD})
 
 # -- the runner -----------------------------------------------------------------
 
@@ -997,11 +1034,25 @@ def fit_input(scan: ct.SyntheticScan, spec, input: str = "grey") -> tuple[np.nda
         return scan.volume, spec, seen
     specs = spec if isinstance(spec, list) else [spec]
     profiles = grey_profiles(scan, len(specs))
-    specs = [item.replace(profile=profile) for item, profile in zip(specs, profiles)]
     grey = gaussian_filter(np.asarray(scan.volume, dtype=np.float32), 0.7)
-    _, _, ranges = profile_levels(grey, [np.asarray(profile) for profile in profiles])
+    void, _, ranges = profile_levels(grey, [np.asarray(profile) for profile in profiles])
+    if input == "broad":
+        # One grey range for every type, from a third of the way to the
+        # brightest type's axis grey to a third past it, as one picks by eye
+        # from a histogram: no per-type ranges read off the true fibers.
+        peak = max(float(profile[0]) for profile in profiles) - void
+        ranges = [(void + BROAD_RANGE[0] * peak, void + BROAD_RANGE[1] * peak)] * len(specs)
+        specs = [item.replace(intensity=ranges[0]) for item in specs]
+    else:
+        specs = [item.replace(profile=profile) for item, profile in zip(specs, profiles)]
     seen, _, _ = range_image(scan.volume, ranges, denoise_sigma=0.7)
     return scan.volume, specs if isinstance(spec, list) else specs[0], seen
+
+
+def _bent(spec: ct.FiberSpec) -> ct.FiberSpec:
+    """``spec`` with its bend limit scaled by ``--bend-scale`` (the truth keeps its own)."""
+    bend = spec.min_bend_radius or 5.0 * spec.diameter
+    return spec.replace(min_bend_radius=BEND_SCALE * bend)
 
 
 def run(name: str, output: Path) -> dict:
@@ -1011,6 +1062,8 @@ def run(name: str, output: Path) -> dict:
     h = scan.voxel_size
     source = INPUT or example.input
     volume, spec, seen = fit_input(scan, example.spec, source)
+    if BEND_SCALE != 1.0:
+        spec = [_bent(item) for item in spec] if isinstance(spec, list) else _bent(spec)
     started = time.perf_counter()
     fit = ct.fit_fibers(volume, h, spec, ct.FitSettings(backend=BACKEND, **SETTINGS))
     seconds = time.perf_counter() - started
@@ -1132,8 +1185,9 @@ def main() -> None:
         "or all",
     )
     parser.add_argument(
-        "--input", choices=("grey", "plain", "mask"), default=None,
-        help="fit every example from the raw scan with grey profiles, the raw scan alone, or a generous mask "
+        "--input", choices=("grey", "broad", "plain", "mask"), default=None,
+        help="fit every example from the raw scan with grey profiles, one broad grey range for every type, "
+        "the raw scan alone, or a generous mask "
         "(default: each example's own; grey, and plain for noisy_two_types)",
     )
     parser.add_argument(
@@ -1144,6 +1198,10 @@ def main() -> None:
         "--round-specs", action="store_true", help="fit oval fibers as round (FiberSpec without thickness), to compare"
     )
     parser.add_argument(
+        "--bend-scale", type=float, default=1.0,
+        help="fit with every FiberSpec's min_bend_radius times this (the true structure keeps its own)",
+    )
+    parser.add_argument(
         "--set", action="append", default=[], metavar="NAME=VALUE",
         help="a FitSettings field for every example, e.g. --set bright_seed_strength=0.05 (repeatable)",
     )
@@ -1151,8 +1209,9 @@ def main() -> None:
     for item in args.set:
         name, _, value = item.partition("=")
         SETTINGS[name] = json.loads(value)
-    global INPUT, BLUR, ROUND_SPECS
+    global INPUT, BLUR, ROUND_SPECS, BEND_SCALE
     ROUND_SPECS = args.round_specs
+    BEND_SCALE = args.bend_scale
     if args.input:
         INPUT = args.input
     BLUR = args.blur
@@ -1164,7 +1223,7 @@ def main() -> None:
         parser.error(f"unknown examples: {', '.join(unknown)} (see --list)")
     output = args.output or Path(os.environ.get("TANGLE_CT_OUTPUT", Path(__file__).with_name("output") / "ct"))
     output.mkdir(parents=True, exist_ok=True)
-    scanned_names = [name for name in EXAMPLES if name.startswith("scanned_")]
+    scanned_names = [name for name in EXAMPLES if name.startswith(("scanned_", "dense_hard_"))]
     if args.scanned:
         chosen = {
             "tune": SCANNED_TUNE, "check": SCANNED_CHECK, "oval": SCANNED_OVAL,

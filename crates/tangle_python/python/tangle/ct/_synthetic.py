@@ -141,6 +141,7 @@ def synthetic_ct(
     phase_contrast: float = 0.0,
     phase_sigma_voxels: float | None = None,
     scanner=None,
+    brightness_spread: float = 0.0,
 ) -> SyntheticScan:
     """Render ``source`` (an ``Assembly`` or ``RunResult``) as a CT-like volume.
 
@@ -180,6 +181,12 @@ def synthetic_ct(
     axis (a solid fiber of brightness 1 is the default). The result's
     ``types`` holds each fiber's profile index.
 
+    ``brightness_spread`` scales each fiber's brightness by its own factor,
+    log-normal with that sigma (median 1), drawn from ``seed``: real fibers
+    of one type can differ a lot in grey, which a grey threshold then
+    cannot follow. It needs ``profiles``; with ``scanner`` the phase follows
+    the same factor.
+
     Oval fibers (a ``Material`` with a ``thickness``) render as ovals: the
     occupancy comes from the export, which draws each section, and a
     fiber's profile is picked by its long width (a Material's
@@ -206,8 +213,16 @@ def synthetic_ct(
         period = np.array([n / voxel_size if p else 0.0 for n, p in zip(cell.lengths, cell.periodic)])
     types = None
     base = occupancy
+    factor = None
+    if brightness_spread > 0:
+        # Its own stream, so the noise below is the same with or without it.
+        factor = np.exp(np.random.default_rng([seed, 1]).normal(0.0, brightness_spread, len(centerlines)))
+    if factor is not None and not profiles:
+        raise ValueError("brightness_spread needs profiles")
     if profiles:
-        occupancy, types = _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles, period, labels, reach)
+        occupancy, types = _apply_profiles(
+            occupancy, centerlines, radii, voxel_size, profiles, period, labels, reach, factor
+        )
     rng = np.random.default_rng(seed)
     if scanner is not None:
         from ._scanner import acquire
@@ -221,7 +236,7 @@ def synthetic_ct(
             if not profiles or len(ratios) != len(profiles):
                 raise ValueError("give one Scanner.delta_beta per profile")
             scaled = [(d, replace(p, brightness=p.brightness * r)) for (d, p), r in zip(profiles, ratios)]
-            weighted, _ = _apply_profiles(base, centerlines, radii, voxel_size, scaled, period, labels, reach)
+            weighted, _ = _apply_profiles(base, centerlines, radii, voxel_size, scaled, period, labels, reach, factor)
             phase = (scanner.fiber_attenuation * weighted).astype(np.float32)
         warp = None
         if scanner.fiber_motion > 0 or scanner.drift > 0:
@@ -258,7 +273,7 @@ def synthetic_ct(
     return SyntheticScan(volume, labels, centerlines, radii, voxel_size, period, types, semi_axes, long_axes)
 
 
-def _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles, period, labels=None, reach=None):
+def _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles, period, labels=None, reach=None, factor=None):
     """Scale occupancy by each fiber type's brightness profile.
 
     In a periodic cell a fiber's centerline runs past the cell walls while its
@@ -267,7 +282,7 @@ def _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles, period,
     belongs to that fiber; the rest (partial-volume edges) go to the nearest
     fiber within ``reach`` (its long semi-axis, default ``radii``) plus 2
     voxels. A fiber's profile is the one whose diameter is nearest twice
-    its ``reach``.
+    its ``reach``. ``factor`` (one per fiber) scales each fiber's brightness.
     """
     import itertools
 
@@ -304,6 +319,8 @@ def _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles, period,
         labelled = np.asarray(labels)[owned]
         fiber = np.where(labelled > 0, labelled - 1, fiber)
     brightness = np.array([p.brightness for p in shapes])[types[fiber]]
+    if factor is not None:
+        brightness = brightness * np.asarray(factor)[fiber]
     core = np.array([1.0 if p.solid else p.core for p in shapes])[types[fiber]]
     rim = np.array([np.inf if p.solid else p.rim / voxel_size for p in shapes])[types[fiber]]
     inner = np.maximum(radii[fiber] - rim, 0.0)
