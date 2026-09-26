@@ -182,6 +182,22 @@ class FitSettings:
     # With recenter_on_grey: also recenter after each round's cleanup, before
     # new fibers are traced around the fits.
     recenter_each_round: bool = False
+    # With recenter_on_grey: recenter after every solve of the main rounds and
+    # the final solve (not in the redraws), so new fibers stay on their fibers
+    # through the cleanup that follows.
+    recenter_each_solve: bool = False
+    # One last round of new fibers after the final recenter, with no solve
+    # after it (each round's solve drags some good births off their fibers,
+    # and the cleanup then removes them); the new fibers are recentered.
+    final_births: bool = False
+    # At the end, trace the largest type again, ignoring the fit, and keep the
+    # dim-cored, unshared candidates in place of the coarse fits they cover,
+    # cutting the smallest type's fits out of their oval sections (see
+    # _rescue). Meant for trace_smallest_first, where fine fits claim the
+    # coarse fibers' rims. Needs coarse_axis_grey_max (its grey).
+    coarse_rescue: bool = False
+    coarse_rescue_grey: float = 0.8
+    coarse_rescue_shared: float = 0.3
     # New fibers traced among existing ones (a round's births, a redraw's new
     # fibers) are kept only if at least this share of their nodes sit on a
     # grey ridge: the brightest point of the grey (smoothed by
@@ -935,6 +951,8 @@ def fit_fibers(
                 break
             anchors = before_births if batch == 0 and settings.births_solve_pinned else None
             lines = fitter.solve(lines, radii, types, anchors=anchors or None)
+            if settings.recenter_on_grey and settings.recenter_each_solve and fitter.peak_grey is not None and lines:
+                lines, _ = fitter.recenter(lines, radii, types)
             fitter.snap(f"round {round_index + 1} solve {batch + 1}", lines, radii, types)
             lines, radii, types, cut = fitter.cut_void(lines, radii, types)
             fitter.snap(f"round {round_index + 1} void cut {batch + 1}", lines, radii, types)
@@ -968,6 +986,8 @@ def fit_fibers(
         # types (so bend limits) it was solved with.
         before = lines
         lines = fitter.solve(lines, radii, types)
+        if settings.recenter_on_grey and settings.recenter_each_solve and fitter.peak_grey is not None:
+            lines, _ = fitter.recenter(lines, radii, types)
         lines, radii, types, cut = fitter.cut_void(lines, radii, types, final=True)
         before = [before[i] for i in cut.pop("source")]
         log("final solve", lines, types=fitter.counts(types), **cut)
@@ -1001,6 +1021,29 @@ def fit_fibers(
         confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
         log("recenter", lines, moved=moved, **summary)
         fitter.snap("recenter", lines, radii, types)
+    if lines and settings.coarse_rescue:
+        from ._rescue import coarse_rescue
+
+        lines, radii, types, info = coarse_rescue(fitter, lines, radii, types, float(levels.void))
+        lines = _refine.respace(lines, fitter.spacing)
+        confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
+        log("coarse rescue", lines, **info)
+        fitter.snap("coarse rescue", lines, radii, types)
+    if lines and settings.final_births:
+        born = fitter.trace(lines, radii)
+        if born:
+            born_radii, born_types = fitter.classify(born)
+            if settings.recenter_on_grey and fitter.peak_grey is not None:
+                moved, _ = fitter.recenter(
+                    lines + born, np.concatenate([radii, born_radii]), np.concatenate([types, born_types])
+                )
+                born = moved[len(lines):]  # the fits already there keep their place
+            lines = lines + born
+            radii = np.concatenate([radii, born_radii])
+            types = np.concatenate([types, born_types]).astype(int)
+            confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
+        log("final births", lines, born=len(born))
+        fitter.snap("final births", lines, radii, types)
     if fitter.snapshots is not None:
         fitter.snapshots.close()
     return FitResult(
