@@ -61,6 +61,13 @@ class FiberSpec:
         ``intensity`` is given), fits are judged by drawing them with their
         profiles and comparing with the scan, and a fiber's type follows
         the profile that matches the grey across it. See ``_grey``.
+    ``thickness``
+        Optional short width of an oval fiber (``diameter`` is then the long
+        width), as Tangle's ``Material(thickness=...)``. Such fibers are
+        traced, typed and relaxed by their short width and drawn as ovals,
+        each node's long axis read from the scan (where the cross-section is
+        flattest), so one fit covers the whole fiber instead of two round
+        ones side by side.
     """
 
     diameter: float
@@ -72,9 +79,17 @@ class FiberSpec:
     name: str = "ct fiber"
     intensity: tuple[float, float] | None = None
     profile: tuple[float, ...] | None = None
+    thickness: float | None = None
 
     def replace(self, **changes: Any) -> "FiberSpec":
         return replace(self, **changes)
+
+    @property
+    def ratio(self) -> float:
+        """Long width over short width: 1 for a round fiber."""
+        if self.thickness is None or self.thickness >= self.diameter:
+            return 1.0
+        return self.diameter / self.thickness
 
 
 @dataclass(frozen=True)
@@ -235,6 +250,10 @@ class FitResult:
     types: np.ndarray | None = None
     # How sure the fit is of each node, in [0, 1] (see ``_confidence``).
     confidence: list[np.ndarray] | None = None
+    # Oval fibers (FiberSpec.thickness): each fiber's unit long axis at each
+    # node (None for a round fiber), or None when every fiber is round.
+    # ``radii`` are then the short semi-axes.
+    long_axes: list[np.ndarray | None] | None = None
 
     def spec_of(self, index: int) -> FiberSpec:
         """The spec (fiber type) of fiber ``index``."""
@@ -257,9 +276,17 @@ class FitResult:
         return [n * self.voxel_size for n in self.shape[::-1]]
 
     # -- voxel outputs ------------------------------------------------------
+    def sections(self) -> list | None:
+        """Each fiber's ``(ratio, long axes)`` for drawing (None: round; see ``_geometry.rasterize``)."""
+        if self.long_axes is None:
+            return None
+        return [
+            None if axes is None else (self.spec_of(i).ratio, axes) for i, axes in enumerate(self.long_axes)
+        ]
+
     def label_volume(self) -> np.ndarray:
         """One-based fiber id for every voxel inside a fitted capsule (0 = void)."""
-        labels, _, _ = rasterize(self.shape, self.centerlines, self.radii, signed=True)
+        labels, _, _ = rasterize(self.shape, self.centerlines, self.radii, signed=True, sections=self.sections())
         return labels
 
     def confidence_volume(self) -> np.ndarray:
@@ -267,7 +294,7 @@ class FitResult:
         values = np.full(self.shape, np.nan, dtype=np.float32)
         if not self.confidence or not self.centerlines:
             return values
-        _, _, segments = rasterize(self.shape, self.centerlines, self.radii, signed=True)
+        _, _, segments = rasterize(self.shape, self.centerlines, self.radii, signed=True, sections=self.sections())
         per_segment = [0.5 * (c[:-1] + c[1:]) for c in self.confidence]
         table = np.concatenate(per_segment).astype(np.float32)
         owned = segments >= 0
@@ -286,11 +313,20 @@ class FitResult:
             bend = spec.min_bend_radius or 5.0 * spec.diameter
             key = (spec.name, int(round(diameter / 1e-8)))
             if key not in cache:
-                cache[key] = tangle.Material(
-                    f"{spec.name} {key[1] * 1e-2:.2f}um",
-                    diameter=key[1] * 1e-8,
-                    min_bend_radius=bend,
-                )
+                if spec.ratio > 1.0 and self.long_axes is not None:
+                    # An oval: the fitted width is the short one.
+                    cache[key] = tangle.Material(
+                        f"{spec.name} {key[1] * 1e-2:.2f}um thick",
+                        diameter=spec.ratio * key[1] * 1e-8,
+                        min_bend_radius=bend,
+                        thickness=key[1] * 1e-8,
+                    )
+                else:
+                    cache[key] = tangle.Material(
+                        f"{spec.name} {key[1] * 1e-2:.2f}um",
+                        diameter=key[1] * 1e-8,
+                        min_bend_radius=bend,
+                    )
             result.append(cache[key])
         return result
 
@@ -298,8 +334,10 @@ class FitResult:
         import tangle
 
         collection = tangle.FiberCollection(name)
-        for line, material in zip(self.centerlines_m(), self.materials()):
-            collection.add_fiber(line.tolist(), material, tags={"source": "ct fit"})
+        axes = self.long_axes or [None] * self.fiber_count
+        for line, material, long_axis in zip(self.centerlines_m(), self.materials(), axes):
+            extra = {"long_axis": np.asarray(long_axis).tolist()} if long_axis is not None and material.is_oval else {}
+            collection.add_fiber(line.tolist(), material, tags={"source": "ct fit"}, **extra)
         return collection
 
     def to_assembly(self) -> Any:
@@ -481,6 +519,11 @@ class FitResult:
                         if self.confidence is not None
                         else {}
                     ),
+                    **(
+                        {"long_axis": np.round(self.long_axes[i], 4).tolist()}
+                        if self.long_axes is not None and self.long_axes[i] is not None
+                        else {}
+                    ),
                 }
                 for i, (line, d, s) in enumerate(zip(self.centerlines_m(), self.diameters_m(), self.support))
             ],
@@ -563,6 +606,10 @@ def load_fit(path: str | Path) -> FitResult:
         levels=Levels(**data["levels"]),
         history=data.get("history", []),
         confidence=[np.asarray(f["confidence"]) for f in fibers] if fibers and "confidence" in fibers[0] else None,
+        long_axes=(
+            [np.asarray(f["long_axis"]) if "long_axis" in f else None for f in fibers]
+            if any("long_axis" in f for f in fibers) else None
+        ),
     )
 
 
@@ -795,6 +842,10 @@ def fit_fibers(
         specs=None if len(specs) == 1 else specs,
         types=None if len(specs) == 1 else np.asarray(types, dtype=int),
         confidence=confidence,
+        long_axes=(
+            [fitter.long_axes(line, int(k)) if fitter.ratio[k] > 1.0 else None for line, k in zip(lines, types)]
+            if (fitter.ratio > 1.0).any() else None
+        ),
     )
 
 
@@ -855,7 +906,11 @@ class _Fitter:
         self.h = voxel_size
         self.log = log
         h = voxel_size
-        self.radius = np.array([0.5 * item.diameter / h for item in specs])
+        # An oval type's radius is its short semi-axis: what the foreground's
+        # depth, the tracer and the solver see; it is drawn ``ratio`` times as
+        # wide along each node's long axis (see sections).
+        self.ratio = np.array([item.ratio for item in specs])
+        self.radius = np.array([0.5 * item.diameter / h / item.ratio for item in specs])
         self.bend = np.array([(item.min_bend_radius or 5.0 * item.diameter) / h for item in specs])
         self.min_length = np.array([(item.min_length or 3.0 * item.diameter) / h for item in specs])
         self.max_length = [item.max_length / h if item.max_length else None for item in specs]
@@ -907,6 +962,48 @@ class _Fitter:
             self.hessians[kind] = HessianField(self.image, sigma=max(0.6 * float(self.radius[kind]), 1.0))
         return self.hessians[kind]
 
+    def long_axes(self, line: np.ndarray, kind: int) -> np.ndarray:
+        """Unit long axis of a type-``kind`` oval fit at each node: across the
+        centerline, where the scan's cross-section is flattest (the larger
+        eigenvalue of the Hessian in the plane across the tangent), smoothed
+        over five nodes."""
+        from ._geometry import tangents
+
+        line = np.asarray(line, dtype=np.float64).reshape(-1, 3)
+        t = tangents(line)
+        helper = np.where(np.abs(t[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
+        e1 = np.cross(t, helper)
+        e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
+        e2 = np.cross(t, e1)
+        hessian = self.hessian(kind).at(line)
+        a = np.einsum("ni,nij,nj->n", e1, hessian, e1)
+        b = np.einsum("ni,nij,nj->n", e1, hessian, e2)
+        c = np.einsum("ni,nij,nj->n", e2, hessian, e2)
+        theta = 0.5 * np.arctan2(2.0 * b, a - c)  # the 2x2 form's larger eigenvector
+        axes = np.cos(theta)[:, None] * e1 + np.sin(theta)[:, None] * e2
+        for k in range(1, len(axes)):  # one way along the fiber
+            if axes[k] @ axes[k - 1] < 0:
+                axes[k] = -axes[k]
+        if len(axes) >= 3:
+            padded = np.concatenate([axes[:1], axes[:1], axes, axes[-1:], axes[-1:]])
+            axes = sum(padded[j : j + len(axes)] for j in range(5))
+        axes -= np.sum(axes * t, axis=1, keepdims=True) * t
+        norm = np.linalg.norm(axes, axis=1, keepdims=True)
+        return np.where(norm > 1e-9, axes / np.maximum(norm, 1e-12), e1)
+
+    def sections(self, lines: list[np.ndarray], radii: np.ndarray | None = None, types: np.ndarray | None = None):
+        """Each line's ``(ratio, long axes)`` for drawing it (None: round; see
+        ``_geometry.rasterize``), or None when no type is oval. Without
+        ``types`` each line's type is the one nearest its radius."""
+        if not (self.ratio > 1.0).any() or not lines:
+            return None
+        if types is None:
+            types = self._nearest(np.asarray(radii, dtype=np.float64))
+        return [
+            (float(self.ratio[k]), self.long_axes(line, int(k))) if self.ratio[k] > 1.0 else None
+            for line, k in zip(lines, types)
+        ]
+
     def counts(self, types: np.ndarray) -> dict[str, int] | None:
         if len(self.specs) == 1:
             return None
@@ -915,7 +1012,10 @@ class _Fitter:
     def claim(self, lines: list[np.ndarray], radii: np.ndarray) -> np.ndarray | None:
         if not lines:
             return None
-        claimed, _, _ = rasterize(self.image.shape, lines, np.asarray(radii), reach=1.2 * np.asarray(radii))
+        claimed, _, _ = rasterize(
+            self.image.shape, lines, np.asarray(radii), reach=1.2 * np.asarray(radii),
+            sections=self.sections(lines, radii),
+        )
         return claimed
 
     def trace(self, lines: list[np.ndarray], radii: np.ndarray) -> list[np.ndarray]:
@@ -1727,6 +1827,9 @@ class _Fitter:
                 group, group_radii, min_bend_radius=bend, min_length=min_length, max_length=self.max_length[kind],
                 threshold=s.kink_threshold, image=self.image, end_cost=cost, scale=scale,
             )
+            if self.ratio[kind] > 1.0:
+                group, group_radii, beside = self._oval_duplicates(group, np.asarray(group_radii), kind)
+                counts["oval_duplicates"] = counts.get("oval_duplicates", 0) + beside
             group, group_radii, duplicates = _moves.resolve_side_by_side(
                 self.image, group, group_radii, min_length=min_length, end_cost=cost, scale=scale
             )
@@ -1756,9 +1859,48 @@ class _Fitter:
                 out_lines, radii, types, min_length=float(self.min_length.min())
             )
         lines = _refine.respace(out_lines, self.spacing)
-        counts["explained"] = _explained_fraction(self.foreground, lines, radii)
+        counts["explained"] = _explained_fraction(self.foreground, lines, radii, self.sections(lines, types=types))
         counts["types"] = self.counts(types)
         return lines, radii, types, counts
+
+    def _oval_duplicates(
+        self, lines: list[np.ndarray], radii: np.ndarray, kind: int
+    ) -> tuple[list[np.ndarray], np.ndarray, int]:
+        """Type-``kind`` oval fits (shortest first) removed when most of their nodes
+        sit inside another one's oval.
+
+        Two ovals of one type that touch are two radii apart once the offset
+        along the long axis is divided by the ratio, whichever way they sit
+        (stacked or side by side), but a fit beside another inside one flat
+        fiber is closer: the solver keeps two round fits two radii apart,
+        which along the long axis is two radii over the ratio. Nodes within
+        1.5 radii by that measure are inside another fiber.
+        """
+        from scipy.spatial import cKDTree
+
+        ratio = float(self.ratio[kind])
+        if ratio <= 1.0 or len(lines) < 2:
+            return lines, radii, 0
+        axes = [self.long_axes(line, kind) for line in lines]
+        nodes = np.concatenate(lines)
+        owner = np.repeat(np.arange(len(lines)), [len(line) for line in lines])
+        tree = cKDTree(nodes)
+        removed = np.zeros(len(lines), dtype=bool)
+        for i in np.argsort([polyline_length(line) for line in lines], kind="stable"):
+            limit = 1.5 * float(radii[i])
+            inside = 0
+            for point, axis, near in zip(lines[i], axes[i], tree.query_ball_point(lines[i], ratio * limit)):
+                near = [q for q in near if owner[q] != i and not removed[owner[q]]]
+                if not near:
+                    continue
+                offset = nodes[near] - point
+                u = offset @ axis
+                scaled = np.sqrt(np.maximum(np.sum(offset**2, axis=1) - u**2 + (u / ratio) ** 2, 0.0))
+                inside += bool((scaled < limit).any())
+            if 2 * inside > len(lines[i]):
+                removed[i] = True
+        keep = np.flatnonzero(~removed)
+        return [lines[i] for i in keep], radii[keep], int(removed.sum())
 
     def end_summary(self, lines: list[np.ndarray], radii: np.ndarray, types: np.ndarray) -> dict[str, Any]:
         ends = end_statistics(lines, radii, self.image.shape)
@@ -1809,8 +1951,8 @@ def _cross_type_duplicates(
     return kept, np.asarray(kept_radii, dtype=np.float64), np.asarray(kept_types, dtype=int), len(lines) - len(kept)
 
 
-def _explained_fraction(foreground: np.ndarray, lines: list[np.ndarray], radii: np.ndarray) -> float:
+def _explained_fraction(foreground: np.ndarray, lines: list[np.ndarray], radii: np.ndarray, sections=None) -> float:
     if not lines or not foreground.any():
         return 0.0
-    labels, _, _ = rasterize(foreground.shape, lines, radii, signed=True)
+    labels, _, _ = rasterize(foreground.shape, lines, radii, signed=True, sections=sections)
     return float(((labels > 0) & foreground).sum()) / float(foreground.sum())

@@ -984,5 +984,24 @@ class CtFitTests(unittest.TestCase):
         self.assertEqual(geometry["overlapping_pairs"], 0, geometry)
 
 
+    def test_a_flat_oval_fiber_is_fitted_once_with_its_long_axis(self):
+        material = tangle.Material("flat", diameter=2 * DIAMETER, thickness=DIAMETER)
+        fibers = tangle.FiberCollection("oval")
+        fibers.add_fiber([[8 * um, 45 * um, 45 * um], [82 * um, 45 * um, 45 * um]], material, long_axis=[0.0, 1.0, 0.0])
+        assembly = tangle.Assembly(tangle.Cell([90 * um] * 3))
+        assembly.insert(fibers)
+        scan = ct.synthetic_ct(assembly, VOXEL, seed=6)
+        spec = ct.FiberSpec(diameter=2 * DIAMETER, thickness=DIAMETER, name="flat")
+        fit = ct.fit_fibers(scan.fiber_mask(level=0.35), VOXEL, spec, fit_settings())
+        self.assertEqual(fit.fiber_count, 1, fit.history[-1])
+        axes = fit.long_axes[0]
+        self.assertGreater(float(np.median(np.abs(axes[:, 1]))), 0.9)  # along y, as drawn
+        labels = fit.label_volume()
+        z, y, _ = np.nonzero(labels == 1)
+        self.assertGreater((y.max() - y.min()) / max(z.max() - z.min(), 1), 1.5)
+        material = fit.materials()[0]
+        self.assertTrue(material.is_oval)
+
+
 if __name__ == "__main__":
     unittest.main()

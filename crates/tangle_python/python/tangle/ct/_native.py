@@ -55,7 +55,23 @@ def core_holes(mask: np.ndarray, max_area: float) -> np.ndarray:
     return out.view(bool)
 
 
-def rasterize(shape, centerlines, radii, reach, signed: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _sections(lines, sections) -> dict:
+    """``ratios`` and ``axes`` keyword arguments for per-line sections (see ``_geometry.rasterize``)."""
+    if sections is None or all(item is None for item in sections):
+        return {}
+    ratios, axes = [], []
+    for line, item in zip(lines, sections):
+        count = len(np.asarray(line).reshape(-1, 3))
+        if item is None:
+            ratios.append(1.0)
+            axes.append(np.zeros((count, 3)))
+        else:
+            ratios.append(float(item[0]))
+            axes.append(np.asarray(item[1], dtype=np.float64).reshape(count, 3))
+    return {"ratios": ratios, "axes": np.ascontiguousarray(np.concatenate(axes)) if axes else np.zeros((0, 3))}
+
+
+def rasterize(shape, centerlines, radii, reach, signed: bool, sections=None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Nearest-fiber ownership: ``(labels, distance, segment)`` (see ``_geometry.rasterize``)."""
     lines = [np.asarray(line, dtype=np.float64).reshape(-1, 3) for line in centerlines]
     nodes = np.ascontiguousarray(np.concatenate(lines)) if lines else np.zeros((0, 3))
@@ -64,16 +80,19 @@ def rasterize(shape, centerlines, radii, reach, signed: bool) -> tuple[np.ndarra
     segment = np.empty(shape, dtype=np.int32)
     _tangle.ct_rasterize(
         nodes, [len(line) for line in lines], [float(r) for r in radii], [float(r) for r in reach],
-        bool(signed), labels, distance, segment,
+        bool(signed), labels, distance, segment, **_sections(lines, sections),
     )
     return labels, distance, segment
 
 
-def paint(target: np.ndarray, line, reach: float, value: int, *, only_empty: bool = False) -> None:
+def paint(target: np.ndarray, line, reach: float, value: int, *, only_empty: bool = False, section=None) -> None:
     """Set ``target``'s voxels within ``reach`` of polyline ``line`` to ``value``, in place (int32 target)."""
     if target.dtype != np.int32 or not target.flags.c_contiguous:
         raise ValueError("paint needs a C-contiguous int32 target")
-    _tangle.ct_paint(target, _points(line), float(reach), int(value), bool(only_empty))
+    extra = {}
+    if section is not None:
+        extra = {"ratio": float(section[0]), "axes": _points(section[1])}
+    _tangle.ct_paint(target, _points(line), float(reach), int(value), bool(only_empty), **extra)
 
 
 class Hessian:
@@ -196,13 +215,15 @@ def _box(corner) -> list[int]:
     return [int(v) for v in corner]
 
 
-def render_occupancy(low, high, centerlines, radii, edge: float) -> np.ndarray:
+def render_occupancy(low, high, centerlines, radii, edge: float, sections=None) -> np.ndarray:
     """Soft union occupancy of capsules over box ``[low, high)`` (see ``_moves.render_occupancy``)."""
     low, high = _box(low), _box(high)
     out = np.zeros(tuple(max(high[a] - low[a], 0) for a in (2, 1, 0)))
     if len(centerlines):
         nodes, counts = _pack(centerlines)
-        _tangle.ct_render_occupancy(low, high, nodes, counts, [float(r) for r in radii], float(edge), out)
+        _tangle.ct_render_occupancy(
+            low, high, nodes, counts, [float(r) for r in radii], float(edge), out, **_sections(centerlines, sections)
+        )
     return out
 
 

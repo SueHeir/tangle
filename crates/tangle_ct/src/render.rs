@@ -5,7 +5,7 @@
 //! `(z, y, x)` order, like the scan.
 
 use crate::line::Point;
-use crate::raster::segment_distance;
+use crate::raster::Section;
 use crate::{strides, Shape};
 
 /// Voxel box corners `(x, y, z)`: `[low, high)`.
@@ -68,15 +68,29 @@ pub fn render_occupancy(
     radii: &[f64],
     edge: f64,
 ) -> Vec<f64> {
+    render_occupancy_sections(low, high, lines, radii, edge, None)
+}
+
+/// `render_occupancy` with each line's cross-section (`None`: all round;
+/// see `raster::Section`).
+pub fn render_occupancy_sections(
+    low: Corner,
+    high: Corner,
+    lines: &[&[Point]],
+    radii: &[f64],
+    edge: f64,
+    sections: Option<&[Section]>,
+) -> Vec<f64> {
     let mut occupancy = vec![0.0; box_size(low, high)];
     if occupancy.is_empty() {
         return occupancy;
     }
     let size = [high[0] - low[0], high[1] - low[1], high[2] - low[2]];
-    for (line, &radius) in lines.iter().zip(radii) {
-        let pad = radius + 2.0 * edge;
+    for (f, (line, &radius)) in lines.iter().zip(radii).enumerate() {
+        let section = sections.map_or(Section::Round, |all| all[f]);
+        let pad = (radius + 2.0 * edge) * section.stretch();
         let limit = radius + edge;
-        for pair in line.windows(2) {
+        for (s, pair) in line.windows(2).enumerate() {
             let (a, b) = (pair[0], pair[1]);
             let mut lo = [0i64; 3];
             let mut hi = [0i64; 3];
@@ -91,7 +105,7 @@ pub fn render_occupancy(
                 for y in lo[1]..hi[1] {
                     for x in lo[0]..hi[0] {
                         let p = [x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5];
-                        let distance = segment_distance(p, a, b);
+                        let distance = section.distance(p, a, b, s);
                         if distance > limit {
                             continue;
                         }

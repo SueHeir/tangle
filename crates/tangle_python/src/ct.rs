@@ -17,7 +17,8 @@ use tangle_ct::moves::{
     MergeSettings, SideBySide, SplitSettings,
 };
 use tangle_ct::refine::{curvature_ratio, cut_void, end_step, support, OwnerLookup, VoidRules};
-use tangle_ct::render::{box_size, local_residual, render_occupancy, Corner};
+use tangle_ct::raster::Section;
+use tangle_ct::render::{box_size, local_residual, render_occupancy_sections, Corner};
 use tangle_ct::trace::{trace_fibers, FiberSearch, TraceSettings, Tracer};
 use tangle_ct::Shape;
 
@@ -171,8 +172,44 @@ fn split_lines(nodes: &[[f64; 3]], counts: &[usize]) -> PyResult<Vec<Vec<[f64; 3
         .collect())
 }
 
+/// Each line's long axes, one per node, from `(n, 3)` `axes` as the nodes
+/// (`None` when there are no oval lines).
+fn axes_of(axes: &Option<PyBuffer<f64>>, counts: &[usize]) -> PyResult<Option<Vec<Vec<[f64; 3]>>>> {
+    axes.as_ref()
+        .map(|buffer| split_lines(&points(buffer, "axes")?, counts))
+        .transpose()
+}
+
+/// Each line's `Section`: an oval where its `ratios` entry (long over short
+/// semi-axis) is above 1, round elsewhere; `None` when all are round.
+fn sections_of<'a>(ratios: &Option<Vec<f64>>, axes: &'a Option<Vec<Vec<[f64; 3]>>>) -> PyResult<Option<Vec<Section<'a>>>> {
+    match (ratios, axes) {
+        (Some(ratios), Some(axes)) => {
+            if ratios.len() != axes.len() {
+                return Err(PyValueError::new_err("give one ratio per line"));
+            }
+            Ok(Some(
+                ratios
+                    .iter()
+                    .zip(axes)
+                    .map(|(&ratio, axes)| {
+                        if ratio > 1.0 && !axes.is_empty() {
+                            Section::Oval { ratio, axes }
+                        } else {
+                            Section::Round
+                        }
+                    })
+                    .collect(),
+            ))
+        }
+        (None, None) => Ok(None),
+        _ => Err(PyValueError::new_err("give both ratios and axes, or neither")),
+    }
+}
+
 /// Nearest-fiber ownership: fills `labels`, `distance` and `segment` (see `_geometry.rasterize`).
 #[pyfunction]
+#[pyo3(signature = (nodes, counts, radii, reach, signed, labels, distance, segment, ratios=None, axes=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ct_rasterize(
     nodes: PyBuffer<f64>,
@@ -183,6 +220,8 @@ pub(crate) fn ct_rasterize(
     labels: PyBuffer<i32>,
     distance: PyBuffer<f32>,
     segment: PyBuffer<i32>,
+    ratios: Option<Vec<f64>>,
+    axes: Option<PyBuffer<f64>>,
 ) -> PyResult<()> {
     let shape = volume_shape(&labels, "labels")?;
     same_shape(&labels, &distance, "distance")?;
@@ -193,34 +232,53 @@ pub(crate) fn ct_rasterize(
         ));
     }
     let lines = split_lines(&points(&nodes, "nodes")?, &counts)?;
-    let raster = tangle_ct::raster::rasterize(shape, &lines, &radii, &reach, signed);
+    let axes = axes_of(&axes, &counts)?;
+    let sections = sections_of(&ratios, &axes)?;
+    let raster = tangle_ct::raster::rasterize_sections(shape, &lines, &radii, &reach, signed, sections.as_deref());
     write(&labels, "labels")?.copy_from_slice(&raster.labels);
     write(&distance, "distance")?.copy_from_slice(&raster.distance);
     write(&segment, "segment")?.copy_from_slice(&raster.segment);
     Ok(())
 }
 
-/// Sets `target`'s voxels within `reach` of polyline `line` to `value`, in place.
+/// Sets `target`'s voxels within `reach` of polyline `line` to `value`, in
+/// place; an oval when `ratio` (long over short semi-axis) is above 1, its
+/// long `axes` one per node.
 #[pyfunction]
+#[pyo3(signature = (target, line, reach, value, only_empty, ratio=1.0, axes=None))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn ct_paint(
     target: PyBuffer<i32>,
     line: PyBuffer<f64>,
     reach: f64,
     value: i32,
     only_empty: bool,
+    ratio: f64,
+    axes: Option<PyBuffer<f64>>,
 ) -> PyResult<()> {
     let shape = volume_shape(&target, "target")?;
     let line = points(&line, "line")?;
     if line.is_empty() {
         return Ok(());
     }
-    tangle_ct::raster::paint(
+    let axes = axes.as_ref().map(|buffer| points(buffer, "axes")).transpose()?;
+    let section = match &axes {
+        Some(axes) if ratio > 1.0 => {
+            if axes.len() != line.len() {
+                return Err(PyValueError::new_err("give one axis per node"));
+            }
+            Section::Oval { ratio, axes }
+        }
+        _ => Section::Round,
+    };
+    tangle_ct::raster::paint_section(
         write(&target, "target")?,
         shape,
         &line,
         reach,
         value,
         only_empty,
+        section,
     );
     Ok(())
 }
@@ -576,6 +634,8 @@ fn line_refs(lines: &[Vec<[f64; 3]>]) -> Vec<&[[f64; 3]]> {
 /// Soft union occupancy of capsules over box `[low, high)` (x, y, z) into
 /// `out`, a `(z, y, x)` array of the box (see `_moves.render_occupancy`).
 #[pyfunction]
+#[pyo3(signature = (low, high, nodes, counts, radii, edge, out, ratios=None, axes=None))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn ct_render_occupancy(
     low: Corner,
     high: Corner,
@@ -584,6 +644,8 @@ pub(crate) fn ct_render_occupancy(
     radii: Vec<f64>,
     edge: f64,
     out: PyBuffer<f64>,
+    ratios: Option<Vec<f64>>,
+    axes: Option<PyBuffer<f64>>,
 ) -> PyResult<()> {
     per_line(&radii, &counts, "radius")?;
     let lines = lines_of(&nodes, &counts)?;
@@ -591,12 +653,15 @@ pub(crate) fn ct_render_occupancy(
     if out.len() != box_size(low, high) {
         return Err(PyValueError::new_err("out must have the box's shape"));
     }
-    out.copy_from_slice(&render_occupancy(
+    let axes = axes_of(&axes, &counts)?;
+    let sections = sections_of(&ratios, &axes)?;
+    out.copy_from_slice(&render_occupancy_sections(
         low,
         high,
         &line_refs(&lines),
         &radii,
         edge,
+        sections.as_deref(),
     ));
     Ok(())
 }
