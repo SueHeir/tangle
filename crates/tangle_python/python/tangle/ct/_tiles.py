@@ -15,14 +15,23 @@ the padding is there only to make those stretches right.
 neighbouring core (the padding). The neighbour tile has its own fit of the
 same fiber there, and its kept stretch leaves toward this core in turn.
 Within ``band`` voxels of the crossing the two fits cover the same stretch of
-fiber from both sides; they are joined when they lie on each other there
-(mean distance under ``0.75`` of the smaller radius, same fiber type) and
-cut at the core wall otherwise. A fit that one tile ends just inside the
-neighbour's core is joined the same way to the neighbour fit's end. Joins
-are made best first, one per stretch end, and chains of joined stretches are
-the stitched fibers. Pieces shorter than the type's minimum length that end
-at a wall without a partner are dropped (they are the other tile's fiber,
-seen from the edge).
+fiber from both sides; they are joined when they lie on each other there (on
+average within 1.25 of the smaller radius and nowhere a diameter apart: two
+tiles' fits of one fiber drift apart a little in their padding, while a
+neighbouring fiber lies a diameter away all along) and the joined fiber goes
+on the way it was going; the partner can be in any of the 26 neighbouring
+cores (a crossing at an edge or a corner), and the two tiles may have typed
+the fiber differently. Otherwise the fiber is cut at the core wall. Ends
+that meet at a wall without overlapping fits (one tile's fit stops short of
+it, or the two end side by side) are joined when they point at each other
+or sit side by side on one axis. Joins are made best first, one per stretch
+end, never closing a loop, and chains of joined stretches are the stitched
+fibers: a stretch's leading nodes behind the last one's end are dropped (no
+step back at a join), a chain that turns over 60 degrees at a join is cut
+there, and the chain takes the largest type covering a third of it (a tile
+fits a large fiber as a small one far more often than the reverse). Pieces shorter
+than the type's minimum length that end at a wall without a partner are
+dropped (they are the other tile's fiber, seen from the edge).
 
 **Checkpoints.** With ``checkpoint=<directory>``, every finished tile is
 written to ``<directory>/tiles/`` in scan coordinates, next to a
@@ -503,9 +512,10 @@ class _End:
     tile: tuple[int, int, int]
     target: tuple[int, int, int] | None  # the core the fit goes on into, None where it ends
     node: np.ndarray  # the stretch's end node
-    band: np.ndarray  # the fit near this end, in order along it: the stretch's last ``band`` voxels and the tail past the wall
+    band: np.ndarray  # the fit near this end, in order along it: the stretch's last ``2 band`` voxels and the tail past the wall
     tail: np.ndarray  # the fit past the wall (empty where it ends)
-    outward: np.ndarray | None  # unit direction the stretch leaves its end in (None for a one-node stretch)
+    outward: np.ndarray | None  # unit direction the stretch leaves its end in (None when the fit has no other node
+    # within ``band`` on the stretch's side: a one-node stretch at the fit's first or last node)
 
 
 def stitch(
@@ -543,28 +553,38 @@ def stitch(
     chains = _chains(len(stretches), links)
 
     min_length = [(item.min_length or 3.0 * item.diameter) / voxel_size for item in specs]
+    size = [item.diameter for item in specs]
     by_key = {(e.stretch, e.side): e for e in ends}
     with_confidence = all(fit.confidence is not None or not fit.centerlines for fit in fits)
     lines, radii, types, support, confidence = [], [], [], [], []
-    dropped = 0
+    dropped = turned = 0
+    pieces = []  # (parts, kept, loose)
     for chain in chains:
-        parts = [stretches[sid]["nodes"] if enter == 0 else stretches[sid]["nodes"][::-1] for sid, enter in chain]
-        line = np.concatenate(parts)
+        parts, kept = _parts(chain, stretches, with_confidence)
         first, last = chain[0], chain[-1]
-        loose = by_key[first].target is not None or by_key[(last[0], 1 - last[1])].target is not None
-        kind = stretches[first[0]]["type"]
+        start_loose = by_key[first].target is not None
+        end_loose = by_key[(last[0], 1 - last[1])].target is not None
+        cuts = _turned_joins(parts)
+        turned += len(cuts)
+        bounds = [0, *cuts, len(parts)]
+        for n, (a, b) in enumerate(zip(bounds[:-1], bounds[1:])):
+            loose = (start_loose if n == 0 else True) or (end_loose if b == len(parts) else True)
+            pieces.append((parts[a:b], kept[a:b], loose))
+    for parts, kept, loose in pieces:
+        line = np.concatenate([nodes for nodes, _ in parts])
+        weights = np.array([polyline_length(nodes) if len(nodes) > 1 else 0.0 for nodes, _ in parts]) + 1e-6
+        kinds = np.array([stretches[sid]["type"] for sid, _ in kept])
+        kind = _chain_type(kinds, weights, size)
         if len(line) < 2 or (loose and polyline_length(line) < min_length[kind]):
             dropped += 1
             continue
-        weights = np.array([polyline_length(p) if len(p) > 1 else 0.0 for p in parts]) + 1e-6
+        same = kinds == kind
         lines.append(line)
-        radii.append(float(np.average([stretches[sid]["radius"] for sid, _ in chain], weights=weights)))
+        radii.append(float(np.average([stretches[sid]["radius"] for sid, _ in kept], weights=weights * same + 1e-12)))
         types.append(kind)
-        support.append(float(np.average([stretches[sid]["support"] for sid, _ in chain], weights=weights)))
+        support.append(float(np.average([stretches[sid]["support"] for sid, _ in kept], weights=weights)))
         if with_confidence:
-            confidence.append(
-                np.concatenate([stretches[sid]["confidence"][:: 1 if enter == 0 else -1] for sid, enter in chain])
-            )
+            confidence.append(np.concatenate([values for _, values in parts]))
     history = [
         {
             "stage": "tiles",
@@ -574,6 +594,10 @@ def stitch(
             "stretches": len(stretches),
             "joins": len(links) // 2,
             "gap_joins": len(links) // 2 - overlap_joins,
+            "cross_type_joins": sum(
+                stretches[a[0]]["type"] != stretches[b[0]]["type"] for a, b in links.items() if a < b
+            ),
+            "turned_joins_cut": turned,
             "dropped_edge_pieces": dropped,
             "fibers": len(lines),
             "seconds": round(sum(fit.seconds for fit in fits), 2),
@@ -596,6 +620,75 @@ def stitch(
         types=np.asarray(types, dtype=int) if multi else None,
         confidence=confidence if with_confidence else None,
     )
+
+
+def _chain_type(kinds: np.ndarray, weights: np.ndarray, size: list[float], share: float = 1.0 / 3.0) -> int:
+    """The type of a chain whose stretches the tiles typed ``kinds`` (lengths ``weights``): the largest type
+    covering at least ``share`` of it, else the most of it. A tile fits a large fiber as a small one far more
+    often than the reverse (off a dim core, or as two lobes), and a large-typed stretch the stitch joined to a
+    small one lies on it, within the small radius."""
+    total = float(weights.sum())
+    for k in sorted(set(kinds.tolist()), key=lambda k: -size[k]):
+        if weights[kinds == k].sum() >= share * total:
+            return int(k)
+    return int(max(set(kinds.tolist()), key=lambda k: (weights[kinds == k].sum(), -k)))
+
+
+def _turned_joins(parts, reach: float = 10.0, max_turn_degrees: float = 60.0) -> list[int]:
+    """Indices of the parts that begin at a join where the fiber turns over ``max_turn_degrees`` between the
+    ``reach`` voxels before and after it (the stitch cuts the chain there: the joins each looked right, but
+    together they fold the fiber)."""
+    cos = np.cos(np.radians(max_turn_degrees))
+    cuts = []
+    for i in range(1, len(parts)):
+        before = np.concatenate([nodes for nodes, _ in parts[:i]])[::-1]
+        after = np.concatenate([before[:1], *[nodes for nodes, _ in parts[i:]]])
+        a, b = _arc_point(before, reach), _arc_point(after, reach)
+        if a is None or b is None:
+            continue
+        u, v = before[0] - a, b - after[0]
+        if float(u @ v) < cos * float(np.linalg.norm(u) * np.linalg.norm(v)):
+            cuts.append(i)
+    return cuts
+
+
+def _arc_point(points: np.ndarray, reach: float) -> np.ndarray | None:
+    """The first point at least ``reach`` of arc along ``points``, None when they are shorter than half of it."""
+    if len(points) < 2:
+        return None
+    arc = np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))
+    k = int(np.searchsorted(arc, reach))
+    if k >= len(arc):
+        return points[-1] if arc[-1] >= 0.5 * reach else None
+    return points[k + 1]
+
+
+def _parts(chain, stretches, with_confidence):
+    """The chain's stretches in order along it, ``[(nodes, confidence)]``, and the ``(stretch, enter)`` of each kept.
+
+    Two tiles' fits of one fiber end a node or two apart at the wall, so the
+    next stretch can begin a little behind where the last one ended: its
+    leading nodes behind the last end (along the direction the last stretch
+    left it in) are dropped, and a stretch that lies wholly behind it is
+    left out, so the fiber never steps back at a join."""
+    parts, kept = [], []
+    for sid, enter in chain:
+        step = 1 if enter == 0 else -1
+        nodes = stretches[sid]["nodes"][::step]
+        values = stretches[sid]["confidence"][::step] if with_confidence else None
+        if parts and len(nodes):
+            previous = np.concatenate([p for p, _ in parts])
+            if len(previous) > 1:
+                chord = previous[-1] - previous[max(len(previous) - 5, 0)]
+                direction = chord / max(float(np.linalg.norm(chord)), 1e-12)
+                ahead = (nodes - previous[-1]) @ direction > 0.0
+                start = int(np.argmax(ahead)) if ahead.any() else len(nodes)
+                nodes = nodes[start:]
+                values = values[start:] if values is not None else None
+        if len(nodes) or not parts:
+            parts.append((nodes, values))
+            kept.append((sid, enter))
+    return parts, kept
 
 
 def _runs(flags: np.ndarray) -> list[tuple[int, int]]:
@@ -621,7 +714,8 @@ def _walk(line: np.ndarray, start: int, step: int, reach: float) -> np.ndarray:
 
 def _end(sid, side, tile, line, owners, k, step, band) -> _End:
     """The end of the stretch at node ``k``; the fit goes on at ``k + step`` if there is such a node."""
-    inward = _walk(line, k, -step, band)  # the stretch from its end node inward
+    near = _walk(line, k, -step, band)  # the stretch from its end node inward: its direction ...
+    inward = _walk(line, k, -step, 2.0 * band)  # ... and the band a tail is compared with, as long as the tail reaches
     target = None
     tail = np.zeros((0, 3))
     nxt = k + step
@@ -630,8 +724,8 @@ def _end(sid, side, tile, line, owners, k, step, band) -> _End:
         tail = _walk(line, nxt, step, band)
     ordered = np.concatenate([inward[::-1], tail])  # inward end ... end node, tail ...
     outward = None
-    if len(inward) > 1:
-        chord = line[k] - inward[min(len(inward) - 1, 4)]
+    if len(near) > 1:
+        chord = line[k] - near[min(len(near) - 1, 4)]
         outward = chord / max(float(np.linalg.norm(chord)), 1e-12)
     return _End(sid, side, tuple(tile), target, line[k], ordered, tail, outward)
 
@@ -646,86 +740,171 @@ def _distance_to_polyline(points: np.ndarray, line: np.ndarray) -> np.ndarray:
     return np.linalg.norm(points[:, None, :] - closest, axis=2).min(axis=1)
 
 
-def _match(ends: list[_End], stretches: list[dict[str, Any]]) -> dict[tuple[int, int], tuple[int, int]]:
-    """Join stretch ends across core walls where two tiles' fits agree, best first."""
-    by_tile: dict[tuple[int, int, int], list[_End]] = {}
-    for end in ends:
-        by_tile.setdefault(end.tile, []).append(end)
-    candidates = []
+def _neighbours(a: tuple[int, int, int], b: tuple[int, int, int] | None) -> bool:
+    """Whether core ``b`` is ``a`` or one of its 26 neighbours."""
+    return b is not None and bool(np.all(np.abs(np.subtract(a, b)) <= 1))
+
+
+class _Chains:
+    """Union-find over stretches, so no join closes a chain into a loop."""
+
+    def __init__(self, count: int, links: dict[tuple[int, int], tuple[int, int]]) -> None:
+        self.parent = list(range(count))
+        for first, second in links.items():
+            self.union(first[0], second[0])
+
+    def find(self, i: int) -> int:
+        while self.parent[i] != i:
+            self.parent[i] = self.parent[self.parent[i]]
+            i = self.parent[i]
+        return i
+
+    def union(self, i: int, j: int) -> bool:
+        i, j = self.find(i), self.find(j)
+        if i == j:
+            return False
+        self.parent[j] = i
+        return True
+
+
+def _link(links, chains: _Chains, candidates) -> None:
+    """Make the candidate joins ``(score, end, end)`` best first, one per end, never closing a loop."""
+    candidates.sort(key=lambda item: item[0])
+    for _, first, second in candidates:
+        if first in links or second in links or first[0] == second[0]:
+            continue
+        if not chains.union(first[0], second[0]):
+            continue
+        links[first] = second
+        links[second] = first
+
+
+def _match(
+    ends: list[_End], stretches: list[dict[str, Any]], max_turn_degrees: float = 60.0,
+    tolerance_radii: float = 1.25, spread_radii: float = 2.0,
+) -> dict[tuple[int, int], tuple[int, int]]:
+    """Join stretch ends across core walls where two tiles' fits agree, best first.
+
+    ``a`` is a stretch end whose tile's fit goes on past the wall; ``b`` is an
+    end in a neighbouring core (any of the 26, so a crossing at a core's edge
+    or corner finds its partner) that ends there or goes on toward ``a``'s
+    core or one of its neighbours. They agree when the fit past one wall lies
+    on the other's band: on average within ``tolerance_radii`` of the smaller
+    radius, and nowhere farther than ``spread_radii`` of it (one diameter:
+    a steady offset between the two tiles' fits near the wall, not a
+    neighbouring fiber, which lies a diameter away all along). Two wall
+    crossings are scored from both sides and agree when either side does,
+    the other side also staying within the spread everywhere: each tile's
+    fit drifts in its padding, so one of the two tails may read far. The
+    types may differ (one tile can type a fiber as another); the smaller
+    radius sets the tolerance. Partners in a face-neighbouring core are
+    joined first, then those in edge or corner cores, so a fit that crosses
+    near an edge keeps the short stretch in the core between.
+
+    A join must carry the fiber on the way it was going: from ``b``'s end the
+    other stretch goes inward within ``max_turn_degrees`` of the direction
+    ``a`` leaves its end in. A short stretch lying on ``a``'s tail agrees with
+    it from either end, and entered from its far end the chain would turn
+    back on itself at the wall.
+    """
+    from scipy.spatial import cKDTree
+
+    cos = np.cos(np.radians(max_turn_degrees))
+    face_candidates, corner_candidates = [], []
+    if not ends:
+        return {}
+    tree = cKDTree(np.array([end.node for end in ends]))
     for a in ends:
         if a.target is None:
             continue
         ra = stretches[a.stretch]["radius"]
-        for b in by_tile.get(a.target, []):
-            if b.target is not None and b.target != a.tile:
+        reach = max(np.linalg.norm(a.tail[-1] - a.node), 1.0) + 2.0 * ra
+        for k in tree.query_ball_point(a.node, reach):
+            b = ends[k]
+            if b.tile == a.tile or not _neighbours(a.tile, b.tile):
                 continue
-            if stretches[b.stretch]["type"] != stretches[a.stretch]["type"]:
+            if b.target is not None and not _neighbours(a.tile, b.target):
                 continue
-            if b.target is not None and (b.stretch, b.side) < (a.stretch, a.side):
-                continue  # both are wall crossings: scored once
-            reach = max(np.linalg.norm(a.tail[-1] - a.node), 1.0) + 2.0 * ra
-            if np.linalg.norm(b.node - a.node) > reach:
-                continue
-            tolerance = max(1.0, 0.75 * min(ra, stretches[b.stretch]["radius"]))
-            score = float(_distance_to_polyline(a.tail, b.band).mean())
-            if b.target is not None:
-                score = max(score, float(_distance_to_polyline(b.tail, a.band).mean()))
-            if score < tolerance:
-                candidates.append((score, (a.stretch, a.side), (b.stretch, b.side)))
-    candidates.sort(key=lambda item: item[0])
+            if a.outward is not None and b.outward is not None and float(a.outward @ -b.outward) < cos:
+                continue  # the chain would turn back at the join
+            r = min(ra, stretches[b.stretch]["radius"])
+            tolerance, spread = max(1.0, tolerance_radii * r), max(1.5, spread_radii * r)
+            sides = [_distance_to_polyline(a.tail, b.band)]
+            if b.target is not None and len(b.tail):
+                sides.append(_distance_to_polyline(b.tail, a.band))
+            if any(float(d.max()) > spread for d in sides):
+                continue  # somewhere a diameter apart: a neighbouring fiber
+            agree = [float(d.mean()) for d in sides if float(d.mean()) < tolerance]
+            if agree:
+                face = int(np.count_nonzero(np.subtract(a.tile, b.tile))) == 1
+                (face_candidates if face else corner_candidates).append(
+                    (min(agree), (a.stretch, a.side), (b.stretch, b.side))
+                )
     links: dict[tuple[int, int], tuple[int, int]] = {}
-    for _, first, second in candidates:
-        if first in links or second in links or first[0] == second[0]:
-            continue
-        links[first] = second
-        links[second] = first
+    chains = _Chains(len(stretches), links)
+    _link(links, chains, face_candidates)
+    _link(links, chains, corner_candidates)  # after: a fit crossing near an edge goes through the core between
     return links
 
 
 def _join_gaps(
     ends: list[_End], stretches: list[dict[str, Any]], links: dict[tuple[int, int], tuple[int, int]],
-    grid: TileGrid, band: float, max_angle_degrees: float = 30.0,
+    grid: TileGrid, band: float, max_angle_degrees: float = 30.0, offset_radii: float = 1.0,
 ) -> None:
-    """Join, end to end, free ends that face each other across a core wall.
+    """Join, end to end, free ends that meet at a core wall.
 
     The overlap match needs both tiles to have fitted the same stretch past
     the wall. Where one tile's fit stops short of it (a void trim, a split
-    near the wall), the two pieces meet at the wall instead: each ends
-    within ``band`` of it, in neighbouring cores, pointing at the other
-    (both within ``max_angle_degrees`` of the line between them, which is
-    at most ``band`` long), with the same type. Nearest pairs first.
+    near the wall), or the two fits end side by side at it, the two pieces
+    meet at the wall instead: each ends within ``band`` of it, in
+    neighbouring cores, with the same type, and either
+
+    - they point at each other: both within ``max_angle_degrees`` of the
+      line between them, which is at most ``band`` long; or
+    - they sit side by side or overlap a little: their directions are
+      antiparallel within ``max_angle_degrees``, and the other end lies
+      within ``offset_radii`` of the smaller radius of each end's axis and at
+      most ``band`` along it either way.
+
+    Nearest pairs first.
     """
+    from scipy.spatial import cKDTree
+
     cos = np.cos(np.radians(max_angle_degrees))
     free = [
         e for e in ends
         if (e.stretch, e.side) not in links and e.outward is not None and _wall_distance(grid, e.node, e.tile) <= band
     ]
     candidates = []
-    for i, a in enumerate(free):
-        for b in free[i + 1:]:
-            if a.tile == b.tile or a.stretch == b.stretch:
-                continue
-            if stretches[a.stretch]["type"] != stretches[b.stretch]["type"]:
-                continue
-            if not np.all(np.abs(np.subtract(a.tile, b.tile)) <= 1):
-                continue
-            gap = b.node - a.node
-            length = float(np.linalg.norm(gap))
-            if length > band:
-                continue
-            if length > 1e-9:
-                direction = gap / length
-                if a.outward @ direction < cos or -(b.outward @ direction) < cos:
-                    continue
-            elif a.outward @ -b.outward < cos:
-                continue
-            candidates.append((length, (a.stretch, a.side), (b.stretch, b.side)))
-    candidates.sort(key=lambda item: item[0])
-    for _, first, second in candidates:
-        if first in links or second in links:
+    pairs = cKDTree(np.array([e.node for e in free])).query_pairs(2.0 * band) if free else set()
+    for i, j in sorted(pairs):
+        a, b = free[i], free[j]
+        if a.tile == b.tile or a.stretch == b.stretch:
             continue
-        links[first] = second
-        links[second] = first
+        if stretches[a.stretch]["type"] != stretches[b.stretch]["type"]:
+            continue
+        if not _neighbours(a.tile, b.tile):
+            continue
+        gap = b.node - a.node
+        length = float(np.linalg.norm(gap))
+        if length > 2.0 * band:
+            continue
+        if length > 1e-9:
+            direction = gap / length
+            if length <= band and a.outward @ direction >= cos and -(b.outward @ direction) >= cos:
+                candidates.append((length, (a.stretch, a.side), (b.stretch, b.side)))
+                continue
+        if float(a.outward @ -b.outward) < cos:
+            continue
+        offset = offset_radii * min(stretches[a.stretch]["radius"], stretches[b.stretch]["radius"])
+        along_a, along_b = float(gap @ a.outward), float(-gap @ b.outward)
+        if abs(along_a) > band or abs(along_b) > band:
+            continue
+        if (np.linalg.norm(gap - along_a * a.outward) > offset
+                or np.linalg.norm(-gap - along_b * b.outward) > offset):
+            continue
+        candidates.append((length, (a.stretch, a.side), (b.stretch, b.side)))
+    _link(links, _Chains(len(stretches), links), candidates)
 
 
 def _wall_distance(grid: TileGrid, point: np.ndarray, tile: tuple[int, int, int]) -> float:

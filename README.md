@@ -200,7 +200,9 @@ See [solver and architecture notes](docs/architecture.md) for details.
   fiber diameter and bend limit, and exports an assembly, a fitted
   population, per-voxel fiber labels and a per-fiber overlay on the scan.
   See the [CT fitting guide](docs/ct_fitting.md), the
-  [step-by-step method](docs/ct_fitting_internals.md), and the
+  [step-by-step method](docs/ct_fitting_internals.md), the
+  [simulated CT scanner](docs/ct_scanner.md), the
+  [dense_hard benchmark](docs/ct_dense_hard.md), and the
   [results on synthetic scans, with pictures](crates/tangle_python/python/examples/ct_results/README.md).
 
 [Results/export tutorial](crates/tangle_python/python/tutorials/14_results_and_exports.ipynb)

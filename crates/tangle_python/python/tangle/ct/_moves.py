@@ -112,10 +112,18 @@ def split_kinks(
 
 
 def render_occupancy(
-    box_low: np.ndarray, box_high: np.ndarray, lines: list[np.ndarray], radii: np.ndarray, edge: float = EDGE
+    box_low: np.ndarray,
+    box_high: np.ndarray,
+    lines: list[np.ndarray],
+    radii: np.ndarray,
+    edge: float = EDGE,
+    sections: list | None = None,
 ) -> np.ndarray:
-    """Soft union occupancy of capsules over the voxel box ``[low, high)`` (x, y, z)."""
-    return _native.render_occupancy(box_low, box_high, lines, radii, edge)
+    """Soft union occupancy of capsules over the voxel box ``[low, high)`` (x, y, z).
+
+    ``sections``: per line, None or an oval's ``(ratio, long axes)`` (see ``_geometry.rasterize``).
+    """
+    return _native.render_occupancy(box_low, box_high, lines, radii, edge, sections)
 
 
 def resolve_side_by_side(

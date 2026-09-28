@@ -224,6 +224,46 @@ look.
 
 ![varied_3 confidence](images/varied_3_confidence.png)
 
+## The dense_hard benchmark
+
+The examples above are fitted from grey profiles measured on their own true
+fibers. [`dense_hard_<n>`](../../../../../docs/ct_dense_hard.md) is harder on
+purpose: packed bundles of 7 or 19 fine fibers (6.5 µm) with flat oval coarse
+fibers (17.3 × 13.8 µm) that are dim with a dimmer core, every fiber with its
+own brightness, scanned by the [simulated CT scanner](../../../../../docs/ct_scanner.md)
+at 1 µm voxels with phase-contrast fringes, blur, photon noise and fiber
+motion. The fit gets one broad grey range for both types, so the grey alone
+cannot tell them apart.
+
+Mean centerline F1 over structures 1-18 (used to choose the settings) and
+19-36 (never used for tuning), with the starting settings and with the
+recommended ones ([`docs/ct_dense_hard.md`](../../../../../docs/ct_dense_hard.md)
+lists every step and setting):
+
+| Settings | 1-18 | 7-fiber bundles | 19-fiber bundles | 19-36 |
+| --- | --- | --- | --- | --- |
+| Starting settings | 0.840 | 0.893 | 0.788 | 0.836 |
+| Recommended settings before the model pass | 0.915 | 0.935 | 0.895 | 0.911 |
+| Recommended settings | **0.942** | **0.956** | **0.929** | **0.934** |
+
+Every one of the 36 structures scores higher with the recommended settings.
+The biggest gains came from a sharper grey in the ridge finish (a dim fiber
+beside a bright one keeps its own ridge), from tracing the dim fibers the fit
+leaves out as fiber-wide holes ("hole births"), from typing coarse fits
+laid over bundles as fine, and from a last pass that reads the scan less
+what the other fits explain: fits recenter against their neighbours' grey
+and halos, and fibers no fit explains are traced on the residual (the
+"model pass").
+
+A 7-fiber-bundle and a 19-fiber-bundle structure, starting settings above and
+recommended settings before the model pass below (red missed, blue extra, orange wrong fiber):
+
+![dense_hard_7 before and after](images/dense_hard_7_before_after.png)
+
+![dense_hard_11 before and after](images/dense_hard_11_before_after.png)
+
+The pictures are made by [`make_dense_hard_images.py`](make_dense_hard_images.py).
+
 ## Files
 
 Each example folder holds `score.json` (every score, the settings, the run

@@ -220,10 +220,9 @@ The fibers move only in Tangle's own relaxation, the GPU by default
 5. **Cut void** (`_refine.cut_void`, `FitSettings.void_level` = 0.3).
    The image force only pulls toward fiber; void never pushes back, so a
    fit shoved off its fiber (by contact, or by a fit taking its place) can
-   leave a tail in empty space that no later step notices (Liz, 2026-09-24:
-   fibers "drift off into nothing, and another fiber will take over that
-   location"). Every centerline node inside the scan whose fiber image
-   reads below 0.3 is void. Void nodes at an end are trimmed back to the
+   leave a tail in empty space that no later step notices. Every
+   centerline node inside the scan whose fiber image reads below 0.3 is
+   void. Void nodes at an end are trimmed back to the
    first supported node. An interior void stretch at least
    `void_gap_radii` (2) radii long is bridged by a straight line between
    its supported neighbors only when it is a real bow: it reaches at least
@@ -318,6 +317,39 @@ At the end of each round except the last, the current fits claim the voxels
 within 1.2 r of them. `trace_fibers` then runs again from ridge seeds in the
 unclaimed foreground, with the same `_drop_claimed` rule, and the new traces
 join the fit.
+
+**Which births are kept** (`_Fitter.trace`). With `birth_ridge_min` (0.5 in
+the packed-bundle settings, §9c), a new trace among existing fits is kept
+only if at least that share of its nodes sit on a grey ridge: the brightest
+point of the grey (the scan smoothed by `birth_ridge_sigma_voxels`, 1.6) on
+a disc of radius r across the trace lies within r/2 of the node. On a
+saturated range image a trace can run straight across a bundle, between its
+fibers, and is then off the ridge most of its length. The same step serves
+every birth after the first trace: a round's new fibers, a redraw's new
+fibers and the final births (§9c).
+
+A dim-cored coarse fiber is brighter on its rims than on its axis, so a
+coarse trace on it fails this test along its whole length (along the true
+axes of the benchmark's 109 coarse fibers the ridge share was at most 0.02,
+so none passed 0.5). A coarse fiber lost in a round or a redraw was never
+traced again; only its rims were, by fine fits. Two settings let coarse
+fibers be born again:
+
+- `birth_ridge_smallest_only` applies `birth_ridge_min` to the smallest type
+  only;
+- `coarse_birth_disc_max` (off by default; 0.8 in the packed-bundle settings)
+  gates the larger types' births instead: a new trace of a larger type is
+  dropped when its cross-section holds fine-bright grey, the disc test of
+  §7b (`_holds_fine`) at this level. It runs after
+  `grey_checked_traces` and `coarse_trace_axis_check`, never on the first
+  trace, and needs `coarse_axis_grey_max`, whose denoised grey it reads.
+
+On the benchmark (redraws off) the pair raised centerline F1 from 0.9065 to
+0.9145 (7-fiber bundles +0.004, 19-fiber bundles +0.012; 10 structures up,
+6 down) and cut the coarse fibers left with under 0.2 of their length
+covered from 19 to 6. The cost is some coarse births over bundles:
+coarse-fit centerline nearest a fine fiber rose from 144 to 394 voxels,
+almost all of it on the 19-fiber bundles, and merged fibers from 86 to 93.
 
 Each round logs:
 
@@ -436,6 +468,60 @@ same steps size the fibers.
   length and length prior.
 - **Radius:** (thickness − δ + r_type) / 2, clamped to `diameter × (1 ±
   diameter_tolerance) / 2` of the type.
+- **Bundle typed coarse:** in a packed bundle the foreground is one blob,
+  so a fit between the bundle's fibers reads the bundle's depth and is
+  typed coarse. `coarse_axis_grey_max` (0.15 in the packed-bundle settings)
+  types a fit fine when its median axis grey lies more than that fraction
+  up the smallest type's range, but a coarse fit laid over a bundle often
+  has its axis on the dark gaps and escapes it. With grey ranges,
+  `coarse_disc_max` (off by default; 0.8 in the packed-bundle settings) and
+  `coarse_disc_classify`, every classify also reads such a fit's disc
+  (`_Fitter._holds_fine`): at each interior node, the brightest grey of the
+  denoised scan on a disc of the larger type's short radius across the fit,
+  sampled every 0.75 voxel. If
+  the median of these over the nodes lies above `coarse_disc_max` of the
+  way up the smallest type's range, the fit holds fine-bright fibers and is
+  typed as the smallest type. Only fits whose depth could make them that
+  larger type at any margin are read. A dim-cored coarse fiber's disc holds
+  only its own rim, which reads dimmer, and it stays coarse.
+
+  `coarse_disc_trace` and `coarse_disc_end` (both on by default) use the same
+  test to drop new coarse traces and to remove coarse fits before the final
+  births (§9c). The packed-bundle settings turn both off and keep only the
+  typing: the trace-time drop also removed a bright true coarse fiber (its
+  disc read 0.86). On the benchmark the typing alone raised F1 from 0.890 to
+  0.903 (19-fiber bundles 0.851 → 0.881, 7-fiber bundles 0.930 → 0.925).
+  A variant that limited the test to packed regions and cut fine-bright
+  stretches out of coarse traces and fits node by node (in every cleanup
+  too), instead of judging whole fits, lost 0.022 on eight structures
+  against the starting settings and was removed.
+- **Dim-cored coarse fiber typed fine:** the opposite error. A dim core
+  leaves holes in the foreground, so the depth of a coarse fit reads low
+  and it is typed fine. With grey ranges and `coarse_axis_grey_min` (0.0 in
+  the packed-bundle settings), a fit the depth types as the smallest type
+  takes the type nearest its cross-section w (less its margin) when all of
+  these hold:
+  - its median axis grey (denoised scan, interior nodes) lies below
+    `coarse_axis_grey_min` of the way up the smallest type's range (0: below
+    the range's low end, where no fine fiber's axis reads);
+  - the 90th percentile of the grey over discs of the largest type's short
+    radius across it lies below `coarse_axis_disc_max` (0.3) of that range.
+    A dark gap between a bundle's fibers has their bright axes within that
+    disc; a dim core has only its rim;
+  - w is nearer a larger type than the smallest;
+  - its depth is at least `coarse_axis_depth_min` (4) voxels, it has at least
+    10 nodes, and `grey_checked_traces` did not flag it.
+
+  In full fits of four structures with the rule on, every one of its 24
+  retypings (summed over all classify calls) fell inside a true coarse
+  fiber. It shipped together with the ridge finish's rim drop (§9d): the two
+  raised F1 from 0.890 to 0.894 (7-fiber bundles 0.930 → 0.935). Both
+  typings with the rim drop score 0.9015 (7-fiber bundles 0.930, 19-fiber
+  0.873): 0.0015 below the disc typing alone over all 18, but without its
+  loss on the 7-fiber bundles. The packed-bundle settings keep both. Both
+  typings read the denoised grey that `coarse_axis_grey_max` builds, and do
+  nothing without it.
+
 - Types are chosen after every solver batch and for new traces. Topology
   moves (6b) run per type, with that type's parameters: splits and joins
   never mix types.
@@ -526,6 +612,20 @@ distances. The history gets a `confidence` entry with the mean, the number
 of fibers whose lowest node is below 0.5, and the mean of each component.
 
 ### 9b. Redraw passes (`_regrow`, `_Fitter.redraw_loop`)
+
+The redraws are on by default (`redraw_passes = 5`). The packed-bundle
+settings (§9c) turn them off (`redraw_passes = 0`): there the stages after
+them (§9c–9g) repair the fit on the grey, and the regions the redraws kept
+cost more than they gave. On the benchmark, with every change up to the
+coarse typing of §7b on, F1 was 0.9015 with 5 passes, 0.9039 with 3 and
+0.9065 with none (19-fiber bundles 0.873, 0.877, 0.883; 7-fiber bundles
+0.930, 0.931, 0.930). The 5 passes kept 46 of 163 region groups over 44
+passes, 8 of the 18 structures kept none, and the passes logged 1314 s in
+all. A kept group can do lasting harm: in one run of `dense_hard_17` with the
+coarse births of §6c on, a kept redraw left two coarse fits on one coarse
+fiber; after the polish and the ridge finish they sat 5.5 and 7.4 voxels off
+its axis, and the fiber was covered along 0.14 of its length, against 0.75
+in the run without those births.
 
 After the final solve and its confidence, up to `redraw_passes` passes:
 
@@ -635,6 +735,503 @@ After the final solve and its confidence, up to `redraw_passes` passes:
    region clears overlapping ones); at `redraw_attempts` failures the box
    is given up. The passes end when nothing is left to cut.
 
+### 9c. After the redraws: the finish
+
+`_fit.fit_fibers`
+
+After the redraws (and their polish, when a redraw was kept) come the last
+stages. None of them solves again. They run in this order, each only when
+its switch is on:
+
+| Stage | Switch | Default | Packed bundles | Section |
+| --- | --- | --- | --- | --- |
+| Recenter | `recenter_on_grey`, `recenter_last` | off | on | below |
+| Coarse rescue | `coarse_rescue` | off | off | 9f |
+| Coarse fits on bundles removed | `coarse_disc_max` with `coarse_disc_end` | off (needs `coarse_disc_max`) | off | 7b |
+| Coarse join | `coarse_join` | off | off | 9f |
+| Final births | `final_births` | off | on | below |
+| Ridge finish | `ridge_finish` | off | on | 9d |
+| Hole births | `hole_births` | off | on | 9e |
+| Straight join | `straight_join` | off | on | 9g |
+| Bend finish | `bend_finish` | off | on | 9g |
+| Clean finish | `clean_finish` | off | off | 9g |
+| Merge short | `merge_short` | off | off | 9g |
+| Model pass | `model_recenter`, `residual_births` | off | on | 9h |
+| Through block | `through_block` | off | off | 9g |
+
+- **Recenter** (`_Fitter.recenter`): each fit of the smallest type moves
+  across itself onto the brightest grey (the scan smoothed by
+  `recenter_sigma_voxels`), by at most `recenter_max_radii` (0.5) r. With
+  `recenter_last` it runs here, after the redraws, rather than before the
+  confidence.
+- **Final births**: one more round of new fibers (§6c, with its birth
+  gates), recentered, with no solve after it: a solve drags some good births
+  off their fibers, and the cleanup then removes them.
+
+Each stage logs a `history` entry under its name ("ridge finish", "hole
+births", "straight join", ...; the removal logs "coarse on bundles removed")
+with its counts, and all but the removal save a snapshot with
+`fit_fibers(snapshots=...)`. The coarse join and the stages from the ridge
+finish on are skipped for a mask.
+
+**The packed-bundle settings.** These are the settings the `dense_hard`
+benchmark below recommends for scans of packed bundles, with grey ranges:
+
+```python
+ct.FitSettings(
+    bright_seed_strength=0.05, grey_checked_traces=True,
+    graded_image=True, graded_smallest_only=True,
+    prior_merge_gap_radii=4, radius_cap_prior=True, births_solve_pinned=True,
+    coarse_trace_axis_check=True, coarse_axis_grey_max=0.15,
+    recenter_on_grey=True, recenter_each_solve=True, recenter_last=True,
+    recenter_sigma_voxels=1.6,
+    birth_ridge_min=0.5, birth_ridge_smallest_only=True,           # 6c
+    coarse_birth_disc_max=0.8,                                     # 6c
+    coarse_disc_max=0.8, coarse_disc_classify=True,                # 7b
+    coarse_disc_trace=False, coarse_disc_end=False,                # 7b
+    coarse_axis_grey_min=0.0,                                      # 7b
+    redraw_passes=0,                                               # 9b
+    final_births=True,
+    ridge_finish=True, ridge_sigma_voxels=1.2,                     # 9d
+    ridge_min_length_scale=0, ridge_refine=True, ridge_rim_share=0.7,
+    ridge_rim_sigma=1.2, hole_births=True, hole_birth_ridge_min=0.3,  # 9e
+    hole_birth_grey_min=0.65, hole_birth_passes=2, hole_birth_rim_drop=True,
+    straight_join=True, bend_finish=True, bend_finish_grey_min=0.4,  # 9g
+    model_recenter=True, residual_births=True,                     # 9h
+)
+```
+
+**The benchmark.** Unless a number says otherwise, it is the mean
+centerline F1 (§10) over `dense_hard_1` … `dense_hard_18` in
+`examples/ct_examples.py`: packed bundles of fine fibers (6.5 µm, r = 3.25
+voxels), 7 per bundle in 9 structures and 19 in the other 9, with flat oval
+coarse fibers (17.3 µm wide, thickness 0.8 of the width) that have a bright
+rim and a dim core, every fiber with its own brightness, scanned by the
+simulated scanner at 1 µm voxels. The fits read one broad grey range for
+every type (`--input broad`), so the smallest type's range that §6c, §7b
+and §9f read is that shared range. Some numbers come from **exact replays**: the
+stages from the ridge finish on rerun on the CPU from each structure's saved
+state, which reproduces the GPU run's final fits exactly.
+
+How the packed-bundle settings were reached, each row adding to the one
+above:
+
+| Change | All 18 | 7-fiber bundles | 19-fiber bundles |
+| --- | --- | --- | --- |
+| Starting settings (the block above without the settings the rows below add, and with `redraw_passes=5`) | 0.840 | 0.893 | 0.787 |
+| Ridge finish: sharper grey, short pieces kept, short recenter (9d) | 0.871 | 0.916 | 0.827 |
+| Hole births (9e) | 0.890 | 0.930 | 0.851 |
+| Coarse typing (7b) and the ridge finish's rim drop (9d) | 0.9015 | 0.930 | 0.873 |
+| Redraws off (9b) | 0.9065 | 0.930 | 0.883 |
+| Coarse births (6c), rim drop on hole births (9e), straight join and bend finish (9g) | 0.915 | 0.935 | 0.895 |
+| Model recenter and residual births (9h) | 0.942 | 0.956 | 0.929 |
+
+On 18 structures no setting was tuned on (`dense_hard_19` … `dense_hard_36`,
+with `DENSE_HARD_COUNT=36`; 8 with 7-fiber bundles, 10 with 19), the
+starting settings score 0.836 and the packed-bundle settings 0.934, every
+structure up (7-fiber bundles 0.860 → 0.942, 19-fiber bundles 0.816 →
+0.929); without the model pass (9h) they score 0.911.
+
+Several of these stages use fixed lengths in voxels (the 1.2-voxel grey and
+Hessian of §9d and §9e, the 3-voxel cut runs, the join and walk distances of
+§9g), chosen at a fine radius of 3.25 voxels. Hole births trust the foreground,
+so any non-fiber foreground becomes holes to trace.
+
+
+### 9d. Ridge finish (`_ridge.ridge_finish`)
+
+Inside a packed bundle the range image is saturated, so nothing in the fit
+image keeps a fine fit on its own fiber: where a neighbour comes close the
+fit slides across and carries on along the neighbour, and fits sit beside
+their axes. The grey, smoothed a little, still peaks on every axis. The
+ridge finish is a last pass over the smallest type's fits on that grey;
+larger types pass through unchanged.
+
+A point is **on the ridge** when the brightest point of the grey on a disc
+of radius r across the fit (the disc values averaged over 7 samples along
+it) lies within r/2 of it. Each fit is sampled every half voxel (a fit of
+fewer than 5 samples passes through untouched), and:
+
+1. **Recenter** onto the ridge: each sample moves to the brightest point of
+   a disc of radius r/2 (averaged over 7 samples), the shifts averaged over
+   11 samples. This reads the recenter grey (`recenter_sigma_voxels`, 1.6),
+   whose basin must reach fits half a radius off.
+2. **Cut** every run of samples off the ridge at least 3 voxels long (a hop's
+   crossing, a stretch between fibers, an overhanging end): an interior run
+   splits the fit, an end run trims it. Samples inside a larger type's fit
+   (its oval section at its fitted radius) are cut too: a coarse fiber's
+   bright rim is a ridge a fine fit can follow. Pieces of at least 4
+   samples are kept.
+3. **Rim drop** (`ridge_rim_share`, below).
+4. **Grow** each piece of at least 12 samples at both ends, one voxel at a
+   time, to the brightest point of a disc of radius `ridge_extend_reach`
+   (0.5) × r ahead of it, while the grey there is at least `ridge_finish_extend`
+   (0.85) of the piece's own median grey, no other fit is within 1.02 r
+   (about half the spacing of touching fibers), and the step stays in the
+   scan and outside every larger type's fit; at most 80 steps.
+5. **Join** piece ends, nearest first, when they are within 6 voxels and
+   either both end directions (over 6 voxels) point along the gap within
+   30°, or the ends are antiparallel within 30° and at most 0.6 r apart
+   across the fiber, or they are within 4 voxels and run on past each other
+   (the second piece's overlapping start is dropped). At least 80% of the
+   straight bridge must be on the ridge (read without averaging along it).
+6. **Refine** (`ridge_refine`, below).
+7. **Drop** pieces shorter than `ridge_min_length_scale` × the type's minimum
+   length.
+
+The pieces go back to the node spacing. The log gives `cut_voxels`,
+`grown_voxels`, `joins`, `short_dropped` and `rim_dropped`.
+
+**Sharper grey** (`ridge_sigma_voxels`, 1.2 in the packed-bundle settings).
+The cut (2), the growth (4) and the join's ridge test (5) read the scan
+smoothed by this sigma; the recenter (1) and the refine (6) keep the
+recenter grey. At 1.6 voxels a dim fiber packed beside a brighter one has no
+ridge of its own: the neighbour's blur tilts the grey across it, the disc's
+brightest point sits on the neighbour's side, and the cut removes a correct
+fit along its whole length. About 1.2 keeps each fiber's own ridge. In
+exact replays on seven structures with the starting settings, the sharper
+grey alone raised F1 by 0.018 on average.
+
+**Short pieces** (`ridge_min_length_scale`, 1 by default, 0 in the
+packed-bundle settings). With 0 the finish keeps every piece of at least 4
+samples (2 voxels) that the cut and the joins leave. The remnants are
+mostly on their own fiber: in the same replays keeping them added 0.006 on
+average, with 35 pieces per structure shorter than the minimum length
+(against 1), at a centerline precision of 0.71. They fragment fibers, which
+the straight join (§9g) partly repairs. At 0.25 the benchmark lost 0.002
+against 0.
+
+**Short recenter** (`ridge_refine`). After the join, every piece is
+recentered once more on the recenter grey with a short reach: the
+brightest point of a disc of radius 0.3 r, the disc values averaged over 21
+samples (10 voxels) along the fit, the shifts over 11 samples. This settles
+grown ends and bridges without letting a fit slide onto a neighbour. In the
+replays it added 0.002 on average on top of the other two.
+
+Together the three raised the benchmark from 0.840 to 0.871, every
+structure up (by 0.009 to 0.059).
+
+**Rim drop** (`ridge_rim_share`, 0.7 in the packed-bundle settings;
+`ridge_rim_reach` 1.35, `ridge_rim_grey` 0.58). The solver keeps a coarse fit
+one section away from a fine fit, so a fine fit on a dim-cored coarse
+fiber's rim pushes the coarse fit off its axis, and the rim then lies just
+outside the coarse fit's section, where step 2 does not cut it. After the
+cut, a piece is dropped when at least `ridge_rim_share` of its samples lie
+within `ridge_rim_reach` of a larger fit's oval section (the section at the
+type's radius, 1 being its edge) and the median grey of those samples is at
+most `ridge_rim_grey` of the way from the void grey to the fine pieces'
+median grey: a coarse rim reads dimmer than a fine fiber. In an exact replay
+on all 18 structures, with the hole births on, it raised F1 by 0.0019, 17
+structures up and none down, through precision (+0.0045).
+
+Other ridge-finish settings, off in the packed-bundle settings:
+
+| Setting | Default | What it does | On the benchmark |
+| --- | --- | --- | --- |
+| `ridge_extend_reach` | 0.5 | the radius (in r) of the disc the growth steps to | 0.25 raised F1 by 0.0032 in an exact replay of the packed-bundle settings without the final passes (14 of 18 up) and cut hop length by 39%; on two earlier bases only 9 and 12 of 18 went up, so it is not adopted yet |
+
+Tried and removed: a second growth-and-join pass after step 7 (+0.002 in an
+exact replay with hole births, 12 of 18 structures up; the straight join of
+§9g does the same job), cutting an off-ridge run only next to another fit,
+and moving a coarse fit toward a dropped rim piece (+0.0005 offline).
+
+
+### 9e. Hole births (`_Fitter.hole_births`, `_ridge.finish_holes`)
+
+A dim fiber in a packed bundle is often never traced. On the graded image
+its bright neighbours dim its axis below the tracer's 0.5, so it is not
+seeded and a trace from it stops at once. Once its neighbours are fitted
+and the ridge finish has put them on their axes, it is a fiber-wide stretch
+of foreground that no fit claims. Hole births trace the smallest type there.
+
+They run after the ridge finish and need `final_births` and
+`ridge_rim_sigma`; without either they
+are skipped. Their ridge test reads the birth grey, which only
+`birth_ridge_min` builds: without it every hole trace passes. Each pass:
+
+1. **Claim.** Every fit claims the foreground within `hole_birth_claim_radii`
+   (1.2) × its radius.
+2. **Trace.** Seeds lie on the distance-transform ridge of the unclaimed
+   foreground, at least `hole_birth_depth_radii` (0.6) r deep. Traces run on
+   the flat range image with the smallest type's radius, bend limit and
+   minimum length; the claim down-weights the recentering, so a trace keeps
+   to its hole.
+3. **Ridge test.** A trace is kept when at least `hole_birth_ridge_min` (0.5;
+   0.3 in the packed-bundle settings) of its nodes are on the ridge of the
+   birth grey (§6c), with the rim exemption (below).
+4. **Finish** (`finish_holes`), every half voxel along each trace:
+   - cut runs off the ridge of at least 3 voxels, with the rim exemption;
+   - cut samples inside a larger type's fit;
+   - with `hole_birth_grey_min`, cut runs of at least 3 voxels whose grey is
+     below the floor (below);
+   - drop pieces shorter than the type's minimum length (not scaled by
+     `ridge_min_length_scale`);
+   - with `hole_birth_rim_drop`, drop pieces on a larger type's rim (below).
+
+   The cut and the floor read the recenter grey (giving them the sharper
+   ridge-finish grey instead cut correct hole length and lost 0.0014 in an
+   exact replay).
+
+The next pass traces around the fits the last one added, up to
+`hole_birth_passes`; the passes stop early when one adds nothing. The log
+gives `born`.
+
+**Rim exemption** (`ridge_rim_sigma`, 1.2 in the packed-bundle settings). A
+dim fiber packed beside a brighter one fails the ridge test although it is
+traced right: the smoothed grey rises all the way across its axis onto the
+bright neighbour's flank, so the disc's brightest point sits on the disc's
+edge, toward the neighbour. With the exemption, a point whose brightest
+disc point lies within half a voxel of the disc's edge still counts as on
+the ridge where the grey curves down across the fit both ways: both
+eigenvalues of the scan's Hessian (at scale `ridge_rim_sigma`) in the plane
+across the fit are negative, so the point sits on a tube of its own
+(`_Fitter.curves_down`). A trace between two fibers sits in a dip across
+their contact and still fails; a fit half a radius or more off its own axis
+has the brighter axis inside the disc, not on its edge, and still fails.
+The exemption acts in the hole births' ridge test and cut only. Extending
+it to the other births (rounds, redraws and the final births) lost 0.107 on
+one structure and raised hop length from 0 to 94 voxels.
+
+**Grey floor** (`hole_birth_grey_min`, 0.65 in the packed-bundle settings). A
+hole trace can run out of the bundle into the dim halo between fibers or
+along the void. The floor is `hole_birth_grey_min` × the median grey along
+the smallest type's fits. With `hole_birth_grey_void` it is instead that
+share of the way from the void grey to that median, for a scan whose void
+grey is far above zero, where a plain share of the median can fall below
+the void and cut nothing. The packed-bundle settings use the plain share.
+
+**Rim drop** (`hole_birth_rim_drop`, on in the packed-bundle settings). The
+cut above removes only samples inside a larger fit's own section, and the
+floor keeps a coarse rim, which is bright. So beside a coarse fit pushed off
+its axis the rim lobe, just outside the section, is traced as a hole. The
+rim drop applies the ridge finish's rim test (§9d: `ridge_rim_reach`,
+`ridge_rim_grey`) with `hole_birth_rim_share` (0.7) as its share, so it
+works with `ridge_rim_share` off. In an exact replay of the packed-bundle
+settings without the final passes it raised F1 by 0.0013 (11 structures up,
+none down), with recall unchanged on every structure and the hole length on
+coarse fibers down from 1089 to 470 voxels.
+
+**What hole births give.** In an offline check on the final fits of eight
+structures after the sharper ridge finish, hole births with the default
+values (ridge share 0.5, no floor, one pass) raised F1 by 0.011 and the
+packed-bundle values (0.3, 0.65, two passes) by 0.016. Fine fibers missed
+along their whole length fell from 19 (no hole births) to 4 (defaults) and
+to 2 (packed-bundle values). Hole length farther than r from every true
+axis was 286 voxels with the defaults and 26 with the packed-bundle values,
+and with the latter 90% of the hole length lay on its own fiber's axis. In
+the full fit they raised the benchmark from 0.871 to 0.890, every structure
+up (by 0.003 to 0.042).
+
+Joining each pass's hole fits to the fits whose ends they continue, with
+the ridge finish's join gates, changed F1 by −0.00001 with the coarse
+births of §6c on and made one wrong join; the straight join (§9g) covers
+the same case.
+
+
+### 9f. Coarse passes
+
+**Coarse join** (`_join.coarse_join`, `coarse_join`, off). A coarse fiber
+often ends the fit in pieces the cleanup no longer joins: two pieces facing
+each other across a short gap, or two pieces running past each other side
+by side, each on one rim of the same dim-cored fiber, with their axes about
+two short radii apart, which the duplicate tests read as two touching
+fibers. Before the final births, pairs of a larger type's piece ends are
+joined best first, r being that type's short radius:
+
+- **across a gap**: the ends antiparallel within 35°, at most 4 r apart,
+  each pointing along the bridge within 35° (or the two lines at most 0.6 r
+  apart across the fiber), and the fit image along the bridge at least 0.5
+  on average;
+- **side by side**: the ends antiparallel within 35°, running past each
+  other by at most 4 r (or stopping at most r short of each other), at most
+  2.2 r apart across the fiber, and no bright band between them: across the
+  overlap, the grey between the two axes stays below the brighter axis plus
+  0.1 of the smallest type's range. Two touching fibers show their rims
+  between their axes; two fits on one fiber show its dim core. The overlap
+  is replaced by the midline of the two fits.
+
+The log gives `gap_joins` and `side_joins`. On eight structures of the
+benchmark with the starting settings it found no pair to join, so it is off.
+
+**Coarse rescue** (`_rescue.coarse_rescue`, `coarse_rescue`, off) traces the
+largest type again at the end, ignoring the fit, and puts the dim-cored,
+unshared candidates in place of the coarse fits they cover. It is meant for
+`trace_smallest_first`, where fine fits claim the coarse fibers' rims.
+An add-only form (keeping every solved coarse fit and adding only the
+candidates' uncovered stretches) lost 0.016 on `dense_hard_4`, and across
+four structures 3 of the 6 pieces it added were stray coarse fits over fine
+fibers, so it was not kept.
+
+
+### 9g. Final passes (`_join`)
+
+These run last, in this order, on the smallest type unless noted. Nothing
+after the last solve keeps to the bend limit, so the bend finish is where
+it is enforced again. In the packed-bundle settings the straight join and
+the bend finish are on; the other three are off.
+
+1. **Straight join** (`straight_join`). Joins pieces that continue each
+   other in a straight line: fibers broken by crossings, by dim stretches,
+   or into a hole birth beside an existing fit. A pair of ends qualifies
+   when their directions (over the last 8 voxels) are antiparallel within
+   `straight_join_angle` (15°), each piece's extended axis passes within
+   `straight_join_offset` (1) radius of the other's end, and either
+   - the ends face each other across a gap of at most `straight_join_gap`
+     (30) voxels whose straight bridge reads at least
+     `straight_join_support` (0.5) in the fit image on average (None: no
+     check), or
+   - the pieces run past each other along the same axis by at most
+     `straight_join_overlap` (20) voxels, and the second piece's
+     overlapping start is dropped.
+
+   Candidates are taken shortest first, each end joins once, and no join
+   closes a loop; a chain takes its pieces' median radius.
+   `straight_join_types = "all"` joins within every type. The log gives
+   `joins`.
+
+   It is for fiber counts and lengths, not F1. In an exact replay of the
+   hole-birth row of the §9c table it changed F1 by −0.0003, cut split
+   fibers from 546 to 342 and fits per true fiber from 1.725 to 1.493, and
+   made 505 joins, at least 22 of them between pieces of different true
+   fibers. Looser gates (20°, 1.5 r) joined more (342 → 250 split fibers)
+   for 0.0005 less F1; a 60-voxel gap joined almost nothing more (340) and
+   lost 0.0003.
+
+2. **Bend finish** (`bend_finish`; `bend_finish_grey_min` 0.6 by default, 0.4
+   in the packed-bundle settings). Each fit is resampled at the node
+   spacing s. Every node more than the bend limit's sagitta s²/(2R) off the
+   midpoint of its neighbours is pulled toward that midpoint by half the
+   excess, sweep after sweep (up to 400), R being the type's
+   `min_bend_radius`, or `bend_finish_diameters` of its diameters. Then,
+   with `bend_finish_grey_min`, runs of at least 3 voxels inside the scan
+   where the smoothed fit reads below that share of the way from the void
+   grey to the fits' median grey (recenter grey) are cut: a trace that
+   wandered along noise has no fiber under its smoothed path. Pieces a cut
+   leaves shorter than the type's minimum length are dropped.
+   `bend_finish_types = "all"` smooths every type. The log gives
+   `moved_voxels_mean`, `cut_voxels` and `pieces_dropped`.
+
+   The gain is in the cut. In an exact replay of the same row the bend
+   finish at 0.4 raised F1 by 0.0036 (precision 0.902 → 0.916, recall
+   0.880 → 0.874) and cut hop length from 896 to 384 voxels. With the
+   straight join, it gave +0.0039 at 0.4 and −0.0011 with no cut (0.0). The
+   default 0.6 was not measured. A limit much stiffer than the fibers'
+   wrecks the fit: at `bend_finish_diameters=20`, four times the benchmark
+   fibers' limit (with the straight join on), two structures fell from
+   0.940 and 0.901 (the same passes at the fibers' own limit) to 0.711 and
+   0.669.
+
+   The two passes together, measured on the packed-bundle settings (the
+   GPU run against an exact replay of the same run without them): F1 0.9159
+   → 0.9150, split fibers 570 → 383, recovered fibers 1398 → 1575, fits
+   3740 → 3231.
+
+3. **Clean finish** (`clean_finish`, off). Shortest fit first, every sample
+   (1 voxel apart) within `clean_finish_reach_radii` (1.25) radii of another
+   fit of the smallest type is doubled when the denoised grey at the
+   midpoint between the two is at least the dimmer axis's grey (less one
+   grey unit): no darker gap lies between them, so they sit on one fiber,
+   while two touching fibers show a dip at their contact. Doubled stretches
+   are cut out of the shorter fit. With `clean_finish_min_length` (voxels;
+   None keeps all), the smallest type's pieces shorter than that are then
+   dropped. The log gives `doubled_voxels` and `short_dropped`. Use it where
+   two fits often run along one fiber. On two structures of the benchmark
+   (exact replays of the hole-birth row of the §9c table, after the straight
+   join and the bend finish) the doubled cut
+   alone changed F1 by +0.0004 and +0.0015, and dropping pieces under the
+   minimum length cost 0.0035 and 0.0045. It was not run on the full set.
+
+4. **Merge short** (`merge_short`, off). Adds each of the smallest type's
+   pieces shorter than `merge_short_length` (None: the type's minimum
+   length) to the end of a longer fit it continues. A short piece's own
+   direction says little, so only the long fit's end direction is used:
+   the piece qualifies when, along that direction, its closest point lies
+   at most `merge_short_gap` (30) voxels ahead of the end and no more than
+   r behind it, and all its samples lie within 1.5 r of the end's extended
+   axis. Each piece
+   goes to the nearest qualifying end, and an end takes its pieces in order
+   of distance. Then the straight join runs with `merge_short_join_gap` (60)
+   voxels as its gap, the bend finish without its cut smooths the
+   junctions, and every piece of the smallest type still shorter than
+   `merge_short_length` is dropped. The log gives `merged`, `joins` and
+   `short_dropped`. It suits scans where fiber counts and lengths matter
+   more than traced length. On the benchmark short remnants are worth
+   keeping (§9d, and the clean finish above), and merge short was not run
+   on it.
+
+5. **Through block** (`through_block`, off). Only for scans whose fibers all
+   run through the block, none ending inside it. Over three rounds of
+   (grey support, dim run, join gap) = (0.3, 10, 120), (0.3, 25, 200) and
+   (0.25, 40, 240), lengths in voxels, it joins ends that continue each
+   other (the straight join with 12°, 1.5 r, a 20-voxel overlap and no
+   bridge check), walks every end still more than 4 voxels inside the
+   block toward the faces (`_join.extend_through_ridge`), and joins again.
+   - A walk steps one voxel at a time. The brightest point of the sharp
+     grey (`ridge_sigma_voxels`, else 1.2) on a disc of radius 0.3 r across
+     the step sets the next direction, which turns by at most 1/R radians per
+     step (R the bend limit in voxels: `bend_finish_diameters`, else the
+     type's).
+   - It stops 4 voxels from a face; at a fit running within 10° of it
+     closer than 0.45 of the two radii's sum (a fit crossing at a steeper
+     angle is passed: fibers cross over and under each other; at a shallower
+     pass angle a walk slides along a nearly parallel neighbour and doubles
+     it); or after dim-run
+     voxels in a row that read below the support share of the way from the
+     void grey to the fits' median grey. The end moves to the last voxel
+     that read bright enough, so a walk keeps only the dim stretches that
+     come back onto fiber.
+
+   Finally, runs of at least 5 voxels reading below 0.3 of the way from
+   void to the fits' median grey (a walk or join over empty space) are cut,
+   and pieces the cut leaves shorter than the minimum length are dropped.
+   The log gives `joins`, `grown_voxels`, `ghost_voxels_cut` and
+   `through_share`, the share of fits with both ends within two diameters
+   of a face (a fiber leaving the block still ends a little inside it). Most scans have fibers that end inside the block; there, joins up
+   to 240 voxels long with no bridge check, and walks to the faces, would
+   join fibers end to end and lengthen them. The benchmark's fibers are
+   0.55 to 0.9 of the block side long (`dense_hard_settings`), so it was not
+   run there.
+
+### 9h. Model pass (`_model`)
+
+`model_recenter` and `residual_births` (both off) run after the other final
+passes, before the through block, on the smallest type's fits. The fits
+are drawn as the grey they should show, **summed** over fibers: fit `f`
+adds `a_f · p_k(d / r_f)` at distance `d` from its axis, with `p_k` its
+type's radial profile (`p_k(0) = 1`, knots every 0.125 r out to 2.5 r) and
+`a_f` its brightness over the void. The profiles come from a least-squares
+fit over up to 200 000 voxels near the fits (a light curvature penalty
+fills knots few voxels reach), then each fit's brightness by projection
+with the other fits held; the void is the median grey beyond every fit's
+reach. The profile takes up the scanner's blur and dark phase-contrast
+halo, which on the benchmark is about −0.25 of the fiber contrast at 1.5 r.
+The sum is drawn from nearest-fiber rasters (`_geometry.rasterize`) of
+groups of fits that never come within 2.5 radii of each other.
+
+1. **Model recenter** (`model_recenter`; `model_recenter_sweeps` = 2,
+   `model_recenter_max_radii` = 0.5). Per sweep the model is remeasured.
+   Each fit samples, on a grid 2.2 r wide across each node (averaged over
+   the node and a voxel either side along the fit), the scan less the
+   void and every other fit's drawn grey, and moves the node to the offset
+   within `model_recenter_max_radii` r where its own profile correlates
+   best with it; moves are smoothed over five nodes. A fit in a packed
+   bundle is no longer pulled toward its neighbours' bodies and away from
+   their halos.
+2. **Residual births** (`residual_births`; `residual_birth_level` = 0.4,
+   `residual_birth_min` = 0.45, `residual_birth_near_share` = 0.5). The
+   residual (scan less void less the drawn fits, over the fits' median
+   brightness, smoothed by 1 voxel) is traced with the §4 tracer where it
+   is above the level. A trace is kept when its median residual is at least
+   `residual_birth_min`, at most `residual_birth_near_share` of it lies
+   within a radius of a fit and at most a third inside a larger type's
+   fit. The recenter then runs again with the new fits.
+
+The log entry "model pass" gives `moved` (the mean node move of the last
+sweep, voxels), `born` and `void`. On the benchmark the pass took the
+packed-bundle settings from 0.915 to 0.942 on structures 1–18 and from
+0.911 to 0.934 on 19–36, every structure up, and roughly doubled the fit
+time of a 160³ scan.
+
 ## 10. Scoring against ground truth
 
 `_evaluate.score`
@@ -654,5 +1251,21 @@ After the final solve and its confidence, up to `redraw_passes` passes:
 - **Solid Dice:** the overlap of fitted solid and true solid.
 - **Voxel label accuracy:** the fraction of true solid voxels whose fitted
   label maps to the right true fiber.
+- **Centerline recall, precision and F1**
+  (`_evaluate.centerline_agreement`). These have an owner rule of their
+  own, on centerlines rather than voxels: a fit belongs to the true fiber
+  whose centerline most of its samples lie within 0.5 r of, r being that
+  true fiber's radius (for an oval fiber, the equivalent radius √(ab) of its
+  semi-axes a and b). **Recall** is the share of true centerline length in
+  the scan that the fits belonging to that fiber pass within 0.5 r of;
+  **precision** is the share of fitted centerline length that lies within
+  0.5 r of the centerline of the fiber its fit belongs to; **F1** is their
+  harmonic mean. True pieces that only clip a corner of the scan (shorter in
+  it than the fit's minimum length) are left out of recall. Pieces of one
+  true fiber all count toward it, so a split fiber loses nothing where each
+  piece follows it; a fit that follows one fiber and then another loses the
+  length along the second. Unlike the voxel label accuracy, it ignores how
+  the capsule edges fill voxels.
+
 - **Interior ends and implied lengths:** reported for both the fit and the
   truth.

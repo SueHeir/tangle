@@ -20,6 +20,7 @@ pub mod raster;
 pub mod refine;
 pub mod render;
 pub mod sample;
+pub mod scan;
 pub mod trace;
 
 /// `[nz, ny, nx]`.

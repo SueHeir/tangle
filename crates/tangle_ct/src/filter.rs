@@ -133,7 +133,7 @@ pub(crate) fn filter_axis(input: &[f32], shape: Shape, axis: usize, kernel: &[f6
 
 /// Runs `work(row, slice)` on every `row_len`-long row of `out`, spreading
 /// contiguous runs of rows over the available cores.
-fn parallel_rows<F>(out: &mut [f32], row_len: usize, work: F)
+pub(crate) fn parallel_rows<F>(out: &mut [f32], row_len: usize, work: F)
 where
     F: Fn(usize, &mut [f32]) + Sync,
 {
