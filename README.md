@@ -204,6 +204,12 @@ See [solver and architecture notes](docs/architecture.md) for details.
   [simulated CT scanner](docs/ct_scanner.md), the
   [dense_hard benchmark](docs/ct_dense_hard.md), and the
   [results on synthetic scans, with pictures](crates/tangle_python/python/examples/ct_results/README.md).
+- **Synthetic CT scans:** `ct.synthetic_ct` with `ct.Scanner` scans any Tangle
+  structure the way a micro-CT does (projections, phase-contrast
+  propagation, detector blur, photon noise, filtered back-projection), with
+  the true fibers known. See [synthetic CT, step by step](docs/ct_synthetic.md).
+
+  ![Scanner settings side by side](docs/media/ct-synth-settings.png)
 - **CT map network:** a 3D U-Net trained on Tangle's own simulated scans turns
   a scan into maps (each voxel's offset to its fiber's axis, the fiber
   direction and type), and a short tracer reads the fibers off them. On the
@@ -217,6 +223,7 @@ See [solver and architecture notes](docs/architecture.md) for details.
 · [PuMA analysis guide](docs/puma_interoperability.md)
 · [CT fitting guide](docs/ct_fitting.md)
 · [CT fitting results](crates/tangle_python/python/examples/ct_results/README.md)
+· [Synthetic CT scans](docs/ct_synthetic.md)
 · [CT map network](docs/ct_unet.md)
 
 ## Backends and reproducibility
