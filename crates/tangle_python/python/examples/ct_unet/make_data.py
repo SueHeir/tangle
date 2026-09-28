@@ -72,18 +72,29 @@ def nearest_points(shape, pos: np.ndarray) -> np.ndarray:
 VARIED_SIDE = 160  # voxels (1 um); everything below is in voxels, the physical scale does not matter to the network
 
 
-def varied_settings(index: int) -> dict:
+FOCUS_FIRST = 4001  # indices from here on use the focused draw (varied_settings(focus=True))
+
+
+def varied_settings(index: int, focus: bool | None = None) -> dict:
     """A random structure and scanner for ``varied_<index>`` (lengths in voxels = um at 1 um voxels).
 
     1-4 fiber types. Diameters are log-uniform in 3.5-28 voxels, and neighbouring types differ by at least 30%:
     ``synthetic_ct`` gives each fiber the profile of the type whose diameter is nearest its own, so two types of
     nearly the same size cannot be rendered as different materials. Each type has its own brightness (the
     brightest 1), oval flattening, dim core, bundling, bend limit and phase ratio.
+
+    ``focus`` (default: index >= FOCUS_FIRST) weights the draw toward what the first round found hard: the thinnest
+    type 3.5-6 voxels 70% of the time, more bundles, more random 3D orientations, and a blur no wider than the
+    thinnest fiber.
     """
     rng = np.random.default_rng(30_000 + index)
+    focus = index >= FOCUS_FIRST if focus is None else focus
     k = int(rng.choice([1, 2, 3, 4], p=[0.25, 0.35, 0.25, 0.15]))
     while True:
         d = np.sort(np.exp(rng.uniform(np.log(3.5), np.log(28.0), k)))
+        if focus and rng.random() < 0.7:  # the focused round: the thinnest type 3.5-6 voxels most of the time
+            d[0] = float(np.exp(rng.uniform(np.log(3.5), np.log(6.0))))
+            d = np.sort(d)
         if k == 1 or np.all(d[1:] / d[:-1] >= 1.3):
             break
     total = float(rng.uniform(0.05, 0.25))
@@ -99,11 +110,13 @@ def varied_settings(index: int) -> dict:
             "ratio": round(float(rng.uniform(0.55, 0.9)), 2) if rng.random() < 0.35 else 1.0,
             "rim": round(float(rng.uniform(0.15, 0.3) * d[t]), 2) if (d[t] > 8 and rng.random() < 0.35) else None,
             "core": round(float(rng.uniform(0.4, 0.8)), 2),
-            "bundle": int(rng.choice([1, 7, 19], p=[0.6, 0.25, 0.15])) if d[t] < 12 else 1,
+            "bundle": (int(rng.choice([1, 7, 19], p=[0.4, 0.35, 0.25] if focus else [0.6, 0.25, 0.15]))
+                       if d[t] < 12 else 1),
             "bend": round(float(rng.uniform(3.0, 8.0)), 2),
             "delta_beta": round(float(rng.uniform(4.0, 16.0)), 1),
         })
-    orientation = str(rng.choice(["planar", "planar", "aligned", "biaxial", "isotropic"]))
+    orientation = str(rng.choice(["planar", "planar", "aligned", "biaxial", "isotropic"]
+                                 + (["isotropic"] if focus else [])))
     blur = float(rng.choice([0.0, 0.0, 0.5, 1.0]))
     return {
         "types": types,
@@ -114,7 +127,9 @@ def varied_settings(index: int) -> dict:
         "brightness_spread": round(float(rng.uniform(0.0, 0.4)), 2),
         "photons": round(1300 * float(rng.uniform(0.5, 2.0)) / max(1.0, 23 * blur**2)),
         "noise_blur": blur,
-        "resolution": round(float(rng.uniform(1.2, 4.0)), 2),
+        # the focused round caps the blur (FWHM, um = voxels) at the thinnest fiber's diameter: blurrier scans
+        # merge touching thin fibers beyond what any method can undo
+        "resolution": round(float(min(rng.uniform(1.2, 4.0), d[0])) if focus else float(rng.uniform(1.2, 4.0)), 2),
         "propagation": round(float(rng.choice([0.0, rng.uniform(1.0, 8.0)])), 2),
         "fiber_motion": round(float(rng.uniform(0.0, 2.0)), 2),
         "drift": round(float(rng.uniform(0.0, 1.0)), 2) if rng.random() < 0.3 else 0.0,

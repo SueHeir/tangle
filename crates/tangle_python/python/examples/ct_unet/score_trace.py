@@ -48,6 +48,26 @@ def truth_of(scan):
             **{f"p_{k}": v for k, v in table.items()}}
 
 
+def rendered(name, cache: Path):
+    """A ct_examples scan, rendered once and then read back from CACHE/<name>_scan.npz (rendering takes seconds)."""
+    from types import SimpleNamespace
+
+    saved = cache / f"{name}_scan.npz"
+    if saved.exists():
+        d = np.load(saved, allow_pickle=False)
+        ends = d["ends"]
+        return SimpleNamespace(volume=d["volume"], labels=d["labels"], radii=d["radii"],
+                               types=d["types"] if d["types"].size else None,
+                               centerlines=np.split(d["points"], ends[:-1]))
+    import ct_examples as ex
+
+    scan = ex.EXAMPLES[name](cache / f"{name}.json").scan
+    np.savez(saved, volume=scan.volume, labels=scan.labels, radii=np.asarray(scan.radii),
+             types=np.asarray(scan.types if scan.types is not None else []),
+             points=np.concatenate(scan.centerlines), ends=np.cumsum([len(l) for l in scan.centerlines]))
+    return scan
+
+
 def from_npz(path):
     """(volume, centerlines, radii, types, truth dict) of a make_data volume."""
     d = dict(np.load(path))
@@ -102,9 +122,7 @@ def main():
             volume, truth_lines, truth_radii, truth_types, data = from_npz(name)
             label = Path(name).stem
         else:
-            import ct_examples as ex
-
-            scan = ex.EXAMPLES[name](Path(args.cache) / f"{name}.json").scan
+            scan = rendered(name, Path(args.cache))
             volume, truth_lines, truth_radii = scan.volume, scan.centerlines, np.asarray(scan.radii)
             truth_types = np.zeros(len(truth_lines), int) if scan.types is None else np.asarray(scan.types)
             data, label = None, name
