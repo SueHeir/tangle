@@ -10,10 +10,10 @@ junctions (a fraction of them, as the binder is uneven), and writes:
 - a PuMA bundle with binder as its own phase, plus bond_ids.vti and
   binder_interface.vti (see docs/fiber_bonds.md).
 
-The bond radius is half the fiber radius. No published bond size exists,
-so treat it as a setting to vary.
+The bond radius defaults to the fiber radius. No published bond size
+exists, so treat it as a setting to vary.
 
-Usage: python bonded_fibers.py [output_directory]
+Usage: python bonded_fibers.py [output_directory] [bond_radius_ratio]
 """
 
 import math
@@ -27,7 +27,7 @@ from tangle.units import um
 BOX = 300 * um
 DIAMETER = 11 * um
 LENGTH = 250 * um
-BOND_RADIUS_RATIO = 0.5
+BOND_RADIUS_RATIO = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
 
 
 def ply(name: str, layer: int, count: int, seed: int) -> tangle.FiberCollection:

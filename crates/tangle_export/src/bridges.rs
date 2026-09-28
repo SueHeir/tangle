@@ -16,7 +16,7 @@ use tangle_core::{FiberAnchor, FiberAssembly, FiberId, Section, Vec3};
 use crate::ExportError;
 
 /// Default binder-bridge radius as a fraction of the thinner fiber's radius.
-pub const DEFAULT_BOND_RADIUS_RATIO: f64 = 0.5;
+pub const DEFAULT_BOND_RADIUS_RATIO: f64 = 1.0;
 
 /// One binder bridge between two anchored fiber centerline points.
 #[derive(Clone, Copy, Debug, PartialEq)]

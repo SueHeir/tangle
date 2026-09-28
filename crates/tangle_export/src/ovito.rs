@@ -831,7 +831,7 @@ pub fn write_ovito_view_script(
         )?;
         writeln!(
             writer,
-            "    if types.type_by_id({}) is not None:",
+            "    if any(t.id == {} for t in types.types):",
             bond_type(config.atom_type)?
         )?;
         writeln!(
@@ -1214,7 +1214,7 @@ mod tests {
             let bond = bonds[0];
             assert_eq!(bond[1], "0");
             assert_eq!(bond[20], "9");
-            assert!((bond[3].parse::<f64>().unwrap() - 0.05).abs() < 1.0e-9);
+            assert!((bond[3].parse::<f64>().unwrap() - 0.1).abs() < 1.0e-9);
             assert!((bond[5].parse::<f64>().unwrap() - 0.2).abs() < 1.0e-9);
 
             config.bond_radius_ratio = None;

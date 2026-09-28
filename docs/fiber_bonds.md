@@ -65,9 +65,36 @@ wall gives a short bridge.
 `tangle_export::junction_bridges(assembly, radius_ratio)` returns these
 bridges, and both exporters use it, so the two outputs always agree.
 
+### Bond size
+
+The binder a bridge adds depends strongly on its radius. The table below
+comes from
+[`bonded_fibers.py`](../crates/tangle_python/python/examples/bonded_fibers.py),
+a felt of 11 µm fibers with 214 bonds, voxelized at 1 µm. It gives the binder
+as a share of all solid voxels at each ratio:
+
+| `bond_radius_ratio` | Binder share of the solid |
+| --- | --- |
+| 0.5 | 0.09 % |
+| 1.0 (default) | 1.7 % |
+| 1.5 | 15 % |
+
+- **At 0.5:** the neck is under a voxel thick.
+- **At 1.0:** each crossing gets a fillet a few voxels thick.
+- **At 1.5:** the bridge swells past the fibers into a node.
+
+![Two bonds in one slice at three bond sizes](media/fiber-bonds-size.png)
+
+A bridge is a lower bound on the binder in a real bonded felt. It fills the
+crotch of a crossing, but not a meniscus that climbs along the fibers, a
+coating along them, or clumps that bind several fibers. The ORNL CBCF recipe
+(46 wt % phenolic in the green body) suggests the binder carbon could be tens
+of percent of the solid, assuming a char yield of roughly 50–60 %. That is
+an estimate, not a published measurement.
+
 ## OVITO
 
-`result.write_ovito(path, bond_radius_ratio=0.5)` and the debug trajectories
+`result.write_ovito(path, bond_radius_ratio=1.0)` and the debug trajectories
 draw each bridge as one extra spherocylinder row. That row has:
 
 - **Particle type:** `atom_type + 2`, which follows the fiber type and the
@@ -81,7 +108,7 @@ does not draw them.
 
 ## PuMA
 
-`export_puma(..., bond_radius_ratio=0.5)` adds binder to the bundle. Bonds
+`export_puma(..., bond_radius_ratio=1.0)` adds binder to the bundle. Bonds
 are off by default (`None`), and without them every image is byte-for-byte
 the same as for the same fibers without junctions. With bonds on:
 
