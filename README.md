@@ -204,11 +204,20 @@ See [solver and architecture notes](docs/architecture.md) for details.
   [simulated CT scanner](docs/ct_scanner.md), the
   [dense_hard benchmark](docs/ct_dense_hard.md), and the
   [results on synthetic scans, with pictures](crates/tangle_python/python/examples/ct_results/README.md).
+- **CT map network:** a 3D U-Net trained on Tangle's own simulated scans turns
+  a scan into maps (each voxel's offset to its fiber's axis, the fiber
+  direction and type), and a short tracer reads the fibers off them. On the
+  simulated `dense_hard` sets it traces 99.5% centerline F1, against 91.5% for
+  the grey fitter, and whole scans run in overlapping tiles. See the
+  [CT map network guide](docs/ct_unet.md).
+
+  ![Simulated scan, network maps and traced fibers](docs/media/ct-unet-maps.png)
 
 [Results/export tutorial](crates/tangle_python/python/tutorials/14_results_and_exports.ipynb)
 · [PuMA analysis guide](docs/puma_interoperability.md)
 · [CT fitting guide](docs/ct_fitting.md)
 · [CT fitting results](crates/tangle_python/python/examples/ct_results/README.md)
+· [CT map network](docs/ct_unet.md)
 
 ## Backends and reproducibility
 
