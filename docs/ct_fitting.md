@@ -12,6 +12,11 @@ match the scan. It returns:
 - an overlay of the fibers on the raw scan, one color per fiber, as an RGB
   TIFF stack and a PNG with three orthogonal slices.
 
+A second route, a 3D U-Net that turns the scan into maps and a tracer that
+reads the fibers off them, is described in the
+[CT map network guide](ct_unet.md). On the simulated `dense_hard` sets it
+scores higher than this fitter.
+
 How well it works, with tables and pictures on synthetic scans:
 [CT fitting results](../crates/tangle_python/python/examples/ct_results/README.md).
 Every step of the method: [ct_fitting_internals.md](ct_fitting_internals.md).

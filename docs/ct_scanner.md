@@ -8,6 +8,9 @@ edge fringes then come out of the same steps a parallel-beam CT scanner
 goes through, instead of being added to the image one by one. Every setting
 is a physical one; none is fitted.
 
+For the whole process in pictures (geometry, the object, each acquisition
+stage, the settings side by side) see [ct_synthetic.md](ct_synthetic.md).
+
 The true fibers are known, so a scan made this way tests the fitter
 ([ct_fitting.md](ct_fitting.md)) against ground truth. The scanner is used
 through `ct.synthetic_ct`, which also draws the fibers: several fiber
