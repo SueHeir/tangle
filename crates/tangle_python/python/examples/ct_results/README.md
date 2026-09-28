@@ -243,16 +243,20 @@ lists every step and setting):
 | Settings | 1-18 | 7-fiber bundles | 19-fiber bundles | 19-36 |
 | --- | --- | --- | --- | --- |
 | Starting settings | 0.840 | 0.893 | 0.788 | 0.836 |
-| Recommended settings | **0.915** | **0.935** | **0.895** | **0.911** |
+| Recommended settings before the model pass | 0.915 | 0.935 | 0.895 | 0.911 |
+| Recommended settings | **0.942** | **0.956** | **0.929** | **0.934** |
 
 Every one of the 36 structures scores higher with the recommended settings.
 The biggest gains came from a sharper grey in the ridge finish (a dim fiber
 beside a bright one keeps its own ridge), from tracing the dim fibers the fit
-leaves out as fiber-wide holes ("hole births"), and from typing coarse fits
-laid over bundles as fine.
+leaves out as fiber-wide holes ("hole births"), from typing coarse fits
+laid over bundles as fine, and from a last pass that reads the scan less
+what the other fits explain: fits recenter against their neighbours' grey
+and halos, and fibers no fit explains are traced on the residual (the
+"model pass").
 
 A 7-fiber-bundle and a 19-fiber-bundle structure, starting settings above and
-recommended settings below (red missed, blue extra, orange wrong fiber):
+recommended settings before the model pass below (red missed, blue extra, orange wrong fiber):
 
 ![dense_hard_7 before and after](images/dense_hard_7_before_after.png)
 

@@ -756,6 +756,7 @@ its switch is on:
 | Bend finish | `bend_finish` | off | on | 9g |
 | Clean finish | `clean_finish` | off | off | 9g |
 | Merge short | `merge_short` | off | off | 9g |
+| Model pass | `model_recenter`, `residual_births` | off | on | 9h |
 | Through block | `through_block` | off | off | 9g |
 
 - **Recenter** (`_Fitter.recenter`): each fit of the smallest type moves
@@ -796,6 +797,7 @@ ct.FitSettings(
     ridge_rim_sigma=1.2, hole_births=True, hole_birth_ridge_min=0.3,  # 9e
     hole_birth_grey_min=0.65, hole_birth_passes=2, hole_birth_rim_drop=True,
     straight_join=True, bend_finish=True, bend_finish_grey_min=0.4,  # 9g
+    model_recenter=True, residual_births=True,                     # 9h
 )
 ```
 
@@ -822,12 +824,13 @@ above:
 | Coarse typing (7b) and the ridge finish's rim drop (9d) | 0.9015 | 0.930 | 0.873 |
 | Redraws off (9b) | 0.9065 | 0.930 | 0.883 |
 | Coarse births (6c), rim drop on hole births (9e), straight join and bend finish (9g) | 0.915 | 0.935 | 0.895 |
+| Model recenter and residual births (9h) | 0.942 | 0.956 | 0.929 |
 
 On 18 structures no setting was tuned on (`dense_hard_19` … `dense_hard_36`,
 with `DENSE_HARD_COUNT=36`; 8 with 7-fiber bundles, 10 with 19), the
-starting settings score 0.836 and the packed-bundle settings 0.911, every
-structure up (7-fiber bundles 0.860 → 0.923, 19-fiber bundles 0.816 →
-0.902).
+starting settings score 0.836 and the packed-bundle settings 0.934, every
+structure up (7-fiber bundles 0.860 → 0.942, 19-fiber bundles 0.816 →
+0.929); without the model pass (9h) they score 0.911.
 
 Several of these stages use fixed lengths in voxels (the 1.2-voxel grey and
 Hessian of §9d and §9e, the 3-voxel cut runs, the join and walk distances of
@@ -1188,6 +1191,46 @@ the bend finish are on; the other three are off.
    join fibers end to end and lengthen them. The benchmark's fibers are
    0.55 to 0.9 of the block side long (`dense_hard_settings`), so it was not
    run there.
+
+### 9h. Model pass (`_model`)
+
+`model_recenter` and `residual_births` (both off) run after the other final
+passes, before the through block, on the smallest type's fits. The fits
+are drawn as the grey they should show, **summed** over fibers: fit `f`
+adds `a_f · p_k(d / r_f)` at distance `d` from its axis, with `p_k` its
+type's radial profile (`p_k(0) = 1`, knots every 0.125 r out to 2.5 r) and
+`a_f` its brightness over the void. The profiles come from a least-squares
+fit over up to 200 000 voxels near the fits (a light curvature penalty
+fills knots few voxels reach), then each fit's brightness by projection
+with the other fits held; the void is the median grey beyond every fit's
+reach. The profile takes up the scanner's blur and dark phase-contrast
+halo, which on the benchmark is about −0.25 of the fiber contrast at 1.5 r.
+The sum is drawn from nearest-fiber rasters (`_geometry.rasterize`) of
+groups of fits that never come within 2.5 radii of each other.
+
+1. **Model recenter** (`model_recenter`; `model_recenter_sweeps` = 2,
+   `model_recenter_max_radii` = 0.5). Per sweep the model is remeasured.
+   Each fit samples, on a grid 2.2 r wide across each node (averaged over
+   the node and a voxel either side along the fit), the scan less the
+   void and every other fit's drawn grey, and moves the node to the offset
+   within `model_recenter_max_radii` r where its own profile correlates
+   best with it; moves are smoothed over five nodes. A fit in a packed
+   bundle is no longer pulled toward its neighbours' bodies and away from
+   their halos.
+2. **Residual births** (`residual_births`; `residual_birth_level` = 0.4,
+   `residual_birth_min` = 0.45, `residual_birth_near_share` = 0.5). The
+   residual (scan less void less the drawn fits, over the fits' median
+   brightness, smoothed by 1 voxel) is traced with the §4 tracer where it
+   is above the level. A trace is kept when its median residual is at least
+   `residual_birth_min`, at most `residual_birth_near_share` of it lies
+   within a radius of a fit and at most a third inside a larger type's
+   fit. The recenter then runs again with the new fits.
+
+The log entry "model pass" gives `moved` (the mean node move of the last
+sweep, voxels), `born` and `void`. On the benchmark the pass took the
+packed-bundle settings from 0.915 to 0.942 on structures 1–18 and from
+0.911 to 0.934 on 19–36, every structure up, and roughly doubled the fit
+time of a 160³ scan.
 
 ## 10. Scoring against ground truth
 

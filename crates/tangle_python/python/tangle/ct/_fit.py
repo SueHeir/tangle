@@ -559,6 +559,27 @@ class FitSettings:
     # fiber far longer than L costly (``_ends.length_end_cost``).
     length_shape: float = 3.0
     confidence_threshold: float = 0.5
+    # A last pass on the smallest type's fits against the scan less what the
+    # other fits explain (``_model``). The fits are drawn as the grey they
+    # should show, summed over fibers, with each type's radial profile (blur,
+    # dark halo and all) and each fit's brightness measured on the scan by
+    # least squares. model_recenter moves each fit across itself to where its
+    # own profile best matches the grey the other fits leave, by at most
+    # model_recenter_max_radii radii per sweep, in model_recenter_sweeps
+    # sweeps: in a packed bundle the brightest grey across a fit is pulled
+    # toward its neighbours' bodies and away from their halos, the residual is
+    # not. residual_births then traces fibers on that residual over the fits'
+    # median brightness (where it is above residual_birth_level), keeps those
+    # whose median residual is at least residual_birth_min with at most
+    # residual_birth_near_share of their length within a radius of a fit, and
+    # recenters again with them.
+    model_recenter: bool = False
+    model_recenter_sweeps: int = 2
+    model_recenter_max_radii: float = 0.5
+    residual_births: bool = False
+    residual_birth_level: float = 0.4
+    residual_birth_min: float = 0.45
+    residual_birth_near_share: float = 0.5
 
     def replace(self, **changes: Any) -> "FitSettings":
         return replace(self, **changes)
@@ -1400,6 +1421,35 @@ def fit_fibers(
         confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
         log("merge short", lines, merged=merged, joins=joins, short_dropped=dropped)
         fitter.snap("merge short", lines, radii, types)
+    if lines and (settings.model_recenter or settings.residual_births) and not binary:
+        from . import _native
+        from ._model import GreyModel, model_recenter, residual_births
+
+        grey = fitter.checked_grey if fitter.checked_grey is not None else _native.gaussian(
+            np.asarray(volume, dtype=np.float32), max(settings.denoise_sigma_voxels, 0.7)
+        )
+        model = GreyModel(grey, len(fitter.specs), sections=fitter.sections)
+        fine = int(np.argmin(fitter.radius))
+        sweeps, reach = int(settings.model_recenter_sweeps), float(settings.model_recenter_max_radii)
+        moved = born = 0
+        if settings.model_recenter:
+            lines, moved = model_recenter(model, lines, radii, types, fine, sweeps=sweeps, max_radii=reach)
+        if settings.residual_births:
+            new = residual_births(
+                fitter, model, lines, radii, types, fine, level=settings.residual_birth_level,
+                median_min=settings.residual_birth_min, near_share=settings.residual_birth_near_share,
+            )
+            born = len(new)
+            if new:
+                lines = lines + new
+                radii = np.concatenate([radii, np.full(born, float(fitter.radius[fine]))])
+                types = np.concatenate([types, np.full(born, fine, dtype=int)]).astype(int)
+                if settings.model_recenter:
+                    lines, moved = model_recenter(model, lines, radii, types, fine, sweeps=sweeps, max_radii=reach)
+        lines = _refine.respace(lines, fitter.spacing)
+        confidence, _, summary = fitter.scores(lines, radii, previous=None, types=types)
+        log("model pass", lines, moved=round(moved, 3), born=born, void=round(float(model.void), 4))
+        fitter.snap("model pass", lines, radii, types)
     if lines and settings.through_block and not binary:
         from . import _native
         from ._join import through_block

@@ -111,6 +111,7 @@ SETTINGS=(
   --set ridge_rim_sigma=1.2 --set hole_births=true --set hole_birth_ridge_min=0.3
   --set hole_birth_grey_min=0.65 --set hole_birth_passes=2 --set hole_birth_rim_drop=true
   --set straight_join=true --set bend_finish=true --set bend_finish_grey_min=0.4
+  --set model_recenter=true --set residual_births=true
 )
 python ct_examples.py dense_hard_5 --input broad "${SETTINGS[@]}"
 python ct_examples.py $(seq -f 'dense_hard_%g' 1 18) --input broad "${SETTINGS[@]}" --output ~/ct-dense-hard
@@ -239,7 +240,8 @@ bundles.
 | 3. Disc typing of coarse fits | 0.9030 | 0.896 / 0.911 | 0.9245 | 0.8814 |
 | 4. Dim-axis typing and rim drop | 0.9015 | 0.894 / 0.910 | 0.9301 | 0.8729 |
 | 5. No redraw passes | 0.9065 | 0.897 / 0.917 | 0.9297 | 0.8833 |
-| 6. Coarse births, hole rim test, straight join, bend finish (**current**) | **0.9150** | 0.895 / 0.936 | **0.9348** | **0.8952** |
+| 6. Coarse births, hole rim test, straight join, bend finish | 0.9150 | 0.895 / 0.936 | 0.9348 | 0.8952 |
+| 7. Model recenter and residual births (**current**) | **0.9423** | 0.934 / 0.951 | **0.9562** | **0.9285** |
 
 Structures 19–36 were not used for tuning. They check that the gains
 carry over to structures the settings have not seen:
@@ -248,54 +250,58 @@ carry over to structures the settings have not seen:
 | --- | --- | --- | --- |
 | Starting settings | 0.8357 | 0.8598 | 0.8165 |
 | Through step 5 | 0.9049 | 0.9148 | 0.8969 |
-| Current | **0.9114** | **0.9227** | **0.9024** |
+| Through step 6 | 0.9114 | 0.9227 | 0.9024 |
+| Current | **0.9343** | **0.9417** | **0.9285** |
 
-The gain on the unseen structures (+0.076) is close to the gain on the
-tuning structures (+0.075).
+Through step 6, the gain on the unseen structures (+0.076) is close to the
+gain on the tuning structures (+0.075). Step 7 adds +0.027 on 1–18 and
++0.023 on 19–36 and raises every structure in both sets; the 19-fiber
+bundles gain the most (+0.033 and +0.026).
 
 The fits are deterministic: a second run of the current settings on
 structures 1–18 gave the same F1 on every structure.
 
-Per structure, with the starting and the current settings:
+Per structure, with the starting settings, through step 6 and with the
+current settings:
 
-| Structure | Bundle | Photons | Fibers (fine + coarse) | Starting F1 | Current F1 |
-| --- | --- | --- | --- | --- | --- |
-| `dense_hard_1` | 19 | 1137 | 111 + 6 | 0.796 | 0.900 |
-| `dense_hard_2` | 19 | 1079 | 107 + 7 | 0.843 | 0.882 |
-| `dense_hard_3` | 7 | 1544 | 106 + 5 | 0.885 | 0.895 |
-| `dense_hard_4` | 7 | 1254 | 108 + 5 | 0.874 | 0.926 |
-| `dense_hard_5` | 19 | 1205 | 128 + 6 | 0.657 | 0.834 |
-| `dense_hard_6` | 7 | 1118 | 118 + 7 | 0.906 | 0.954 |
-| `dense_hard_7` | 7 | 1193 | 131 + 7 | 0.893 | 0.931 |
-| `dense_hard_8` | 7 | 1469 | 131 + 6 | 0.869 | 0.933 |
-| `dense_hard_9` | 7 | 1229 | 119 + 6 | 0.905 | 0.944 |
-| `dense_hard_10` | 19 | 1487 | 114 + 6 | 0.815 | 0.889 |
-| `dense_hard_11` | 19 | 1540 | 107 + 6 | 0.713 | 0.880 |
-| `dense_hard_12` | 7 | 1213 | 124 + 5 | 0.892 | 0.931 |
-| `dense_hard_13` | 19 | 1126 | 114 + 5 | 0.810 | 0.906 |
-| `dense_hard_14` | 19 | 1135 | 103 + 6 | 0.817 | 0.924 |
-| `dense_hard_15` | 7 | 1375 | 120 + 5 | 0.905 | 0.949 |
-| `dense_hard_16` | 7 | 1043 | 108 + 5 | 0.904 | 0.951 |
-| `dense_hard_17` | 19 | 1419 | 109 + 8 | 0.785 | 0.923 |
-| `dense_hard_18` | 19 | 1224 | 114 + 8 | 0.849 | 0.919 |
-| `dense_hard_19` | 19 | 1123 | 100 + 7 | 0.826 | 0.914 |
-| `dense_hard_20` | 19 | 1546 | 107 + 7 | 0.830 | 0.912 |
-| `dense_hard_21` | 19 | 1143 | 92 + 5 | 0.806 | 0.879 |
-| `dense_hard_22` | 19 | 1529 | 82 + 5 | 0.838 | 0.942 |
-| `dense_hard_23` | 19 | 1305 | 133 + 7 | 0.834 | 0.934 |
-| `dense_hard_24` | 7 | 1193 | 110 + 6 | 0.869 | 0.935 |
-| `dense_hard_25` | 19 | 1512 | 127 + 7 | 0.841 | 0.912 |
-| `dense_hard_26` | 7 | 1504 | 131 + 7 | 0.853 | 0.935 |
-| `dense_hard_27` | 7 | 1416 | 109 + 6 | 0.828 | 0.909 |
-| `dense_hard_28` | 19 | 1338 | 95 + 7 | 0.768 | 0.869 |
-| `dense_hard_29` | 19 | 1378 | 114 + 7 | 0.879 | 0.923 |
-| `dense_hard_30` | 19 | 1209 | 95 + 5 | 0.756 | 0.839 |
-| `dense_hard_31` | 19 | 1352 | 114 + 5 | 0.786 | 0.900 |
-| `dense_hard_32` | 7 | 1349 | 124 + 6 | 0.824 | 0.896 |
-| `dense_hard_33` | 7 | 1166 | 101 + 6 | 0.848 | 0.917 |
-| `dense_hard_34` | 7 | 1383 | 112 + 7 | 0.904 | 0.928 |
-| `dense_hard_35` | 7 | 1230 | 124 + 7 | 0.843 | 0.925 |
-| `dense_hard_36` | 7 | 1217 | 119 + 6 | 0.910 | 0.936 |
+| Structure | Bundle | Photons | Fibers (fine + coarse) | Starting F1 | Step 6 F1 | Current F1 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `dense_hard_1` | 19 | 1137 | 111 + 6 | 0.796 | 0.900 | 0.930 |
+| `dense_hard_2` | 19 | 1079 | 107 + 7 | 0.843 | 0.882 | 0.934 |
+| `dense_hard_3` | 7 | 1544 | 106 + 5 | 0.885 | 0.895 | 0.909 |
+| `dense_hard_4` | 7 | 1254 | 108 + 5 | 0.874 | 0.926 | 0.955 |
+| `dense_hard_5` | 19 | 1205 | 128 + 6 | 0.657 | 0.834 | 0.871 |
+| `dense_hard_6` | 7 | 1118 | 118 + 7 | 0.906 | 0.954 | 0.968 |
+| `dense_hard_7` | 7 | 1193 | 131 + 7 | 0.893 | 0.931 | 0.960 |
+| `dense_hard_8` | 7 | 1469 | 131 + 6 | 0.869 | 0.933 | 0.954 |
+| `dense_hard_9` | 7 | 1229 | 119 + 6 | 0.905 | 0.944 | 0.962 |
+| `dense_hard_10` | 19 | 1487 | 114 + 6 | 0.815 | 0.889 | 0.909 |
+| `dense_hard_11` | 19 | 1540 | 107 + 6 | 0.713 | 0.880 | 0.911 |
+| `dense_hard_12` | 7 | 1213 | 124 + 5 | 0.892 | 0.931 | 0.961 |
+| `dense_hard_13` | 19 | 1126 | 114 + 5 | 0.810 | 0.906 | 0.941 |
+| `dense_hard_14` | 19 | 1135 | 103 + 6 | 0.817 | 0.924 | 0.959 |
+| `dense_hard_15` | 7 | 1375 | 120 + 5 | 0.905 | 0.949 | 0.965 |
+| `dense_hard_16` | 7 | 1043 | 108 + 5 | 0.904 | 0.951 | 0.972 |
+| `dense_hard_17` | 19 | 1419 | 109 + 8 | 0.785 | 0.923 | 0.950 |
+| `dense_hard_18` | 19 | 1224 | 114 + 8 | 0.849 | 0.919 | 0.952 |
+| `dense_hard_19` | 19 | 1123 | 100 + 7 | 0.826 | 0.914 | 0.945 |
+| `dense_hard_20` | 19 | 1546 | 107 + 7 | 0.830 | 0.912 | 0.933 |
+| `dense_hard_21` | 19 | 1143 | 92 + 5 | 0.806 | 0.879 | 0.913 |
+| `dense_hard_22` | 19 | 1529 | 82 + 5 | 0.838 | 0.942 | 0.963 |
+| `dense_hard_23` | 19 | 1305 | 133 + 7 | 0.834 | 0.934 | 0.954 |
+| `dense_hard_24` | 7 | 1193 | 110 + 6 | 0.869 | 0.935 | 0.951 |
+| `dense_hard_25` | 19 | 1512 | 127 + 7 | 0.841 | 0.912 | 0.941 |
+| `dense_hard_26` | 7 | 1504 | 131 + 7 | 0.853 | 0.935 | 0.957 |
+| `dense_hard_27` | 7 | 1416 | 109 + 6 | 0.828 | 0.909 | 0.929 |
+| `dense_hard_28` | 19 | 1338 | 95 + 7 | 0.768 | 0.869 | 0.910 |
+| `dense_hard_29` | 19 | 1378 | 114 + 7 | 0.879 | 0.923 | 0.942 |
+| `dense_hard_30` | 19 | 1209 | 95 + 5 | 0.756 | 0.839 | 0.854 |
+| `dense_hard_31` | 19 | 1352 | 114 + 5 | 0.786 | 0.900 | 0.930 |
+| `dense_hard_32` | 7 | 1349 | 124 + 6 | 0.824 | 0.896 | 0.913 |
+| `dense_hard_33` | 7 | 1166 | 101 + 6 | 0.848 | 0.917 | 0.945 |
+| `dense_hard_34` | 7 | 1383 | 112 + 7 | 0.904 | 0.928 | 0.940 |
+| `dense_hard_35` | 7 | 1230 | 124 + 7 | 0.843 | 0.925 | 0.942 |
+| `dense_hard_36` | 7 | 1217 | 119 + 6 | 0.910 | 0.936 | 0.957 |
 
 Every structure went up. The 19-fiber bundles gained the most: +0.108 on
 1–18 against +0.042 for the 7-fiber bundles.
@@ -421,6 +427,35 @@ where it was: 0.9159 without them (the same exact replay as the loss table
 below) against 0.9150 with them, 8 structures up and 10 down. They are
 kept because they cut split fibers from 570 to 383 and fits from 3740 to
 3231.
+
+**Step 7: model recenter and residual births** (`model_recenter`,
+`residual_births`; `tangle/ct/_model.py`). An audit of the step 6 fits on
+the 19-fiber bundles found two kinds of miss. About a third of the missed
+fine centerline lay under a fit of its own fiber that sat 0.5–1.5 radii
+off the axis, and over half lay where no fit came within a radius, on
+bright grey inside a bundle. Both come from reading the grey one fiber at a
+time. Across a packed fiber the grey also holds its neighbours' bodies and,
+on this scanner, their dark phase-contrast halos (about a quarter of the
+fiber contrast, 1.5 radii from the axis), so the brightest point across a
+fit is pulled off its axis, and an untraced fiber between fits is a bright
+stripe no seed lands on.
+
+The pass draws the fits as the grey they should show, summed over fibers.
+Each type's radial profile (blur and halo) and each fit's brightness are
+measured on the scan by least squares over the voxels near the fits, so
+nothing about the scanner is assumed. Each fine fit then moves across
+itself, by at most half a radius per sweep over two sweeps, to where its
+own profile best matches the grey the other fits leave (a matched filter
+on the residual). Fibers are then traced on that residual over the fits'
+median brightness: an untraced fiber reads about 0.7 there, the void under
+0.1. A trace is kept when its median residual is at least 0.45, at most
+half of it runs within a radius of a fit and at most a third inside a
+larger type's fit; the recenter then runs again with the new fits. With
+perfectly centred fits (each fine node moved onto its own fiber when
+within 1.5 radii) the step 6 fits would score about 0.04 higher on the
+19-fiber bundles; the recenter recovers about half of that, and the births
+add the rest of the step's gain. The pass roughly doubles the fit time on
+these 160³ scans (55 s to 100 s per structure, on a loaded machine).
 
 ## Caveats
 
