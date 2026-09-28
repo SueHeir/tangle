@@ -10,6 +10,8 @@ use serde::Serialize;
 use tangle_characterize::{characterize_assembly, write_analysis_json, AnalysisWriteError};
 use tangle_core::{FiberAssembly, FiberId, Section, Vec3};
 
+use crate::{junction_bridges, JunctionBridge};
+
 /// Version of the on-disk PuMA bundle schema.
 pub const PUMA_BUNDLE_SCHEMA_VERSION: u32 = 1;
 
@@ -26,6 +28,11 @@ pub struct PumaVoxelExportConfig {
     pub include_interface: bool,
     /// Absolute signed-distance tolerance for ownership ties.
     pub ambiguity_tolerance: f64,
+    /// Binder-bridge radius as a fraction of the thinner fiber's radius.
+    /// `Some` voxelizes every persistent junction as binder (its own phase,
+    /// plus the bond-ID and binder-occupancy images); `None` leaves binder
+    /// out and the fiber images are exactly as without junctions.
+    pub bond_radius_ratio: Option<f64>,
 }
 
 impl PumaVoxelExportConfig {
@@ -37,7 +44,15 @@ impl PumaVoxelExportConfig {
             include_fiber_ids: true,
             include_interface: true,
             ambiguity_tolerance: voxel_size * 1.0e-6,
+            bond_radius_ratio: None,
         }
+    }
+
+    /// Voxelizes persistent junctions as binder bridges of the given radius
+    /// ratio, or leaves them out with `None`.
+    pub fn with_bonds(mut self, radius_ratio: Option<f64>) -> Self {
+        self.bond_radius_ratio = radius_ratio;
+        self
     }
 
     /// Enables or disables the stable owner-fiber image.
@@ -74,12 +89,25 @@ pub struct PumaExportReport {
     pub voxel_volume_fraction: f64,
     /// Number of occupied cells with a cross-fiber ownership tie.
     pub ambiguous_voxels: usize,
+    /// Number of cells assigned to the binder phase (included in
+    /// `occupied_voxels`).
+    #[serde(default)]
+    pub binder_voxels: usize,
+    /// Number of binder bridges voxelized.
+    #[serde(default)]
+    pub bonds: usize,
     /// Primary phase and orientation image.
     pub domain_path: PathBuf,
     /// Optional owner-fiber image.
     pub fiber_ids_path: Option<PathBuf>,
     /// Optional smooth interface image.
     pub interface_path: Option<PathBuf>,
+    /// Owner-junction image, when bonds are exported.
+    #[serde(default)]
+    pub bond_ids_path: Option<PathBuf>,
+    /// Smooth binder-occupancy image, when bonds are exported.
+    #[serde(default)]
+    pub binder_interface_path: Option<PathBuf>,
     /// Bundle manifest.
     pub manifest_path: PathBuf,
     /// Native TANGLE characterization.
@@ -186,6 +214,8 @@ struct PumaManifest {
     arrays: Vec<ManifestArray>,
     materials: Vec<ManifestMaterial>,
     fibers: Vec<ManifestFiber>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    binder: Option<ManifestBinder>,
     voxelization: ManifestVoxelization,
     source: ManifestSource,
     files: Vec<ManifestFile>,
@@ -238,6 +268,26 @@ struct ManifestFiber {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct ManifestBinder {
+    phase_id: u16,
+    name: &'static str,
+    geometry: &'static str,
+    radius_ratio: f64,
+    occupancy_rule: &'static str,
+    interface_rule: &'static str,
+    bonds: Vec<ManifestBond>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ManifestBond {
+    export_id: u32,
+    junction_id: u32,
+    law: String,
+    radius: f64,
+    length: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct ManifestVoxelization {
     geometry: &'static str,
     occupancy_rule: &'static str,
@@ -269,6 +319,10 @@ struct VoxelFields {
     owner_export_id: Vec<u32>,
     interface: Vec<u8>,
     ambiguous: Vec<bool>,
+    /// Owner-junction export ID per cell; empty without bonds.
+    bond_id: Vec<u32>,
+    /// Smooth binder occupancy outside the fibers; empty without bonds.
+    binder_interface: Vec<u8>,
 }
 
 /// Characterizes and rasterizes an assembly into a versioned bundle that can
@@ -286,9 +340,24 @@ pub fn write_puma_bundle(
         .try_fold(1usize, |product, count| product.checked_mul(*count))
         .ok_or(PumaExportError::GridTooLarge(counts))?;
 
+    let bridges = match config.bond_radius_ratio {
+        Some(ratio) => junction_bridges(assembly, ratio)
+            .map_err(|error| PumaExportError::InvalidConfig(error.to_string()))?,
+        None => Vec::new(),
+    };
     fs::create_dir_all(&config.output_directory)?;
-    let fields = voxelize(assembly, config, counts, total_voxels)?;
+    let fields = voxelize_with_bonds(assembly, config, counts, total_voxels, &bridges)?;
+    let binder_phase = binder_phase_id(assembly);
     let occupied_voxels = fields.phase.iter().filter(|phase| **phase != 0).count();
+    let binder_voxels = if config.bond_radius_ratio.is_some() {
+        fields
+            .phase
+            .iter()
+            .filter(|phase| **phase == binder_phase)
+            .count()
+    } else {
+        0
+    };
     let ambiguous_voxels = fields.ambiguous.iter().filter(|value| **value).count();
     let voxel_volume_fraction = occupied_voxels as f64 / total_voxels as f64;
 
@@ -330,6 +399,31 @@ pub fn write_puma_bundle(
         )?;
     }
 
+    let bonds_enabled = config.bond_radius_ratio.is_some();
+    let bond_ids_path = bonds_enabled.then(|| config.output_directory.join("bond_ids.vti"));
+    if let Some(path) = &bond_ids_path {
+        write_scalar_vti_u32(
+            path,
+            assembly.cell.origin,
+            config.voxel_size,
+            counts,
+            "bond_id",
+            &fields.bond_id,
+        )?;
+    }
+    let binder_interface_path =
+        bonds_enabled.then(|| config.output_directory.join("binder_interface.vti"));
+    if let Some(path) = &binder_interface_path {
+        write_scalar_vti_u8(
+            path,
+            assembly.cell.origin,
+            config.voxel_size,
+            counts,
+            "binder_grayscale",
+            &fields.binder_interface,
+        )?;
+    }
+
     let analysis_path = config.output_directory.join("tangle_analysis.json");
     write_analysis_json(&characterize_assembly(assembly), &analysis_path)?;
 
@@ -368,9 +462,28 @@ pub fn write_puma_bundle(
         });
     }
 
+    if bonds_enabled {
+        arrays.push(ManifestArray {
+            file: "bond_ids.vti".into(),
+            name: "bond_id",
+            vtk_type: "UInt32",
+            components: 1,
+            association: "CellData",
+        });
+        arrays.push(ManifestArray {
+            file: "binder_interface.vti".into(),
+            name: "binder_grayscale",
+            vtk_type: "UInt8",
+            components: 1,
+            association: "CellData",
+        });
+    }
+
     let mut bundle_paths = vec![domain_path.clone(), analysis_path.clone()];
     bundle_paths.extend(fiber_ids_path.iter().cloned());
     bundle_paths.extend(interface_path.iter().cloned());
+    bundle_paths.extend(bond_ids_path.iter().cloned());
+    bundle_paths.extend(binder_interface_path.iter().cloned());
     let files = bundle_paths
         .iter()
         .map(|path| manifest_file(path, &config.output_directory))
@@ -419,6 +532,29 @@ pub fn write_puma_bundle(
                 fiber_id: fiber.id.0,
             })
             .collect(),
+        binder: config.bond_radius_ratio.map(|radius_ratio| ManifestBinder {
+            phase_id: binder_phase,
+            name: "binder",
+            geometry: "round capsule between the two anchored centerline points of each junction; radius is radius_ratio times the thinner fiber's radius (short semi-axis for ovals)",
+            radius_ratio,
+            occupancy_rule: "voxel center inside a bridge and outside every fiber; fibers win where both overlap",
+            interface_rule: "binder_grayscale is the bridge's smooth occupancy capped at 255 minus interface_grayscale, so fiber and binder occupancies add to at most 255",
+            bonds: bridges
+                .iter()
+                .map(|bridge| ManifestBond {
+                    export_id: bridge.junction_index as u32 + 1,
+                    junction_id: bridge.junction_id,
+                    law: assembly
+                        .junction_laws
+                        .entries
+                        .get(bridge.law as usize)
+                        .map(|law| law.name.clone())
+                        .unwrap_or_default(),
+                    radius: bridge.radius,
+                    length: bridge.length(),
+                })
+                .collect(),
+        }),
         voxelization: ManifestVoxelization {
             geometry:
                 "piecewise-linear centerline swept by a circular radius with spherical end caps",
@@ -450,9 +586,13 @@ pub fn write_puma_bundle(
         occupied_voxels,
         voxel_volume_fraction,
         ambiguous_voxels,
+        binder_voxels,
+        bonds: bridges.len(),
         domain_path,
         fiber_ids_path,
         interface_path,
+        bond_ids_path,
+        binder_interface_path,
         manifest_path,
         analysis_path,
     })
@@ -472,10 +612,9 @@ fn validate_grid(
             "ambiguity_tolerance must be finite and nonnegative".into(),
         ));
     }
-    if assembly.materials.entries.len() > u16::MAX as usize {
-        return Err(PumaExportError::TooManyMaterials(
-            assembly.materials.entries.len(),
-        ));
+    let phases = assembly.materials.entries.len() + usize::from(config.bond_radius_ratio.is_some());
+    if phases > u16::MAX as usize {
+        return Err(PumaExportError::TooManyMaterials(phases));
     }
     let basis = assembly.cell.basis;
     let scale = basis
@@ -514,11 +653,27 @@ fn validate_grid(
     Ok((lengths, counts))
 }
 
+/// Binder phase ID: the one after every material's.
+fn binder_phase_id(assembly: &FiberAssembly) -> u16 {
+    (assembly.materials.entries.len() + 1).min(u16::MAX as usize) as u16
+}
+
+#[cfg(test)]
 fn voxelize(
     assembly: &FiberAssembly,
     config: &PumaVoxelExportConfig,
     counts: [usize; 3],
     total_voxels: usize,
+) -> Result<VoxelFields, PumaExportError> {
+    voxelize_with_bonds(assembly, config, counts, total_voxels, &[])
+}
+
+fn voxelize_with_bonds(
+    assembly: &FiberAssembly,
+    config: &PumaVoxelExportConfig,
+    counts: [usize; 3],
+    total_voxels: usize,
+    bridges: &[JunctionBridge],
 ) -> Result<VoxelFields, PumaExportError> {
     let mut phase = vec![0u16; total_voxels];
     let mut orientation = vec![[0.0f32; 3]; total_voxels];
@@ -661,6 +816,80 @@ fn voxelize(
             }
         }
     }
+    let (bond_id, binder_interface) = if config.bond_radius_ratio.is_some() {
+        let mut bond_id = vec![0u32; total_voxels];
+        let mut binder_interface = vec![0u8; total_voxels];
+        let binder_phase = binder_phase_id(assembly);
+        for bridge in bridges {
+            let delta = sub(bridge.end, bridge.start);
+            let length = norm(delta);
+            let axis = if length > f64::EPSILON {
+                scale(delta, length.recip())
+            } else {
+                [0.0; 3]
+            };
+            let export_id = bridge.junction_index as u32 + 1;
+            let padding = bridge.radius + interface_half_width;
+            let image_ranges = periodic_image_ranges(
+                bridge.start,
+                bridge.end,
+                padding,
+                origin,
+                lengths,
+                assembly.cell.periodic,
+            );
+            for image_x in image_ranges[0].0..=image_ranges[0].1 {
+                for image_y in image_ranges[1].0..=image_ranges[1].1 {
+                    for image_z in image_ranges[2].0..=image_ranges[2].1 {
+                        let shift = [
+                            image_x as f64 * lengths[0],
+                            image_y as f64 * lengths[1],
+                            image_z as f64 * lengths[2],
+                        ];
+                        let a = add(bridge.start, shift);
+                        let b = add(bridge.end, shift);
+                        let ranges = voxel_ranges(a, b, padding, origin, config.voxel_size, counts);
+                        for z in ranges[2].0..ranges[2].1 {
+                            for y in ranges[1].0..ranges[1].1 {
+                                for x in ranges[0].0..ranges[0].1 {
+                                    let index = x + counts[0] * (y + counts[1] * z);
+                                    let center = [
+                                        origin[0] + (x as f64 + 0.5) * config.voxel_size,
+                                        origin[1] + (y as f64 + 0.5) * config.voxel_size,
+                                        origin[2] + (z as f64 + 0.5) * config.voxel_size,
+                                    ];
+                                    let signed_distance =
+                                        point_segment_distance(center, a, b) - bridge.radius;
+                                    if signed_distance > interface_half_width {
+                                        continue;
+                                    }
+                                    let outside_fibers = 255 - interface[index];
+                                    binder_interface[index] = binder_interface[index].max(
+                                        interface_value(signed_distance, interface_half_width)
+                                            .min(outside_fibers),
+                                    );
+                                    let free = phase[index] == 0 || phase[index] == binder_phase;
+                                    if signed_distance > 0.0
+                                        || !free
+                                        || signed_distance >= best_signed_distance[index]
+                                    {
+                                        continue;
+                                    }
+                                    best_signed_distance[index] = signed_distance;
+                                    phase[index] = binder_phase;
+                                    bond_id[index] = export_id;
+                                    orientation_sum[index] = axis;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (bond_id, binder_interface)
+    } else {
+        (Vec::new(), Vec::new())
+    };
     for (output, sum) in orientation.iter_mut().zip(orientation_sum) {
         let magnitude = norm(sum);
         if magnitude > f64::EPSILON {
@@ -677,6 +906,8 @@ fn voxelize(
         owner_export_id,
         interface,
         ambiguous,
+        bond_id,
+        binder_interface,
     })
 }
 
@@ -1129,5 +1360,121 @@ mod tests {
             "{occupied} voxels, expected {expected}"
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn read_file(path: &Option<PathBuf>) -> Vec<u8> {
+        fs::read(path.as_ref().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn bonds_off_leave_every_image_as_without_junctions() {
+        use crate::bridges::tests::touching_cross;
+        let plain_directory = temporary_bundle("puma-bonds-plain");
+        let joined_directory = temporary_bundle("puma-bonds-joined");
+        let plain = write_puma_bundle(
+            &touching_cross(false, false),
+            &PumaVoxelExportConfig::new(&plain_directory, 0.05),
+        )
+        .unwrap();
+        let joined = write_puma_bundle(
+            &touching_cross(false, true),
+            &PumaVoxelExportConfig::new(&joined_directory, 0.05),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(&plain.domain_path).unwrap(),
+            fs::read(&joined.domain_path).unwrap()
+        );
+        assert_eq!(
+            read_file(&plain.fiber_ids_path),
+            read_file(&joined.fiber_ids_path)
+        );
+        assert_eq!(
+            read_file(&plain.interface_path),
+            read_file(&joined.interface_path)
+        );
+        assert!(joined.bond_ids_path.is_none());
+        assert_eq!(joined.binder_voxels, 0);
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&joined.manifest_path).unwrap()).unwrap();
+        assert!(manifest.get("binder").is_none());
+        fs::remove_dir_all(plain_directory).unwrap();
+        fs::remove_dir_all(joined_directory).unwrap();
+    }
+
+    #[test]
+    fn bonds_on_add_a_binder_phase_outside_the_fibers() {
+        use crate::bridges::tests::touching_cross;
+        let assembly = touching_cross(false, true);
+        let plain_directory = temporary_bundle("puma-binder-plain");
+        let directory = temporary_bundle("puma-binder");
+        let plain = write_puma_bundle(
+            &assembly,
+            &PumaVoxelExportConfig::new(&plain_directory, 0.05),
+        )
+        .unwrap();
+        let config = PumaVoxelExportConfig::new(&directory, 0.05).with_bonds(Some(0.8));
+        let report = write_puma_bundle(&assembly, &config).unwrap();
+        assert_eq!(report.bonds, 1);
+        assert!(report.binder_voxels > 0);
+        assert!(report.bond_ids_path.as_ref().unwrap().is_file());
+        assert!(report.binder_interface_path.as_ref().unwrap().is_file());
+        assert_eq!(
+            report.occupied_voxels,
+            plain.occupied_voxels + report.binder_voxels
+        );
+        // The fiber images do not change when binder is added.
+        assert_eq!(
+            read_file(&plain.fiber_ids_path),
+            read_file(&report.fiber_ids_path)
+        );
+        assert_eq!(
+            read_file(&plain.interface_path),
+            read_file(&report.interface_path)
+        );
+
+        let bridges = junction_bridges(&assembly, 0.8).unwrap();
+        let fields = voxelize_with_bonds(&assembly, &config, [20; 3], 8_000, &bridges).unwrap();
+        let binder_phase = binder_phase_id(&assembly);
+        assert_eq!(binder_phase, 2);
+        for index in 0..8_000 {
+            if fields.phase[index] == binder_phase {
+                assert_eq!(fields.owner_export_id[index], 0);
+                assert_eq!(fields.bond_id[index], 1);
+            } else {
+                assert_eq!(fields.bond_id[index], 0);
+            }
+            assert!(
+                u16::from(fields.binder_interface[index]) + u16::from(fields.interface[index])
+                    <= 255
+            );
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&report.manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["binder"]["phase_id"], 2);
+        assert_eq!(manifest["binder"]["bonds"][0]["junction_id"], 9);
+        assert_eq!(manifest["binder"]["bonds"][0]["law"], "bond");
+        fs::remove_dir_all(plain_directory).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn binder_across_a_periodic_wall_stays_near_the_wall() {
+        use crate::bridges::tests::touching_cross;
+        let assembly = touching_cross(true, true);
+        let config = PumaVoxelExportConfig::new("unused", 0.05).with_bonds(Some(0.8));
+        let bridges = junction_bridges(&assembly, 0.8).unwrap();
+        let fields = voxelize_with_bonds(&assembly, &config, [20; 3], 8_000, &bridges).unwrap();
+        let binder_phase = binder_phase_id(&assembly);
+        let mut binder_columns = Vec::new();
+        for (index, phase) in fields.phase.iter().enumerate() {
+            if *phase == binder_phase {
+                binder_columns.push(index % 20);
+            }
+        }
+        assert!(!binder_columns.is_empty());
+        // The gap between the fibers through the wall is x in [0.95, 1) and
+        // [0, 0.05); the binder never reaches the middle of the cell.
+        assert!(binder_columns.iter().all(|x| *x <= 2 || *x >= 17));
     }
 }

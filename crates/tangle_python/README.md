@@ -354,6 +354,12 @@ print(analysis.nominal_swept_volume_fraction)
 print(bundle.voxel_volume_fraction, bundle.ambiguous_voxels)
 ```
 
+With captured junctions, `bond_radius_ratio=` (a fraction of the thinner
+fiber's radius) also voxelizes each junction as a binder bridge, in its own
+phase with `bond_ids.vti` and `binder_interface.vti`. `write_ovito` draws the
+same bridges as bonds by default. See
+[docs/fiber_bonds.md](../../docs/fiber_bonds.md).
+
 ### Contacts and neighbors
 
 `characterize_neighbors(contact_gap, ...)` on an `Assembly` or `RunResult`

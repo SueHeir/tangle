@@ -221,6 +221,7 @@ See [solver and architecture notes](docs/architecture.md) for details.
 
 [Results/export tutorial](crates/tangle_python/python/tutorials/14_results_and_exports.ipynb)
 · [PuMA analysis guide](docs/puma_interoperability.md)
+· [Fiber bonds (binder at junctions)](docs/fiber_bonds.md)
 · [CT fitting guide](docs/ct_fitting.md)
 · [CT fitting results](crates/tangle_python/python/examples/ct_results/README.md)
 · [Synthetic CT scans](docs/ct_synthetic.md)

@@ -180,6 +180,8 @@ specimen.puma/
 ├── domain.vti
 ├── fiber_ids.vti       # optional
 ├── interface.vti       # optional
+├── bond_ids.vti        # with bond_radius_ratio
+├── binder_interface.vti  # with bond_radius_ratio
 ├── manifest.json
 └── tangle_analysis.json
 ```
@@ -192,6 +194,10 @@ specimen.puma/
   fiber IDs in the manifest.
 - `interface.vti`: UInt8 smooth signed-distance-derived interface, solid
   threshold 128, useful for surface reconstruction. It is not a material map.
+- `bond_ids.vti`, `binder_interface.vti`: written only when
+  `bond_radius_ratio` is given. Junctions are then voxelized as binder, in
+  its own `phase_id` recorded in the manifest's `binder` entry; see
+  [fiber_bonds.md](fiber_bonds.md).
 - `manifest.json`: cell, grid, array conventions, material/fiber maps,
   occupancy/ownership rules, ambiguity count, source provenance, and file
   sizes/FNV-1a hashes. Hashes are integrity fingerprints, not cryptographic

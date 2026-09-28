@@ -198,6 +198,14 @@ class PumaExportReport:
     @property
     def ambiguous_voxels(self) -> int: ...
     @property
+    def binder_voxels(self) -> int: ...
+    @property
+    def bonds(self) -> int: ...
+    @property
+    def bond_ids_path(self) -> Path | None: ...
+    @property
+    def binder_interface_path(self) -> Path | None: ...
+    @property
     def domain_path(self) -> Path: ...
     @property
     def fiber_ids_path(self) -> Path | None: ...
@@ -296,6 +304,7 @@ class Assembly:
         include_fiber_ids: bool = ...,
         include_interface: bool = ...,
         ambiguity_tolerance: float | None = ...,
+        bond_radius_ratio: float | None = ...,
     ) -> PumaExportReport: ...
 
 class FiberCollection:
@@ -1019,6 +1028,7 @@ class RunResult:
         view_script_path: Path | None = ...,
         session_path: Path | None = ...,
         coloring: OvitoColoring = ...,
+        bond_radius_ratio: float | None = ...,
     ) -> None: ...
     def export_bpm(
         self,
@@ -1038,6 +1048,7 @@ class RunResult:
         include_fiber_ids: bool = ...,
         include_interface: bool = ...,
         ambiguity_tolerance: float | None = ...,
+        bond_radius_ratio: float | None = ...,
     ) -> PumaExportReport: ...
 
 class ImageRelaxer:

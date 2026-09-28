@@ -644,7 +644,7 @@ impl PyAssembly {
         )
     }
 
-    #[pyo3(signature = (output_directory, voxel_size, *, include_fiber_ids=true, include_interface=true, ambiguity_tolerance=None))]
+    #[pyo3(signature = (output_directory, voxel_size, *, include_fiber_ids=true, include_interface=true, ambiguity_tolerance=None, bond_radius_ratio=None))]
     fn export_puma(
         &self,
         output_directory: PathBuf,
@@ -652,10 +652,12 @@ impl PyAssembly {
         include_fiber_ids: bool,
         include_interface: bool,
         ambiguity_tolerance: Option<f64>,
+        bond_radius_ratio: Option<f64>,
     ) -> PyResult<PyPumaExportReport> {
         let mut config = PumaVoxelExportConfig::new(output_directory, voxel_size)
             .with_fiber_ids(include_fiber_ids)
-            .with_interface(include_interface);
+            .with_interface(include_interface)
+            .with_bonds(bond_radius_ratio);
         if let Some(tolerance) = ambiguity_tolerance {
             config = config.with_ambiguity_tolerance(tolerance);
         }
