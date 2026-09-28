@@ -92,10 +92,15 @@ def main():
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, total_steps=args.steps, pct_start=0.05)
     step, best = 0, float("inf")
     if args.init:
-        # the body only: a first-layout network's head (void / fine / coarse) does not fit the new outputs
-        weights = {k: v for k, v in torch.load(args.init, map_location=device)["model"].items()
-                   if not k.startswith("head.")}
+        weights = torch.load(args.init, map_location=device)["model"]
+        head_w, head_b = weights.pop("head.weight"), weights.pop("head.bias")
         model.load_state_dict(weights, strict=False)
+        # the head: keep the channels both layouts share (heatmap, offset, direction: the first 10); a
+        # first-layout network's void / fine / coarse logits do not fit the fiber and radius outputs
+        shared = min(head_w.shape[0], model.head.weight.shape[0], 10 if head_w.shape[0] != model.head.weight.shape[0] else head_w.shape[0])
+        with torch.no_grad():
+            model.head.weight[:shared] = head_w[:shared]
+            model.head.bias[:shared] = head_b[:shared]
     if args.resume and (args.out / "last.pt").exists():
         state = torch.load(args.out / "last.pt", map_location=device)
         model.load_state_dict(state["model"])
