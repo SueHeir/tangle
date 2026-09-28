@@ -17,7 +17,7 @@ import numpy as np
 from scipy.ndimage import uniform_filter1d
 from scipy.spatial import cKDTree
 
-from maps import OFFSET, TYPE
+from maps import FIBER, OFFSET
 
 CATCH = 3.0  # voxels: how far a vote may land from the node it is counted for
 SMOOTH = 7  # nodes (1 voxel apart) averaged along the fiber
@@ -47,8 +47,7 @@ class Accumulator:
 
     def add(self, maps: np.ndarray, origin=(0, 0, 0), window=None):
         window = window or tuple(slice(0, s) for s in maps.shape[1:])
-        kind = np.argmax(maps[TYPE][(slice(None), *window)], axis=0)
-        z, y, x = np.nonzero(kind > 0)
+        z, y, x = np.nonzero(maps[FIBER][0][window] > 0.5)
         z, y, x = z + window[0].start, y + window[1].start, x + window[2].start
         voxel = np.stack([x + origin[2], y + origin[1], z + origin[0]], axis=1) + 0.5
         vote = voxel + maps[OFFSET][:, z, y, x].T

@@ -8,7 +8,12 @@ order; arrays in (z, y, x) order like the scans):
   centerline, so touching fibers stay separate ridges.
 * 1-3: offset from the voxel center to its own fiber's axis.
 * 4-9: fiber direction as the sign-free tensor t t^T (xx, yy, zz, xy, xz, yz).
-* 10-12: type logits (void, fine, coarse).
+* 10: fiber (vs void) logit.
+* 11: log of the local fiber radius (voxels; the equal-area radius of the fiber the voxel belongs to).
+
+No fiber types: the network only finds fibers, whatever their material, and the radius map lets the tracer and
+the per-fiber typing (``fiber_types.py``) work for any mix of sizes. The first networks (13 channels: void /
+fine / coarse logits in place of 10-11) still load; ``predict`` turns their output into this layout.
 """
 
 import numpy as np
@@ -16,8 +21,10 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-HEAT, OFFSET, DIRECTION, TYPE = slice(0, 1), slice(1, 4), slice(4, 10), slice(10, 13)
-CHANNELS = 13
+HEAT, OFFSET, DIRECTION, FIBER, RADIUS = slice(0, 1), slice(1, 4), slice(4, 10), slice(10, 11), slice(11, 12)
+CHANNELS = 12
+_OLD_TYPE = slice(10, 13)  # the first networks' void / fine / coarse logits
+_OLD_RADIUS = (2.75, 6.75)  # voxels: what "fine" and "coarse" meant for them
 
 
 def levels(volume: np.ndarray) -> tuple[float, float]:
@@ -55,16 +62,13 @@ def targets(data, window=None) -> dict:
     t = tan[i]
     direction = np.stack([t[..., 0] ** 2, t[..., 1] ** 2, t[..., 2] ** 2, t[..., 0] * t[..., 1],
                           t[..., 0] * t[..., 2], t[..., 1] * t[..., 2]], axis=0)
-    fiber_type = np.zeros(int(max(fid.max(), labels.max())) + 1, dtype=np.int64)
-    fiber_type[fid] = typ.astype(np.int64) + 1
-    kind = fiber_type[np.minimum(labels, len(fiber_type) - 1)]
-    kind[labels == 0] = 0
     return {
         "heat": heat[None],
         "offset": np.moveaxis(offset, -1, 0).astype(np.float32) * own[None],
         "direction": direction.astype(np.float32) * own[None],
         "own": own[None].astype(np.float32),
-        "type": kind,
+        "fiber": (labels > 0)[None].astype(np.float32),
+        "radius": (np.log(np.maximum(rad[i], 0.5)) * own)[None].astype(np.float32),
     }
 
 
@@ -104,13 +108,13 @@ def block(cin, cout):
 
 
 class UNet3D(nn.Module):
-    def __init__(self, base: int = 16, levels: int = 4):
+    def __init__(self, base: int = 16, levels: int = 4, channels: int = CHANNELS):
         super().__init__()
         widths = [base * 2**k for k in range(levels + 1)]
         self.down = nn.ModuleList([block(1, widths[0])] + [block(widths[k], widths[k + 1]) for k in range(levels)])
         self.up = nn.ModuleList([nn.ConvTranspose3d(widths[k + 1], widths[k], 2, stride=2) for k in range(levels)])
         self.merge = nn.ModuleList([block(2 * widths[k], widths[k]) for k in range(levels)])
-        self.head = nn.Conv3d(widths[0], CHANNELS, 1)
+        self.head = nn.Conv3d(widths[0], channels, 1)
 
     def forward(self, x):
         skips = []
@@ -128,22 +132,41 @@ def loss_terms(out: torch.Tensor, batch: dict) -> dict:
     weight = 1.0 + 9.0 * (heat > 0.1)
     own = batch["own"]
     n_own = own.sum().clamp(min=1.0)
-    type_weight = torch.tensor([1.0, 3.0, 3.0], device=out.device)
+    fiber = batch["fiber"]
     return {
         "heat": (F.binary_cross_entropy_with_logits(out[:, HEAT], heat, reduction="none") * weight).mean(),
         "offset": (F.smooth_l1_loss(out[:, OFFSET], batch["offset"], reduction="none") * own).sum() / (3 * n_own),
         "direction": ((out[:, DIRECTION] - batch["direction"]) ** 2 * own).sum() / (6 * n_own) * 10.0,
-        "type": F.cross_entropy(out[:, TYPE], batch["type"], weight=type_weight),
+        "fiber": (F.binary_cross_entropy_with_logits(out[:, FIBER], fiber, reduction="none")
+                  * (1.0 + 2.0 * fiber)).mean(),
+        "radius": (F.smooth_l1_loss(out[:, RADIUS], batch["radius"], reduction="none", beta=0.1) * own).sum() / n_own,
     }
+
+
+def load(path, device: str) -> nn.Module:
+    """A saved network (either layout) on ``device``."""
+    state = torch.load(path, map_location=device)
+    channels = state["model"]["head.weight"].shape[0]
+    model = UNet3D(base=state.get("base", 16), channels=channels).to(device)
+    model.load_state_dict(state["model"])
+    return model
 
 
 @torch.no_grad()
 def predict(model: nn.Module, volume: np.ndarray, device: str, grey: tuple[float, float] | None = None) -> np.ndarray:
-    """The network's maps for a whole scan (sides divisible by 16), float32 (CHANNELS, z, y, x):
-    heatmap and type as probabilities, offsets in voxels, the direction tensor as predicted."""
+    """The network's maps for a whole scan (sides divisible by 16), float32 (CHANNELS, z, y, x): heatmap and
+    fiber as probabilities, offsets in voxels, the direction tensor as predicted, the radius in voxels."""
     model.eval()
     x = torch.from_numpy(normalize(volume, grey))[None, None].to(device)
     out = model(x)[0]
-    out[HEAT] = torch.sigmoid(out[HEAT])
-    out[TYPE] = torch.softmax(out[TYPE], dim=0)
-    return out.cpu().numpy()
+    maps = torch.empty((CHANNELS, *out.shape[1:]), device=out.device)
+    maps[HEAT] = torch.sigmoid(out[HEAT])
+    maps[OFFSET], maps[DIRECTION] = out[OFFSET], out[DIRECTION]
+    if out.shape[0] == CHANNELS:
+        maps[FIBER] = torch.sigmoid(out[FIBER])
+        maps[RADIUS] = torch.exp(out[RADIUS])
+    else:  # a first-layout network: fiber = not void, radius from its fine / coarse call
+        p = torch.softmax(out[_OLD_TYPE], dim=0)
+        maps[FIBER] = 1.0 - p[0:1]
+        maps[RADIUS] = torch.where(p[2:3] > p[1:2], _OLD_RADIUS[1], _OLD_RADIUS[0])
+    return maps.cpu().numpy()

@@ -2,6 +2,8 @@
 
 usage: python train.py DATA VAL OUT [--steps N] [--crop 128] [--base 16] [--resume]
 
+DATA and VAL may each be several folders joined by commas (e.g. dense_hard-style and varied data together).
+
 Writes OUT/last.pt every checkpoint and OUT/best.pt at the lowest validation
 loss, and one line per log interval to stdout.
 """
@@ -17,7 +19,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from maps import UNet3D, augment, loss_terms, normalize, targets
 
-WEIGHTS = {"heat": 1.0, "offset": 1.0, "direction": 1.0, "type": 0.5}
+WEIGHTS = {"heat": 1.0, "offset": 1.0, "direction": 1.0, "fiber": 0.5, "radius": 1.0}
 
 
 class Crops(Dataset):
@@ -68,8 +70,8 @@ def run_batch(model, batch, device):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("data", type=Path)
-    parser.add_argument("val", type=Path)
+    parser.add_argument("data")
+    parser.add_argument("val")
     parser.add_argument("out", type=Path)
     parser.add_argument("--steps", type=int, default=20000)
     parser.add_argument("--crop", type=int, default=128)
@@ -90,22 +92,25 @@ def main():
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, total_steps=args.steps, pct_start=0.05)
     step, best = 0, float("inf")
     if args.init:
-        model.load_state_dict(torch.load(args.init, map_location=device)["model"])
+        # the body only: a first-layout network's head (void / fine / coarse) does not fit the new outputs
+        weights = {k: v for k, v in torch.load(args.init, map_location=device)["model"].items()
+                   if not k.startswith("head.")}
+        model.load_state_dict(weights, strict=False)
     if args.resume and (args.out / "last.pt").exists():
         state = torch.load(args.out / "last.pt", map_location=device)
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
         scheduler.load_state_dict(state["scheduler"])
         step, best = state["step"], state["best"]
-    (args.out / "config.json").write_text(json.dumps({**vars(args), "data": str(args.data), "val": str(args.val),
+    (args.out / "config.json").write_text(json.dumps({**vars(args), "data": args.data, "val": args.val,
                                                        "out": str(args.out), "init": str(args.init), "weights": WEIGHTS}, indent=1) + "\n")
 
-    val_files = sorted(args.val.glob("*.npz"))
+    val_files = sorted(f for d in args.val.split(",") for f in Path(d).glob("*.npz"))
     val_loader = DataLoader(Crops(val_files, args.crop, 1, 0, train=False), batch_size=1, num_workers=2)
     started, window = time.perf_counter(), []
     while step < args.steps:
         # Re-list each pass so volumes still being generated join as they land.
-        files = sorted(args.data.glob("*.npz"))
+        files = sorted(f for d in args.data.split(",") for f in Path(d).glob("*.npz"))
         loader = DataLoader(Crops(files, args.crop, 2, step, noise=args.noise), batch_size=1, shuffle=True, num_workers=args.workers,
                             persistent_workers=False, prefetch_factor=2)
         model.train()
