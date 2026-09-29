@@ -74,6 +74,7 @@ VARIED_SIDE = 160  # voxels (1 um); everything below is in voxels, the physical 
 
 FOCUS_FIRST = 4001  # indices from here on use the focused draw (varied_settings(focus=True))
 BOND_FIRST = 5001  # indices from here on may have binder bonds at their fiber junctions
+SHAPES_FIRST = 7001  # ... and from here on bonds of several shapes (bridge, meniscus, blob) and coatings
 
 
 def varied_settings(index: int, focus: bool | None = None) -> dict:
@@ -125,6 +126,16 @@ def varied_settings(index: int, focus: bool | None = None) -> dict:
             "brightness": round(float(rng.choice([rng.uniform(0.3, 0.8), rng.uniform(0.8, 1.2)])), 2),
             "delta_beta": round(float(rng.uniform(4.0, 16.0)), 1),
         }
+        if index >= SHAPES_FIRST:
+            bonds["shape"] = str(rng.choice(["bridge", "meniscus", "meniscus", "blob"]))
+            bonds["coating"] = round(float(rng.uniform(0.1, 0.6)), 2) if rng.random() < 0.4 else 0.0
+            bonds["coating_thickness"] = round(float(rng.uniform(0.7, 2.0)), 2)
+    elif index >= SHAPES_FIRST and rng.random() < 0.3:  # some bond-free scans still carry a coating
+        bonds = {"probability": 0.0, "gap": 0.5, "radius_ratio": 1.0,
+                 "delta_beta": round(float(rng.uniform(4.0, 16.0)), 1),
+                 "brightness": round(float(rng.uniform(0.3, 1.2)), 2), "shape": "bridge",
+                 "coating": round(float(rng.uniform(0.1, 0.6)), 2),
+                 "coating_thickness": round(float(rng.uniform(0.7, 2.0)), 2)}
     orientation = str(rng.choice(["planar", "planar", "aligned", "biaxial", "isotropic"]
                                  + (["isotropic"] if focus else [])))
     blur = float(rng.choice([0.0, 0.0, 0.5, 1.0]))
@@ -246,7 +257,9 @@ def _varied_scan(v, index, cache, crowd):
     if v.get("bonds"):
         b = v["bonds"]
         truth = with_bonds(cache / f"varied_{index}-{key}.json", cell, populations, b, v["seed"])
-        binder = ct.Binder(radius_ratio=b["radius_ratio"], brightness=b["brightness"], delta_beta=b["delta_beta"])
+        binder = ct.Binder(radius_ratio=b["radius_ratio"], brightness=b["brightness"], delta_beta=b["delta_beta"],
+                           shape=b.get("shape", "bridge"), coating=b.get("coating", 0.0),
+                           coating_thickness=b.get("coating_thickness", 1.0))
     v = {**v, "crowd": crowd}
     scanner = replace(ex.SCANNER, photons=v["photons"], noise_blur=v["noise_blur"], resolution=v["resolution"] * um,
                       propagation=v["propagation"], fiber_motion=v["fiber_motion"] * um, drift=v["drift"] * um,
@@ -295,6 +308,8 @@ def main() -> None:
         if scan.bond_labels is not None:
             extra["bond_labels"] = scan.bond_labels.astype(np.uint16)
             extra["bond_ratio"] = np.float32(varied["bonds"]["radius_ratio"])
+            if scan.binder_occupancy is not None:
+                extra["binder_mask"] = scan.binder_occupancy > 0.5
             extra["bond_pairs"] = np.array([b["fibers"] + [0] * (2 - len(b["fibers"])) for b in scan.bonds]
                                            or np.zeros((0, 2)), dtype=np.int32).reshape(-1, 2)
             extra["bond_centers"] = np.array([b["center"] for b in scan.bonds] or np.zeros((0, 3)),

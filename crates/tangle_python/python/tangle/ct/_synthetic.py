@@ -47,6 +47,8 @@ class SyntheticScan:
     # and each bond's two fibers (one-based ids, as ``labels``) and center (x, y, z voxels). None without bonds.
     bond_labels: np.ndarray | None = None
     bonds: list[dict] | None = None
+    # all binder (bonds and coatings) as occupancy 0-1; None without bonds
+    binder_occupancy: np.ndarray | None = None
 
     def fiber_mask(self, level: float = 0.5, *, sigma: float = 0.7) -> np.ndarray:
         """A binary fiber mask, as a grey-level threshold of the scan gives.
@@ -213,6 +215,9 @@ def synthetic_ct(
         if binder and report.bond_ids_path is not None:
             bond_labels = read_vti(report.bond_ids_path).astype(np.int32)
             binder_occupancy = np.clip(read_vti(report.binder_interface_path).astype(np.float32) / 255.0, 0.0, 1.0)
+    if binder and bond_labels is None:  # no junctions to bond (a coating may still be drawn)
+        bond_labels = np.zeros(labels.shape, np.int32)
+        binder_occupancy = np.zeros(labels.shape, np.float32)
     occupancy = np.clip(interface.astype(np.float32) / 255.0, 0.0, 1.0)
     centerlines = [np.asarray(line) / voxel_size for line in source.centerlines()]
     # Export ids are one-based in source order for these single-material scans.
@@ -221,6 +226,8 @@ def synthetic_ct(
     if semi_axes is not None:
         radii = np.sqrt(semi_axes[:, 0] * semi_axes[:, 1])
     reach = semi_axes[:, 0] if semi_axes is not None else radii
+    if binder_occupancy is not None and (binder.shape != "bridge" or binder.coating > 0):
+        bond_labels, binder_occupancy = _shape_binder(bond_labels, binder_occupancy, labels, radii, binder, seed)
     period = np.zeros(3)
     cell = getattr(source, "cell", None)
     if cell is not None:
@@ -277,7 +284,7 @@ def synthetic_ct(
         low, high = np.percentile(attenuation, [0.5, 99.5])
         volume = np.clip((attenuation - low) / (high - low) * 65535, 0, 65535).astype(np.uint16)
         return SyntheticScan(volume, labels, centerlines, radii, voxel_size, period, types, semi_axes, long_axes,
-                             *_bond_truth(bond_labels, labels))
+                             *_bond_truth(bond_labels, labels), binder_occupancy)
     if binder_occupancy is not None:
         occupancy = occupancy + binder.brightness * binder_occupancy
     attenuation = void_level + (1.0 - void_level) * gaussian_filter(occupancy, psf_sigma_voxels)
@@ -299,7 +306,7 @@ def synthetic_ct(
     volume = np.clip((attenuation - low) / (high - low) * 65535, 0, 65535).astype(np.uint16)
 
     return SyntheticScan(volume, labels, centerlines, radii, voxel_size, period, types, semi_axes, long_axes,
-                         *_bond_truth(bond_labels, labels))
+                         *_bond_truth(bond_labels, labels), binder_occupancy)
 
 
 @dataclass(frozen=True)
@@ -314,6 +321,60 @@ class Binder:
     radius_ratio: float = 1.0
     brightness: float = 0.7
     delta_beta: float = 10.0
+    # "bridge": the exporter's capsule between the two anchored axis points; "meniscus": binder filling the
+    # wedge between the two fibers near the contact (where the distances to both surfaces add up to less than
+    # the bond size), as a liquid binder wets a crossing; "blob": a round lump at the contact.
+    shape: str = "bridge"
+    # Binder that coats fibers without bonding: this share of the fibers gets a layer ``coating_thickness``
+    # voxels thick (binder in the images, but no bond).
+    coating: float = 0.0
+    coating_thickness: float = 1.0
+
+
+def _shape_binder(bond_labels, binder_occupancy, labels, radii, binder, seed):
+    """Redraw the exporter's bridges as ``binder.shape`` around the same contacts, and add coatings."""
+    from scipy.ndimage import distance_transform_edt, gaussian_filter
+
+    _, bonds = _bond_truth(bond_labels, labels)
+    shape = labels.shape
+    new_labels = np.zeros_like(bond_labels)
+    if binder.shape == "bridge":
+        new_labels = bond_labels.copy()
+        mask = binder_occupancy > 0.5
+    else:
+        mask = np.zeros(shape, bool)
+        for bond in bonds:
+            if len(bond["fibers"]) < 2:
+                continue
+            i, j = bond["fibers"]
+            r = float(min(radii[i - 1], radii[j - 1]))
+            size = max(binder.radius_ratio * r, 1.0)
+            c = np.asarray(bond["center"]) - 0.5  # voxel index units (x, y, z)
+            half = int(np.ceil(size * 2.5 + 3))
+            lo = np.maximum(np.floor(c).astype(int) - half, 0)[::-1]
+            hi = np.minimum(np.floor(c).astype(int) + half + 1, np.array(shape[::-1]))[::-1]
+            box = tuple(slice(a, b) for a, b in zip(lo, hi))
+            lab = labels[box]
+            z, y, x = np.indices(lab.shape)
+            far = np.sqrt((x + lo[2] - c[0]) ** 2 + (y + lo[1] - c[1]) ** 2 + (z + lo[0] - c[2]) ** 2)
+            if binder.shape == "blob":
+                region = far <= 1.2 * size
+            else:  # meniscus
+                d_i = distance_transform_edt(lab != i)
+                d_j = distance_transform_edt(lab != j)
+                region = (d_i + d_j <= size) & (far <= 2.0 * size + 2)
+            region &= (lab == 0) & (new_labels[box] == 0)
+            new_labels[box][region] = bond["id"]
+            mask[box] |= region
+    if binder.coating > 0 and labels.max() > 0:
+        rng = np.random.default_rng([seed, 2])
+        coated = np.zeros(int(labels.max()) + 1, bool)
+        coated[1:] = rng.random(int(labels.max())) < binder.coating
+        dist, index = distance_transform_edt(labels == 0, return_indices=True)
+        nearest = labels[tuple(index)]
+        mask |= (dist > 0) & (dist <= binder.coating_thickness) & coated[nearest]
+    occupancy = np.clip(gaussian_filter(mask.astype(np.float32), 0.5), 0.0, 1.0) * (labels == 0)
+    return new_labels, occupancy
 
 
 def _bond_truth(bond_labels, labels):

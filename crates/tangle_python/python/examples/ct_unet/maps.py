@@ -66,6 +66,15 @@ def normalize(volume: np.ndarray, grey: tuple[float, float] | None = None) -> np
     return (v - np.float32(low)) / np.float32(max(high - low, 1e-6))
 
 
+def _binder(data, window, shape):
+    """The binder target: all binder (bonds and coatings) when stored, else the bond voxels, else none."""
+    for key in ("binder_mask", "bond_labels"):
+        if key in data:
+            a = data[key] if window is None else data[key][window]
+            return (a > 0)[None].astype(np.float32)
+    return np.zeros((1, *shape), np.float32)
+
+
 def targets(data, window=None) -> dict:
     """Training targets for ``data`` (a make_data npz), optionally in a (z, y, x) slice ``window``."""
     near = data["near"] if window is None else data["near"][window]
@@ -93,8 +102,7 @@ def targets(data, window=None) -> dict:
         "direction": direction.astype(np.float32) * own[None],
         "own": own[None].astype(np.float32),
         "fiber": (labels > 0)[None].astype(np.float32),
-        "binder": ((data["bond_labels"] if window is None else data["bond_labels"][window]) > 0)[None].astype(np.float32)
-        if "bond_labels" in data else np.zeros((1, *labels.shape), np.float32),
+        "binder": _binder(data, window, labels.shape),
         "radius": (np.log(np.maximum(rad[i], 0.5)) * own)[None].astype(np.float32),
     }
 
