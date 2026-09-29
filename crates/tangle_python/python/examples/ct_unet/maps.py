@@ -100,20 +100,26 @@ def augment(sample: dict, rng: np.random.Generator) -> dict:
     return sample
 
 
-def block(cin, cout):
+def block(cin, cout, groups=None):
+    groups = groups or min(8, cout // 4)
     return nn.Sequential(
-        nn.Conv3d(cin, cout, 3, padding=1, bias=False), nn.GroupNorm(min(8, cout // 4), cout), nn.SiLU(inplace=True),
-        nn.Conv3d(cout, cout, 3, padding=1, bias=False), nn.GroupNorm(min(8, cout // 4), cout), nn.SiLU(inplace=True),
+        nn.Conv3d(cin, cout, 3, padding=1, bias=False), nn.GroupNorm(groups, cout), nn.SiLU(inplace=True),
+        nn.Conv3d(cout, cout, 3, padding=1, bias=False), nn.GroupNorm(groups, cout), nn.SiLU(inplace=True),
     )
 
 
 class UNet3D(nn.Module):
-    def __init__(self, base: int = 16, levels: int = 4, channels: int = CHANNELS):
+    def __init__(self, base: int = 16, levels: int = 4, channels: int = CHANNELS, group_sizes=None):
+        """``group_sizes``: channels per norm group at each level (default: 8 groups, at least 4 channels each);
+        a widened network keeps its source's group sizes, so the old channels stay in groups of their own."""
         super().__init__()
         widths = [base * 2**k for k in range(levels + 1)]
-        self.down = nn.ModuleList([block(1, widths[0])] + [block(widths[k], widths[k + 1]) for k in range(levels)])
+        self.group_sizes = list(group_sizes) if group_sizes else None
+        g = [w // group_sizes[k] for k, w in enumerate(widths)] if group_sizes else [None] * len(widths)
+        self.down = nn.ModuleList([block(1, widths[0], g[0])] + [block(widths[k], widths[k + 1], g[k + 1])
+                                                                 for k in range(levels)])
         self.up = nn.ModuleList([nn.ConvTranspose3d(widths[k + 1], widths[k], 2, stride=2) for k in range(levels)])
-        self.merge = nn.ModuleList([block(2 * widths[k], widths[k]) for k in range(levels)])
+        self.merge = nn.ModuleList([block(2 * widths[k], widths[k], g[k]) for k in range(levels)])
         self.head = nn.Conv3d(widths[0], channels, 1)
 
     def forward(self, x):
@@ -147,7 +153,7 @@ def load(path, device: str) -> nn.Module:
     """A saved network (either layout) on ``device``."""
     state = torch.load(path, map_location=device)
     channels = state["model"]["head.weight"].shape[0]
-    model = UNet3D(base=state.get("base", 16), channels=channels).to(device)
+    model = UNet3D(base=state.get("base", 16), channels=channels, group_sizes=state.get("group_sizes")).to(device)
     model.load_state_dict(state["model"])
     return model
 
@@ -170,3 +176,44 @@ def predict(model: nn.Module, volume: np.ndarray, device: str, grey: tuple[float
         maps[FIBER] = 1.0 - p[0:1]
         maps[RADIUS] = torch.where(p[2:3] > p[1:2], _OLD_RADIUS[1], _OLD_RADIUS[0])
     return maps.cpu().numpy()
+
+
+def widen(small: nn.Module, base: int) -> nn.Module:
+    """A wider copy of ``small`` (Net2Net style) that starts out computing nearly the same maps.
+
+    Every layer's trained channels are copied into the first channels of the wider layer; the new channels get
+    fresh weights for their own outputs but zero weight wherever they feed an old channel, so on the first step
+    they change nothing downstream. Group norm regroups some layers' channels, so the start is close to, not
+    exactly, the small network.
+    """
+    old_w = [small.down[0][0].out_channels * 2**k for k in range(len(small.down))]
+    sizes = [w // small.down[k][1].num_groups for k, w in enumerate(old_w)]
+    wide = UNet3D(base=base, channels=small.head.out_channels, group_sizes=sizes)
+    new_w = [base * 2**k for k in range(len(small.down))]
+    small_state, wide_state = small.state_dict(), wide.state_dict()
+    for name, target in wide_state.items():
+        source = small_state[name]
+        if target.shape == source.shape:
+            wide_state[name] = source.clone()
+            continue
+        target = target.clone()
+        if target.ndim > 1:
+            target[:, source.shape[1]:] = 0.0  # new inputs feed nothing yet
+            if name.startswith("merge.") and name.endswith(".0.weight"):
+                # the first conv of a merge block reads [upsampled, skip]: both halves move
+                k = int(name.split(".")[1])
+                o, n = old_w[k], new_w[k]
+                target[:, :n * 2] = 0.0
+                target[: source.shape[0], :o] = source[:, :o]
+                target[: source.shape[0], n:n + o] = source[:, o:]
+            elif name.startswith("up.") and name.endswith(".weight"):
+                # transposed conv: (in, out, ...)
+                target[source.shape[0]:] = 0.0
+                target[: source.shape[0], : source.shape[1]] = source
+            else:
+                target[: source.shape[0], : source.shape[1]] = source
+        else:
+            target[: source.shape[0]] = source
+        wide_state[name] = target
+    wide.load_state_dict(wide_state)
+    return wide

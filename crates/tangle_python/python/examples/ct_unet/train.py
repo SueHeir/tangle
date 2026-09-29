@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from maps import UNet3D, augment, loss_terms, normalize, targets
+from maps import UNet3D, augment, load, loss_terms, normalize, targets, widen
 
 WEIGHTS = {"heat": 1.0, "offset": 1.0, "direction": 1.0, "fiber": 0.5, "radius": 1.0}
 
@@ -82,16 +82,21 @@ def main():
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--init", type=Path, help="start from this checkpoint's weights (fine-tuning)")
+    parser.add_argument("--widen", type=int, help="with --init: widen that network to this base width (Net2Net)")
     parser.add_argument("--noise", type=float, default=0.0, help="correlated-noise augmentation sd (0 = off)")
     args = parser.parse_args()
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     args.out.mkdir(parents=True, exist_ok=True)
 
-    model = UNet3D(base=args.base).to(device)
+    if args.widen:
+        model = widen(load(args.init, "cpu"), args.widen).to(device)
+        args.base = args.widen
+    else:
+        model = UNet3D(base=args.base).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, total_steps=args.steps, pct_start=0.05)
     step, best = 0, float("inf")
-    if args.init:
+    if args.init and not args.widen:
         weights = torch.load(args.init, map_location=device)["model"]
         head_w, head_b = weights.pop("head.weight"), weights.pop("head.bias")
         model.load_state_dict(weights, strict=False)
@@ -141,7 +146,8 @@ def main():
                 parts = {k: np.mean([float(v[1][k]) for v in vals]) for k in vals[0][1]}
                 print(f"VAL step {step} loss {val:.4f} " + " ".join(f"{k} {v:.4f}" for k, v in parts.items()), flush=True)
                 state = {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
-                         "scheduler": scheduler.state_dict(), "step": step, "best": min(best, val), "base": args.base}
+                         "scheduler": scheduler.state_dict(), "step": step, "best": min(best, val), "base": args.base,
+                         "group_sizes": model.group_sizes}
                 save(state, args.out / "last.pt")
                 if val < best:
                     best = val
