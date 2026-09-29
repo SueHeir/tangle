@@ -23,6 +23,7 @@ import torch.nn.functional as F
 
 HEAT, OFFSET, DIRECTION, FIBER, RADIUS = slice(0, 1), slice(1, 4), slice(4, 10), slice(10, 11), slice(11, 12)
 BINDER = slice(12, 13)  # binder (bond) voxel logit
+BINDER_POSITIVE = 9.0  # extra loss weight on true binder voxels (binder is ~1% of the voxels)
 SIZE_BINS = np.linspace(np.log(3.0), np.log(32.0), 16)  # log-diameter bins (voxels) of the size code
 SIZE_CODE = len(SIZE_BINS) + 1 + 3  # the bins, 1 = sizes known, then the bond hint (known, present, size)
 
@@ -195,7 +196,7 @@ def loss_terms(out: torch.Tensor, batch: dict) -> dict:
                   * (1.0 + 2.0 * fiber)).mean(),
         "radius": (F.smooth_l1_loss(out[:, RADIUS], batch["radius"], reduction="none", beta=0.1) * own).sum() / n_own,
         "binder": (F.binary_cross_entropy_with_logits(out[:, BINDER], batch["binder"], reduction="none")
-                   * (1.0 + 9.0 * batch["binder"])).mean(),
+                   * (1.0 + BINDER_POSITIVE * batch["binder"])).mean(),
     }
 
 

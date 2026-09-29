@@ -97,12 +97,18 @@ def main():
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--init", type=Path, help="start from this checkpoint's weights (fine-tuning)")
+    parser.add_argument("--binder-weight", type=float, default=1.0, help="weight of the binder loss")
+    parser.add_argument("--binder-positive", type=float, default=9.0, help="extra weight on true binder voxels")
     parser.add_argument("--condition", action="store_true", help="add the fiber-size conditioning (FiLM)")
     parser.add_argument("--widen", type=int, help="with --init: widen that network to this base width (Net2Net)")
     parser.add_argument("--noise", type=float, default=0.0, help="correlated-noise augmentation sd (0 = off)")
     args = parser.parse_args()
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     args.out.mkdir(parents=True, exist_ok=True)
+    import maps as maps_module
+
+    WEIGHTS["binder"] = args.binder_weight
+    maps_module.BINDER_POSITIVE = args.binder_positive
 
     if args.widen:
         model = widen(load(args.init, "cpu"), args.widen).to(device)
