@@ -43,6 +43,10 @@ class SyntheticScan:
     # equivalent radius, sqrt(long * short), either way.
     semi_axes: np.ndarray | None = None
     long_axes: list[np.ndarray] | None = None
+    # Binder bonds (``synthetic_ct(..., binder=...)``): the bond id of every binder voxel (0 = none, one-based),
+    # and each bond's two fibers (one-based ids, as ``labels``) and center (x, y, z voxels). None without bonds.
+    bond_labels: np.ndarray | None = None
+    bonds: list[dict] | None = None
 
     def fiber_mask(self, level: float = 0.5, *, sigma: float = 0.7) -> np.ndarray:
         """A binary fiber mask, as a grey-level threshold of the scan gives.
@@ -142,6 +146,7 @@ def synthetic_ct(
     phase_sigma_voxels: float | None = None,
     scanner=None,
     brightness_spread: float = 0.0,
+    binder: "Binder | None" = None,
 ) -> SyntheticScan:
     """Render ``source`` (an ``Assembly`` or ``RunResult``) as a CT-like volume.
 
@@ -192,13 +197,22 @@ def synthetic_ct(
     fiber's profile is picked by its long width (a Material's
     ``diameter``). A hollow profile's core still follows the equivalent
     radius. The result's ``semi_axes`` and ``long_axes`` hold the truth.
+
+    ``binder`` (a :class:`Binder`) draws the source's junctions as binder bonds (``export_puma``'s
+    ``bond_radius_ratio``), a material of its own brightness and phase ratio; the result's ``bond_labels``
+    and ``bonds`` hold the truth. The source needs captured junctions (``Recipe.capture_junctions``).
     """
     from scipy.ndimage import gaussian_filter
 
     with tempfile.TemporaryDirectory() as tmp:
-        report = source.export_puma(Path(tmp) / "truth.puma", voxel_size, include_fiber_ids=True, include_interface=True)
+        report = source.export_puma(Path(tmp) / "truth.puma", voxel_size, include_fiber_ids=True, include_interface=True,
+                                    **({"bond_radius_ratio": binder.radius_ratio} if binder else {}))
         labels = read_vti(report.fiber_ids_path).astype(np.int32)
         interface = read_vti(report.interface_path)
+        binder_occupancy = bond_labels = None
+        if binder and report.bond_ids_path is not None:
+            bond_labels = read_vti(report.bond_ids_path).astype(np.int32)
+            binder_occupancy = np.clip(read_vti(report.binder_interface_path).astype(np.float32) / 255.0, 0.0, 1.0)
     occupancy = np.clip(interface.astype(np.float32) / 255.0, 0.0, 1.0)
     centerlines = [np.asarray(line) / voxel_size for line in source.centerlines()]
     # Export ids are one-based in source order for these single-material scans.
@@ -229,6 +243,8 @@ def synthetic_ct(
         from ._scanner import acquire
 
         sample = scanner.void_attenuation + (scanner.fiber_attenuation - scanner.void_attenuation) * occupancy
+        if binder_occupancy is not None:
+            sample = sample + scanner.fiber_attenuation * binder.brightness * binder_occupancy
         phase = None
         if np.ndim(scanner.delta_beta) > 0:
             # One ratio per fiber type: the fibers' attenuation, type by type,
@@ -239,6 +255,14 @@ def synthetic_ct(
             scaled = [(d, replace(p, brightness=p.brightness * r)) for (d, p), r in zip(profiles, ratios)]
             weighted, _ = _apply_profiles(base, centerlines, radii, voxel_size, scaled, period, labels, reach, factor)
             phase = (scanner.fiber_attenuation * weighted).astype(np.float32)
+            if binder_occupancy is not None:
+                phase += (scanner.fiber_attenuation * binder.brightness * binder.delta_beta * binder_occupancy
+                          ).astype(np.float32)
+        elif binder_occupancy is not None:
+            # one ratio for the fibers; the binder keeps its own
+            fibers = sample - scanner.fiber_attenuation * binder.brightness * binder_occupancy
+            phase = (float(scanner.delta_beta) * fibers + scanner.fiber_attenuation * binder.brightness
+                     * binder.delta_beta * binder_occupancy).astype(np.float32)
         warp = None
         if scanner.fiber_motion > 0 or scanner.drift > 0:
             from ._scanner import motion_warp
@@ -252,7 +276,10 @@ def synthetic_ct(
             attenuation += drift * np.cos(np.pi * (x - nx / 2) / nx) * np.cos(np.pi * (y - ny / 2) / ny)
         low, high = np.percentile(attenuation, [0.5, 99.5])
         volume = np.clip((attenuation - low) / (high - low) * 65535, 0, 65535).astype(np.uint16)
-        return SyntheticScan(volume, labels, centerlines, radii, voxel_size, period, types, semi_axes, long_axes)
+        return SyntheticScan(volume, labels, centerlines, radii, voxel_size, period, types, semi_axes, long_axes,
+                             *_bond_truth(bond_labels, labels))
+    if binder_occupancy is not None:
+        occupancy = occupancy + binder.brightness * binder_occupancy
     attenuation = void_level + (1.0 - void_level) * gaussian_filter(occupancy, psf_sigma_voxels)
     if phase_contrast:
         from scipy.ndimage import gaussian_laplace
@@ -271,7 +298,44 @@ def synthetic_ct(
     low, high = np.percentile(attenuation, [0.5, 99.5])
     volume = np.clip((attenuation - low) / (high - low) * 65535, 0, 65535).astype(np.uint16)
 
-    return SyntheticScan(volume, labels, centerlines, radii, voxel_size, period, types, semi_axes, long_axes)
+    return SyntheticScan(volume, labels, centerlines, radii, voxel_size, period, types, semi_axes, long_axes,
+                         *_bond_truth(bond_labels, labels))
+
+
+@dataclass(frozen=True)
+class Binder:
+    """Binder bonds for ``synthetic_ct``: each captured junction drawn as a bridge between its two fibers.
+
+    ``radius_ratio``: the bridge radius over the thinner fiber's radius (``export_puma``'s ``bond_radius_ratio``).
+    ``brightness``: the binder's attenuation over a brightness-1 fiber's (a binder that absorbs like the
+    fibers is 1: then only its shape shows). ``delta_beta``: its phase ratio, for a ``scanner`` with propagation.
+    """
+
+    radius_ratio: float = 1.0
+    brightness: float = 0.7
+    delta_beta: float = 10.0
+
+
+def _bond_truth(bond_labels, labels):
+    """(bond_labels, bonds): each bond's two fibers (the fiber labels most in contact with its binder) and center."""
+    if bond_labels is None:
+        return None, None
+    from scipy.ndimage import binary_dilation, center_of_mass, find_objects
+
+    bonds = []
+    for index, box in enumerate(find_objects(bond_labels), start=1):
+        if box is None:
+            continue
+        grown = tuple(slice(max(b.start - 2, 0), b.stop + 2) for b in box)
+        mine = bond_labels[grown] == index
+        near = binary_dilation(mine, iterations=2) & (labels[grown] > 0)
+        ids, counts = np.unique(labels[grown][near], return_counts=True)
+        pair = [int(i) for i in ids[np.argsort(-counts)][:2]]
+        z, y, x = center_of_mass(mine)
+        bonds.append({"id": index, "fibers": pair, "center": [x + grown[2].start + 0.5, y + grown[1].start + 0.5,
+                                                               z + grown[0].start + 0.5],
+                      "voxels": int(mine.sum())})
+    return bond_labels, bonds
 
 
 def _apply_profiles(occupancy, centerlines, radii, voxel_size, profiles, period, labels=None, reach=None, factor=None):

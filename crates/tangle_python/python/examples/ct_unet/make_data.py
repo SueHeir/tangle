@@ -73,6 +73,7 @@ VARIED_SIDE = 160  # voxels (1 um); everything below is in voxels, the physical 
 
 
 FOCUS_FIRST = 4001  # indices from here on use the focused draw (varied_settings(focus=True))
+BOND_FIRST = 5001  # indices from here on may have binder bonds at their fiber junctions
 
 
 def varied_settings(index: int, focus: bool | None = None) -> dict:
@@ -115,6 +116,15 @@ def varied_settings(index: int, focus: bool | None = None) -> dict:
             "bend": round(float(rng.uniform(3.0, 8.0)), 2),
             "delta_beta": round(float(rng.uniform(4.0, 16.0)), 1),
         })
+    bonds = None
+    if index >= BOND_FIRST and rng.random() < 0.65:  # a third of the bond round stays bond-free
+        bonds = {
+            "probability": round(float(rng.uniform(0.3, 1.0)), 2),  # of the touching crossings
+            "gap": round(float(rng.uniform(0.3, 1.5)), 2),  # voxels: surfaces this close count as touching
+            "radius_ratio": round(float(rng.uniform(0.5, 1.5)), 2),
+            "brightness": round(float(rng.choice([rng.uniform(0.3, 0.8), rng.uniform(0.8, 1.2)])), 2),
+            "delta_beta": round(float(rng.uniform(4.0, 16.0)), 1),
+        }
     orientation = str(rng.choice(["planar", "planar", "aligned", "biaxial", "isotropic"]
                                  + (["isotropic"] if focus else [])))
     blur = float(rng.choice([0.0, 0.0, 0.5, 1.0]))
@@ -135,7 +145,39 @@ def varied_settings(index: int, focus: bool | None = None) -> dict:
         "drift": round(float(rng.uniform(0.0, 1.0)), 2) if rng.random() < 0.3 else 0.0,
         "ring_strength": round(float(rng.uniform(0.0, 0.01)), 4) if rng.random() < 0.2 else 0.0,
         "seed": 30_000 + index,
+        **({"bonds": bonds} if index >= BOND_FIRST else {}),
     }
+
+
+def with_bonds(cache_file: Path, cell, populations, bonds: dict, seed: int):
+    """The cached relaxed structure again, with its touching crossings captured as bonded junctions and a short
+    relaxation to settle them (a RunResult that export_puma can draw bonds for)."""
+    import tangle
+    import ct_examples as ex
+    from tangle.units import um
+
+    data = json.loads(cache_file.read_text())
+    recipe = tangle.Recipe(cell)
+    start = 0
+    for population, count in zip(populations, data["counts"]):
+        lines = data["centerlines"][start:start + count]
+        axes = data["long_axes"][start:start + count] if "long_axes" in data else None
+        start += count
+        material = ex._material(population)
+        looser = tangle.Material(material.name, diameter=material.diameter,
+                                 min_bend_radius=0.99 * material.min_bend_radius, thickness=material.thickness)
+        collection = tangle.FiberCollection(material.name)
+        for k, line in enumerate(lines):
+            if material.is_oval and axes is not None:
+                collection.add_fiber(line, looser, long_axis=axes[k])
+            else:
+                collection.add_fiber(line, looser)
+        recipe.insert(collection, name=material.name)
+    recipe.capture_junctions(tangle.JunctionPolicy(
+        "binder", "bond", max_surface_gap=bonds["gap"] * um, min_crossing_angle=0.0,
+        probability=bonds["probability"], seed=seed, max_per_fiber_pair=1))
+    return recipe.run(tangle.RelaxationSettings(backend=ex.BACKEND, max_iterations=300, max_step=0.5 * um,
+                                                penetration_tolerance=0.1 * um))
 
 
 def varied_scan(index: int, cache: Path):
@@ -200,12 +242,17 @@ def _varied_scan(v, index, cache, crowd):
         profiles.append((diameter, ct.CrossSection(brightness=spec["brightness"], **shade)))
     key = hashlib.sha1(json.dumps({**v, "crowd": crowd}, sort_keys=True).encode()).hexdigest()[:8]
     truth = ex.relaxed_truth(cache / f"varied_{index}-{key}.json", cell, populations)
+    binder = None
+    if v.get("bonds"):
+        b = v["bonds"]
+        truth = with_bonds(cache / f"varied_{index}-{key}.json", cell, populations, b, v["seed"])
+        binder = ct.Binder(radius_ratio=b["radius_ratio"], brightness=b["brightness"], delta_beta=b["delta_beta"])
     v = {**v, "crowd": crowd}
     scanner = replace(ex.SCANNER, photons=v["photons"], noise_blur=v["noise_blur"], resolution=v["resolution"] * um,
                       propagation=v["propagation"], fiber_motion=v["fiber_motion"] * um, drift=v["drift"] * um,
                       ring_strength=v["ring_strength"],
                       delta_beta=tuple(spec["delta_beta"] for spec in v["types"]))
-    scan = ct.synthetic_ct(truth, 1 * um, seed=v["seed"], profiles=profiles, scanner=scanner,
+    scan = ct.synthetic_ct(truth, 1 * um, seed=v["seed"], profiles=profiles, scanner=scanner, binder=binder,
                            **({"brightness_spread": v["brightness_spread"]} if v["brightness_spread"] else {}))
     return scan, v
 
@@ -245,6 +292,13 @@ def main() -> None:
         table = point_table(scan)
         near = nearest_points(scan.volume.shape, table["pos"])
         extra = {}
+        if scan.bond_labels is not None:
+            extra["bond_labels"] = scan.bond_labels.astype(np.uint16)
+            extra["bond_ratio"] = np.float32(varied["bonds"]["radius_ratio"])
+            extra["bond_pairs"] = np.array([b["fibers"] + [0] * (2 - len(b["fibers"])) for b in scan.bonds]
+                                           or np.zeros((0, 2)), dtype=np.int32).reshape(-1, 2)
+            extra["bond_centers"] = np.array([b["center"] for b in scan.bonds] or np.zeros((0, 3)),
+                                             dtype=np.float32).reshape(-1, 3)
         if scan.semi_axes is not None:
             extra["semi_axes"] = np.asarray(scan.semi_axes, dtype=np.float32)
         np.savez_compressed(

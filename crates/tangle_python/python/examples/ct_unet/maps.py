@@ -22,23 +22,31 @@ from torch import nn
 import torch.nn.functional as F
 
 HEAT, OFFSET, DIRECTION, FIBER, RADIUS = slice(0, 1), slice(1, 4), slice(4, 10), slice(10, 11), slice(11, 12)
+BINDER = slice(12, 13)  # binder (bond) voxel logit
 SIZE_BINS = np.linspace(np.log(3.0), np.log(32.0), 16)  # log-diameter bins (voxels) of the size code
-SIZE_CODE = len(SIZE_BINS) + 1  # the bins, then 1 = sizes known
+SIZE_CODE = len(SIZE_BINS) + 1 + 3  # the bins, 1 = sizes known, then the bond hint (known, present, size)
 
 
-def size_code(diameters=None) -> np.ndarray:
-    """The known fiber diameters (voxels; any number of types) as the network's conditioning vector.
+def size_code(diameters=None, bonds: bool | None = None, bond_ratio: float | None = None) -> np.ndarray:
+    """What is known about the scan, as the network's conditioning vector.
 
-    A soft histogram over log diameter (each type a Gaussian bump, 0.1 wide in log) plus a "known" flag; None or
-    an empty list is "sizes unknown" (all zeros), which a conditioned network also handles."""
+    ``diameters``: the fiber types' diameters (voxels; any number), a soft histogram over log diameter (each a
+    Gaussian bump 0.1 wide in log) plus a "known" flag; None or [] = unknown. ``bonds``: True (the fibers are
+    bonded), False (no binder) or None (unknown); ``bond_ratio``: the rough bond radius over the thinner
+    fiber's radius, if known. All zeros = nothing known, which a conditioned network also handles."""
     code = np.zeros(SIZE_CODE, np.float32)
-    if diameters is None or len(diameters) == 0:
-        return code
-    for d in diameters:
-        code[:-1] = np.maximum(code[:-1], np.exp(-0.5 * ((SIZE_BINS - np.log(d)) / 0.1) ** 2))
-    code[-1] = 1.0
+    n = len(SIZE_BINS)
+    if diameters is not None and len(diameters):
+        for d in diameters:
+            code[:n] = np.maximum(code[:n], np.exp(-0.5 * ((SIZE_BINS - np.log(d)) / 0.1) ** 2))
+        code[n] = 1.0
+    if bonds is not None:
+        code[n + 1] = 1.0
+        code[n + 2] = 1.0 if bonds else 0.0
+        if bonds and bond_ratio:
+            code[n + 3] = float(bond_ratio)
     return code
-CHANNELS = 12
+CHANNELS = 13
 _OLD_TYPE = slice(10, 13)  # the first networks' void / fine / coarse logits
 _OLD_RADIUS = (2.75, 6.75)  # voxels: what "fine" and "coarse" meant for them
 
@@ -84,6 +92,8 @@ def targets(data, window=None) -> dict:
         "direction": direction.astype(np.float32) * own[None],
         "own": own[None].astype(np.float32),
         "fiber": (labels > 0)[None].astype(np.float32),
+        "binder": ((data["bond_labels"] if window is None else data["bond_labels"][window]) > 0)[None].astype(np.float32)
+        if "bond_labels" in data else np.zeros((1, *labels.shape), np.float32),
         "radius": (np.log(np.maximum(rad[i], 0.5)) * own)[None].astype(np.float32),
     }
 
@@ -126,7 +136,7 @@ def block(cin, cout, groups=None):
 
 class UNet3D(nn.Module):
     def __init__(self, base: int = 16, levels: int = 4, channels: int = CHANNELS, group_sizes=None,
-                 condition: bool = False):
+                 condition: bool = False, code_size: int = SIZE_CODE):
         """``group_sizes``: channels per norm group at each level (default: 8 groups, at least 4 channels each);
         a widened network keeps its source's group sizes, so the old channels stay in groups of their own."""
         super().__init__()
@@ -144,7 +154,7 @@ class UNet3D(nn.Module):
         self.condition = condition
         if condition:
             self.film_widths = [widths[k] for k in range(levels + 1)] + [widths[k] for k in range(levels)]
-            self.film = nn.Sequential(nn.Linear(SIZE_CODE, 64), nn.SiLU(), nn.Linear(64, 2 * sum(self.film_widths)))
+            self.film = nn.Sequential(nn.Linear(code_size, 64), nn.SiLU(), nn.Linear(64, 2 * sum(self.film_widths)))
             nn.init.zeros_(self.film[-1].weight)
             nn.init.zeros_(self.film[-1].bias)
 
@@ -152,7 +162,7 @@ class UNet3D(nn.Module):
         films = None
         if self.condition:
             if code is None:
-                code = torch.zeros((x.shape[0], SIZE_CODE), device=x.device)
+                code = torch.zeros((x.shape[0], self.film[0].in_features), device=x.device)
             films = list(torch.split(self.film(code), [2 * w for w in self.film_widths], dim=1))
 
         def apply(y, i):
@@ -184,36 +194,46 @@ def loss_terms(out: torch.Tensor, batch: dict) -> dict:
         "fiber": (F.binary_cross_entropy_with_logits(out[:, FIBER], fiber, reduction="none")
                   * (1.0 + 2.0 * fiber)).mean(),
         "radius": (F.smooth_l1_loss(out[:, RADIUS], batch["radius"], reduction="none", beta=0.1) * own).sum() / n_own,
+        "binder": (F.binary_cross_entropy_with_logits(out[:, BINDER], batch["binder"], reduction="none")
+                   * (1.0 + 9.0 * batch["binder"])).mean(),
     }
 
 
 def load(path, device: str) -> nn.Module:
-    """A saved network (either layout) on ``device``."""
+    """A saved network (any layout) on ``device``; ``model.layout`` says which (see ``predict``)."""
     state = torch.load(path, map_location=device)
     channels = state["model"]["head.weight"].shape[0]
+    film = [k for k in state["model"] if k.startswith("film.")]
     model = UNet3D(base=state.get("base", 16), channels=channels, group_sizes=state.get("group_sizes"),
-                   condition=any(k.startswith("film.") for k in state["model"])).to(device)
+                   condition=bool(film), code_size=state["model"]["film.0.weight"].shape[1] if film else SIZE_CODE
+                   ).to(device)
     model.load_state_dict(state["model"])
+    model.layout = state.get("layout") or {13: "types", 12: "fibers"}[channels]
     return model
 
 
 @torch.no_grad()
 def predict(model: nn.Module, volume: np.ndarray, device: str, grey: tuple[float, float] | None = None,
-            diameters=None) -> np.ndarray:
-    """The network's maps for a whole scan (sides divisible by 16), float32 (CHANNELS, z, y, x): heatmap and
-    fiber as probabilities, offsets in voxels, the direction tensor as predicted, the radius in voxels."""
+            diameters=None, bonds: bool | None = None, bond_ratio: float | None = None) -> np.ndarray:
+    """The network's maps for a whole scan (sides divisible by 16), float32 (CHANNELS, z, y, x): heatmap, fiber
+    and binder as probabilities (binder 0 for networks without it), offsets in voxels, the direction tensor as
+    predicted, the radius in voxels. ``diameters``, ``bonds`` and ``bond_ratio`` are the optional hints."""
     model.eval()
     x = torch.from_numpy(normalize(volume, grey))[None, None].to(device)
     if getattr(model, "condition", False):
-        out = model(x, torch.from_numpy(size_code(diameters))[None].to(device))[0]
+        code = size_code(diameters, bonds, bond_ratio)[: model.film[0].in_features]
+        out = model(x, torch.from_numpy(code)[None].to(device))[0]
     else:
         out = model(x)[0]
-    maps = torch.empty((CHANNELS, *out.shape[1:]), device=out.device)
+    maps = torch.zeros((CHANNELS, *out.shape[1:]), device=out.device)
     maps[HEAT] = torch.sigmoid(out[HEAT])
     maps[OFFSET], maps[DIRECTION] = out[OFFSET], out[DIRECTION]
-    if out.shape[0] == CHANNELS:
+    layout = getattr(model, "layout", "bonds")
+    if layout in ("fibers", "bonds"):
         maps[FIBER] = torch.sigmoid(out[FIBER])
         maps[RADIUS] = torch.exp(out[RADIUS])
+        if layout == "bonds":
+            maps[BINDER] = torch.sigmoid(out[BINDER])
     else:  # a first-layout network: fiber = not void, radius from its fine / coarse call
         p = torch.softmax(out[_OLD_TYPE], dim=0)
         maps[FIBER] = 1.0 - p[0:1]

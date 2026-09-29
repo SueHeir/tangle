@@ -29,7 +29,7 @@ from ._image import Levels
 from ._profile import CrossSection
 from ._overlay import fiber_palette, overlay_slice, overlay_volume, save_overlay_figure
 from ._scanner import Scanner
-from ._synthetic import SyntheticScan, read_vti, synthetic_ct
+from ._synthetic import Binder, SyntheticScan, read_vti, synthetic_ct
 from ._tiles import fit_tiled, load_tiles, open_scan
 
 __all__ = [
@@ -39,6 +39,7 @@ __all__ = [
     "FitSettings",
     "Levels",
     "Scanner",
+    "Binder",
     "SyntheticScan",
     "fiber_palette",
     "fit_fibers",

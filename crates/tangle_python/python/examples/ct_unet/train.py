@@ -17,9 +17,9 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from maps import CHANNELS, UNet3D, augment, load, loss_terms, normalize, size_code, targets, widen
+from maps import BINDER, CHANNELS, UNet3D, augment, load, loss_terms, normalize, size_code, targets, widen
 
-WEIGHTS = {"heat": 1.0, "offset": 1.0, "direction": 1.0, "fiber": 0.5, "radius": 1.0}
+WEIGHTS = {"heat": 1.0, "offset": 1.0, "direction": 1.0, "fiber": 0.5, "radius": 1.0, "binder": 1.0}
 
 
 class Crops(Dataset):
@@ -58,7 +58,15 @@ class Crops(Dataset):
                                         rng.uniform(0.6, 1.3, size=3))
                 field *= rng.uniform(0.3, 1.0) * self.noise / max(float(field.std()), 1e-6)
                 sample["image"] = sample["image"] + field[None]
-        sample["code"] = size_code(sizes)
+        # the bond hint, as a user would give it: 40% "bonded / not bonded" (half of those with a rough bond size
+        # when bonded), 60% nothing said
+        bonded = "bond_labels" in data.files and bool(data["bond_labels"].any())
+        hint, ratio = None, None
+        if not self.train or rng.random() < 0.4:
+            hint = bonded
+            if bonded and "bond_ratio" in data.files and (not self.train or rng.random() < 0.5):
+                ratio = float(data["bond_ratio"]) * (float(np.exp(rng.normal(0.0, 0.15))) if self.train else 1.0)
+        sample["code"] = size_code(sizes, hint, ratio)
         return {k: torch.from_numpy(np.ascontiguousarray(v)) for k, v in sample.items()}
 
 
@@ -102,8 +110,23 @@ def main():
     elif args.init:
         source = load(args.init, "cpu")
         args.base = source.down[0][0].out_channels
-        if source.head.out_channels == CHANNELS:
+        if source.layout == "bonds":
             model = source.to(device)
+        elif source.layout == "fibers":
+            # a network without the binder output (and maybe an older, shorter hint): grow it. Every weight it
+            # has is copied; the binder output starts at "no binder" and new hint inputs start unread.
+            model = UNet3D(base=args.base, group_sizes=source.group_sizes, condition=source.condition).to(device)
+            grown = model.state_dict()
+            for name, value in source.state_dict().items():
+                target = grown[name].clone()
+                if target.shape == value.shape:
+                    target = value.clone()
+                else:
+                    target.zero_()
+                    target[tuple(slice(0, n) for n in value.shape)] = value
+                grown[name] = target
+            grown["head.bias"][BINDER] = -4.0
+            model.load_state_dict(grown)
         else:
             # a first-layout network: its body, and the head channels both layouts share (heatmap, offset,
             # direction: the first 10); its void / fine / coarse logits do not fit the fiber and radius outputs
@@ -164,7 +187,7 @@ def main():
                 parts = {k: np.mean([float(v[1][k]) for v in vals]) for k in vals[0][1]}
                 print(f"VAL step {step} loss {val:.4f} " + " ".join(f"{k} {v:.4f}" for k, v in parts.items()), flush=True)
                 state = {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
-                         "scheduler": scheduler.state_dict(), "step": step, "best": min(best, val), "base": args.base, "condition": bool(getattr(model, "condition", False)),
+                         "scheduler": scheduler.state_dict(), "step": step, "best": min(best, val), "base": args.base, "condition": bool(getattr(model, "condition", False)), "layout": "bonds",
                          "group_sizes": model.group_sizes}
                 save(state, args.out / "last.pt")
                 if val < best:
