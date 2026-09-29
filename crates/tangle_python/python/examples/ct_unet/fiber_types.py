@@ -108,3 +108,11 @@ def assign_types(feats: np.ndarray, k: int | None = None, seed: int = 0):
     labels, _, mu, kk = best
     order = np.argsort(np.argsort(mu[:, 0]))  # number the types by radius
     return order[labels], kk
+
+
+def assign_by_size(radii, diameters) -> np.ndarray:
+    """Types when the fiber sizes are known: each fiber gets the type whose diameter (voxels) is nearest its
+    own measured diameter, in log terms. Types are numbered in the order of ``diameters``."""
+    d = np.log(np.maximum(2.0 * np.asarray(radii, float), 0.3))
+    known = np.log(np.asarray(diameters, float))
+    return np.argmin(np.abs(d[:, None] - known[None, :]), axis=1)

@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from maps import UNet3D, augment, load, loss_terms, normalize, targets, widen
+from maps import CHANNELS, UNet3D, augment, load, loss_terms, normalize, size_code, targets, widen
 
 WEIGHTS = {"heat": 1.0, "offset": 1.0, "direction": 1.0, "fiber": 0.5, "radius": 1.0}
 
@@ -38,6 +38,12 @@ class Crops(Dataset):
         window = tuple(slice(l, l + self.crop) for l in low)
         sample = targets(data, window)
         sample["image"] = normalize(data["volume"])[window][None]
+        # the scan's fiber sizes (each type's median equal-area diameter), as a user would give them: roughly
+        # (x/÷ ~10%) in training, and 20% of the time not at all
+        typ, rad = data["p_typ"], data["p_rad"]
+        sizes = [2.0 * float(np.median(rad[typ == t])) for t in np.unique(typ)]
+        if self.train:
+            sizes = [] if rng.random() < 0.2 else [d * float(np.exp(rng.normal(0.0, 0.1))) for d in sizes]
         if self.train:
             sample = augment(sample, rng)
             # Grey level jitter: real scans differ in contrast and offset.
@@ -52,6 +58,7 @@ class Crops(Dataset):
                                         rng.uniform(0.6, 1.3, size=3))
                 field *= rng.uniform(0.3, 1.0) * self.noise / max(float(field.std()), 1e-6)
                 sample["image"] = sample["image"] + field[None]
+        sample["code"] = size_code(sizes)
         return {k: torch.from_numpy(np.ascontiguousarray(v)) for k, v in sample.items()}
 
 
@@ -63,7 +70,7 @@ def save(state, path: Path):
 
 def run_batch(model, batch, device):
     batch = {k: v.to(device) for k, v in batch.items()}
-    out = model(batch["image"])
+    out = model(batch["image"], batch["code"]) if getattr(model, "condition", False) else model(batch["image"])
     terms = loss_terms(out, batch)
     return sum(WEIGHTS[k] * v for k, v in terms.items()), terms
 
@@ -82,6 +89,7 @@ def main():
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--init", type=Path, help="start from this checkpoint's weights (fine-tuning)")
+    parser.add_argument("--condition", action="store_true", help="add the fiber-size conditioning (FiLM)")
     parser.add_argument("--widen", type=int, help="with --init: widen that network to this base width (Net2Net)")
     parser.add_argument("--noise", type=float, default=0.0, help="correlated-noise augmentation sd (0 = off)")
     args = parser.parse_args()
@@ -91,21 +99,31 @@ def main():
     if args.widen:
         model = widen(load(args.init, "cpu"), args.widen).to(device)
         args.base = args.widen
+    elif args.init:
+        source = load(args.init, "cpu")
+        args.base = source.down[0][0].out_channels
+        if source.head.out_channels == CHANNELS:
+            model = source.to(device)
+        else:
+            # a first-layout network: its body, and the head channels both layouts share (heatmap, offset,
+            # direction: the first 10); its void / fine / coarse logits do not fit the fiber and radius outputs
+            model = UNet3D(base=args.base, group_sizes=source.group_sizes).to(device)
+            weights = source.state_dict()
+            head_w, head_b = weights.pop("head.weight"), weights.pop("head.bias")
+            model.load_state_dict(weights, strict=False)
+            with torch.no_grad():
+                model.head.weight[:10] = head_w[:10]
+                model.head.bias[:10] = head_b[:10]
     else:
         model = UNet3D(base=args.base).to(device)
+    step, best = 0, float("inf")
+    if args.condition and not getattr(model, "condition", False):
+        conditioned = UNet3D(base=args.base, channels=model.head.out_channels, group_sizes=model.group_sizes,
+                             condition=True).to(device)
+        conditioned.load_state_dict(model.state_dict(), strict=False)
+        model = conditioned
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, total_steps=args.steps, pct_start=0.05)
-    step, best = 0, float("inf")
-    if args.init and not args.widen:
-        weights = torch.load(args.init, map_location=device)["model"]
-        head_w, head_b = weights.pop("head.weight"), weights.pop("head.bias")
-        model.load_state_dict(weights, strict=False)
-        # the head: keep the channels both layouts share (heatmap, offset, direction: the first 10); a
-        # first-layout network's void / fine / coarse logits do not fit the fiber and radius outputs
-        shared = min(head_w.shape[0], model.head.weight.shape[0], 10 if head_w.shape[0] != model.head.weight.shape[0] else head_w.shape[0])
-        with torch.no_grad():
-            model.head.weight[:shared] = head_w[:shared]
-            model.head.bias[:shared] = head_b[:shared]
     if args.resume and (args.out / "last.pt").exists():
         state = torch.load(args.out / "last.pt", map_location=device)
         model.load_state_dict(state["model"])
@@ -146,7 +164,7 @@ def main():
                 parts = {k: np.mean([float(v[1][k]) for v in vals]) for k in vals[0][1]}
                 print(f"VAL step {step} loss {val:.4f} " + " ".join(f"{k} {v:.4f}" for k, v in parts.items()), flush=True)
                 state = {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
-                         "scheduler": scheduler.state_dict(), "step": step, "best": min(best, val), "base": args.base,
+                         "scheduler": scheduler.state_dict(), "step": step, "best": min(best, val), "base": args.base, "condition": bool(getattr(model, "condition", False)),
                          "group_sizes": model.group_sizes}
                 save(state, args.out / "last.pt")
                 if val < best:

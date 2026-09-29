@@ -22,6 +22,22 @@ from torch import nn
 import torch.nn.functional as F
 
 HEAT, OFFSET, DIRECTION, FIBER, RADIUS = slice(0, 1), slice(1, 4), slice(4, 10), slice(10, 11), slice(11, 12)
+SIZE_BINS = np.linspace(np.log(3.0), np.log(32.0), 16)  # log-diameter bins (voxels) of the size code
+SIZE_CODE = len(SIZE_BINS) + 1  # the bins, then 1 = sizes known
+
+
+def size_code(diameters=None) -> np.ndarray:
+    """The known fiber diameters (voxels; any number of types) as the network's conditioning vector.
+
+    A soft histogram over log diameter (each type a Gaussian bump, 0.1 wide in log) plus a "known" flag; None or
+    an empty list is "sizes unknown" (all zeros), which a conditioned network also handles."""
+    code = np.zeros(SIZE_CODE, np.float32)
+    if diameters is None or len(diameters) == 0:
+        return code
+    for d in diameters:
+        code[:-1] = np.maximum(code[:-1], np.exp(-0.5 * ((SIZE_BINS - np.log(d)) / 0.1) ** 2))
+    code[-1] = 1.0
+    return code
 CHANNELS = 12
 _OLD_TYPE = slice(10, 13)  # the first networks' void / fine / coarse logits
 _OLD_RADIUS = (2.75, 6.75)  # voxels: what "fine" and "coarse" meant for them
@@ -109,7 +125,8 @@ def block(cin, cout, groups=None):
 
 
 class UNet3D(nn.Module):
-    def __init__(self, base: int = 16, levels: int = 4, channels: int = CHANNELS, group_sizes=None):
+    def __init__(self, base: int = 16, levels: int = 4, channels: int = CHANNELS, group_sizes=None,
+                 condition: bool = False):
         """``group_sizes``: channels per norm group at each level (default: 8 groups, at least 4 channels each);
         a widened network keeps its source's group sizes, so the old channels stay in groups of their own."""
         super().__init__()
@@ -121,15 +138,36 @@ class UNet3D(nn.Module):
         self.up = nn.ModuleList([nn.ConvTranspose3d(widths[k + 1], widths[k], 2, stride=2) for k in range(levels)])
         self.merge = nn.ModuleList([block(2 * widths[k], widths[k], g[k]) for k in range(levels)])
         self.head = nn.Conv3d(widths[0], channels, 1)
+        # Optional conditioning on the known fiber sizes (``size_code``): a small network turns the code into a
+        # per-channel scale and shift after every block (FiLM). Its last layer starts at zero, so a conditioned
+        # network starts out computing exactly what the network it was made from computes.
+        self.condition = condition
+        if condition:
+            self.film_widths = [widths[k] for k in range(levels + 1)] + [widths[k] for k in range(levels)]
+            self.film = nn.Sequential(nn.Linear(SIZE_CODE, 64), nn.SiLU(), nn.Linear(64, 2 * sum(self.film_widths)))
+            nn.init.zeros_(self.film[-1].weight)
+            nn.init.zeros_(self.film[-1].bias)
 
-    def forward(self, x):
+    def forward(self, x, code=None):
+        films = None
+        if self.condition:
+            if code is None:
+                code = torch.zeros((x.shape[0], SIZE_CODE), device=x.device)
+            films = list(torch.split(self.film(code), [2 * w for w in self.film_widths], dim=1))
+
+        def apply(y, i):
+            if films is None:
+                return y
+            scale, shift = films[i].chunk(2, dim=1)
+            return y * (1 + scale[:, :, None, None, None]) + shift[:, :, None, None, None]
+
         skips = []
         for k, layer in enumerate(self.down):
-            x = layer(x if k == 0 else F.max_pool3d(x, 2))
+            x = apply(layer(x if k == 0 else F.max_pool3d(x, 2)), k)
             skips.append(x)
         x = skips.pop()
         for k in reversed(range(len(self.up))):
-            x = self.merge[k](torch.cat([self.up[k](x), skips.pop()], dim=1))
+            x = apply(self.merge[k](torch.cat([self.up[k](x), skips.pop()], dim=1)), len(self.down) + k)
         return self.head(x)
 
 
@@ -153,18 +191,23 @@ def load(path, device: str) -> nn.Module:
     """A saved network (either layout) on ``device``."""
     state = torch.load(path, map_location=device)
     channels = state["model"]["head.weight"].shape[0]
-    model = UNet3D(base=state.get("base", 16), channels=channels, group_sizes=state.get("group_sizes")).to(device)
+    model = UNet3D(base=state.get("base", 16), channels=channels, group_sizes=state.get("group_sizes"),
+                   condition=any(k.startswith("film.") for k in state["model"])).to(device)
     model.load_state_dict(state["model"])
     return model
 
 
 @torch.no_grad()
-def predict(model: nn.Module, volume: np.ndarray, device: str, grey: tuple[float, float] | None = None) -> np.ndarray:
+def predict(model: nn.Module, volume: np.ndarray, device: str, grey: tuple[float, float] | None = None,
+            diameters=None) -> np.ndarray:
     """The network's maps for a whole scan (sides divisible by 16), float32 (CHANNELS, z, y, x): heatmap and
     fiber as probabilities, offsets in voxels, the direction tensor as predicted, the radius in voxels."""
     model.eval()
     x = torch.from_numpy(normalize(volume, grey))[None, None].to(device)
-    out = model(x)[0]
+    if getattr(model, "condition", False):
+        out = model(x, torch.from_numpy(size_code(diameters))[None].to(device))[0]
+    else:
+        out = model(x)[0]
     maps = torch.empty((CHANNELS, *out.shape[1:]), device=out.device)
     maps[HEAT] = torch.sigmoid(out[HEAT])
     maps[OFFSET], maps[DIRECTION] = out[OFFSET], out[DIRECTION]

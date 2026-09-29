@@ -23,7 +23,7 @@ from scipy.spatial import cKDTree
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from tangle.ct._evaluate import _samples_inside, centerline_agreement  # noqa: E402
-from fiber_types import assign_types, features  # noqa: E402
+from fiber_types import assign_by_size, assign_types, features  # noqa: E402
 from maps import CHANNELS, DIRECTION, FIBER, HEAT, OFFSET, RADIUS, levels, targets  # noqa: E402
 from trace_maps import trace  # noqa: E402
 
@@ -107,6 +107,8 @@ def main():
     parser.add_argument("examples", nargs="+")
     parser.add_argument("--min-votes", type=int, default=3)
     parser.add_argument("--no-tidy", action="store_true")
+    parser.add_argument("--known-sizes", action="store_true",
+                        help="give the network (if conditioned) and the typing each type's true diameter")
     parser.add_argument("--min-length", type=float, help="voxels (default: 3 x the smallest true diameter)")
     args = parser.parse_args()
     model = None
@@ -133,8 +135,9 @@ def main():
             lines = [np.asarray(f["centerline"]) / saved["voxel_size"] for f in saved["fibers"]]
             radii = None
         else:
+            sizes = [2.0 * float(np.median(truth_radii[truth_types == t])) for t in np.unique(truth_types)]
             if model is not None:
-                maps = predict(model, volume, device)
+                maps = predict(model, volume, device, diameters=sizes if args.known_sizes else None)
             else:  # truth
                 maps = true_maps(data if data is not None else truth_of(scan))
             lines, radii = trace(maps, min_length=shortest, min_votes=args.min_votes, tidy=not args.no_tidy)
@@ -148,7 +151,10 @@ def main():
         extra = ""
         if radii is not None and k > 1 and len(lines) >= k:
             grey = levels(volume[::2, ::2, ::2])
-            kinds, _ = assign_types(features(lines, radii, volume, grey), k)
+            if args.known_sizes:
+                kinds = assign_by_size(radii, sizes)
+            else:
+                kinds, _ = assign_types(features(lines, radii, volume, grey), k)
             acc = typing_accuracy(lines, kinds, truth_lines, truth_types)
             typing.append(acc)
             extra = f", {k} types: typed right {acc:.3f}"
