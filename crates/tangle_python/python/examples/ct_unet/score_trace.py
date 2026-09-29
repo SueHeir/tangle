@@ -24,7 +24,8 @@ from scipy.spatial import cKDTree
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from tangle.ct._evaluate import _samples_inside, centerline_agreement  # noqa: E402
 from fiber_types import assign_by_size, assign_types, features  # noqa: E402
-from maps import CHANNELS, DIRECTION, FIBER, HEAT, OFFSET, RADIUS, levels, targets  # noqa: E402
+from maps import BINDER, CHANNELS, DIRECTION, FIBER, HEAT, OFFSET, RADIUS, levels, targets  # noqa: E402
+from bonds import extract_bonds, score_bonds  # noqa: E402
 from trace_maps import trace  # noqa: E402
 
 
@@ -36,6 +37,7 @@ def true_maps(data) -> np.ndarray:
     maps[HEAT], maps[OFFSET], maps[DIRECTION] = t["heat"], t["offset"], t["direction"]
     maps[FIBER] = t["fiber"]
     maps[RADIUS] = np.exp(t["radius"]) * t["own"] + (1 - t["own"])
+    maps[BINDER] = t["binder"]
     return maps
 
 
@@ -107,6 +109,7 @@ def main():
     parser.add_argument("examples", nargs="+")
     parser.add_argument("--min-votes", type=int, default=3)
     parser.add_argument("--no-tidy", action="store_true")
+    parser.add_argument("--bond-hint", action="store_true", help="tell the network whether the scan is bonded")
     parser.add_argument("--known-sizes", action="store_true",
                         help="give the network (if conditioned) and the typing each type's true diameter")
     parser.add_argument("--min-length", type=float, help="voxels (default: 3 x the smallest true diameter)")
@@ -137,7 +140,9 @@ def main():
         else:
             sizes = [2.0 * float(np.median(truth_radii[truth_types == t])) for t in np.unique(truth_types)]
             if model is not None:
-                maps = predict(model, volume, device, diameters=sizes if args.known_sizes else None)
+                bonded = data is not None and "bond_labels" in data and bool(np.any(data["bond_labels"]))
+                maps = predict(model, volume, device, diameters=sizes if args.known_sizes else None,
+                               bonds=bonded if args.bond_hint else None)
             else:  # truth
                 maps = true_maps(data if data is not None else truth_of(scan))
             lines, radii = trace(maps, min_length=shortest, min_votes=args.min_votes, tidy=not args.no_tidy)
@@ -158,10 +163,23 @@ def main():
             acc = typing_accuracy(lines, kinds, truth_lines, truth_types)
             typing.append(acc)
             extra = f", {k} types: typed right {acc:.3f}"
+        bond_scores = getattr(main, "bond_scores", [])
+        main.bond_scores = bond_scores
+        if data is not None and "p_pos" in data and (model is None or getattr(model, "layout", "") == "bonds") \
+                and radii is not None and ("bond_centers" in data or "bond_labels" not in data):
+            found = extract_bonds(maps, lines, radii)
+            bs = score_bonds(found, data["bond_centers"] if "bond_centers" in data else np.zeros((0, 3)))
+            bond_scores.append(bs)
+            extra += f", bonds {bs['found']}/{bs['true']} P {bs['precision']:.2f} R {bs['recall']:.2f}"
         print(f"{label}: true {len(truth_lines) - len(stubs)} traced {len(lines)} recall {agree['recall']:.3f} "
               f"precision {agree['precision']:.3f} F1 {agree['f1']:.3f}{extra} ({seconds:.1f} s)", flush=True)
+    bond_scores = getattr(main, "bond_scores", [])
+    bonded = [b for b in bond_scores if b["true"] > 0]
+    free = [b for b in bond_scores if b["true"] == 0]
     print(f"mean F1 {np.mean(scores):.3f} over {len(scores)}"
-          + (f"; typing {np.mean(typing):.3f} over {len(typing)} multi-type scans" if typing else ""))
+          + (f"; typing {np.mean(typing):.3f} over {len(typing)} multi-type scans" if typing else "")
+          + (f"; bonds F1 {np.mean([b['f1'] for b in bonded]):.3f} over {len(bonded)} bonded scans" if bonded else "")
+          + (f", {np.mean([b['found'] for b in free]):.1f} false bonds per bond-free scan" if free else ""))
 
 
 if __name__ == "__main__":
