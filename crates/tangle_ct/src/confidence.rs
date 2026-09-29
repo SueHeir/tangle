@@ -265,6 +265,10 @@ pub struct ConfidenceSettings {
     pub thickness_margin: f64,
     pub ring: usize,
     pub thickness_tolerance: f64,
+    /// Exponent of the surround part in the product: 1 counts it fully,
+    /// 0 leaves it out (a fit next to foreground no other fit explains
+    /// is not in itself wrong; the neighbour may simply not be fitted yet).
+    pub surround_weight: f64,
 }
 
 /// Per fiber: per-node confidence, the same without stability, and per
@@ -288,6 +292,7 @@ pub fn node_confidence(
     lines: &[Vec<Point>],
     radii: &[f64],
     previous: Option<&[Vec<Point>]>,
+    surround_radii: Option<&[f64]>,
     s: ConfidenceSettings,
 ) -> Confidence {
     let segments = Segments::new(lines, radii, s.margin + 0.5);
@@ -309,8 +314,17 @@ pub fn node_confidence(
                     (start..(start + chunk).min(lines.len()))
                         .map(|f| {
                             fiber_parts(
-                                image, depth, shape, lines, radii, previous, &s, segments, angles,
+                                image,
+                                depth,
+                                shape,
+                                lines,
+                                radii,
+                                previous,
+                                &s,
+                                segments,
+                                angles,
                                 f,
+                                surround_radii.map_or(radii[f], |reach| reach[f]),
                             )
                         })
                         .collect::<Vec<_>>()
@@ -331,8 +345,16 @@ pub fn node_confidence(
             (0..samples)
                 .map(|k| {
                     let mut value = fiber[0][k];
-                    for part in &fiber[1..if with_stability { 5 } else { 4 }] {
-                        value *= part[k];
+                    for (c, part) in fiber[1..if with_stability { 5 } else { 4 }]
+                        .iter()
+                        .enumerate()
+                    {
+                        // fiber[1] is the surround.
+                        value *= if c == 0 {
+                            part[k].powf(s.surround_weight)
+                        } else {
+                            part[k]
+                        };
                     }
                     value
                 })
@@ -367,6 +389,7 @@ fn fiber_parts(
     segments: &Segments,
     angles: &[f64],
     f: usize,
+    surround_radius: f64,
 ) -> ([Vec<f64>; 5], usize) {
     let line = &lines[f];
     let points = if line.len() > 1 {
@@ -415,7 +438,7 @@ fn fiber_parts(
         out[2].push(1.0 - shared as f64 / core.len() as f64);
         let unexplained = (0..ring)
             .filter(|&k| {
-                let p = offset(i, k, r + s.margin + 1.0);
+                let p = offset(i, k, surround_radius + s.margin + 1.0);
                 sample(p) > 0.5 && !segments.covered(p, f, s.margin + 0.5)
             })
             .count();
@@ -484,8 +507,9 @@ mod tests {
             thickness_margin: 0.0,
             ring: 8,
             thickness_tolerance: 0.3,
+            surround_weight: 1.0,
         };
-        let c = node_confidence(&image, &depth, shape, &[line], &[r], None, settings);
+        let c = node_confidence(&image, &depth, shape, &[line], &[r], None, None, settings);
         let middle = c.per_node[0][10];
         assert!(middle > 0.5, "confidence {middle}");
         assert!(c.parts[2][0].iter().all(|&v| v == 1.0)); // nothing else to share with

@@ -3,11 +3,13 @@
 #![warn(missing_docs)]
 
 mod bpm;
+mod bridges;
 mod ovito;
 mod puma;
 mod trajectory;
 
 pub use bpm::{build_bpm_model, write_bpm_lammps_data, BpmExportPlugin, BpmExportReport};
+pub use bridges::{junction_bridges, JunctionBridge, DEFAULT_BOND_RADIUS_RATIO};
 pub use ovito::{
     write_ovito_assembly_frame, write_ovito_dump_frame, write_ovito_view_script, OvitoColoring,
     OvitoRepresentation, OvitoTrajectoryConfig, OvitoTrajectoryReport,
@@ -339,6 +341,10 @@ pub enum ExportError {
     InvalidFiberSpan(u32),
     /// A constant spherocylinder length could not be found.
     NoActiveSegments,
+    /// Binder-bridge radius ratio was not positive and finite.
+    InvalidBondRadiusRatio(f64),
+    /// Junction anchor lookup failed.
+    InvalidJunction(u32),
     /// Fiber material lookup failed.
     MissingMaterial(u32),
     /// The current LAMMPS-data writer requires an orthorhombic positive cell.
@@ -375,6 +381,10 @@ impl fmt::Display for ExportError {
             Self::NoActiveSegments => {
                 f.write_str("constant spherocylinder export requires an active segment")
             }
+            Self::InvalidBondRadiusRatio(value) => {
+                write!(f, "bond radius ratio must be positive, got {value}")
+            }
+            Self::InvalidJunction(id) => write!(f, "junction {id} has an invalid anchor span"),
             Self::MissingMaterial(id) => write!(f, "fiber {id} references a missing material"),
             Self::NonOrthorhombicCell => {
                 f.write_str("DEM-BPM LAMMPS export currently requires a positive orthorhombic cell")

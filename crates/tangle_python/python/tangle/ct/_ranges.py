@@ -16,6 +16,13 @@ The fit image is the largest of these over the types (0 void … 1 fiber),
 so the solver sees sub-voxel edges rather than a hard mask boundary. Which
 range a fiber's core voxels fall in is kept per voxel (``types``, one bit
 per type) and helps decide each fiber's type.
+
+A range is wide enough that the dimmer grey where two fibers touch is in
+it too, so the fit image is flat across touching fibers: a packed bundle
+reads as one blob at 1. ``graded_image`` keeps that dip, dimming each
+voxel by how far its grey falls below the brightest grey near it, so a
+fiber's axis is brighter than the contact beside it, for tracing and
+relaxing onto single fibers.
 """
 
 from __future__ import annotations
@@ -84,6 +91,62 @@ def range_image(
         image[excluded] = 0.0
         types[excluded] = 0
     return image, types, void
+
+
+def graded_image(
+    volume: np.ndarray,
+    ranges: list[tuple[float, float]],
+    void: float,
+    flat: np.ndarray,
+    *,
+    reach: float,
+    denoise_sigma: float,
+    exclude: np.ndarray | None = None,
+) -> np.ndarray:
+    """``flat`` (``range_image``'s image) dimmed where the grey dips below its surroundings.
+
+    Each voxel's grey above void over the brightest grey above void within
+    ``reach`` voxels (a cube), up to 1, times ``flat``: a fiber's axis keeps
+    ``flat``, and the contact between two touching fibers, dimmer than both
+    axes beside it, reads that much lower. Grading each type against its own
+    level instead would not do: the contact between two bright fibers is as
+    bright as a dimmer type's core. ``reach`` is about the smallest fiber
+    radius. Voxels ``range_image`` filled as dim cores (fiber there though
+    darker than every range) stay 1.
+
+    Only voxels with the brightest type's grey within ``reach`` are dimmed:
+    elsewhere the brightest grey nearby is a dim fiber's own noise, and in a
+    dim, noisy fiber dividing by it would dim the fiber itself.
+    """
+    from . import _native
+
+    grey = np.asarray(volume, dtype=np.float32)
+    if denoise_sigma > 0:
+        grey = _native.gaussian(grey, denoise_sigma)
+    above = np.maximum(grey - np.float32(void), np.float32(0.0))
+    local = above.copy()
+    steps = max(int(np.ceil(reach)), 1)
+    for axis in range(3):
+        for _ in range(steps):  # a running 3-wide maximum, ``steps`` times: a (2 steps + 1)-wide one
+            ahead = np.take(local, range(1, local.shape[axis]), axis=axis)
+            behind = np.take(local, range(0, local.shape[axis] - 1), axis=axis)
+            head = [slice(None)] * 3
+            tail = [slice(None)] * 3
+            head[axis] = slice(0, -1)
+            tail[axis] = slice(1, None)
+            grown = local.copy()
+            np.maximum(grown[tuple(head)], ahead, out=grown[tuple(head)])
+            np.maximum(grown[tuple(tail)], behind, out=grown[tuple(tail)])
+            local = grown
+    relative = np.clip(above / np.maximum(local, np.float32(1e-12)), 0.0, 1.0)
+    brightest = max(low for low, _ in ranges) - void
+    relative[local < brightest] = 1.0
+    image = (np.asarray(flat, dtype=np.float32) * relative).astype(np.float32)
+    filled = (flat >= 1.0) & (grey < min(low for low, _ in ranges))
+    image[filled] = 1.0
+    if exclude is not None:
+        image[np.asarray(exclude, dtype=bool)] = 0.0
+    return image
 
 
 def type_fractions(types: np.ndarray, points: np.ndarray, count: int) -> np.ndarray:

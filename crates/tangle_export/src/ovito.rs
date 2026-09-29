@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 
 use tangle_core::{measure_vertex_curvature, FiberAssembly, Section, Vec3};
 
-use crate::{build_dem_bpm_model, DemBpmExportConfig, DemBpmModel, ExportError};
+use crate::{
+    build_dem_bpm_model, junction_bridges, DemBpmExportConfig, DemBpmModel, ExportError,
+    JunctionBridge, DEFAULT_BOND_RADIUS_RATIO,
+};
 
 /// Geometry written to an OVITO relaxation trajectory.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -66,6 +69,14 @@ pub struct OvitoTrajectoryConfig {
     pub coloring: OvitoColoring,
     /// Particle type stored in the dump.
     pub atom_type: u32,
+    /// Binder-bridge radius as a fraction of the thinner fiber's radius, for
+    /// drawing persistent junctions as bonds. `None` leaves bonds out.
+    ///
+    /// Bonds are written as extra spherocylinder rows of type
+    /// `atom_type + 2`, with `mol` 0 and their junction identifier in the
+    /// `junction` column (0 on fiber rows). The DEM-particle representation
+    /// does not draw them.
+    pub bond_radius_ratio: Option<f64>,
 }
 
 impl OvitoTrajectoryConfig {
@@ -80,7 +91,15 @@ impl OvitoTrajectoryConfig {
             representation: OvitoRepresentation::FiberSegments,
             coloring: OvitoColoring::Fiber,
             atom_type: 1,
+            bond_radius_ratio: Some(DEFAULT_BOND_RADIUS_RATIO),
         }
+    }
+
+    /// Draws persistent junctions as binder bonds of the given radius ratio,
+    /// or leaves them out with `None`.
+    pub fn with_bonds(mut self, radius_ratio: Option<f64>) -> Self {
+        self.bond_radius_ratio = radius_ratio;
+        self
     }
 
     /// Includes or omits the pre-relaxation host assembly frame.
@@ -155,6 +174,7 @@ pub fn write_ovito_assembly_frame(
         OvitoRepresentation::FiberSegments => write_fiber_segment_frame(
             assembly,
             config.atom_type,
+            config.bond_radius_ratio,
             &config.dump_path,
             timestep,
             append,
@@ -192,6 +212,7 @@ fn write_connected_fiber_frame(
 ) -> Result<(), ExportError> {
     let (box_low, box_high) = crate::orthorhombic_bounds(assembly)?;
     let capsules = build_fiber_capsules(assembly, config.atom_type)?;
+    let bridges = frame_bridges(assembly, config.bond_radius_ratio)?;
     let mut vertex_count = 0;
     for (fiber_index, fiber) in assembly.topology.fibers.iter().enumerate() {
         vertex_count +=
@@ -201,14 +222,14 @@ fn write_connected_fiber_frame(
     write_frame_header(
         &mut writer,
         timestep,
-        capsules.len() + vertex_count,
+        capsules.len() + vertex_count + bridges.len(),
         box_low,
         box_high,
         assembly.cell.periodic,
     )?;
     writeln!(
         writer,
-        "ITEM: ATOMS id mol type AsphericalShape.X AsphericalShape.Y AsphericalShape.Z quati quatj quatk quatw x y z segment fiber_points natural_curvature current_curvature curvature_ratio curvature_excess refinement_level"
+        "ITEM: ATOMS id mol type AsphericalShape.X AsphericalShape.Y AsphericalShape.Z quati quatj quatk quatw x y z segment fiber_points natural_curvature current_curvature curvature_ratio curvature_excess refinement_level junction"
     )?;
 
     for capsule in &capsules {
@@ -227,6 +248,7 @@ fn write_connected_fiber_frame(
             capsule.curvature_ratio,
             capsule.curvature_excess,
             capsule.refinement_level,
+            0,
         )?;
     }
 
@@ -310,11 +332,13 @@ fn write_connected_fiber_frame(
                     curvature_ratio,
                     curvature_excess,
                     refinement_level,
+                    0,
                 )?;
                 next_id = next_id.checked_add(1).ok_or(ExportError::IndexOverflow)?;
             }
         }
     }
+    write_bond_rows(&mut writer, &bridges, next_id, bond_type(config.atom_type)?)?;
     writer.flush()?;
     Ok(())
 }
@@ -335,10 +359,11 @@ fn write_fiber_glyph(
     curvature_ratio: f64,
     curvature_excess: f64,
     refinement_level: f64,
+    junction: u32,
 ) -> Result<(), std::io::Error> {
     writeln!(
         writer,
-        "{id} {fiber_id} {atom_type} {:.9e} {:.9e} {:.9e} {:.9e} {:.9e} {:.9e} {:.9e} {:.9e} {:.9e} {:.9e} {local_index} {fiber_points} {:.9e} {:.9e} {:.9e} {:.9e} {:.9e}",
+        "{id} {fiber_id} {atom_type} {:.9e} {:.9e} {:.9e} {:.9e} {:.9e} {:.9e} {:.9e} {:.9e} {:.9e} {:.9e} {local_index} {fiber_points} {:.9e} {:.9e} {:.9e} {:.9e} {:.9e} {junction}",
         shape[0],
         shape[1],
         shape[2],
@@ -360,29 +385,33 @@ fn write_fiber_glyph(
 fn write_fiber_segment_frame(
     assembly: &FiberAssembly,
     atom_type: u32,
+    bond_radius_ratio: Option<f64>,
     path: &Path,
     timestep: usize,
     append: bool,
 ) -> Result<(), ExportError> {
     let (box_low, box_high) = crate::orthorhombic_bounds(assembly)?;
     let capsules = build_fiber_capsules(assembly, atom_type)?;
+    let bridges = frame_bridges(assembly, bond_radius_ratio)?;
     let mut writer = open_frame_writer(path, append)?;
     write_frame_header(
         &mut writer,
         timestep,
-        capsules.len(),
+        capsules.len() + bridges.len(),
         box_low,
         box_high,
         assembly.cell.periodic,
     )?;
     writeln!(
         writer,
-        "ITEM: ATOMS id mol type AsphericalShape.X AsphericalShape.Y AsphericalShape.Z quati quatj quatk quatw x y z segment fiber_points natural_curvature current_curvature curvature_ratio curvature_excess refinement_level"
+        "ITEM: ATOMS id mol type AsphericalShape.X AsphericalShape.Y AsphericalShape.Z quati quatj quatk quatw x y z segment fiber_points natural_curvature current_curvature curvature_ratio curvature_excess refinement_level junction"
     )?;
+    let first_bond_id =
+        u32::try_from(capsules.len() + 1).map_err(|_| ExportError::IndexOverflow)?;
     for capsule in capsules {
         writeln!(
             writer,
-            "{} {} {} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {} {} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e}",
+            "{} {} {} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {} {} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} 0",
             capsule.id,
             capsule.fiber_id,
             capsule.atom_type,
@@ -405,7 +434,58 @@ fn write_fiber_segment_frame(
             capsule.refinement_level
         )?;
     }
+    write_bond_rows(&mut writer, &bridges, first_bond_id, bond_type(atom_type)?)?;
     writer.flush()?;
+    Ok(())
+}
+
+/// Particle type of binder-bond rows: after the fiber type and the connected
+/// view's vertex-sphere type.
+fn bond_type(atom_type: u32) -> Result<u32, ExportError> {
+    atom_type.checked_add(2).ok_or(ExportError::IndexOverflow)
+}
+
+fn frame_bridges(
+    assembly: &FiberAssembly,
+    bond_radius_ratio: Option<f64>,
+) -> Result<Vec<JunctionBridge>, ExportError> {
+    match bond_radius_ratio {
+        Some(ratio) => junction_bridges(assembly, ratio),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Writes one spherocylinder row per binder bridge, centered between its two
+/// anchor points and spanning them.
+fn write_bond_rows(
+    writer: &mut impl Write,
+    bridges: &[JunctionBridge],
+    first_id: u32,
+    bond_type: u32,
+) -> Result<(), ExportError> {
+    let mut id = first_id;
+    for bridge in bridges {
+        let delta = sub(bridge.end, bridge.start);
+        let length = norm(delta);
+        write_fiber_glyph(
+            writer,
+            id,
+            0,
+            bond_type,
+            [bridge.radius, bridge.radius, length],
+            z_axis_orientation(delta, length),
+            scale(add(bridge.start, bridge.end), 0.5),
+            0,
+            0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            bridge.junction_id,
+        )?;
+        id = id.checked_add(1).ok_or(ExportError::IndexOverflow)?;
+    }
     Ok(())
 }
 
@@ -749,6 +829,16 @@ pub fn write_ovito_view_script(
             writer,
             "    types.type_by_id_({sphere_type}).shape = ParticlesVis.Shape.Sphere"
         )?;
+        writeln!(
+            writer,
+            "    if any(t.id == {} for t in types.types):",
+            bond_type(config.atom_type)?
+        )?;
+        writeln!(
+            writer,
+            "        types.type_by_id_({}).shape = ParticlesVis.Shape.Spherocylinder",
+            bond_type(config.atom_type)?
+        )?;
         writeln!(writer, "pipeline.modifiers.append(setup_connected_fibers)")?;
     }
     match config.coloring {
@@ -778,6 +868,26 @@ pub fn write_ovito_view_script(
             writer,
             "pipeline.modifiers.append(ColorCodingModifier(property='refinement_level'))"
         )?,
+    }
+    if config.bond_radius_ratio.is_some()
+        && !matches!(
+            config.representation,
+            OvitoRepresentation::DemParticles { .. }
+        )
+    {
+        writeln!(
+            writer,
+            "# Binder bonds at junctions: one grey spherocylinder each"
+        )?;
+        writeln!(
+            writer,
+            "pipeline.modifiers.append(ExpressionSelectionModifier(expression='ParticleType == {}'))",
+            bond_type(config.atom_type)?
+        )?;
+        writeln!(
+            writer,
+            "pipeline.modifiers.append(AssignColorModifier(color=(0.55, 0.55, 0.55)))"
+        )?;
     }
     writeln!(writer, "pipeline.add_to_scene(name='TANGLE relaxation')")?;
     writeln!(writer, "data = pipeline.compute()")?;
@@ -927,6 +1037,7 @@ mod tests {
             representation: OvitoRepresentation::ConnectedFiberSegments,
             coloring: OvitoColoring::Fiber,
             atom_type: 3,
+            bond_radius_ratio: None,
         };
 
         write_ovito_assembly_frame(&assembly, &config, 0, false).unwrap();
@@ -1002,6 +1113,7 @@ mod tests {
             representation: OvitoRepresentation::FiberSegments,
             coloring: OvitoColoring::Fiber,
             atom_type: 1,
+            bond_radius_ratio: None,
         };
         assert_eq!(
             python_path_expression(&config.dump_path, config.view_script_path.as_ref().unwrap()),
@@ -1027,6 +1139,7 @@ mod tests {
             representation: OvitoRepresentation::FiberSegments,
             coloring: OvitoColoring::CurvatureRatio,
             atom_type: 1,
+            bond_radius_ratio: None,
         };
         let directory = std::env::temp_dir().join(format!(
             "tangle-ovito-curvature-script-{}",
@@ -1067,5 +1180,48 @@ mod tests {
         assert!((widths[0] + 0.02).abs() < 1.0e-12);
         assert!(widths[1].abs() < 1.0e-12);
         assert!((widths[2] - 0.02).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn junctions_draw_as_bond_rows_in_both_capsule_views() {
+        let assembly = crate::bridges::tests::touching_cross(false, true);
+        let directory =
+            std::env::temp_dir().join(format!("tangle-ovito-bonds-{}", std::process::id()));
+        for (name, representation, fiber_rows) in [
+            ("segments", OvitoRepresentation::FiberSegments, 2),
+            (
+                "connected",
+                OvitoRepresentation::ConnectedFiberSegments,
+                2 + 4,
+            ),
+        ] {
+            let path = directory.join(format!("{name}.dump"));
+            let mut config = OvitoTrajectoryConfig::fiber_segments(&path, 1);
+            config.representation = representation;
+            write_ovito_assembly_frame(&assembly, &config, 0, false).unwrap();
+            let dump = std::fs::read_to_string(&path).unwrap();
+            assert!(dump.contains(&format!("ITEM: NUMBER OF ATOMS\n{}\n", fiber_rows + 1)));
+            let rows = dump
+                .lines()
+                .skip_while(|line| !line.starts_with("ITEM: ATOMS"))
+                .skip(1)
+                .map(|line| line.split_whitespace().collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            assert_eq!(rows.len(), fiber_rows + 1);
+            assert!(rows.iter().all(|row| row.len() == 21));
+            let bonds = rows.iter().filter(|row| row[2] == "3").collect::<Vec<_>>();
+            assert_eq!(bonds.len(), 1);
+            let bond = bonds[0];
+            assert_eq!(bond[1], "0");
+            assert_eq!(bond[20], "9");
+            assert!((bond[3].parse::<f64>().unwrap() - 0.1).abs() < 1.0e-9);
+            assert!((bond[5].parse::<f64>().unwrap() - 0.2).abs() < 1.0e-9);
+
+            config.bond_radius_ratio = None;
+            write_ovito_assembly_frame(&assembly, &config, 0, false).unwrap();
+            let dump = std::fs::read_to_string(&path).unwrap();
+            assert!(dump.contains(&format!("ITEM: NUMBER OF ATOMS\n{fiber_rows}\n")));
+        }
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

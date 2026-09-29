@@ -55,7 +55,23 @@ def core_holes(mask: np.ndarray, max_area: float) -> np.ndarray:
     return out.view(bool)
 
 
-def rasterize(shape, centerlines, radii, reach, signed: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _sections(lines, sections) -> dict:
+    """``ratios`` and ``axes`` keyword arguments for per-line sections (see ``_geometry.rasterize``)."""
+    if sections is None or all(item is None for item in sections):
+        return {}
+    ratios, axes = [], []
+    for line, item in zip(lines, sections):
+        count = len(np.asarray(line).reshape(-1, 3))
+        if item is None:
+            ratios.append(1.0)
+            axes.append(np.zeros((count, 3)))
+        else:
+            ratios.append(float(item[0]))
+            axes.append(np.asarray(item[1], dtype=np.float64).reshape(count, 3))
+    return {"ratios": ratios, "axes": np.ascontiguousarray(np.concatenate(axes)) if axes else np.zeros((0, 3))}
+
+
+def rasterize(shape, centerlines, radii, reach, signed: bool, sections=None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Nearest-fiber ownership: ``(labels, distance, segment)`` (see ``_geometry.rasterize``)."""
     lines = [np.asarray(line, dtype=np.float64).reshape(-1, 3) for line in centerlines]
     nodes = np.ascontiguousarray(np.concatenate(lines)) if lines else np.zeros((0, 3))
@@ -64,16 +80,19 @@ def rasterize(shape, centerlines, radii, reach, signed: bool) -> tuple[np.ndarra
     segment = np.empty(shape, dtype=np.int32)
     _tangle.ct_rasterize(
         nodes, [len(line) for line in lines], [float(r) for r in radii], [float(r) for r in reach],
-        bool(signed), labels, distance, segment,
+        bool(signed), labels, distance, segment, **_sections(lines, sections),
     )
     return labels, distance, segment
 
 
-def paint(target: np.ndarray, line, reach: float, value: int, *, only_empty: bool = False) -> None:
+def paint(target: np.ndarray, line, reach: float, value: int, *, only_empty: bool = False, section=None) -> None:
     """Set ``target``'s voxels within ``reach`` of polyline ``line`` to ``value``, in place (int32 target)."""
     if target.dtype != np.int32 or not target.flags.c_contiguous:
         raise ValueError("paint needs a C-contiguous int32 target")
-    _tangle.ct_paint(target, _points(line), float(reach), int(value), bool(only_empty))
+    extra = {}
+    if section is not None:
+        extra = {"ratio": float(section[0]), "axes": _points(section[1])}
+    _tangle.ct_paint(target, _points(line), float(reach), int(value), bool(only_empty), **extra)
 
 
 class Hessian:
@@ -123,13 +142,15 @@ def trace_one_way(
 def trace_fibers(
     image: np.ndarray, hessian: Hessian, claimed: np.ndarray, edt: np.ndarray, peak: np.ndarray, *,
     radius: float, min_bend_radius: float, step: float, min_length: float, node_spacing: float,
-    label_offset: int, max_fibers: int | None, seed_depth_radii: float,
+    label_offset: int, max_fibers: int | None, seed_depth_radii: float, bright_seed_strength: float | None = None,
+    peak_floor: float = 0.0, claim_radii: float = 1.1,
 ) -> list[np.ndarray]:
     """Fibers traced from ridge seeds, painting ``claimed`` in place (see ``_trace.trace_fibers``)."""
     lines = _tangle.ct_trace_fibers(
         _f32(image), hessian.native, _claimed(claimed), _f32(edt), _f32(peak), float(radius),
         float(min_bend_radius), float(step), float(min_length), float(node_spacing), int(label_offset),
         None if max_fibers is None else int(max_fibers), float(seed_depth_radii),
+        None if bright_seed_strength is None else float(bright_seed_strength), float(peak_floor), float(claim_radii),
     )
     return [np.array(line, dtype=np.float64).reshape(-1, 3) for line in lines]
 
@@ -194,13 +215,15 @@ def _box(corner) -> list[int]:
     return [int(v) for v in corner]
 
 
-def render_occupancy(low, high, centerlines, radii, edge: float) -> np.ndarray:
+def render_occupancy(low, high, centerlines, radii, edge: float, sections=None) -> np.ndarray:
     """Soft union occupancy of capsules over box ``[low, high)`` (see ``_moves.render_occupancy``)."""
     low, high = _box(low), _box(high)
     out = np.zeros(tuple(max(high[a] - low[a], 0) for a in (2, 1, 0)))
     if len(centerlines):
         nodes, counts = _pack(centerlines)
-        _tangle.ct_render_occupancy(low, high, nodes, counts, [float(r) for r in radii], float(edge), out)
+        _tangle.ct_render_occupancy(
+            low, high, nodes, counts, [float(r) for r in radii], float(edge), out, **_sections(centerlines, sections)
+        )
     return out
 
 
@@ -278,15 +301,22 @@ def render_grey(low, high, centerlines, radii, profiles, void: float, edge: floa
 
 
 def node_confidence(image, depth, centerlines, radii, *, spacing, margin, thickness_margin, ring,
-                    thickness_tolerance, previous=None):
+                    thickness_tolerance, previous=None, surround_weight=1.0, surround_radii=None):
     """``(per_node, settled, per_sample, parts)`` (see ``_confidence.node_confidence``)."""
     nodes, counts = _pack(centerlines)
     previous_nodes = previous_counts = None
     if previous is not None:
         previous_nodes, previous_counts = _pack(previous)
+    surround = {}
+    if surround_weight != 1.0 or surround_radii is not None:  # (builds before these took neither)
+        surround = {
+            "surround_weight": float(surround_weight),
+            "surround_radii": None if surround_radii is None else [float(r) for r in surround_radii],
+        }
     per_node, settled, per_sample, parts = _tangle.ct_node_confidence(
         _f32(image), _f32(depth), nodes, counts, [float(r) for r in radii], float(spacing), float(margin),
         float(thickness_margin), int(ring), float(thickness_tolerance), previous_nodes, previous_counts,
+        **surround,
     )
     as_arrays = lambda rows: [np.array(row, dtype=np.float64) for row in rows]  # noqa: E731
     return as_arrays(per_node), as_arrays(settled), as_arrays(per_sample), [as_arrays(part) for part in parts]
@@ -300,3 +330,20 @@ def overlap(low, high, centerlines, radii) -> np.ndarray:
         nodes, counts = _pack(centerlines)
         _tangle.ct_overlap(low, high, nodes, counts, [float(r) for r in radii], out)
     return out
+
+
+def project(sample, angles, width: int) -> np.ndarray:
+    """Parallel-beam line integrals of a ``(z, y, x)`` sample: ``(angles, z, width)`` (see ``_scanner``)."""
+    sample = _f32(sample)
+    angles = [float(a) for a in angles]
+    out = np.empty((len(angles), sample.shape[0], int(width)), dtype=np.float32)
+    _tangle.ct_project(sample, angles, out)
+    return out
+
+
+def back_project(projections, angles, shape) -> np.ndarray:
+    """The back-projection of ``(angles, z, width)`` rows over a ``shape`` volume (see ``_scanner``)."""
+    out = np.empty(tuple(int(n) for n in shape), dtype=np.float32)
+    _tangle.ct_back_project(_f32(projections), [float(a) for a in angles], out)
+    return out
+

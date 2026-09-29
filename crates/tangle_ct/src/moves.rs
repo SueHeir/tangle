@@ -86,7 +86,9 @@ fn argsort_by(values: &[f64]) -> Vec<usize> {
 /// Fibers mostly lying inside another fiber removed, and end runs that do
 /// trimmed (`_moves.trim_duplicates`). Two distinct fibers never have
 /// centerlines closer than the sum of their radii, so nodes within
-/// `closeness * radius` of another fiber's nodes are re-traces of it.
+/// `closeness` times the larger of the two radii of another fiber's nodes
+/// are re-traces of it (the larger: a thin fit inside a thick fiber sits
+/// off its axis by up to the difference of the radii).
 pub fn trim_duplicates(
     lines: &[Vec<Point>],
     radii: &[f64],
@@ -116,14 +118,13 @@ pub fn trim_duplicates(
         if (0..lines.len()).all(|j| j == index || removed[j]) {
             continue;
         }
-        let limit = closeness * radii[index];
         let line = &lines[index];
         let covered: Vec<bool> = line
             .iter()
             .map(|&p| {
-                grid.within(p, limit).iter().any(|&(d, q)| {
+                grid.within(p, closeness * largest).iter().any(|&(d, q)| {
                     let k = owner[q];
-                    d < limit
+                    d < closeness * radii[index].max(radii[k])
                         && k != index
                         && !removed[k]
                         && (alive[k].0..alive[k].1).contains(&slot[q])
@@ -1075,6 +1076,19 @@ mod tests {
         let (lines, radii) = trim_duplicates(&[long.clone(), copy], &[3.0, 3.0], 4.0, 0.8);
         assert_eq!(lines, vec![long]);
         assert_eq!(radii, vec![3.0]);
+    }
+
+    #[test]
+    fn a_thin_retrace_inside_a_thick_fiber_is_removed() {
+        let thick = straight(0.0, 40.0, 10.0, 2.0);
+        let thin = straight(10.0, 20.0, 14.0, 2.0);
+        let (lines, radii) = trim_duplicates(&[thick.clone(), thin], &[8.0, 2.5], 4.0, 0.8);
+        assert_eq!(lines, vec![thick.clone()]);
+        assert_eq!(radii, vec![8.0]);
+        // A thin fiber touching the thick one is kept.
+        let beside = straight(10.0, 20.0, 20.5, 2.0);
+        let (lines, _) = trim_duplicates(&[thick.clone(), beside], &[8.0, 2.5], 4.0, 0.8);
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]

@@ -13,6 +13,7 @@ use tangle_export::{
     build_bpm_model, write_bpm_lammps_data, write_ovito_assembly_frame, write_ovito_view_script,
     write_puma_bundle, BpmExportConfig, BpmExportMode, OvitoColoring, OvitoRepresentation,
     OvitoTrajectoryConfig, OvitoTrajectoryPlugin, OvitoTrajectoryReport, PumaVoxelExportConfig,
+    DEFAULT_BOND_RADIUS_RATIO,
 };
 use tangle_generate::{
     random_footprint_center, FormationOperation, FormationRecipeConfig, FormationRecipePlugin,
@@ -1041,16 +1042,19 @@ impl PyRunResult {
         self.model().assembly.junctions.junctions.len()
     }
 
-    #[pyo3(signature = (path, *, view_script_path=None, session_path=None, coloring="fiber"))]
+    #[pyo3(signature = (path, *, view_script_path=None, session_path=None, coloring="fiber", bond_radius_ratio=Some(DEFAULT_BOND_RADIUS_RATIO)))]
     fn write_ovito(
         &self,
         path: PathBuf,
         view_script_path: Option<PathBuf>,
         session_path: Option<PathBuf>,
         coloring: &str,
+        bond_radius_ratio: Option<f64>,
     ) -> PyResult<()> {
         let coloring = parse_choice(coloring, "coloring", OVITO_COLORINGS)?;
-        let mut config = OvitoTrajectoryConfig::fiber_segments(path, 1).with_coloring(coloring);
+        let mut config = OvitoTrajectoryConfig::fiber_segments(path, 1)
+            .with_coloring(coloring)
+            .with_bonds(bond_radius_ratio);
         config.representation = OvitoRepresentation::FiberSegments;
         config.view_script_path = view_script_path.clone();
         config.session_path = session_path;
@@ -1090,7 +1094,7 @@ impl PyRunResult {
         Ok((model.particles(), model.bonds()))
     }
 
-    #[pyo3(signature = (output_directory, voxel_size, *, include_fiber_ids=true, include_interface=true, ambiguity_tolerance=None))]
+    #[pyo3(signature = (output_directory, voxel_size, *, include_fiber_ids=true, include_interface=true, ambiguity_tolerance=None, bond_radius_ratio=None))]
     fn export_puma(
         &self,
         output_directory: PathBuf,
@@ -1098,10 +1102,12 @@ impl PyRunResult {
         include_fiber_ids: bool,
         include_interface: bool,
         ambiguity_tolerance: Option<f64>,
+        bond_radius_ratio: Option<f64>,
     ) -> PyResult<PyPumaExportReport> {
         let mut config = PumaVoxelExportConfig::new(output_directory, voxel_size)
             .with_fiber_ids(include_fiber_ids)
-            .with_interface(include_interface);
+            .with_interface(include_interface)
+            .with_bonds(bond_radius_ratio);
         if let Some(tolerance) = ambiguity_tolerance {
             config = config.with_ambiguity_tolerance(tolerance);
         }

@@ -12,6 +12,11 @@ match the scan. It returns:
 - an overlay of the fibers on the raw scan, one color per fiber, as an RGB
   TIFF stack and a PNG with three orthogonal slices.
 
+A second route, a 3D U-Net that turns the scan into maps and a tracer that
+reads the fibers off them, is described in the
+[CT map network guide](ct_unet.md). On the simulated `dense_hard` sets it
+scores higher than this fitter.
+
 How well it works, with tables and pictures on synthetic scans:
 [CT fitting results](../crates/tangle_python/python/examples/ct_results/README.md).
 Every step of the method: [ct_fitting_internals.md](ct_fitting_internals.md).
@@ -320,11 +325,19 @@ fit.write("scan_fit/result")
 - **Stitching.** Where a kept stretch leaves its core, the tile's fit goes on
   into the padding, which is the neighbouring core. There the neighbour's
   own fit of that fiber leaves toward this core. When the two fits lie on
-  each other within half the overlap of the wall (on average closer than
-  three quarters of the smaller radius, and of the same type), they are
-  joined into one fiber; otherwise the fiber is cut at the wall. Joins are
-  made best first, one per end, so a fiber that crosses many cores comes out
-  whole. A short piece that ends at a wall without a partner is dropped.
+  each other within half the overlap of the wall (on average within 1.25 of
+  the smaller radius and nowhere a diameter apart) and the joined fiber goes
+  on the way it was going (within 60 degrees), they are joined into one
+  fiber; otherwise the fiber is cut at the wall. The partner may sit in any
+  of the 26 neighbouring cores (a crossing at an edge or corner), and the two
+  tiles may have typed the fiber differently: the joined fiber takes the
+  larger type when that covers a third of it (a tile fits a large fiber as a
+  small one far more often than the reverse). Ends that meet at a wall without overlapping fits
+  are joined when they point at each other or sit side by side on one axis.
+  Joins are made best first, one per end, so a fiber that crosses many cores
+  comes out whole; a join never steps back, and a chain that turns over 60
+  degrees at a join is cut there. A short piece that ends at a wall without
+  a partner is dropped.
 - **Checkpoints.** With `checkpoint=<directory>`, the directory holds a
   `manifest.json` of the inputs and one `tiles/<z>_<y>_<x>.json` per
   finished tile, in scan coordinates. Running `fit_tiled` again with the
@@ -359,7 +372,10 @@ for comparison) and scores it.
 ## Examples
 
 [`ct_examples.py`](../crates/tangle_python/python/examples/ct_examples.py)
-holds every example, and every example is run the same way. A synthetic
+holds every example, and every example is run the same way. The synthetic
+scans come from the simulated scanner in [ct_scanner.md](ct_scanner.md);
+the hardest set, and the settings that fit it best, are in
+[ct_dense_hard.md](ct_dense_hard.md). A synthetic
 scan with known true fibers is fitted from the raw scan, with each type's
 grey profile measured around its true fibers (as one would on a few
 fibers of a real scan), with Tangle's solver on the GPU.

@@ -1,6 +1,6 @@
 //! The Gaussian-scale Hessian of a scan and the local tube direction.
 
-use crate::filter::{filter_axis, gaussian_kernel, kernel_radius};
+use crate::filter::{filter_axis, gaussian_kernel, kernel_radius, parallel_rows};
 use crate::sample::trilinear;
 use crate::Shape;
 
@@ -87,6 +87,31 @@ impl HessianField {
             vectors[2][order[0]],
         ];
         (axis, -0.5 * (values[order[1]] + values[order[2]]))
+    }
+
+    /// Per voxel, how strongly the image curves down across a tube there:
+    /// minus the weaker of the two largest-magnitude eigenvalues when both
+    /// are negative (the middle of a bright tube), else 0. Unlike the
+    /// foreground's depth it peaks on every fiber of a packed bundle, as
+    /// long as the grey dips a little between them.
+    pub fn tube_strength(&self) -> Vec<f32> {
+        let mut out = vec![0.0f32; self.components[0].len()];
+        let row = self.shape[2];
+        parallel_rows(&mut out, row, |r, slice| {
+            for (i, strength) in slice.iter_mut().enumerate() {
+                let v = r * row + i;
+                let mut h = [[0.0; 3]; 3];
+                for (((a, b), _), values) in COMPONENTS.iter().zip(&self.components) {
+                    h[*a][*b] = values[v] as f64;
+                    h[*b][*a] = values[v] as f64;
+                }
+                let (mut values, _) = symmetric_eigen(h);
+                values.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
+                let weaker = values[1].max(values[2]);
+                *strength = if weaker < 0.0 { -weaker as f32 } else { 0.0 };
+            }
+        });
+        out
     }
 }
 

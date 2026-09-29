@@ -38,7 +38,7 @@ def overlay_slice(
     labels: np.ndarray,
     *,
     palette: np.ndarray | None = None,
-    alpha: float = 0.45,
+    alpha: float = 0.3,
     outline: bool = True,
     window: tuple[float, float] | None = None,
 ) -> np.ndarray:
@@ -58,7 +58,7 @@ def overlay_slice(
     return np.clip(rgb, 0.0, 1.0)
 
 
-def overlay_volume(volume: np.ndarray, labels: np.ndarray, *, alpha: float = 0.45) -> np.ndarray:
+def overlay_volume(volume: np.ndarray, labels: np.ndarray, *, alpha: float = 0.3) -> np.ndarray:
     """``uint8`` RGB stack ``(z, y, x, 3)`` for viewing in Fiji/Napari/ParaView."""
     palette = fiber_palette(int(labels.max()))
     low, high = np.percentile(np.asarray(volume)[:: max(1, volume.shape[0] // 32)], [0.5, 99.5])

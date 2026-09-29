@@ -169,6 +169,26 @@ impl PyPumaExportReport {
     }
 
     #[getter]
+    fn binder_voxels(&self) -> usize {
+        self.inner.binder_voxels
+    }
+
+    #[getter]
+    fn bonds(&self) -> usize {
+        self.inner.bonds
+    }
+
+    #[getter]
+    fn bond_ids_path(&self) -> Option<PathBuf> {
+        self.inner.bond_ids_path.clone()
+    }
+
+    #[getter]
+    fn binder_interface_path(&self) -> Option<PathBuf> {
+        self.inner.binder_interface_path.clone()
+    }
+
+    #[getter]
     fn manifest_path(&self) -> PathBuf {
         self.inner.manifest_path.clone()
     }
