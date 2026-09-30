@@ -23,9 +23,10 @@ WEIGHTS = {"heat": 1.0, "offset": 1.0, "direction": 1.0, "fiber": 0.5, "radius":
 
 
 class Crops(Dataset):
-    def __init__(self, files, crop: int, per_volume: int, seed: int, train: bool = True, noise: float = 0.0):
+    def __init__(self, files, crop: int, per_volume: int, seed: int, train: bool = True, noise: float = 0.0,
+                 hint_rate: float = 0.4):
         self.files, self.crop, self.per_volume, self.seed, self.train = files, crop, per_volume, seed, train
-        self.noise = noise
+        self.noise, self.hint_rate = noise, hint_rate
 
     def __len__(self):
         return len(self.files) * self.per_volume
@@ -58,11 +59,11 @@ class Crops(Dataset):
                                         rng.uniform(0.6, 1.3, size=3))
                 field *= rng.uniform(0.3, 1.0) * self.noise / max(float(field.std()), 1e-6)
                 sample["image"] = sample["image"] + field[None]
-        # the bond hint, as a user would give it: 40% "bonded / not bonded" (half of those with a rough bond size
-        # when bonded), 60% nothing said
+        # the bond hint, as a user would give it: "bonded / not bonded" hint_rate of the time (half of those with a
+        # rough bond size when bonded), otherwise nothing said (--hint-rate)
         bonded = "bond_labels" in data.files and bool(data["bond_labels"].any())
         hint, ratio = None, None
-        if not self.train or rng.random() < 0.4:
+        if not self.train or rng.random() < self.hint_rate:
             hint = bonded
             if bonded and "bond_ratio" in data.files and (not self.train or rng.random() < 0.5):
                 ratio = float(data["bond_ratio"]) * (float(np.exp(rng.normal(0.0, 0.15))) if self.train else 1.0)
@@ -97,6 +98,7 @@ def main():
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--init", type=Path, help="start from this checkpoint's weights (fine-tuning)")
+    parser.add_argument("--hint-rate", type=float, default=0.4, help="share of crops given the bond hint")
     parser.add_argument("--binder-weight", type=float, default=1.0, help="weight of the binder loss")
     parser.add_argument("--binder-positive", type=float, default=9.0, help="extra weight on true binder voxels")
     parser.add_argument("--condition", action="store_true", help="add the fiber-size conditioning (FiLM)")
@@ -168,7 +170,7 @@ def main():
     while step < args.steps:
         # Re-list each pass so volumes still being generated join as they land.
         files = sorted(f for d in args.data.split(",") for f in Path(d).glob("*.npz"))
-        loader = DataLoader(Crops(files, args.crop, 2, step, noise=args.noise), batch_size=1, shuffle=True, num_workers=args.workers,
+        loader = DataLoader(Crops(files, args.crop, 2, step, noise=args.noise, hint_rate=args.hint_rate), batch_size=1, shuffle=True, num_workers=args.workers,
                             persistent_workers=False, prefetch_factor=2)
         model.train()
         for batch in loader:
