@@ -86,6 +86,29 @@ pub fn proxy_of(parameter: f32, proxies: u32) -> u32 {
     piece.min(proxies - 1)
 }
 
+/// Rest length of fiber between two segments `a0-a1` and `b0-b1` of the same
+/// fiber, from `vertex_arc_lengths` (each vertex's rest arc length from its
+/// fiber's start; a fiber's vertices are numbered in order along it). It is
+/// negative when the segments share a vertex or one contains the other.
+///
+/// Two segments of one straight fiber whose gap is below the sum of their
+/// radii overlap in space, and a bent fiber only brings them closer, so
+/// contact skips them: pushing them apart would only stretch the fiber.
+/// Real self-contact, a fiber looping back onto itself, has a gap of many
+/// diameters and is kept.
+#[cube]
+pub fn along_fiber_gap(
+    vertex_arc_lengths: &[f32],
+    a0: usize,
+    a1: usize,
+    b0: usize,
+    b1: usize,
+) -> f32 {
+    let after = vertex_arc_lengths[b0] - vertex_arc_lengths[a1];
+    let before = vertex_arc_lengths[a0] - vertex_arc_lengths[b1];
+    after.max(before)
+}
+
 /// Counts the proxies binned into each cell. `use_proxies == 0` bins every
 /// segment whole (one proxy), as the contact-capture grid requires.
 #[cube(launch_unchecked)]

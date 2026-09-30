@@ -34,16 +34,12 @@ from tangle.units import um
 
 cell = tangle.Cell([120 * um] * 3, periodic="xyz")
 fiber = tangle.Material("fiber", diameter=10 * um, min_bend_radius=50 * um)
-population = tangle.FiberPopulation(
-    material=fiber, count=40, length=(60 * um, 100 * um), segments_per_fiber=4,
-    curvature_amplitude=(1 * um, 5 * um),
-)
+population = tangle.FiberPopulation(material=fiber, count=40, length=(60 * um, 100 * um))
 
 recipe = tangle.Recipe(cell)          # steps are recorded here...
 recipe.insert(tangle.generate_fiber_population(cell, population))
 recipe.relax_until_converged()
-settings = tangle.RelaxationSettings(penetration_tolerance=0.1 * um, max_step=1 * um)
-result = recipe.run(settings)         # ...and simulated here, on the GPU
+result = recipe.run()                 # ...and simulated here, on the GPU
 result.write_ovito("network.dump")
 
 scan = ct.synthetic_ct(result, voxel_size=1.5 * um)
@@ -51,10 +47,9 @@ fit = ct.fit_fibers(scan.volume, scan.voxel_size, ct.FiberSpec(diameter=10 * um)
 fit.write("fit", volume=scan.volume)  # fit.json, labels.tif, overlay.png
 ```
 
-Lengths are in meters, and the length-type settings (`curvature_amplitude`,
-`penetration_tolerance`, `max_step`) have defaults sized for millimeter-scale
-fibers, so set them for yours. Without a GPU, add `backend="cpu"` to
-`RelaxationSettings` and use
+Lengths are in meters. Unset length settings (fiber length and waviness,
+overlap tolerance, step size) follow the fiber diameter. Without a GPU, use
+`recipe.run(tangle.RelaxationSettings(backend="cpu"))` and
 `ct.FitSettings(backend="cpu")`. The sections below cover installation in
 more detail (Windows, Conda, notebooks) and the rest of the API.
 

@@ -8,7 +8,7 @@ use pyo3::types::{PyAny, PyType};
 use tangle_app::{TanglePreparedAssemblyPlugin, TangleStage, TangleWorkflowPlugin};
 use tangle_characterize::characterize_assembly;
 use tangle_checkpoint::{CheckpointConfig, CheckpointPlugin, CheckpointReport};
-use tangle_core::{FiberAssembly, Vec3};
+use tangle_core::{FiberAssembly, Section, Vec3};
 use tangle_export::{
     build_bpm_model, write_bpm_lammps_data, write_ovito_assembly_frame, write_ovito_view_script,
     write_puma_bundle, BpmExportConfig, BpmExportMode, OvitoColoring, OvitoRepresentation,
@@ -660,7 +660,7 @@ impl PyRecipe {
             }
             None
         };
-        let relaxation = settings.to_rust()?;
+        let relaxation = settings.to_rust_for(smallest_diameter(&model.assembly))?;
         let assembly = model.assembly.clone();
         drop(model);
         let recipe = FormationRecipeConfig {
@@ -1204,4 +1204,19 @@ fn assembly_centerlines(assembly: &FiberAssembly) -> Vec<Vec<Vec3>> {
             assembly.geometry.placed.positions[start..end].to_vec()
         })
         .collect()
+}
+
+/// The smallest cross-section width among the assembly's fibers (an oval's
+/// short width), or `None` without fibers, as when resuming a checkpoint.
+fn smallest_diameter(assembly: &FiberAssembly) -> Option<f64> {
+    assembly
+        .topology
+        .fibers
+        .iter()
+        .filter_map(|fiber| assembly.sections.entries.get(fiber.section.0 as usize))
+        .map(|section| match section {
+            Section::Circular { radius } => 2.0 * radius,
+            Section::Elliptical { semi_axes } => 2.0 * semi_axes[0].min(semi_axes[1]),
+        })
+        .reduce(f64::min)
 }

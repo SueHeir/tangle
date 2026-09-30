@@ -4,7 +4,7 @@
 
 use cubecl::prelude::*;
 
-use super::cell_list::{proxy_cell, proxy_of};
+use super::cell_list::{along_fiber_gap, proxy_cell, proxy_of};
 
 #[cube(launch_unchecked)]
 #[allow(unused_assignments)]
@@ -235,6 +235,7 @@ pub fn find_segment_corrections(
     positions: &[f32],
     segment_vertices: &[u32],
     segment_fibers: &[u32],
+    vertex_arc_lengths: &[f32],
     segment_radii: &[f32],
     segment_lane_offsets: &[f32],
     directors: &[f32],
@@ -436,12 +437,16 @@ pub fn find_segment_corrections(
             }
             let third_vertex = segment_vertices[2 * other] as usize;
             let fourth_vertex = segment_vertices[2 * other + 1] as usize;
-            let adjacent_same_fiber = segment_fibers[other] == owner
-                && (first_vertex == third_vertex
-                    || first_vertex == fourth_vertex
-                    || second_vertex == third_vertex
-                    || second_vertex == fourth_vertex);
-            if other != segment_index && !adjacent_same_fiber {
+            let gap = along_fiber_gap(
+                vertex_arc_lengths,
+                first_vertex,
+                second_vertex,
+                third_vertex,
+                fourth_vertex,
+            );
+            let near_along_fiber =
+                segment_fibers[other] == owner && gap < radius + segment_radii[other];
+            if other != segment_index && !near_along_fiber {
                 let mut p2x = positions[3 * third_vertex];
                 let mut p2y = positions[3 * third_vertex + 1];
                 let mut p2z = positions[3 * third_vertex + 2];

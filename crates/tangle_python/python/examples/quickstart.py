@@ -19,18 +19,12 @@ output = Path(__file__).parent / "output" / "quickstart"
 #    that no two fibers overlap.
 cell = tangle.Cell([120 * um] * 3, periodic="xyz")
 fiber = tangle.Material("fiber", diameter=10 * um, min_bend_radius=50 * um)
-population = tangle.FiberPopulation(
-    material=fiber, count=40, length=(60 * um, 100 * um), segments_per_fiber=4,
-    curvature_amplitude=(1 * um, 5 * um),
-)
+population = tangle.FiberPopulation(material=fiber, count=40, length=(60 * um, 100 * um))
 
 recipe = tangle.Recipe(cell)
 recipe.insert(tangle.generate_fiber_population(cell, population))
 recipe.relax_until_converged()
-# Length settings have no automatic scale: set them for 10 µm fibers. Keep
-# segments (length / segments_per_fiber) no shorter than the diameter.
-settings = tangle.RelaxationSettings(penetration_tolerance=0.1 * um, max_step=1 * um)
-result = recipe.run(settings)
+result = recipe.run()  # solver lengths default to fractions of the fiber diameter
 print(f"relaxed {result.fiber_count} fibers in {result.iterations} iterations, converged={result.converged}")
 
 result.write_ovito(output / "network.dump")

@@ -263,6 +263,72 @@ fn adaptive_coarsening_waits_for_active_vertex_target_release() {
     assert_eq!(released.segment_merges, 1, "{released:?}");
 }
 
+fn single_fiber_world(points: &[[f64; 3]]) -> DeviceFiberWorld<WgpuRuntime> {
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([4.0; 3], [false; 3]));
+    let material = assembly.materials.add("fiber");
+    let section = assembly.sections.add(Section::Circular { radius: 0.1 });
+    assembly
+        .add_fiber(FiberId(1), material, section, points, points)
+        .unwrap();
+    let packed = PackedAssembly::from_assembly(&assembly).unwrap();
+    DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed,
+        CellListConfig::default(),
+        0.2,
+    )
+}
+
+#[test]
+fn segments_shorter_than_the_diameter_do_not_touch_their_own_fiber() {
+    // Twenty 0.05-long segments of a 0.2-diameter fiber: segments two apart
+    // overlap as capsules, but they are neighbours along the fiber.
+    let points: Vec<[f64; 3]> = (0..=20).map(|i| [1.0 + 0.05 * i as f64, 2.0, 2.0]).collect();
+    let mut world = single_fiber_world(&points);
+    let config = RelaxationConfig {
+        penetration_tolerance: 1.0e-5,
+        max_step: 0.02,
+        max_iterations: 50,
+        iterations_per_batch: 50,
+        ..RelaxationConfig::default()
+    };
+    let status = world.run_batch(&config, 50);
+    assert!(status.converged, "{status:?}");
+    assert!(status.max_penetration <= config.penetration_tolerance);
+}
+
+#[test]
+fn a_fiber_folded_onto_itself_is_pushed_apart() {
+    // A hairpin: two 1.5-long legs 0.1 apart (a 0.1 overlap for a 0.2
+    // diameter), joined by a short turn. The legs are many diameters apart
+    // along the fiber, so their overlap is real self-contact.
+    let mut points: Vec<[f64; 3]> = (0..=15).map(|i| [1.0 + 0.1 * i as f64, 2.0, 2.0]).collect();
+    points.extend((0..=15).rev().map(|i| [1.0 + 0.1 * i as f64, 2.1, 2.0]));
+    let far_first = 0;
+    let far_last = points.len() - 1;
+    let mut world = single_fiber_world(&points);
+    let config = RelaxationConfig {
+        penetration_tolerance: 1.0e-4,
+        max_step: 0.02,
+        max_iterations: 4_000,
+        iterations_per_batch: 4_000,
+        ..RelaxationConfig::default()
+    };
+    let status = world.run_batch(&config, 4_000);
+    // The rest shape is the folded one, so bending keeps pulling the turn
+    // back; contact must still have removed nearly all of the 0.1 overlap.
+    assert!(status.max_penetration < 0.01, "{status:?}");
+    let positions = world.download_positions();
+    let gap = (0..3)
+        .map(|axis| {
+            let delta = positions[3 * far_first + axis] - positions[3 * far_last + axis];
+            delta * delta
+        })
+        .sum::<f32>()
+        .sqrt();
+    assert!(gap >= 0.2 - 1.0e-3, "free ends only {gap} apart");
+}
+
 #[test]
 fn fully_pinned_overlap_is_not_accepted() {
     let assembly = crossed_assembly();

@@ -484,6 +484,37 @@ class RecipeTests(unittest.TestCase):
         self.assertLess(separation, 0.07)
         self.assertEqual(len(result.assembly.long_axes()[0]), 2)
 
+    def test_micrometer_fibers_relax_with_default_lengths(self):
+        # Unset lengths follow the fiber diameter, not the millimeter-scale
+        # Rust defaults, so 10 um fibers need no hand-tuned settings.
+        fiber = tangle.Material("fiber", diameter=10 * um)
+        population = tangle.FiberPopulation(material=fiber, count=20)
+        self.assertIsNone(population.length)
+        self.assertIsNone(tangle.RelaxationSettings().penetration_tolerance)
+        cell = tangle.Cell([400 * um] * 3, periodic="xyz")
+        collection = tangle.generate_fiber_population(cell, population)
+        for line in collection.centerlines():
+            length = sum(math.dist(a, b) for a, b in zip(line, line[1:]))
+            self.assertLess(length, 25 * 10 * um)
+        recipe = tangle.Recipe(cell)
+        recipe.insert(collection)
+        recipe.relax_until_converged()
+        result = recipe.run()
+        self.assertTrue(result.converged)
+        self.assertLessEqual(result.max_penetration, 0.01 * 10 * um)
+
+    def test_segments_shorter_than_the_diameter_converge(self):
+        fiber = tangle.Material("fiber", diameter=10 * um)
+        population = tangle.FiberPopulation(
+            material=fiber, count=5, length=60 * um, segments_per_fiber=16, curvature_amplitude=0.0
+        )
+        cell = tangle.Cell([300 * um] * 3, periodic="xyz")
+        recipe = tangle.Recipe(cell)
+        recipe.insert(tangle.generate_fiber_population(cell, population))
+        recipe.relax_until_converged()
+        result = recipe.run()
+        self.assertTrue(result.converged)
+
     def test_run_returns_a_new_assembly(self):
         assembly = tangle.Assembly(tangle.Cell([1.0, 1.0, 1.0]))
         recipe = tangle.Recipe(assembly)

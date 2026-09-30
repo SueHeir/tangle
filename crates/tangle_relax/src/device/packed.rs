@@ -515,6 +515,31 @@ impl PackedAssembly {
         self.positions.len() / 3
     }
 
+    /// Rest arc length of every vertex from its fiber's first vertex, along
+    /// the intrinsic centerline. A fiber's vertices are stored in order along
+    /// it, including the inactive vertices reserved for refinement, so this
+    /// holds through refinement and coarsening.
+    pub fn vertex_arc_lengths(&self) -> Vec<f32> {
+        let mut arc = vec![0.0_f32; self.vertex_count()];
+        for span in self.fiber_vertex_spans.chunks_exact(2) {
+            let (start, count) = (span[0] as usize, span[1] as usize);
+            let mut total = 0.0_f64;
+            for vertex in start + 1..start + count {
+                let length = (0..3)
+                    .map(|axis| {
+                        let delta = self.intrinsic_positions[3 * vertex + axis] as f64
+                            - self.intrinsic_positions[3 * (vertex - 1) + axis] as f64;
+                        delta * delta
+                    })
+                    .sum::<f64>()
+                    .sqrt();
+                total += length;
+                arc[vertex] = total as f32;
+            }
+        }
+        arc
+    }
+
     /// Number of segments in the packed representation.
     pub fn segment_count(&self) -> usize {
         self.segment_fibers.len()

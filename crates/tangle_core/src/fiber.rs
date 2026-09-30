@@ -31,15 +31,34 @@ pub struct FiberTopology {
 }
 
 /// One centerline configuration for every fiber in an assembly.
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
 pub struct GeometryState {
     /// Flat vertex positions addressed by [`Fiber::vertices`].
     pub positions: Vec<Vec3>,
     /// Unit long-axis direction of the cross-section at each vertex, for
     /// non-circular sections. Either empty (no fiber needs one) or one entry
     /// per position; see [`crate::default_directors`].
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub directors: Vec<Vec3>,
+}
+
+impl serde::Serialize for GeometryState {
+    /// Human-readable formats (JSON) leave out an empty `directors`, so
+    /// round-fiber files read as before ovals; binary formats (bincode
+    /// checkpoints) read fields by position and always get both.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let with_directors = !serializer.is_human_readable() || !self.directors.is_empty();
+        let mut state =
+            serializer.serialize_struct("GeometryState", 1 + usize::from(with_directors))?;
+        state.serialize_field("positions", &self.positions)?;
+        if with_directors {
+            state.serialize_field("directors", &self.directors)?;
+        } else {
+            state.skip_field("directors")?;
+        }
+        state.end()
+    }
 }
 
 /// Intrinsic, placed, and optional manufactured reference geometry.
