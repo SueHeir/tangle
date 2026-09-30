@@ -57,6 +57,10 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 cube_dim.clone(),
                 BufferArg::from_raw_parts(self.slot_geometry.clone(), 8 * slots),
                 BufferArg::from_raw_parts(self.slot_topology.clone(), 5 * slots),
+                BufferArg::from_raw_parts(
+                    self.vertex_arc_lengths.clone(),
+                    self.packed.vertex_count(),
+                ),
                 BufferArg::from_raw_parts(self.cell_counts.clone(), self.cell_count),
                 BufferArg::from_raw_parts(self.cell_offsets.clone(), self.cell_count),
                 BufferArg::from_raw_parts(self.cell_segments.clone(), slots),

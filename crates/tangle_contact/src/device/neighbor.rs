@@ -12,7 +12,7 @@
 
 use cubecl::prelude::*;
 
-use super::cell_list::{proxy_cell, proxy_of};
+use super::cell_list::{along_fiber_gap, proxy_cell, proxy_of};
 
 /// Distance between two segment axes `p1 + s d1` and `p2 + t d2`, or
 /// [`NOT_CANONICAL`] unless the closest points lie in pieces `proxy1` and
@@ -171,6 +171,7 @@ pub fn gather_cell_slot_geometry(
 pub fn build_segment_neighbor_lists(
     slot_geometry: &[f32],
     slot_topology: &[u32],
+    vertex_arc_lengths: &[f32],
     cell_counts: &[u32],
     cell_offsets: &[u32],
     cell_segments: &[u32],
@@ -278,12 +279,19 @@ pub fn build_segment_neighbor_lists(
                 let other = cell_segments[other_slot];
                 let third_vertex = slot_topology[5 * other_slot];
                 let fourth_vertex = slot_topology[5 * other_slot + 1];
-                let adjacent_same_fiber = slot_topology[5 * other_slot + 2] == owner
-                    && (first_vertex == third_vertex
-                        || first_vertex == fourth_vertex
-                        || second_vertex == third_vertex
-                        || second_vertex == fourth_vertex);
-                if other as usize != segment_index && !adjacent_same_fiber {
+                // Segments of one fiber closer than their radii along its
+                // rest length always overlap in space; they are neighbours
+                // along the fiber, not in contact (see `along_fiber_gap`).
+                let gap = along_fiber_gap(
+                    vertex_arc_lengths,
+                    first_vertex as usize,
+                    second_vertex as usize,
+                    third_vertex as usize,
+                    fourth_vertex as usize,
+                );
+                let near_along_fiber = slot_topology[5 * other_slot + 2] == owner
+                    && gap < radius + slot_geometry[8 * other_slot + 3];
+                if other as usize != segment_index && !near_along_fiber {
                     let mut p2x = slot_geometry[8 * other_slot];
                     let mut p2y = slot_geometry[8 * other_slot + 1];
                     let mut p2z = slot_geometry[8 * other_slot + 2];
