@@ -32,9 +32,13 @@ def extract_bonds(maps: np.ndarray, lines, radii, threshold: float = 0.5):
     touches one fiber only (a coating) makes no bond. Pairs, not connected blobs, so the neck around one
     crossing counts once even if it reads as two pieces, and neighbouring crossings stay apart."""
     z, y, x = np.nonzero(maps[BINDER][0] > threshold)
-    if len(z) == 0 or not lines:
+    return bonds_from_binder(np.stack([x, y, z], 1) + 0.5, lines, radii)
+
+
+def bonds_from_binder(voxels: np.ndarray, lines, radii):
+    """``extract_bonds`` for binder voxel centers (x, y, z) already picked out (e.g. tile by tile)."""
+    if len(voxels) == 0 or not lines:
         return []
-    voxels = np.stack([x, y, z], 1) + 0.5
     points = [_dense(l) for l in lines]
     owner = np.concatenate([np.full(len(p), k) for k, p in enumerate(points)])
     radius = np.asarray(radii, float)[owner]
@@ -95,9 +99,27 @@ def extract_bond_points(maps: np.ndarray, lines, radii, threshold: float = 0.5):
     heat = maps[BONDPT][0]
     peaks = (heat > threshold) & (heat == ndimage.maximum_filter(heat, size=5))
     z, y, x = np.nonzero(peaks)
-    if len(z) == 0 or not lines:
+    return bonds_at(np.stack([x, y, z], 1) + 0.5, heat[z, y, x], lines, radii)
+
+
+def bond_peaks(maps: np.ndarray, threshold: float = 0.5, window=None, origin=(0, 0, 0)):
+    """(centers (x, y, z), strengths) of the bond-point peaks above ``threshold`` inside ``window``."""
+    from maps import BONDPT
+
+    heat = maps[BONDPT][0]
+    peaks = (heat > threshold) & (heat == ndimage.maximum_filter(heat, size=5))
+    if window is not None:
+        keep = np.zeros_like(peaks)
+        keep[window] = True
+        peaks &= keep
+    z, y, x = np.nonzero(peaks)
+    return np.stack([x + origin[2], y + origin[1], z + origin[0]], 1) + 0.5, heat[z, y, x]
+
+
+def bonds_at(centers: np.ndarray, strengths, lines, radii):
+    """Bonds at given points: each joins the two traced fibers whose surfaces are nearest it (within REACH)."""
+    if len(centers) == 0 or not lines:
         return []
-    centers = np.stack([x, y, z], 1) + 0.5
     points = [_dense(l) for l in lines]
     owner = np.concatenate([np.full(len(p), k) for k, p in enumerate(points)])
     radius = np.asarray(radii, float)[owner]
@@ -113,5 +135,19 @@ def extract_bond_points(maps: np.ndarray, lines, radii, threshold: float = 0.5):
         if len(best) >= 2:
             a, b = sorted(best, key=best.get)[:2]
             bonds.append({"fibers": (int(min(a, b)), int(max(a, b))), "center": centers[v].tolist(),
-                          "strength": float(heat[z[v], y[v], x[v]])})
+                          "strength": float(strengths[v])})
     return bonds
+
+
+def merge_bonds(*groups, tolerance: float = 3.0):
+    """One list from several bond finders: a bond is dropped if an earlier one joins the same fiber pair or
+    lies within ``tolerance`` voxels of it."""
+    kept = []
+    for group in groups:
+        for bond in group:
+            c = np.asarray(bond["center"])
+            if any(b["fibers"] == bond["fibers"] or np.linalg.norm(np.asarray(b["center"]) - c) < tolerance
+                   for b in kept):
+                continue
+            kept.append(bond)
+    return kept

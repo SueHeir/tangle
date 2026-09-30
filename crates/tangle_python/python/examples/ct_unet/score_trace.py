@@ -25,7 +25,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from tangle.ct._evaluate import _samples_inside, centerline_agreement  # noqa: E402
 from fiber_types import assign_by_size, assign_types, features  # noqa: E402
 from maps import BINDER, BONDPT, CHANNELS, DIRECTION, FIBER, HEAT, OFFSET, RADIUS, levels, targets  # noqa: E402
-from bonds import extract_bond_points, extract_bonds, score_bonds  # noqa: E402
+from bonds import extract_bond_points, extract_bonds, merge_bonds, score_bonds  # noqa: E402
 from trace_maps import trace  # noqa: E402
 
 
@@ -112,6 +112,8 @@ def main():
     parser.add_argument("--no-tidy", action="store_true")
     parser.add_argument("--bond-hint", action="store_true", help="tell the network whether the scan is bonded")
     parser.add_argument("--binder-bonds", action="store_true", help="bonds from the binder map, not bond points")
+    parser.add_argument("--both-bonds", action="store_true", help="bonds from bond points and the binder map")
+    parser.add_argument("--binder-threshold", type=float, default=0.5, help="binder cutoff with --both-bonds")
     parser.add_argument("--bond-threshold", type=float, default=0.5, help="binder probability that counts as binder")
     parser.add_argument("--known-sizes", action="store_true",
                         help="give the network (if conditioned) and the typing each type's true diameter")
@@ -170,7 +172,10 @@ def main():
         main.bond_scores = bond_scores
         if data is not None and "p_pos" in data and (model is None or getattr(model, "layout", "") in ("bonds", "bondpoints")) \
                 and radii is not None and ("bond_centers" in data or "bond_labels" not in data):
-            if getattr(model, "layout", "") == "bondpoints" and not args.binder_bonds:
+            if args.both_bonds:
+                found = merge_bonds(extract_bond_points(maps, lines, radii, threshold=args.bond_threshold),
+                                    extract_bonds(maps, lines, radii, threshold=args.binder_threshold))
+            elif getattr(model, "layout", "") == "bondpoints" and not args.binder_bonds:
                 found = extract_bond_points(maps, lines, radii, threshold=args.bond_threshold)
             else:
                 found = extract_bonds(maps, lines, radii, threshold=args.bond_threshold)
