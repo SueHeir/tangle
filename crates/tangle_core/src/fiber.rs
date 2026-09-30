@@ -37,8 +37,9 @@ pub struct GeometryState {
     pub positions: Vec<Vec3>,
     /// Unit long-axis direction of the cross-section at each vertex, for
     /// non-circular sections. Either empty (no fiber needs one) or one entry
-    /// per position; see [`crate::default_directors`].
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// per position; see [`crate::default_directors`]. Always serialized:
+    /// checkpoints use bincode, which cannot skip a field.
+    #[serde(default)]
     pub directors: Vec<Vec3>,
 }
 
