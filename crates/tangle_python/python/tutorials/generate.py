@@ -92,6 +92,7 @@ RELAXATION_FIELDS = [
     ("curvature_ratio_tolerance", "Excess ratio allowed above one: the accepted curvature ratio is at most 1 + this tolerance.", "dimensionless excess"),
     ("constraint_iterations", "Constraint sweeps in each solver iteration.", "count"),
     ("curvature_cleanup_sweeps", "Extra hard-curvature projections per iteration.", "count"),
+    ("twist_stiffness", "Oval fibers only: how strongly each long-axis direction is pulled toward its neighbours' mean each iteration.", "fraction"),
     ("max_step", "Maximum vertex displacement in one correction.", "length, m"),
     ("max_iterations", "Global relaxation iteration budget.", "count"),
     ("iterations_per_batch", "Iterations in one scheduler/device batch.", "count"),
