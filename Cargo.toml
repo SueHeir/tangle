@@ -1,5 +1,27 @@
 [workspace]
-members = ["crates/*", "examples/*"]
+# Listed by name so output-only folders under examples/ do not break the build.
+members = [
+    "crates/tangle_app",
+    "crates/tangle_characterize",
+    "crates/tangle_checkpoint",
+    "crates/tangle_contact",
+    "crates/tangle_core",
+    "crates/tangle_ct",
+    "crates/tangle_export",
+    "crates/tangle_generate",
+    "crates/tangle_python",
+    "crates/tangle_relax",
+    "examples/adaptive_crossed_fibers",
+    "examples/biased_fiber_box",
+    "examples/felt_20ply_control_vs_needled",
+    "examples/fibers_through_center_point",
+    "examples/multisegment_flexible_relaxation",
+    "examples/needled_felt_toy",
+    "examples/needled_preform_two_fiber",
+    "examples/puma_cross_validation",
+    "examples/tangle_example_support",
+    "examples/tps_preform_formation",
+]
 resolver = "2"
 
 [workspace.package]
