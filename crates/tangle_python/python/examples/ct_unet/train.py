@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from maps import BINDER, CHANNELS, UNet3D, augment, load, loss_terms, normalize, size_code, targets, widen
 
-WEIGHTS = {"heat": 1.0, "offset": 1.0, "direction": 1.0, "fiber": 0.5, "radius": 1.0, "binder": 1.0}
+WEIGHTS = {"heat": 1.0, "offset": 1.0, "direction": 1.0, "fiber": 0.5, "radius": 1.0, "binder": 1.0, "bondpt": 1.0}
 
 
 class Crops(Dataset):
@@ -118,11 +118,11 @@ def main():
     elif args.init:
         source = load(args.init, "cpu")
         args.base = source.down[0][0].out_channels
-        if source.layout == "bonds":
+        if source.head.out_channels == CHANNELS:
             model = source.to(device)
-        elif source.layout == "fibers":
-            # a network without the binder output (and maybe an older, shorter hint): grow it. Every weight it
-            # has is copied; the binder output starts at "no binder" and new hint inputs start unread.
+        elif source.layout in ("fibers", "bonds"):
+            # a network with fewer outputs (and maybe a shorter hint): grow it. Every weight it has is copied;
+            # new outputs start at "nothing here" and new hint inputs start unread.
             model = UNet3D(base=args.base, group_sizes=source.group_sizes, condition=source.condition).to(device)
             grown = model.state_dict()
             for name, value in source.state_dict().items():
@@ -133,7 +133,8 @@ def main():
                     target.zero_()
                     target[tuple(slice(0, n) for n in value.shape)] = value
                 grown[name] = target
-            grown["head.bias"][BINDER] = -4.0
+            for new_channel in range(source.head.out_channels, CHANNELS):
+                grown["head.bias"][new_channel] = -4.0
             model.load_state_dict(grown)
         else:
             # a first-layout network: its body, and the head channels both layouts share (heatmap, offset,
@@ -195,7 +196,7 @@ def main():
                 parts = {k: np.mean([float(v[1][k]) for v in vals]) for k in vals[0][1]}
                 print(f"VAL step {step} loss {val:.4f} " + " ".join(f"{k} {v:.4f}" for k, v in parts.items()), flush=True)
                 state = {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
-                         "scheduler": scheduler.state_dict(), "step": step, "best": min(best, val), "base": args.base, "condition": bool(getattr(model, "condition", False)), "layout": "bonds",
+                         "scheduler": scheduler.state_dict(), "step": step, "best": min(best, val), "base": args.base, "condition": bool(getattr(model, "condition", False)), "layout": "bondpoints",
                          "group_sizes": model.group_sizes}
                 save(state, args.out / "last.pt")
                 if val < best:

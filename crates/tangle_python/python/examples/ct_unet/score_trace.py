@@ -24,8 +24,8 @@ from scipy.spatial import cKDTree
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from tangle.ct._evaluate import _samples_inside, centerline_agreement  # noqa: E402
 from fiber_types import assign_by_size, assign_types, features  # noqa: E402
-from maps import BINDER, CHANNELS, DIRECTION, FIBER, HEAT, OFFSET, RADIUS, levels, targets  # noqa: E402
-from bonds import extract_bonds, score_bonds  # noqa: E402
+from maps import BINDER, BONDPT, CHANNELS, DIRECTION, FIBER, HEAT, OFFSET, RADIUS, levels, targets  # noqa: E402
+from bonds import extract_bond_points, extract_bonds, score_bonds  # noqa: E402
 from trace_maps import trace  # noqa: E402
 
 
@@ -38,6 +38,7 @@ def true_maps(data) -> np.ndarray:
     maps[FIBER] = t["fiber"]
     maps[RADIUS] = np.exp(t["radius"]) * t["own"] + (1 - t["own"])
     maps[BINDER] = t["binder"]
+    maps[BONDPT] = t["bondpt"]
     return maps
 
 
@@ -110,6 +111,7 @@ def main():
     parser.add_argument("--min-votes", type=int, default=3)
     parser.add_argument("--no-tidy", action="store_true")
     parser.add_argument("--bond-hint", action="store_true", help="tell the network whether the scan is bonded")
+    parser.add_argument("--binder-bonds", action="store_true", help="bonds from the binder map, not bond points")
     parser.add_argument("--bond-threshold", type=float, default=0.5, help="binder probability that counts as binder")
     parser.add_argument("--known-sizes", action="store_true",
                         help="give the network (if conditioned) and the typing each type's true diameter")
@@ -166,9 +168,12 @@ def main():
             extra = f", {k} types: typed right {acc:.3f}"
         bond_scores = getattr(main, "bond_scores", [])
         main.bond_scores = bond_scores
-        if data is not None and "p_pos" in data and (model is None or getattr(model, "layout", "") == "bonds") \
+        if data is not None and "p_pos" in data and (model is None or getattr(model, "layout", "") in ("bonds", "bondpoints")) \
                 and radii is not None and ("bond_centers" in data or "bond_labels" not in data):
-            found = extract_bonds(maps, lines, radii, threshold=args.bond_threshold)
+            if getattr(model, "layout", "") == "bondpoints" and not args.binder_bonds:
+                found = extract_bond_points(maps, lines, radii, threshold=args.bond_threshold)
+            else:
+                found = extract_bonds(maps, lines, radii, threshold=args.bond_threshold)
             bs = score_bonds(found, data["bond_centers"] if "bond_centers" in data else np.zeros((0, 3)))
             bond_scores.append(bs)
             extra += f", bonds {bs['found']}/{bs['true']} P {bs['precision']:.2f} R {bs['recall']:.2f}"

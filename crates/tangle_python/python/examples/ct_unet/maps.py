@@ -23,6 +23,8 @@ import torch.nn.functional as F
 
 HEAT, OFFSET, DIRECTION, FIBER, RADIUS = slice(0, 1), slice(1, 4), slice(4, 10), slice(10, 11), slice(11, 12)
 BINDER = slice(12, 13)  # binder (bond) voxel logit
+BONDPT = slice(13, 14)  # bond-point heatmap logit: a peak at each bond's center (as HEAT is for fiber axes)
+BOND_SIGMA = 1.5  # voxels: width of the bond-point peaks
 BINDER_POSITIVE = 9.0  # extra loss weight on true binder voxels (binder is ~1% of the voxels)
 SIZE_BINS = np.linspace(np.log(3.0), np.log(32.0), 16)  # log-diameter bins (voxels) of the size code
 SIZE_CODE = len(SIZE_BINS) + 1 + 3  # the bins, 1 = sizes known, then the bond hint (known, present, size)
@@ -47,7 +49,7 @@ def size_code(diameters=None, bonds: bool | None = None, bond_ratio: float | Non
         if bonds and bond_ratio:
             code[n + 3] = float(bond_ratio)
     return code
-CHANNELS = 13
+CHANNELS = 14
 _OLD_TYPE = slice(10, 13)  # the first networks' void / fine / coarse logits
 _OLD_RADIUS = (2.75, 6.75)  # voxels: what "fine" and "coarse" meant for them
 
@@ -73,6 +75,26 @@ def _binder(data, window, shape):
             a = data[key] if window is None else data[key][window]
             return (a > 0)[None].astype(np.float32)
     return np.zeros((1, *shape), np.float32)
+
+
+def _bond_points(data, window, shape):
+    """Gaussian peaks (BOND_SIGMA) at the true bond centers inside ``window``."""
+    out = np.zeros(shape, np.float32)
+    if "bond_centers" not in data or not len(data["bond_centers"]):
+        return out[None]
+    z0, y0, x0 = (0, 0, 0) if window is None else (window[0].start, window[1].start, window[2].start)
+    reach = int(np.ceil(3 * BOND_SIGMA))
+    for c in np.asarray(data["bond_centers"], np.float64):
+        p = c - np.array([x0, y0, z0]) - 0.5  # voxel index (x, y, z) in the window
+        lo = np.maximum(np.floor(p).astype(int) - reach, 0)
+        hi = np.minimum(np.floor(p).astype(int) + reach + 2, np.array(shape[::-1]))
+        if np.any(hi <= lo):
+            continue
+        z, y, x = np.mgrid[lo[2]:hi[2], lo[1]:hi[1], lo[0]:hi[0]]
+        g = np.exp(-0.5 * ((x - p[0]) ** 2 + (y - p[1]) ** 2 + (z - p[2]) ** 2) / BOND_SIGMA**2)
+        box = out[lo[2]:hi[2], lo[1]:hi[1], lo[0]:hi[0]]
+        np.maximum(box, g, out=box)
+    return out[None]
 
 
 def targets(data, window=None) -> dict:
@@ -103,6 +125,7 @@ def targets(data, window=None) -> dict:
         "own": own[None].astype(np.float32),
         "fiber": (labels > 0)[None].astype(np.float32),
         "binder": _binder(data, window, labels.shape),
+        "bondpt": _bond_points(data, window, labels.shape),
         "radius": (np.log(np.maximum(rad[i], 0.5)) * own)[None].astype(np.float32),
     }
 
@@ -205,6 +228,8 @@ def loss_terms(out: torch.Tensor, batch: dict) -> dict:
         "radius": (F.smooth_l1_loss(out[:, RADIUS], batch["radius"], reduction="none", beta=0.1) * own).sum() / n_own,
         "binder": (F.binary_cross_entropy_with_logits(out[:, BINDER], batch["binder"], reduction="none")
                    * (1.0 + BINDER_POSITIVE * batch["binder"])).mean(),
+        "bondpt": (F.binary_cross_entropy_with_logits(out[:, BONDPT], batch["bondpt"], reduction="none")
+                   * (1.0 + 19.0 * (batch["bondpt"] > 0.1))).mean(),
     }
 
 
@@ -217,7 +242,7 @@ def load(path, device: str) -> nn.Module:
                    condition=bool(film), code_size=state["model"]["film.0.weight"].shape[1] if film else SIZE_CODE
                    ).to(device)
     model.load_state_dict(state["model"])
-    model.layout = state.get("layout") or {13: "types", 12: "fibers"}[channels]
+    model.layout = {14: "bondpoints"}.get(channels) or state.get("layout") or {13: "types", 12: "fibers"}[channels]
     return model
 
 
@@ -237,12 +262,14 @@ def predict(model: nn.Module, volume: np.ndarray, device: str, grey: tuple[float
     maps = torch.zeros((CHANNELS, *out.shape[1:]), device=out.device)
     maps[HEAT] = torch.sigmoid(out[HEAT])
     maps[OFFSET], maps[DIRECTION] = out[OFFSET], out[DIRECTION]
-    layout = getattr(model, "layout", "bonds")
-    if layout in ("fibers", "bonds"):
+    layout = getattr(model, "layout", "bondpoints")
+    if layout in ("fibers", "bonds", "bondpoints"):
         maps[FIBER] = torch.sigmoid(out[FIBER])
         maps[RADIUS] = torch.exp(out[RADIUS])
-        if layout == "bonds":
+        if layout in ("bonds", "bondpoints"):
             maps[BINDER] = torch.sigmoid(out[BINDER])
+        if layout == "bondpoints":
+            maps[BONDPT] = torch.sigmoid(out[BONDPT])
     else:  # a first-layout network: fiber = not void, radius from its fine / coarse call
         p = torch.softmax(out[_OLD_TYPE], dim=0)
         maps[FIBER] = 1.0 - p[0:1]

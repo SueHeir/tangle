@@ -85,3 +85,33 @@ def score_bonds(found, true_centers, tolerance: float = 4.0):
     p, r = matched / len(found_centers), matched / len(true_centers)
     return {"precision": p, "recall": r, "f1": 2 * p * r / max(p + r, 1e-12), "found": len(found_centers),
             "true": len(true_centers)}
+
+
+def extract_bond_points(maps: np.ndarray, lines, radii, threshold: float = 0.5):
+    """Bonds from the bond-point map: every local peak above ``threshold`` is a bond, joining the two traced
+    fibers whose surfaces are nearest it (both within ``REACH``)."""
+    from maps import BONDPT
+
+    heat = maps[BONDPT][0]
+    peaks = (heat > threshold) & (heat == ndimage.maximum_filter(heat, size=5))
+    z, y, x = np.nonzero(peaks)
+    if len(z) == 0 or not lines:
+        return []
+    centers = np.stack([x, y, z], 1) + 0.5
+    points = [_dense(l) for l in lines]
+    owner = np.concatenate([np.full(len(p), k) for k, p in enumerate(points)])
+    radius = np.asarray(radii, float)[owner]
+    tree = cKDTree(np.concatenate(points))
+    dist, idx = tree.query(centers, k=32, distance_upper_bound=float(np.max(radii)) + REACH)
+    bonds = []
+    for v in range(len(centers)):
+        ok = np.isfinite(dist[v])
+        best = {}
+        for f, g in zip(owner[idx[v][ok]], dist[v][ok] - radius[idx[v][ok]]):
+            if g <= REACH and g < best.get(f, np.inf):
+                best[f] = g
+        if len(best) >= 2:
+            a, b = sorted(best, key=best.get)[:2]
+            bonds.append({"fibers": (int(min(a, b)), int(max(a, b))), "center": centers[v].tolist(),
+                          "strength": float(heat[z[v], y[v], x[v]])})
+    return bonds
