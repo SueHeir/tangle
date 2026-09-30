@@ -447,15 +447,16 @@ Position = UniformPosition | LayeredPosition | DensityGradientPosition
 class FiberPopulation:
     """Random fibers for ``generate_fiber_population``: how many, their material,
     length, diameter and curvature (a value or a ``(low, high)`` range, in
-    meters), and how they are oriented and positioned."""
+    meters), and how they are oriented and positioned. Unset, ``length`` is
+    16-24 fiber diameters and ``curvature_amplitude`` 0-0.8 diameters."""
 
     material: Material
     count: int
     segments_per_fiber: int
     seed: int
-    length: Range
+    length: Range | None
     diameter: Range | None
-    curvature_amplitude: Range
+    curvature_amplitude: Range | None
     nominal_parent_length: float | None
     orientation: Orientation
     position: Position
@@ -467,9 +468,9 @@ class FiberPopulation:
         count: int = ...,
         segments_per_fiber: int = ...,
         seed: int = ...,
-        length: Range = ...,
+        length: Range | None = ...,
         diameter: Range | None = ...,
-        curvature_amplitude: Range = ...,
+        curvature_amplitude: Range | None = ...,
         nominal_parent_length: float | None = ...,
         orientation: Orientation = ...,
         position: Position = ...,
@@ -699,12 +700,14 @@ class CompactionSettings:
 class RelaxationSettings:
     """Run-wide solver settings for ``Recipe.run``. Most runs change at most
     ``backend`` (``"wgpu"`` for the GPU, ``"cpu"`` without one),
-    ``penetration_tolerance`` or ``max_iterations``."""
+    ``penetration_tolerance`` or ``max_iterations``. Unset,
+    ``penetration_tolerance`` is 1% and ``max_step`` 10% of the smallest
+    fiber diameter in the recipe."""
 
     backend: Backend
     motion_model: MotionModel
     pin_fiber_ends: bool
-    penetration_tolerance: float
+    penetration_tolerance: float | None
     force_full_iterations: bool
     correction_fraction: float
     contact_aggregation: ContactAggregation
@@ -716,7 +719,7 @@ class RelaxationSettings:
     constraint_iterations: int
     curvature_cleanup_sweeps: int
     twist_stiffness: float
-    max_step: float
+    max_step: float | None
     max_iterations: int
     iterations_per_batch: int
     debug_snapshot_interval: int | None
@@ -731,7 +734,7 @@ class RelaxationSettings:
         backend: Backend = ...,
         motion_model: MotionModel = ...,
         pin_fiber_ends: bool = ...,
-        penetration_tolerance: float = ...,
+        penetration_tolerance: float | None = ...,
         force_full_iterations: bool = ...,
         correction_fraction: float = ...,
         contact_aggregation: ContactAggregation = ...,
@@ -743,7 +746,7 @@ class RelaxationSettings:
         constraint_iterations: int = ...,
         curvature_cleanup_sweeps: int = ...,
         twist_stiffness: float = ...,
-        max_step: float = ...,
+        max_step: float | None = ...,
         max_iterations: int = ...,
         iterations_per_batch: int = ...,
         debug_snapshot_interval: int | None = ...,
