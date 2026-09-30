@@ -19,12 +19,18 @@ output = Path(__file__).parent / "output" / "quickstart"
 #    that no two fibers overlap.
 cell = tangle.Cell([120 * um] * 3, periodic="xyz")
 fiber = tangle.Material("fiber", diameter=10 * um, min_bend_radius=50 * um)
-population = tangle.FiberPopulation(material=fiber, count=40, length=(60 * um, 100 * um))
+population = tangle.FiberPopulation(
+    material=fiber, count=40, length=(60 * um, 100 * um), segments_per_fiber=4,
+    curvature_amplitude=(1 * um, 5 * um),
+)
 
 recipe = tangle.Recipe(cell)
 recipe.insert(tangle.generate_fiber_population(cell, population))
 recipe.relax_until_converged()
-result = recipe.run()
+# Length settings have no automatic scale: set them for 10 µm fibers. Keep
+# segments (length / segments_per_fiber) no shorter than the diameter.
+settings = tangle.RelaxationSettings(penetration_tolerance=0.1 * um, max_step=1 * um)
+result = recipe.run(settings)
 print(f"relaxed {result.fiber_count} fibers in {result.iterations} iterations, converged={result.converged}")
 
 result.write_ovito(output / "network.dump")
@@ -33,6 +39,7 @@ result.write_ovito(output / "network.dump")
 scan = ct.synthetic_ct(result, voxel_size=1.5 * um, seed=1)
 fit = ct.fit_fibers(scan.volume, scan.voxel_size, ct.FiberSpec(diameter=10 * um))
 print(f"fitted {len(fit.centerlines)} fibers")
-print({k: v for k, v in ct.score(fit, scan).items() if not isinstance(v, (list, dict))})
+score = ct.score(fit, scan)
+print(f"recovered {score['recovered']} of {score['true_fibers_in_volume']} true fibers, F1 {score['f1']:.2f}")
 
 fit.write(output / "fit", volume=scan.volume)
