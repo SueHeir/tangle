@@ -10,6 +10,56 @@ C/C++ compiler/linker, and network access for the first dependency build.
 CubeCL's build dependency downloads its matching bundled LLVM automatically;
 users do not need a system LLVM installation or `llvm-config`.
 
+## Quick start
+
+From the repository root, with Rust and Python 3.11+ installed:
+
+```console
+python3 -m venv .venv-tangle
+source .venv-tangle/bin/activate
+python -m pip install "maturin>=1.8,<2"
+maturin develop --release --extras ct --manifest-path crates/tangle_python/Cargo.toml
+python crates/tangle_python/python/examples/quickstart.py
+```
+
+`--extras ct` also installs what `tangle.ct` (CT fitting) needs: NumPy, SciPy,
+tifffile and matplotlib. The core `tangle` package needs none of them.
+[`quickstart.py`](python/examples/quickstart.py) builds and relaxes a small
+fiber network, then fits it back from a simulated CT scan:
+
+```python
+import tangle
+import tangle.ct as ct
+from tangle.units import um
+
+cell = tangle.Cell([120 * um] * 3, periodic="xyz")
+fiber = tangle.Material("fiber", diameter=10 * um, min_bend_radius=50 * um)
+population = tangle.FiberPopulation(
+    material=fiber, count=40, length=(60 * um, 100 * um), segments_per_fiber=4,
+    curvature_amplitude=(1 * um, 5 * um),
+)
+
+recipe = tangle.Recipe(cell)          # steps are recorded here...
+recipe.insert(tangle.generate_fiber_population(cell, population))
+recipe.relax_until_converged()
+settings = tangle.RelaxationSettings(penetration_tolerance=0.1 * um, max_step=1 * um)
+result = recipe.run(settings)         # ...and simulated here, on the GPU
+result.write_ovito("network.dump")
+
+scan = ct.synthetic_ct(result, voxel_size=1.5 * um)
+fit = ct.fit_fibers(scan.volume, scan.voxel_size, ct.FiberSpec(diameter=10 * um))
+fit.write("fit", volume=scan.volume)  # fit.json, labels.tif, overlay.png
+```
+
+Lengths are in meters, and the length-type settings (`curvature_amplitude`,
+`penetration_tolerance`, `max_step`) have defaults sized for millimeter-scale
+fibers, so set them for yours. Without a GPU, add `backend="cpu"` to
+`RelaxationSettings` and use
+`ct.FitSettings(backend="cpu")`. The sections below cover installation in
+more detail (Windows, Conda, notebooks) and the rest of the API.
+
+## Installing in detail
+
 Obtain the source with Git (or download and unpack the repository):
 
 ```console
@@ -410,6 +460,8 @@ for exact definitions, supported comparisons, and current limitations.
 
 ## Examples
 
+- `quickstart.py` builds a small network, then fits it back from a simulated
+  CT scan (the quick start above).
 - `crossed_fibers.py` / `crossed_fibers.ipynb` run the smallest complete
   Python-to-CubeCL calculation and write OVITO and BPM outputs.
 - `adaptive_crossing.py` / `adaptive_crossing.ipynb` start with one segment per
