@@ -16,14 +16,12 @@ from scipy.spatial import cKDTree
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 import ct_examples as ex  # noqa: E402
 from diameters import measure  # noqa: E402
-from maps import UNet3D, predict  # noqa: E402
+from maps import load, predict  # noqa: E402
 from trace_maps import trace  # noqa: E402
 
 checkpoint, cache, *names = sys.argv[1:]
 device = "mps" if torch.backends.mps.is_available() else "cpu"
-state = torch.load(checkpoint, map_location=device)
-model = UNet3D(base=state.get("base", 16)).to(device)
-model.load_state_dict(state["model"])
+model = load(checkpoint, device)
 for name in names:
     scan = ex.EXAMPLES[name](Path(cache) / f"{name}.json").scan
     um = scan.voxel_size * 1e6

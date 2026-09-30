@@ -79,15 +79,15 @@ for f, (line, t) in enumerate(zip(scan.centerlines, scan.types)):
         s = np.linalg.norm(ax)
         ang = np.arctan2(s, d[2])
         q = np.r_[ax / s * np.sin(ang / 2), np.cos(ang / 2)] if s > 1e-9 else np.array([0, 0, 0, 1.0])
-        rows.append((f + 1, r, 0.5 * n + r, q, 0.5 * (a + b), int(t)))
+        rows.append((f + 1, r, n, q, 0.5 * (a + b), int(t)))
 with open(dump, "w") as fh:
     fh.write(f"ITEM: TIMESTEP\n0\nITEM: NUMBER OF ATOMS\n{len(rows)}\nITEM: BOX BOUNDS ff ff ff\n")
     for L in lengths:
         fh.write(f"0 {L:.6g}\n")
     fh.write("ITEM: ATOMS id mol type AsphericalShape.X AsphericalShape.Y AsphericalShape.Z quati quatj quatk quatw "
              "x y z fiber_type\n")
-    for i, (m, r, half, q, c, t) in enumerate(rows, 1):
-        fh.write(f"{i} {m} 1 {r:.3f} {r:.3f} {half:.3f} {q[0]:.6f} {q[1]:.6f} {q[2]:.6f} {q[3]:.6f} "
+    for i, (m, r, length, q, c, t) in enumerate(rows, 1):
+        fh.write(f"{i} {m} 1 {r:.3f} {r:.3f} {length:.3f} {q[0]:.6f} {q[1]:.6f} {q[2]:.6f} {q[3]:.6f} "
                  f"{c[0]:.3f} {c[1]:.3f} {c[2]:.3f} {t}\n")
 if args.ovito:
     render = args.out / "render_geometry.py"

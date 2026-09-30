@@ -3,29 +3,31 @@
 1. Every voxel the network calls fiber votes for its axis at voxel + offset.
    Votes are pooled in 1-voxel cells; a cell with enough votes is an axis
    point, carrying the mean vote position, the mean direction tensor and
-   the majority type.
+   the mean predicted fiber radius.
 2. Fibers are tracked from the best-supported unused axis point, both ways
    along the point's direction: each step looks ``STEP`` voxels ahead and
    moves to the mean of the axis points there whose direction agrees with
    the track's, so a crossing fiber's points are ignored. A track may coast
    straight over short gaps, and it stops where it runs onto a fiber
    already traced.
-3. Tracks shorter than ``min_length`` are dropped.
+3. Tracks shorter than ``min_length`` are dropped. Each track carries its fiber's radius (the median of the
+   predicted radius along it); nothing here knows fiber types, so any mix of sizes works. Types are assigned
+   per fiber afterwards (``fiber_types.py``).
 
-usage (scoring a fit on the true or predicted maps): see fit_maps.py --trace
+usage (scoring against the truth): see score_trace.py
 """
 
 import numpy as np
 from scipy.spatial import cKDTree
 
-from maps import DIRECTION, OFFSET, TYPE
+from maps import DIRECTION, FIBER, OFFSET, RADIUS
 
 STEP = 1.5  # voxels per tracking step
 REACH = 1.6  # voxels: axis points within this of the look-ahead point are candidates
 AGREE = 0.8  # |cos| between a candidate's direction and the track's
 GAP_STEPS = 4  # straight steps allowed without support
-OWNED = 1.2  # voxels: axis points within this of a fine track are used up
-OWNED_COARSE = 4.0  # ... of a coarse track (its votes spread wider, e.g. onto both rims of a dim core)
+OWNED_MIN = 1.2  # voxels: a track uses up the axis points within max(this, OWNED_SHARE x its radius)
+OWNED_SHARE = 0.5  # (a thick fiber's votes spread wider, e.g. onto both rims of a dim core)
 OVERLAP_STEPS = 4  # stop after this many steps on used-up points
 
 
@@ -47,33 +49,31 @@ def vote_cells(maps: np.ndarray, origin=(0, 0, 0), window=None):
     Returns (key, count, position sum, tensor sum, type counts), one row per cell.
     """
     window = window or tuple(slice(0, n) for n in maps.shape[1:])
-    kind = np.argmax(maps[TYPE][(slice(None), *window)], axis=0)
-    z, y, x = np.nonzero(kind > 0)
-    k = kind[z, y, x]
+    fiber = maps[FIBER][0][window] > 0.5
+    z, y, x = np.nonzero(fiber)
     z, y, x = z + window[0].start, y + window[1].start, x + window[2].start
     offset = maps[OFFSET][:, z, y, x].T.astype(np.float64)
     tensor = maps[DIRECTION][:, z, y, x].T.astype(np.float64)
     votes = np.stack([x + origin[2], y + origin[1], z + origin[0]], axis=1) + 0.5 + offset
     cell = np.floor(votes).astype(np.int64) + 1024  # room for votes a little outside the volume
     key = (cell[:, 0] * 8192 + cell[:, 1]) * 8192 + cell[:, 2]
-    return merge_cells(key, np.ones(len(key), np.int64), votes, tensor, np.eye(3)[k])
+    return merge_cells(key, np.ones(len(key), np.int64), votes, tensor, maps[RADIUS][0][z, y, x].astype(np.float64))
 
 
-def merge_cells(key, count, position, tensor, types):
+def merge_cells(key, count, position, tensor, radius):
     """Sum rows that share a cell key."""
     unique, inverse = np.unique(key, return_inverse=True)
     n = len(unique)
-    sums = [np.zeros(n, np.int64), np.zeros((n, 3)), np.zeros((n, 6)), np.zeros((n, 3))]
-    for total, part in zip(sums, (count, position, tensor, types)):
+    sums = [np.zeros(n, np.int64), np.zeros((n, 3)), np.zeros((n, 6)), np.zeros(n)]
+    for total, part in zip(sums, (count, position, tensor, radius)):
         np.add.at(total, inverse, part)
     return (unique, *sums)
 
 
-def cells_to_points(key, count, position, tensor, types, min_votes: int = 3):
-    """Axis points from summed cells: mean position, principal direction, majority type, vote count."""
+def cells_to_points(key, count, position, tensor, radius, min_votes: int = 3):
+    """Axis points from summed cells: mean position, principal direction, mean radius, vote count."""
     keep = count >= min_votes
-    return (position[keep] / count[keep, None], principal(tensor[keep]), np.argmax(types[keep], axis=1),
-            count[keep])
+    return (position[keep] / count[keep, None], principal(tensor[keep]), radius[keep] / count[keep], count[keep])
 
 
 def axis_points(maps: np.ndarray, min_votes: int = 3):
@@ -113,27 +113,25 @@ def tiled_axis_points(predict_tile, shape, tile: int = 128, stride: int = 64, mi
     return cells_to_points(*parts[0], min_votes=min_votes)
 
 
-def trace(maps: np.ndarray, min_length: float = 10.0, min_votes: int = 3, tidy: tuple | None = None):
-    """Centerlines (x, y, z voxels) and each one's type (1 fine, 2 coarse).
-
-    ``tidy=(fine_radius, coarse_radius)`` (voxels) also drops doubled traces and joins gaps (``tidy_up``)."""
-    lines, types = track(*axis_points(maps, min_votes), shape=maps.shape[1:], min_length=min_length)
-    return tidy_up(lines, types, *tidy) if tidy else (lines, types)
+def trace(maps: np.ndarray, min_length: float = 10.0, min_votes: int = 3, tidy: bool = True):
+    """Centerlines (x, y, z voxels) and each one's radius (voxels); ``tidy`` drops doubles and joins gaps."""
+    lines, radii = track(*axis_points(maps, min_votes), shape=maps.shape[1:], min_length=min_length)
+    return tidy_up(lines, radii) if tidy else (lines, radii)
 
 
-def tidy_up(lines, types, fine_radius: float, coarse_radius: float):
+def tidy_up(lines, radii):
     """Doubled traces dropped, then gaps joined."""
-    lines, types = drop_doubles(lines, types, fine_radius, coarse_radius)
-    return join_gaps(lines, types)
+    lines, radii = drop_doubles(lines, radii)
+    return join_gaps(lines, radii)
 
 
-def track(position, direction, types, counts, shape, min_length: float = 10.0, log=None):
+def track(position, direction, radius, counts, shape, min_length: float = 10.0, log=None):
     """Fibers tracked through axis points (see the module notes); ``shape`` is the volume's (z, y, x)."""
     if not len(position):
         return [], []
     tree = cKDTree(position)
     used = np.zeros(len(position), dtype=bool)
-    lines, line_types = [], []
+    lines, line_radii = [], []
     for rank, seed in enumerate(np.argsort(-counts)):
         if used[seed]:
             continue
@@ -176,16 +174,16 @@ def track(position, direction, types, counts, shape, min_length: float = 10.0, l
                 path = path[: len(path) - gaps]
             halves.append(path)
         line = np.array(halves[1][::-1] + [position[seed]] + halves[0])
-        owned = OWNED_COARSE if types[seed] == 2 else OWNED
+        owned = max(OWNED_MIN, OWNED_SHARE * radius[seed])
         for q in line:  # use up the points along it, even if it is too short to keep
             used[tree.query_ball_point(q, owned)] = True
         used[seed] = True
         if len(line) < 2 or np.linalg.norm(np.diff(line, axis=0), axis=1).sum() < min_length:
             continue
-        near = np.unique(np.concatenate([tree.query_ball_point(q, OWNED) for q in line])).astype(int)
+        near = np.unique(np.concatenate([tree.query_ball_point(q, owned) for q in line])).astype(int)
         lines.append(line)
-        line_types.append(int(np.bincount(types[near], minlength=3).argmax()) if len(near) else 1)
-    return lines, line_types
+        line_radii.append(float(np.median(radius[near])) if len(near) else float(radius[seed]))
+    return lines, line_radii
 
 
 def _dense(line: np.ndarray, spacing: float = 1.0) -> np.ndarray:
@@ -196,36 +194,37 @@ def _dense(line: np.ndarray, spacing: float = 1.0) -> np.ndarray:
     return np.stack([np.interp(t, s, line[:, k]) for k in range(3)], axis=1)
 
 
-def drop_doubles(lines, types, fine_radius: float, coarse_radius: float, share: float = 0.5):
+def drop_doubles(lines, radii, share: float = 0.5):
     """Drop traces lying on top of a longer one along more than ``share`` of their length.
 
     A track's leftover axis points just beside it can seed a short second track along the same fiber; a
-    solver then pushes the two a diameter apart. "On top" = within half the trace's own radius... of the
-    longer trace's axis plus a voxel (fine) or half the coarse radius (coarse).
+    solver then pushes the two a diameter apart. "On top" = within half the trace's own radius plus a voxel of the
+    longer trace's axis.
     """
     if not lines:
-        return lines, types
+        return lines, radii
     dense = [_dense(np.asarray(l, float)) for l in lines]
     owner = np.concatenate([np.full(len(d), k) for k, d in enumerate(dense)])
     tree = cKDTree(np.concatenate(dense))
     kept = np.zeros(len(lines), bool)
     for k in np.argsort([-len(d) for d in dense]):
-        tol = 0.5 * coarse_radius if types[k] == 2 else 0.5 * fine_radius + 1.0
+        tol = 0.5 * radii[k] + 1.0
         hits = tree.query_ball_point(dense[k], tol)
         on_top = np.mean([bool(kept[owner[h]].any()) if len(h) else False for h in hits])
         kept[k] = on_top <= share
-    return [l for l, k in zip(lines, kept) if k], [t for t, k in zip(types, kept) if k]
+    return [l for l, k in zip(lines, kept) if k], [r for r, k in zip(radii, kept) if k]
 
 
-def join_gaps(lines, types, max_gap: float = 12.0, max_offset: float = 1.5, min_cos: float = 0.9):
-    """Join traces of one type whose ends face each other across a gap (straight, in line).
+def join_gaps(lines, radii, max_gap: float = 12.0, max_offset: float = 1.5, min_cos: float = 0.9,
+              max_size_ratio: float = 1.3):
+    """Join traces of about the same radius (within ``max_size_ratio``) whose ends face each other across a gap.
 
     Ends are paired best-first by gap length; a pair joins when the gap is under ``max_gap`` voxels, both
     ends' directions (over their last 5 voxels) point along the gap within ``min_cos``, and each end's
     straight extension passes within ``max_offset`` voxels of the other end.
     """
     lines = [np.asarray(l, float) for l in lines]
-    types = list(types)
+    radii = list(radii)
     while True:
         ends, info = [], []
         for k, l in enumerate(lines):
@@ -240,14 +239,14 @@ def join_gaps(lines, types, max_gap: float = 12.0, max_offset: float = 1.5, min_
                 ends.append(p)
                 info.append((k, side, d))
         if len(ends) < 2:
-            return lines, types
+            return lines, radii
         tree = cKDTree(np.array(ends))
         pairs = sorted(tree.query_pairs(max_gap), key=lambda ab: np.linalg.norm(ends[ab[0]] - ends[ab[1]]))
         used, joins = set(), []
         for a, b in pairs:
             ka, sa, da = info[a]
             kb, sb, db = info[b]
-            if ka == kb or ka in used or kb in used or types[ka] != types[kb]:
+            if ka == kb or ka in used or kb in used or max(radii[ka], radii[kb]) > max_size_ratio * min(radii[ka], radii[kb]):
                 continue
             gap = ends[b] - ends[a]
             g = np.linalg.norm(gap)
@@ -262,11 +261,12 @@ def join_gaps(lines, types, max_gap: float = 12.0, max_offset: float = 1.5, min_
             used |= {ka, kb}
             joins.append((ka, sa, kb, sb))
         if not joins:
-            return lines, types
+            return lines, radii
         for ka, sa, kb, sb in joins:
             la = lines[ka] if sa == 1 else lines[ka][::-1]  # ends at the joining end
             lb = lines[kb] if sb == 0 else lines[kb][::-1]  # starts at the joining end
             lines[ka] = np.vstack([la, lb])
+            radii[ka] = (len(la) * radii[ka] + len(lb) * radii[kb]) / (len(la) + len(lb))
             lines[kb] = np.zeros((0, 3))
         keep = [k for k, l in enumerate(lines) if len(l)]
-        lines, types = [lines[k] for k in keep], [types[k] for k in keep]
+        lines, radii = [lines[k] for k in keep], [radii[k] for k in keep]
