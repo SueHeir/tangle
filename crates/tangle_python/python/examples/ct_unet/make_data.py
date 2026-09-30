@@ -75,6 +75,7 @@ VARIED_SIDE = 160  # voxels (1 um); everything below is in voxels, the physical 
 FOCUS_FIRST = 4001  # indices from here on use the focused draw (varied_settings(focus=True))
 BOND_FIRST = 5001  # indices from here on may have binder bonds at their fiber junctions
 SHAPES_FIRST = 7001  # ... and from here on bonds of several shapes (bridge, meniscus, blob) and coatings
+STIFF_FIRST = 9001  # ... and from here on stiff, nearly straight fibers, bonded at their tight crossings
 
 
 def varied_settings(index: int, focus: bool | None = None) -> dict:
@@ -138,13 +139,29 @@ def varied_settings(index: int, focus: bool | None = None) -> dict:
                  "coating_thickness": round(float(rng.uniform(0.7, 2.0)), 2)}
     orientation = str(rng.choice(["planar", "planar", "aligned", "biaxial", "isotropic"]
                                  + (["isotropic"] if focus else [])))
+    if index >= STIFF_FIRST:
+        # stiff round: bend limits of 40-400 diameters and little waviness, most scans bonded at tight crossings
+        # (surfaces within 0.2-0.8 voxel), fibers mostly in layers
+        rs = np.random.default_rng(90_000 + index)  # a separate stream: the draws above stay as they were
+        for t in types:
+            t["bend"] = round(float(np.exp(rs.uniform(np.log(40.0), np.log(400.0)))), 1)
+        if bonds is not None or rs.random() < 0.85:
+            base = bonds or {"delta_beta": round(float(rs.uniform(4.0, 16.0)), 1), "shape": "bridge", "coating": 0.0,
+                             "coating_thickness": 1.0, "radius_ratio": 1.0,
+                             "brightness": round(float(rs.uniform(0.3, 1.2)), 2)}
+            bonds = {**base, "probability": round(float(rs.uniform(0.6, 1.0)), 2),
+                     "gap": round(float(rs.uniform(0.2, 0.8)), 2),
+                     "radius_ratio": round(float(rs.uniform(0.5, 1.5)), 2),
+                     "shape": str(rs.choice(["bridge", "meniscus", "meniscus", "blob"]))}
+        orientation = str(rs.choice(["planar", "planar", "biaxial", "biaxial", "aligned", "isotropic"]))
     blur = float(rng.choice([0.0, 0.0, 0.5, 1.0]))
     return {
         "types": types,
         "orientation": orientation,
         "tilt": round(float(rng.uniform(0.1, 0.5)), 2),
         "length_fraction": [round(float(rng.uniform(0.35, 0.6)), 2), round(float(rng.uniform(0.7, 0.98)), 2)],
-        "curvature": [round(float(rng.uniform(0.05, 0.2)), 2), round(float(rng.uniform(0.3, 0.8)), 2)],
+        "curvature": ([round(float(rng.uniform(0.05, 0.2)), 2), round(float(rng.uniform(0.3, 0.8)), 2)]
+                      if index < STIFF_FIRST else [0.0, round(float(rng.uniform(0.02, 0.15)), 2)]),
         "brightness_spread": round(float(rng.uniform(0.0, 0.4)), 2),
         "photons": round(1300 * float(rng.uniform(0.5, 2.0)) / max(1.0, 23 * blur**2)),
         "noise_blur": blur,
@@ -158,6 +175,17 @@ def varied_settings(index: int, focus: bool | None = None) -> dict:
         "seed": 30_000 + index,
         **({"bonds": bonds} if index >= BOND_FIRST else {}),
     }
+
+
+def _max_curvature(line) -> float:
+    """The largest turning angle per unit length along a polyline (1 / its tightest bend radius)."""
+    p = np.asarray(line, float)
+    if len(p) < 3:
+        return 0.0
+    d = np.diff(p, axis=0)
+    n = np.linalg.norm(d, axis=1)
+    cos = np.clip(np.einsum("ij,ij->i", d[:-1], d[1:]) / np.maximum(n[:-1] * n[1:], 1e-30), -1.0, 1.0)
+    return float(np.max(np.arccos(cos) / np.maximum(0.5 * (n[:-1] + n[1:]), 1e-30)))
 
 
 def with_bonds(cache_file: Path, cell, populations, bonds: dict, seed: int):
@@ -175,8 +203,11 @@ def with_bonds(cache_file: Path, cell, populations, bonds: dict, seed: int):
         axes = data["long_axes"][start:start + count] if "long_axes" in data else None
         start += count
         material = ex._material(population)
-        looser = tangle.Material(material.name, diameter=material.diameter,
-                                 min_bend_radius=0.99 * material.min_bend_radius, thickness=material.thickness)
+        bend = 0.99 * material.min_bend_radius
+        if bend:  # stiff fibers can end their relaxation a little past their limit: loosen it to what they reached
+            bend = min(bend, 0.9 / max(max(_max_curvature(line) for line in lines), 1e-30)) if lines else bend
+        looser = tangle.Material(material.name, diameter=material.diameter, min_bend_radius=bend,
+                                 thickness=material.thickness)
         collection = tangle.FiberCollection(material.name)
         for k, line in enumerate(lines):
             if material.is_oval and axes is not None:
