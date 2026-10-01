@@ -515,6 +515,21 @@ class RecipeTests(unittest.TestCase):
         result = recipe.run()
         self.assertTrue(result.converged)
 
+    def test_insert_a_population_and_run(self):
+        # The shortest path: insert a population, run, and it is relaxed.
+        cell = tangle.Cell([300 * um] * 3, periodic="xyz")
+        fiber = tangle.Material("fiber", diameter=10 * um)
+        recipe = tangle.Recipe(cell)
+        recipe.insert(tangle.FiberPopulation(material=fiber, count=15))
+        self.assertEqual(len(recipe.operations()), 1)
+        result = recipe.run()
+        self.assertEqual(result.fiber_count, 15)
+        self.assertTrue(result.converged)
+        self.assertIn("converged=True", repr(result))
+        self.assertEqual(repr(fiber), 'Material(name="fiber", diameter=1e-05)')
+        with self.assertRaises(TypeError):
+            recipe.insert([[0, 0, 0], [1, 0, 0]])
+
     def test_run_returns_a_new_assembly(self):
         assembly = tangle.Assembly(tangle.Cell([1.0, 1.0, 1.0]))
         recipe = tangle.Recipe(assembly)

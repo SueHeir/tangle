@@ -1,7 +1,7 @@
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use tangle_core::FiberAssembly;
+use tangle_core::{FiberAssembly, PeriodicCell};
 use tangle_generate::{
     generate_biased_fiber_population, generate_fiber_pair_crossing, generate_multisegment_crossing,
     generate_point_crossing, CenterlineShape, FiberPairCrossingConfig, FiberPopulationSpec,
@@ -727,11 +727,21 @@ pub(crate) fn generate_fiber_population_py(
     population: PyRef<'_, PyFiberPopulation>,
     name: String,
 ) -> PyResult<PyFiberCollection> {
-    let mut assembly = FiberAssembly::new(cell.inner);
+    generate_population(cell.inner, cell.stack_axis, &population, &name)
+}
+
+/// Generates `population` in an empty copy of `cell`.
+pub(crate) fn generate_population(
+    cell: PeriodicCell,
+    stack_axis: usize,
+    population: &PyFiberPopulation,
+    name: &str,
+) -> PyResult<PyFiberCollection> {
+    let mut assembly = FiberAssembly::new(cell);
     population.check_combination()?;
-    generate_biased_fiber_population(&mut assembly, &population.to_rust(cell.stack_axis))
+    generate_biased_fiber_population(&mut assembly, &population.to_rust(stack_axis))
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    PyFiberCollection::from_assembly(name, &assembly)
+    PyFiberCollection::from_assembly(name.to_string(), &assembly)
 }
 
 fn shape(name: &str, amplitude: f64, label: &str) -> PyResult<CenterlineShape> {
