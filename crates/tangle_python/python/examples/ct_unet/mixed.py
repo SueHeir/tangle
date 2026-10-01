@@ -124,7 +124,7 @@ def mixed_settings(index: int) -> dict:
         "resolution": round(min(float(rng.uniform(1.0, 4.0)), max(1.0, thinnest)) if rng.random() < 0.7
                             else float(rng.uniform(1.0, 4.0)), 2),
         "propagation": round(0.0 if rng.random() < 0.3 else _log_uniform(rng, 0.5, 12.0), 2),
-        "ring_strength": round(0.0 if rng.random() < 0.6 else _log_uniform(rng, 0.002, 0.02), 4),
+        "ring_strength": round(0.0 if rng.random() < 0.6 else _log_uniform(rng, 0.002, 0.01), 4),
         "fiber_motion": round(float(rng.uniform(0.0, 1.5)) if rng.random() < 0.5 else 0.0, 2),
         "drift": round(float(rng.uniform(0.0, 1.0)) if rng.random() < 0.2 else 0.0, 2),
         "angles": round(float(rng.uniform(0.3, 0.8)), 2) if rng.random() < 0.3 else None,  # of the slice width
