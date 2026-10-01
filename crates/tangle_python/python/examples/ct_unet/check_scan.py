@@ -73,9 +73,14 @@ def run(args) -> None:
         sample = -sample
     check = scan_io.check_grey(sample, inverted=args.invert, original=(lambda v: -v) if args.invert else None)
     sign = -1.0 if args.invert else 1.0
-    say(f"Grey values{' (inverted)' if args.invert else ''}: 0.5th percentile {check.low:.6g}, median "
-        f"{check.void:.6g} (the network's empty space), 99.5th percentile {check.bright:.6g} (its bright fiber)")
-    say(f"Solid/void split (Otsu): {check.threshold:.6g}; about {100 * check.solid:.0f}% of the scan is above it")
+    if args.invert:  # quote the scan's own grey values, where the fibers are the dark end
+        say(f"Grey values: 0.5th percentile {-check.bright:.6g} (the network's fiber, with --invert), median "
+            f"{-check.void:.6g} (its empty space), 99.5th percentile {-check.low:.6g}")
+        say(f"Solid/void split (Otsu): {-check.threshold:.6g}; about {100 * check.solid:.0f}% of the scan is below it")
+    else:
+        say(f"Grey values: 0.5th percentile {check.low:.6g}, median {check.void:.6g} (the network's empty space), "
+            f"99.5th percentile {check.bright:.6g} (its bright fiber)")
+        say(f"Solid/void split (Otsu): {check.threshold:.6g}; about {100 * check.solid:.0f}% of the scan is above it")
     for warning in check.warnings:
         say(f"  Warning: {warning}")
     out = Path(args.out).expanduser() if args.out else Path.cwd()
@@ -106,8 +111,12 @@ def run(args) -> None:
     elif args.bin > 1:
         command += ["--bin", str(args.bin)]
     say("")
-    say("Next, find the fibers in a small piece first (then drop --center-crop for the whole scan):")
-    say("  " + " ".join(shlex.quote(part) for part in command + ["--center-crop", "256"]))
+    if max(scan.shape) > 256:
+        say("Next, find the fibers in a small piece first (then drop --center-crop for the whole scan):")
+        command += ["--center-crop", "256"]
+    else:
+        say("Next, find the fibers:")
+    say("  " + " ".join(shlex.quote(part) for part in command))
 
 
 def measure(scan, args, out: Path, name: str) -> list[str]:

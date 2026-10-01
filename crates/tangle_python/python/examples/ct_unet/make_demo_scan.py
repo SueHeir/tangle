@@ -4,7 +4,8 @@
 
 Writes FOLDER/demo_scan.tif (default FOLDER: demo): a 160-voxel cube of 1.5 um voxels holding two types of
 gently curved fibers, 10.5 and 21 um across (7 and 14 voxels), lying mostly flat as in a nonwoven, close but
-never overlapping, blurred and noisy like a CT scan. FOLDER/truth/ holds the true fibers in the files
+never overlapping, never bending tighter than Tangle's default limit (5 diameters), blurred and noisy like a
+CT scan. FOLDER/truth/ holds the true fibers in the files
 find_fibers.py writes (fibers.csv, centerlines.csv), for compare_fibers.py.
 
 Needs only NumPy, SciPy and tifffile (no Tangle build). It is far simpler than a real scan, and than the
@@ -29,6 +30,7 @@ VOXEL_UM = 1.5
 KINDS = ((7.0, 2000.0, 0.65), (14.0, 2600.0, 0.35))  # diameter (voxels), grey above the void, share of fibers
 VOID, NOISE, BLUR = 1000.0, 150.0, 0.8
 GAP = 0.5  # voxels kept between fiber surfaces
+BEND = 5.0  # no fiber bends tighter than this many diameters (Tangle's default limit)
 
 
 def fibers_in_box(size: int, rng: np.random.Generator, fraction: float = 0.12, attempts: int = 5000):
@@ -51,6 +53,9 @@ def fibers_in_box(size: int, rng: np.random.Generator, fraction: float = 0.12, a
         up = np.cross(u, side)
         s = np.arange(-1.0 * size, 1.0 * size + 0.5, 1.0)
         wave, amplitude = rng.uniform(50.0, 140.0), rng.uniform(0.0, 1.2) * r
+        # the two waves below bend the fiber by at most A (2 pi / wave)^2 (1 + 0.3 / 1.7^2): keep that 10% under
+        # the bend limit, 1 / (BEND * 2 r)
+        amplitude = min(amplitude, 0.9 * (wave / (2 * np.pi)) ** 2 / ((1 + 0.3 / 1.7**2) * BEND * 2 * r))
         phase = rng.uniform(0.0, 2 * np.pi, 2)
         line = (rng.uniform(0.0, size, 3) + s[:, None] * u
                 + (amplitude * np.sin(2 * np.pi * s / wave + phase[0]))[:, None] * side

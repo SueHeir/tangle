@@ -121,9 +121,17 @@ def main(argv=None) -> int:
         print(text)
     matched = match >= 0
     if matched.any() and len(np.unique(true_t)) > 1:  # both number their types by size, 1 = the thinnest
-        right = found_t[matched] == true_t[match[matched]]
+        kinds, how = found_t, ""
+        if len(np.unique(found_t)) != len(np.unique(true_t)):  # numbered differently: pair them by diameter
+            sizes = {t: np.log(np.median(true_d[true_t == t])) for t in np.unique(true_t)}
+            pair = {f: min(sizes, key=lambda t: abs(sizes[t] - np.log(np.median(found_d[found_t == f]))))
+                    for f in np.unique(found_t)}
+            kinds = np.array([pair[f] for f in found_t], int)
+            how = (f" ({len(np.unique(found_t))} found types against {len(np.unique(true_t))} true ones, each found "
+                   "type taken as the true type nearest in diameter)")
+        right = kinds[matched] == true_t[match[matched]]
         share = float((weight[matched] * right).sum() / weight[matched].sum())
-        print(f"typed like the true fiber they lie on: {100 * share:.1f}% of the matched found length")
+        print(f"typed like the true fiber they lie on: {100 * share:.1f}% of the matched found length{how}")
     return 0
 
 

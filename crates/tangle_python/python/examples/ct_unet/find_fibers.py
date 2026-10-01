@@ -147,7 +147,8 @@ def run(args) -> Path:
                 "diameters_um": sizes, "voxel_size_um": voxel, "region": box.describe(scan.shape), "bin": k,
                 "invert": args.invert}]
     levels = {"void": grey[0], "fiber": grey[1], "threshold": check.threshold}
-    paths = [fiber_outputs.write_fit_json(fibers, out / "fit.json", levels, history, sizes)]
+    fit_path, fit_notes = fiber_outputs.write_fit_json(fibers, out / "fit.json", levels, history, sizes)
+    paths = [fit_path]
     paths += fiber_outputs.write_tables(fibers, out)
     paths += fiber_outputs.write_vtk(fibers, out)
     paths += fiber_outputs.write_ovito(fibers, out)
@@ -171,7 +172,7 @@ def run(args) -> Path:
         paths.append(preview)
 
     seconds = time.time() - started
-    report = fiber_outputs.summary(fibers, sizes, fractions)
+    report = fiber_outputs.summary(fibers, sizes, fractions) + (fit_notes if fibers.count else [])
     origin = [box.x0, box.y0, box.z0]
     header = [f"find_fibers.py results for {scan.path}", "",
               f"Region: {box.describe(scan.shape)}" + (f", binned {k} x {k} x {k}" if k > 1 else "")
@@ -244,6 +245,7 @@ def find_in_region(region, voxel_um: float, model, device: str, grey, sizes_um=N
         keep = np.array([polyline_length(line) >= 3.0 * thinnest for line in lines])
         lines, radii, kinds = [l for l, k in zip(lines, keep) if k], radii[keep], kinds[keep]
         shortest = max(shortest, 3.0 * thinnest)
+        kinds, names = settle_types(lines, radii, kinds, voxel_um, fold=not types)  # a type may have lost its fibers
     say(f"  {len(lines):,} fibers")
     bonds = []
     if want_bonds and len(centers) and lines:
@@ -297,7 +299,7 @@ def network_votes(region, model, device: str, grey, hints: dict, want_bonds: boo
             write_json(work / "votes.json", key)
     left = (len(layers) - first) * per_layer
     if left:
-        say(f"Running the network on {left:,} tiles of {TILE} x {TILE} x {TILE} voxels"
+        say(f"Running the network on {left:,} tile{'s' if left > 1 else ''} of {TILE} x {TILE} x {TILE} voxels"
             + (" (this is slow on the CPU)" if device == "cpu" and left > 50 else ""))
     done, started, shown, stored = 0, time.time(), time.time(), time.time()
     for layer, (oz, z0, z1) in enumerate(layers):
@@ -382,8 +384,34 @@ def fiber_kinds(lines, radii, sizes, k, region, grey, voxel_um: float):
             bad = ~np.isfinite(column)
             column[bad] = np.median(column[~bad]) if (~bad).any() else 0.0
         kinds = np.asarray(assign_types(feats, min(k, len(lines)) if k else None)[0], int)
-    used = np.unique(kinds)  # a cluster left empty is dropped; the rest keep their order by size
-    kinds = np.searchsorted(used, kinds)
+    return settle_types(lines, radii, kinds, voxel_um, fold=not k)
+
+
+def settle_types(lines, radii, kinds, voxel_um: float, fold: bool) -> tuple[np.ndarray, list[str]]:
+    """Clustered types numbered from 0 by median diameter (0 = the thinnest) with none left empty, and a name
+    for each. With ``fold`` (the number of types was guessed), a type of fewer than 3 fibers or under 2% of
+    the traced length joins the type nearest to it in diameter: a few odd traces are not a fiber type."""
+    kinds = np.array(kinds, dtype=int)
+    radii = np.asarray(radii, float)
+    if fold and len(lines):
+        length = np.array([polyline_length(line) for line in lines])
+        size = np.log(2.0 * np.maximum(radii, 1e-6))
+        while True:
+            used = np.unique(kinds)
+            if len(used) < 2:
+                break
+            count = np.array([np.sum(kinds == t) for t in used])
+            share = np.array([length[kinds == t].sum() for t in used]) / max(float(length.sum()), 1e-12)
+            small = (count < 3) | (share < 0.02)
+            if not small.any():
+                break
+            t = used[np.argmin(np.where(small, share, np.inf))]
+            rest = used[used != t]
+            centers = np.array([np.median(size[kinds == r]) for r in rest])
+            kinds[kinds == t] = rest[np.argmin(np.abs(centers - np.median(size[kinds == t])))]
+    used = np.unique(kinds)
+    rank = np.argsort(np.argsort([np.median(radii[kinds == t]) for t in used]))
+    kinds = rank[np.searchsorted(used, kinds)] if len(used) else kinds
     names = [f"about {2.0 * float(np.median(radii[kinds == t])) * voxel_um:.3g} um" for t in range(len(used))]
     return kinds, names
 
@@ -408,7 +436,7 @@ def diameter_profiles(region, lines, model, device: str, grey, hints: dict, voxe
 
     plan = tile_plan(region.shape)
     total = len(plan[0]) * len(plan[1]) * len(plan[2])
-    say(f"Measuring the diameter along every fiber: the network again, {total:,} tiles")
+    say(f"Measuring the diameter along every fiber: the network again, {total:,} tile{'s' if total > 1 else ''}")
     accumulator = Accumulator(lines, tuple(int(n) for n in region.shape))
     done, started, shown = 0, time.time(), time.time()
     for oz, z0, z1 in plan[0]:
@@ -514,6 +542,7 @@ def network_file(text: str) -> Path:
 def pick_device(name: str) -> str:
     torch = scan_io.need("torch", "Running the network", "torch")
     has_mps = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
+    chosen = name != "auto"
     if name == "auto":
         name = "cuda" if torch.cuda.is_available() else "mps" if has_mps else "cpu"
     elif name == "cuda" and not torch.cuda.is_available():
@@ -521,8 +550,10 @@ def pick_device(name: str) -> str:
     elif name == "mps" and not has_mps:
         raise ScanError("--device mps: PyTorch sees no Apple GPU here")
     where = {"cuda": "the GPU", "mps": "the Apple GPU", "cpu": "the CPU"}[name]
-    say(f"Network on {where}" + (" (no GPU found: it runs, slowly; try a small --center-crop first)"
-                                  if name == "cpu" else ""))
+    if name == "cpu":
+        where += (" (slow: try a small --center-crop first)" if chosen
+                  else " (no GPU found: it runs, slowly; try a small --center-crop first)")
+    say(f"Network on {where}")
     return name
 
 

@@ -19,6 +19,7 @@ import numpy as np
 
 STACK_LIMIT = 600_000_000  # voxels: bigger regions skip the overlay and label stacks unless asked for
 SPECK = 20  # voxels: binder pieces smaller than this are dropped as noise
+BEND_DIAMETERS = 5.0  # Tangle's default bend limit (tangle.ct.FiberSpec.min_bend_radius), in fiber diameters
 OUTPUTS = ("summary.txt", "run.json", "fit.json", "fibers.csv", "centerlines.csv", "bonds.csv", "diameters.csv",
            "fibers.vtk", "bonds.vtk", "fibers.dump", "view_in_ovito.py", "overlay.png", "overlay.tif", "labels.tif",
            "binder.tif", "overlay.npy", "labels.npy", "binder.npy", "overlay.partial.npy", "labels.partial.npy",
@@ -76,6 +77,30 @@ def resample(line, spacing: float) -> np.ndarray:
     n = max(int(np.ceil(s[-1] / spacing)) + 1, 2)
     t = np.linspace(0.0, s[-1], n)
     return np.stack([np.interp(t, s, line[:, k]) for k in range(3)], axis=1)
+
+
+def within_bend_limit(points, bend: float, sweeps: int = 2000) -> tuple[np.ndarray, bool]:
+    """A copy of the polyline ``points`` smoothed wherever it turns tighter than a bend radius of ``bend`` (in
+    the same units), so that Tangle accepts it as a fiber's shape. The turn is measured as Tangle does:
+    2 sin(angle / 2) over the mean of the two segments, at every inner point. Points over the limit move
+    halfway to the middle of their neighbours, sweep after sweep; after ``sweeps``, every inner point does.
+    The ends stay put. Returns the points and whether all of them are now within the limit."""
+    p = np.array(points, dtype=float)
+    if len(p) < 3:
+        return p, True
+    limit = 0.98 / bend  # a little inside the limit, so rounding to meters can't tip a point over it
+    for sweep in range(11 * sweeps):
+        before, point, after = p[:-2], p[1:-1], p[2:]
+        u, v = point - before, after - point
+        lu, lv = np.linalg.norm(u, axis=1), np.linalg.norm(v, axis=1)
+        cosine = np.clip((u * v).sum(1) / np.maximum(lu * lv, 1e-12), -1.0, 1.0)
+        over = 2.0 * np.sin(0.5 * np.arccos(cosine)) > limit * 0.5 * (lu + lv)
+        if not over.any():
+            return p, True
+        if sweep >= sweeps:  # a long stretch over the limit: smooth the whole line
+            over[:] = True
+        point[over] += 0.5 * (0.5 * (before + after)[over] - point[over])  # point is a view into p
+    return p, False
 
 
 def axis_of(line) -> np.ndarray:
@@ -175,12 +200,20 @@ def _write_points(path: Path, header: str, per_fiber: list) -> Path:
     return path
 
 
-def write_fit_json(fibers: Fibers, path: Path, levels: dict, history: list[dict], given_um: list | None = None) -> Path:
-    """The fibers in tangle.ct's fit.json format (meters), so ``tangle.ct.load_fit`` reads them back.
+def write_fit_json(fibers: Fibers, path: Path, levels: dict, history: list[dict],
+                   given_um: list | None = None) -> tuple[Path, list[str]]:
+    """The fibers in tangle.ct's fit.json format (meters), so ``tangle.ct.load_fit`` reads them back and
+    ``FitResult.relax`` solves them. Returns the path and lines for the summary.
 
     Only the types that have fibers are listed (Tangle can't make a material or population from an empty
     type), numbered from 0 in order of size; each keeps its number from fibers.csv in its name. A type's
-    diameter is the one given (``given_um``), else the median of its fibers."""
+    diameter is the one given (``given_um``), else the median of its fibers.
+
+    Tangle refuses a fiber whose shape bends tighter than its type's bend limit (5 diameters by default), and
+    traces wiggle by a fraction of a voxel, so each centerline here is resampled one radius of its type apart
+    (with finer nodes on thick fibers, Tangle's solve takes longer to settle) and smoothed where it bends
+    tighter than the limit (``within_bend_limit``). The tables, ParaView and OVITO files and the stacks keep
+    the traced lines."""
     h = fibers.voxel_um * 1e-6
     diameters = 2.0 * np.asarray(fibers.radii, float) * h
     present = [t for t in range(len(fibers.type_names)) if np.any(fibers.types == t)]
@@ -191,6 +224,26 @@ def write_fit_json(fibers: Fibers, path: Path, levels: dict, history: list[dict]
     if not specs:
         specs = [{"diameter": given_um[0] * 1e-6 if given_um else 1e-5, "name": "fiber"}]
     number = {t: k for k, t in enumerate(present)}
+    spec_vox = np.array([s["diameter"] for s in specs]) / h
+    lines, shift, moved, tight = [], 0.0, 0, []
+    for k, (line, t) in enumerate(zip(fibers.lines, fibers.types)):
+        d = float(spec_vox[number.get(int(t), 0)])
+        start = resample(line, max(1.0, 0.5 * d))
+        smooth, ok = within_bend_limit(start, BEND_DIAMETERS * d)
+        step = float(np.max(np.linalg.norm(smooth - start, axis=1))) if len(start) else 0.0
+        shift = max(shift, step)
+        moved += int(step > 0.25)
+        if not ok:
+            tight.append(k + 1)
+        lines.append(smooth)
+    notes = [f"fit.json: centerlines smoothed where they bend tighter than Tangle's bend limit ({BEND_DIAMETERS:g} "
+             f"diameters); {moved:,} fibers moved more than a quarter voxel, by at most {shift * fibers.voxel_um:.3g} um"]
+    if tight:
+        notes.append(f"  {len(tight)} fibers still bend tighter than the limit, so Tangle will refuse fit.json: "
+                     + ", ".join(map(str, tight[:10])) + (", ..." if len(tight) > 10 else "") + " in fibers.csv")
+    history = history + [{"stage": "smoothed to Tangle's bend limit", "bend_limit_diameters": BEND_DIAMETERS,
+                          "node_spacing": "one radius of the fiber's type",
+                          "largest_shift_um": round(shift * fibers.voxel_um, 4), "fibers_over_limit": tight}]
     data = {
         "schema": "tangle.ct.fit/1",
         "units": "meters",
@@ -202,15 +255,15 @@ def write_fit_json(fibers: Fibers, path: Path, levels: dict, history: list[dict]
         "levels": levels,
         "specs": specs if len(specs) > 1 else None,
         "fibers": [{"id": k + 1, "diameter": float(d), "support": float(s), "type": number.get(int(t), 0),
-                    "centerline": np.round(np.asarray(line, float) * h, 10).tolist()}
-                   for k, (line, d, s, t) in enumerate(zip(fibers.lines, diameters, fibers.support, fibers.types))],
+                    "centerline": np.round(line * h, 10).tolist()}
+                   for k, (line, d, s, t) in enumerate(zip(lines, diameters, fibers.support, fibers.types))],
         "bonds": [{"fibers": [b["fibers"][0] + 1, b["fibers"][1] + 1],
                    "center": np.round(np.asarray(b["center"], float) * h, 10).tolist(),
                    "strength": round(float(b["strength"]), 4)} for b in fibers.bonds],
         "history": history,
     }
     path.write_text(json.dumps(data, indent=1) + "\n")
-    return path
+    return path, notes
 
 
 # -- ParaView and OVITO ----------------------------------------------------------------------------------------------
