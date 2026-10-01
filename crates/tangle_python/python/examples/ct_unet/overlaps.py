@@ -82,6 +82,32 @@ def from_structure(source, voxel_size: float) -> Fibers:
                   semi.max(1), semi.min(1))
 
 
+def from_scan(scan) -> Fibers:
+    """The true fibers of a ``SyntheticScan`` (its centerlines, semi-axes and long axes are in voxels)."""
+    from tangle.ct._geometry import resample
+
+    n = len(scan.centerlines)
+    if scan.semi_axes is not None:
+        semi = np.asarray(scan.semi_axes, dtype=np.float64).reshape(-1, 2)
+    else:
+        semi = np.repeat(np.asarray(scan.radii, dtype=np.float64)[:, None], 2, axis=1)
+    P, T, U, F = [], [], [], []
+    for k in range(n):
+        line = np.asarray(scan.centerlines[k], dtype=np.float64)
+        dense = resample(line, SPACING)
+        t = np.gradient(dense, axis=0)
+        t /= np.maximum(np.linalg.norm(t, axis=1, keepdims=True), 1e-12)
+        u = np.zeros_like(dense)
+        if scan.long_axes is not None and semi[k].max() > 1.001 * semi[k].min():
+            nodes = np.asarray(scan.long_axes[k], dtype=np.float64)
+            _, near = cKDTree(line).query(dense)
+            u = nodes[near] - (nodes[near] * t).sum(1, keepdims=True) * t
+            u /= np.maximum(np.linalg.norm(u, axis=1, keepdims=True), 1e-12)
+        P.append(dense), T.append(t), U.append(u), F.append(np.full(len(dense), k))
+    return Fibers(np.concatenate(P), np.concatenate(T), np.concatenate(F), np.concatenate(U),
+                  semi.max(1), semi.min(1))
+
+
 def from_npz(data) -> Fibers:
     """The true fibers of a make_data volume (``np.load`` of its .npz)."""
     P = data["p_pos"].astype(np.float64)
