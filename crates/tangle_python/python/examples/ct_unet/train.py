@@ -186,7 +186,7 @@ def main():
         scheduler.load_state_dict(state["scheduler"])
         step, best = state["step"], state["best"]
     (args.out / "config.json").write_text(json.dumps({**vars(args), "data": args.data, "val": args.val,
-                                                       "out": str(args.out), "init": str(args.init), "weights": WEIGHTS}, indent=1) + "\n")
+                                                       "out": str(args.out), "init": str(args.init), "weights": WEIGHTS}, indent=1, default=str) + "\n")
 
     val_files = volumes(args.val)
     val_loader = DataLoader(Crops(val_files, args.crop, 1, 0, train=False), batch_size=1, num_workers=2)
