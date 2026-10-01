@@ -1111,6 +1111,8 @@ fn run_native_recipe(
 ) -> Result<PyRunResult, RunFailure> {
     let operation_count = recipe.operations.len();
     let mut app = App::new();
+    // Python callers print their own results; keep GRASS's timing table off stdout.
+    app.disable_timing_print();
     app.add_plugins(TangleWorkflowPlugin {
         initial: TangleStage::Relax,
     })
