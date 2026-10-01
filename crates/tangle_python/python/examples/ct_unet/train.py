@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from maps import BINDER, CHANNELS, UNet3D, augment, load, loss_terms, normalize, size_code, targets, widen
 
+AMP = None  # autocast dtype on CUDA (set from --amp)
 WEIGHTS = {"heat": 1.0, "offset": 1.0, "direction": 1.0, "fiber": 0.5, "radius": 1.0, "binder": 1.0, "bondpt": 1.0}
 
 
@@ -78,9 +79,10 @@ def save(state, path: Path):
 
 
 def run_batch(model, batch, device):
-    batch = {k: v.to(device) for k, v in batch.items()}
-    out = model(batch["image"], batch["code"]) if getattr(model, "condition", False) else model(batch["image"])
-    terms = loss_terms(out, batch)
+    batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+    with torch.autocast("cuda", dtype=AMP or torch.float32, enabled=AMP is not None):
+        out = model(batch["image"], batch["code"]) if getattr(model, "condition", False) else model(batch["image"])
+    terms = loss_terms(out.float(), batch)
     return sum(WEIGHTS[k] * v for k, v in terms.items()), terms
 
 
@@ -104,8 +106,29 @@ def main():
     parser.add_argument("--condition", action="store_true", help="add the fiber-size conditioning (FiLM)")
     parser.add_argument("--widen", type=int, help="with --init: widen that network to this base width (Net2Net)")
     parser.add_argument("--noise", type=float, default=0.0, help="correlated-noise augmentation sd (0 = off)")
+    parser.add_argument("--amp", choices=["off", "bf16", "fp16"], default="off", help="mixed precision (CUDA only)")
+    parser.add_argument("--refresh-every", type=int, default=0,
+                        help="re-list the data folders every N steps (0 = once per pass), so scans still arriving join")
+    parser.add_argument("--pace", action="append", default=[], metavar="DIR:TOTAL",
+                        help="at each refresh, wait until DIR holds its share of TOTAL scans (TOTAL x the share of "
+                             "steps done by the next refresh)")
+    parser.add_argument("--exclude", type=Path,
+                        help="leave out the volumes listed in this file, one FOLDER/NAME per line (e.g. those "
+                             "overlaps.py finds with fibers through each other)")
     args = parser.parse_args()
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    skip = set(args.exclude.read_text().split()) if args.exclude else set()
+
+    def volumes(folders: str) -> list[Path]:
+        return sorted(f for d in folders.split(",") for f in Path(d).glob("*.npz")
+                      if f"{f.parent.name}/{f.stem}" not in skip)
+
+    device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    global AMP
+    AMP = None if args.amp == "off" or device != "cuda" else {"bf16": torch.bfloat16, "fp16": torch.float16}[args.amp]
+    if device == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.allow_tf32 = True
+    scaler = torch.amp.GradScaler("cuda", enabled=AMP is torch.float16)
     args.out.mkdir(parents=True, exist_ok=True)
     import maps as maps_module
 
@@ -165,23 +188,34 @@ def main():
     (args.out / "config.json").write_text(json.dumps({**vars(args), "data": args.data, "val": args.val,
                                                        "out": str(args.out), "init": str(args.init), "weights": WEIGHTS}, indent=1) + "\n")
 
-    val_files = sorted(f for d in args.val.split(",") for f in Path(d).glob("*.npz"))
+    val_files = volumes(args.val)
     val_loader = DataLoader(Crops(val_files, args.crop, 1, 0, train=False), batch_size=1, num_workers=2)
     started, window = time.perf_counter(), []
     while step < args.steps:
-        # Re-list each pass so volumes still being generated join as they land.
-        files = sorted(f for d in args.data.split(",") for f in Path(d).glob("*.npz"))
+        # Pacing: hold training until each paced folder has its share of the scans for the coming steps.
+        for spec in args.pace:
+            folder, total = spec.rsplit(":", 1)
+            span = args.refresh_every or args.steps
+            need = min(int(total), int(np.ceil(int(total) * min(1.0, (step + span) / args.steps))))
+            while (have := len(list(Path(folder).glob("*.npz")))) < need:
+                print(f"PAUSED step {step}: {folder} has {have}/{need} scans, waiting", flush=True)
+                time.sleep(120)
+        # Re-list each pass (or every --refresh-every steps) so volumes still being generated join as they land.
+        files = volumes(args.data)
         loader = DataLoader(Crops(files, args.crop, 2, step, noise=args.noise, hint_rate=args.hint_rate), batch_size=1, shuffle=True, num_workers=args.workers,
                             persistent_workers=False, prefetch_factor=2)
         model.train()
         for batch in loader:
             loss, terms = run_batch(model, batch, device)
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
             step += 1
+            refresh = args.refresh_every and step % args.refresh_every == 0
             window.append({k: float(v.detach()) for k, v in terms.items()})
             if step % args.log_every == 0:
                 mean = {k: np.mean([w[k] for w in window]) for k in window[0]}
@@ -203,7 +237,7 @@ def main():
                     best = val
                     save(state, args.out / "best.pt")
                 model.train()
-            if step >= args.steps:
+            if step >= args.steps or refresh:
                 break
 
 

@@ -21,7 +21,7 @@ from trace_maps import trace  # noqa: E402
 
 checkpoint, cache, out = sys.argv[1:4]
 name, y = "dense_hard_7", 80
-device = "mps" if torch.backends.mps.is_available() else "cpu"
+device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 model = load(checkpoint, device)
 scan = ex.EXAMPLES[name](Path(cache) / f"{name}.json").scan
 maps = predict(model, scan.volume, device)
