@@ -100,3 +100,4 @@ trying a new cleanup strategy.
 | `tangle_checkpoint` | Atomic restart serialization |
 | `tangle_characterize` | Native centerline/material metrics |
 | `tangle_export` | BPM, OVITO, and PuMA-compatible outputs |
+| `tangle_ct` | CT fitting kernels behind `tangle.ct` (filters, tracing, topology moves, confidence) |
