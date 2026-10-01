@@ -227,15 +227,6 @@ def render_occupancy(low, high, centerlines, radii, edge: float, sections=None) 
     return out
 
 
-def local_residual(image, low, high, centerlines, radii, base, edge: float) -> float:
-    nodes, counts = _pack(centerlines)
-    if base is not None:
-        base = np.ascontiguousarray(base, dtype=np.float64)
-    return _tangle.ct_local_residual(
-        _f32(image), _box(low), _box(high), nodes, counts, [float(r) for r in radii], float(edge), base
-    )
-
-
 def _lines_and_radii(result) -> tuple:
     packed, radii, *count = result
     return (_unpack(packed), np.array(radii, dtype=np.float64), *count)

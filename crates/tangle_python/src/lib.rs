@@ -118,7 +118,6 @@ fn _tangle(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(ct::ct_support, module)?)?;
     module.add_function(wrap_pyfunction!(ct::ct_curvature_ratio, module)?)?;
     module.add_function(wrap_pyfunction!(ct::ct_render_occupancy, module)?)?;
-    module.add_function(wrap_pyfunction!(ct::ct_local_residual, module)?)?;
     module.add_function(wrap_pyfunction!(ct::ct_trim_duplicates, module)?)?;
     module.add_function(wrap_pyfunction!(ct::ct_remove_unsupported, module)?)?;
     module.add_function(wrap_pyfunction!(ct::ct_merge_fragments, module)?)?;

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ._confidence import _Segments
-from ._geometry import paint, polyline_length, resample, tangents
+from ._geometry import UnionFind, paint, polyline_length, resample, runs, tangents
 
 
 Box = tuple[np.ndarray, np.ndarray]  # (low, high) corners, voxel coordinates (x, y, z)
@@ -88,7 +88,7 @@ def cut_unsure(
             unsure &= ~_inside_any(fine, skip)
         kept_mask = np.zeros(len(fine), dtype=bool)
         kept = 0
-        for start, stop in _runs(~unsure):
+        for start, stop in runs(~unsure):
             piece = fine[start:stop]
             if (
                 len(fine)
@@ -114,7 +114,7 @@ def cut_unsure(
             if len(anchor) >= 2:
                 anchors.append(anchor)
         removed_nodes += int((~kept_mask).sum())
-        for start, stop in _runs(~kept_mask):
+        for start, stop in runs(~kept_mask):
             removed.append(fine[start:stop])
             removed_owner.append(f)
         if kept == 0:
@@ -135,21 +135,6 @@ def cut_unsure(
         removed_nodes,
         removed_fibers,
     )
-
-
-def touched_regions(lines: list[np.ndarray], regions: list[Box]) -> list[set[int]]:
-    """For every fiber, the regions its nodes enter."""
-    touched = []
-    for line in lines:
-        line = np.asarray(line, dtype=np.float64).reshape(-1, 3)
-        touched.append(
-            {
-                k
-                for k, (low, high) in enumerate(regions)
-                if np.any(np.all((line >= low) & (line <= high), axis=1))
-            }
-        )
-    return touched
 
 
 def changed_regions(
@@ -194,20 +179,13 @@ def region_components(region_count: int, *touch_lists: list[set[int]]) -> np.nda
     A redraw is kept or reverted one component at a time, so a fiber is
     never half kept.
     """
-    root = list(range(region_count))
-
-    def find(k: int) -> int:
-        while root[k] != k:
-            root[k] = root[root[k]]
-            k = root[k]
-        return k
-
+    sets = UnionFind()
     for touches in touch_lists:
         for regions in touches:
             regions = sorted(regions)
             for other in regions[1:]:
-                root[find(other)] = find(regions[0])
-    labels = np.array([find(k) for k in range(region_count)], dtype=int)
+                sets.union(regions[0], other)
+    labels = np.array([sets.find(k) for k in range(region_count)], dtype=int)
     _, component = np.unique(labels, return_inverse=True)
     return component.astype(int)
 
@@ -360,21 +338,12 @@ def _cluster_boxes(
         return [], np.zeros(0, dtype=int)
     points = np.concatenate(stretches)
     owner = np.concatenate([np.full(len(s), k) for k, s in enumerate(stretches)])
-    root = list(range(len(stretches)))
-
-    def find(k: int) -> int:
-        while root[k] != k:
-            root[k] = root[root[k]]
-            k = root[k]
-        return k
-
+    sets = UnionFind()
     for a, b in cKDTree(points).query_pairs(max(pad, 1e-6)):
-        ra, rb = find(int(owner[a])), find(int(owner[b]))
-        if ra != rb:
-            root[rb] = ra
+        sets.union(int(owner[a]), int(owner[b]))
     groups: dict[int, list[int]] = {}
     for k in range(len(stretches)):
-        groups.setdefault(find(k), []).append(k)
+        groups.setdefault(sets.find(k), []).append(k)
     boxes = []
     membership = np.zeros(len(stretches), dtype=int)
     for index, members in enumerate(groups.values()):
@@ -493,7 +462,7 @@ def _stop_before_others(
     owner = claimed[index[:, 0], index[:, 1], index[:, 2]]
     foreign = (owner > 0) & (owner != own)
     cos_limit = np.cos(np.radians(max_angle_degrees))
-    for start, stop in _runs(foreign):
+    for start, stop in runs(foreign):
         if stop == len(extension):
             return extension[:start]
         label = int(np.bincount(owner[start:stop]).argmax())
@@ -509,11 +478,6 @@ def _stop_before_others(
         if abs(float(heading @ along)) >= cos_limit:
             return extension[:start]
     return extension
-
-
-def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
-    edges = np.diff(np.concatenate([[0], mask.astype(np.int8), [0]]))
-    return list(zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)))
 
 
 def _refine_with_values(

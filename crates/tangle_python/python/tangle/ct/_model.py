@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._geometry import rasterize, resample, sample_image, tangents
+from ._geometry import frame, rasterize, resample, sample_image, tangents
 
 _BINS = np.linspace(0.0, 2.5, 21)  # the profile's knots, in radii from the axis
 _SAMPLES = 200_000  # voxels the profiles are measured on
@@ -196,14 +196,6 @@ class GreyModel:
         return np.interp(x, _BINS, self.profiles[kind], right=0.0)
 
 
-def _frame(line: np.ndarray):
-    t = tangents(line)
-    helper = np.where(np.abs(t[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
-    e1 = np.cross(t, helper)
-    e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
-    return t, e1, np.cross(t, e1)
-
-
 def model_recenter(model: GreyModel, lines, radii, types, kind: int, *, sweeps: int, max_radii: float,
                    step: float = 0.5):
     """Fits of type ``kind`` moved across themselves onto their own grey, the other fits' drawn grey taken
@@ -220,7 +212,7 @@ def model_recenter(model: GreyModel, lines, radii, types, kind: int, *, sweeps: 
         for i, (line, r, k) in enumerate(zip(lines, radii, types)):
             if int(k) != kind or len(line) < 2:
                 continue
-            t, e1, e2 = _frame(line)
+            t, e1, e2 = frame(line)
             grid = np.arange(-2.2 * r, 2.2 * r + 1e-9, step)
             u, v = (a.ravel() for a in np.meshgrid(grid, grid))
             shifts = np.arange(-max_radii * r, max_radii * r + 1e-9, step)
