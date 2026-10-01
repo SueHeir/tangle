@@ -272,18 +272,26 @@ class FibersOverlap(Exception):
 
 
 def relax_further(cache_file: Path, cell, populations, steps: int) -> None:
-    """Relax the cached structure ``steps`` more (``relaxed_truth``'s settings) and cache the result."""
-    import tangle
-    import ct_examples as ex
-    from tangle.units import um
+    """Relax the structure again from its placement for ``steps`` more than last time, and cache the result.
 
-    recipe, data = cached_recipe(cache_file, cell, populations)
-    run = recipe.run(tangle.RelaxationSettings(backend=ex.BACKEND, max_step=1.0 * um, penetration_tolerance=0.1 * um,
-                                               **{**ex.TRUTH_RELAXATION, "max_iterations": steps}))
-    data["centerlines"] = run.centerlines()
-    if "long_axes" in data:
-        data["long_axes"] = run.assembly.long_axes()
-    data["more_steps"] = data.get("more_steps", 0) + steps
+    Not from the cache: rebuilt from relaxed centerlines, each fiber's bent shape would be its rest shape, so its
+    bend limit has to be loosened to what the worst fiber reached (``cached_recipe``), and over thousands of
+    steps every fiber then bends that far. Starting over repeats the earlier steps, but every fiber keeps its own
+    rest shape and bend limit.
+    """
+    import ct_examples as ex
+
+    more = json.loads(cache_file.read_text()).get("more_steps", 0) + steps
+    saved = dict(ex.TRUTH_RELAXATION)
+    ex.TRUTH_RELAXATION["max_iterations"] = saved.get("max_iterations", 12_000) + more
+    try:
+        cache_file.unlink()
+        ex.relaxed_truth(cache_file, cell, populations)
+    finally:
+        ex.TRUTH_RELAXATION.clear()
+        ex.TRUTH_RELAXATION.update(saved)
+    data = json.loads(cache_file.read_text())
+    data["more_steps"] = more
     cache_file.write_text(json.dumps(data) + "\n")
 
 
