@@ -72,10 +72,11 @@ ends are flat.
 - Every fiber is its own body. Fibers that touch, or overlap by TANGLE's small
   allowed penetration, do not share nodes. Connect them in the solver: contact
   for loose fibers, glued contact for bonded ones.
-- `element_size` is the largest element edge; the default is the thinnest
-  fiber's smaller radius. `elements_around` is the fewest element edges around
-  a cross-section, whatever `element_size` is. The default of 16 keeps a round
-  fiber's volume within about 2%.
+- `elements_around` sets each fiber's element size: the perimeter of its
+  cross-section divided by this many edges, so thin and flat fibers get
+  smaller elements than thick ones. The default of 16 keeps a round fiber's
+  volume within about 2%. `element_size`, when given, caps the element edge in
+  every fiber.
 - `order=2` writes 10-node tetrahedra with straight edges. They avoid the
   stiffness of 4-node tetrahedra in bending, which matters for thin fibers.
 - With `clip_to_cell=True` the fibers are cut at the cell walls, with their
