@@ -99,5 +99,5 @@ trying a new cleanup strategy.
 | `tangle_relax` | Persistent device world and mechanics corrections |
 | `tangle_checkpoint` | Atomic restart serialization |
 | `tangle_characterize` | Native centerline/material metrics |
-| `tangle_export` | BPM, OVITO, and PuMA-compatible outputs |
+| `tangle_export` | BPM, OVITO, and PuMA-compatible outputs, and the voxel labels behind `tangle.fem` |
 | `tangle_ct` | CT fitting kernels behind `tangle.ct` (filters, tracing, topology moves, confidence) |

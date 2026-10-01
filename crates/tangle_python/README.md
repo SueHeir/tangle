@@ -457,6 +457,27 @@ orthorhombic cells. It validates geometry structure and grid compatibility,
 not solver convergence. See the [analysis guide](../../docs/puma_interoperability.md)
 for exact definitions, supported comparisons, and current limitations.
 
+## FEM meshes (Nastran and Abaqus)
+
+`tangle.fem` builds solid finite-element meshes of an assembly or a run's
+result and writes them for Nastran (`.bdf` bulk data) or Abaqus (`.inp`). It
+needs NumPy, and gmsh for tetrahedra (`pip install numpy gmsh`):
+
+```python
+from tangle import fem
+
+pet = fem.ElasticMaterial(youngs_modulus=2.5e9, poisson_ratio=0.35, density=1380.0)
+hexes = fem.hex_mesh(result, voxel_size=2e-6)  # one 8-node brick per voxel
+hexes.write_nastran("output/felt_hex.bdf", pet)
+tets = fem.tet_mesh(result, order=2)  # 10-node tetrahedra on each fiber's surface
+tets.write_abaqus("output/felt_tet.inp", pet)
+```
+
+`hex_mesh` uses the `export_puma` voxels, and fibers that touch share nodes.
+`tet_mesh` meshes every fiber as its own body, cut at the cell walls. The
+[FEM export guide](../../docs/fem_export.md) covers element types, units,
+materials and the [`fem_mesh` example](python/examples/fem_mesh.py).
+
 ## Examples
 
 - `quickstart.py` builds a small network, then fits it back from a simulated

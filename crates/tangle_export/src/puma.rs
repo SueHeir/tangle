@@ -364,26 +364,59 @@ struct VoxelFields {
     binder_interface: Vec<u8>,
 }
 
+/// Per-voxel labels on the PuMA grid, computed in memory without writing a
+/// bundle.
+///
+/// The grid, ownership and binder rules are exactly those of
+/// [`write_puma_bundle`]. Every image is flat with x fastest, then y, then z.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoxelLabels {
+    /// Number of cells along x, y, and z.
+    pub voxel_counts: [usize; 3],
+    /// Cubic voxel edge length.
+    pub voxel_size: f64,
+    /// Corner of the grid, which is the cell origin.
+    pub origin: Vec3,
+    /// Phase per cell: material index + 1, the binder phase after every
+    /// material, or 0 for void.
+    pub phase: Vec<u16>,
+    /// Owner fiber per cell as dense fiber index + 1, or 0 for void and
+    /// binder.
+    pub fiber: Vec<u32>,
+    /// Owner junction per binder cell as junction index + 1, or 0. Empty
+    /// when bonds are off.
+    pub bond: Vec<u32>,
+}
+
+/// Rasterizes an assembly onto the PuMA grid and returns the labels in
+/// memory. `bond_radius_ratio` voxelizes persistent junctions as binder, as
+/// [`PumaVoxelExportConfig::with_bonds`] does.
+pub fn voxelize_labels(
+    assembly: &FiberAssembly,
+    voxel_size: f64,
+    bond_radius_ratio: Option<f64>,
+) -> Result<VoxelLabels, PumaExportError> {
+    let config =
+        PumaVoxelExportConfig::new(PathBuf::new(), voxel_size).with_bonds(bond_radius_ratio);
+    let (_, counts, total_voxels, bridges) = prepare_grid(assembly, &config)?;
+    let fields = voxelize_with_bonds(assembly, &config, counts, total_voxels, &bridges)?;
+    Ok(VoxelLabels {
+        voxel_counts: counts,
+        voxel_size,
+        origin: assembly.cell.origin,
+        phase: fields.phase,
+        fiber: fields.owner_export_id,
+        bond: fields.bond_id,
+    })
+}
+
 /// Characterizes and rasterizes an assembly into a versioned bundle that can
 /// be imported with `pumapy.import_vti` without a TANGLE-specific adapter.
 pub fn write_puma_bundle(
     assembly: &FiberAssembly,
     config: &PumaVoxelExportConfig,
 ) -> Result<PumaExportReport, PumaExportError> {
-    assembly
-        .validate()
-        .map_err(|error| PumaExportError::InvalidAssembly(error.to_string()))?;
-    let (lengths, counts) = validate_grid(assembly, config)?;
-    let total_voxels = counts
-        .iter()
-        .try_fold(1usize, |product, count| product.checked_mul(*count))
-        .ok_or(PumaExportError::GridTooLarge(counts))?;
-
-    let bridges = match config.bond_radius_ratio {
-        Some(ratio) => junction_bridges(assembly, ratio)
-            .map_err(|error| PumaExportError::InvalidConfig(error.to_string()))?,
-        None => Vec::new(),
-    };
+    let (lengths, counts, total_voxels, bridges) = prepare_grid(assembly, config)?;
     fs::create_dir_all(&config.output_directory)?;
     let fields = voxelize_with_bonds(assembly, config, counts, total_voxels, &bridges)?;
     let binder_phase = binder_phase_id(assembly);
@@ -635,6 +668,29 @@ pub fn write_puma_bundle(
         manifest_path,
         analysis_path,
     })
+}
+
+/// Validates the assembly and grid and builds the binder bridges: the
+/// lengths, voxel counts, voxel total and bridges shared by
+/// [`write_puma_bundle`] and [`voxelize_labels`].
+fn prepare_grid(
+    assembly: &FiberAssembly,
+    config: &PumaVoxelExportConfig,
+) -> Result<(Vec3, [usize; 3], usize, Vec<JunctionBridge>), PumaExportError> {
+    assembly
+        .validate()
+        .map_err(|error| PumaExportError::InvalidAssembly(error.to_string()))?;
+    let (lengths, counts) = validate_grid(assembly, config)?;
+    let total_voxels = counts
+        .iter()
+        .try_fold(1usize, |product, count| product.checked_mul(*count))
+        .ok_or(PumaExportError::GridTooLarge(counts))?;
+    let bridges = match config.bond_radius_ratio {
+        Some(ratio) => junction_bridges(assembly, ratio)
+            .map_err(|error| PumaExportError::InvalidConfig(error.to_string()))?,
+        None => Vec::new(),
+    };
+    Ok((lengths, counts, total_voxels, bridges))
 }
 
 fn validate_grid(
@@ -1526,5 +1582,43 @@ mod tests {
         // The gap between the fibers through the wall is x in [0.95, 1) and
         // [0, 0.05); the binder never reaches the middle of the cell.
         assert!(binder_columns.iter().all(|x| *x <= 2 || *x >= 17));
+    }
+
+    #[test]
+    fn in_memory_labels_match_the_bundle_rasterization() {
+        use crate::bridges::tests::touching_cross;
+        let assembly = touching_cross(true, true);
+        let labels = voxelize_labels(&assembly, 0.05, Some(0.8)).unwrap();
+        assert_eq!(labels.voxel_counts, [20; 3]);
+        assert_eq!(labels.voxel_size, 0.05);
+        assert_eq!(labels.origin, assembly.cell.origin);
+
+        let config = PumaVoxelExportConfig::new("unused", 0.05).with_bonds(Some(0.8));
+        let bridges = junction_bridges(&assembly, 0.8).unwrap();
+        let fields = voxelize_with_bonds(&assembly, &config, [20; 3], 8_000, &bridges).unwrap();
+        assert_eq!(labels.phase, fields.phase);
+        assert_eq!(labels.fiber, fields.owner_export_id);
+        assert_eq!(labels.bond, fields.bond_id);
+        assert!(labels.phase.contains(&binder_phase_id(&assembly)));
+        assert!(labels.fiber.contains(&1) && labels.fiber.contains(&2));
+    }
+
+    #[test]
+    fn in_memory_labels_without_bonds_have_no_binder() {
+        use crate::bridges::tests::touching_cross;
+        let assembly = touching_cross(false, true);
+        let labels = voxelize_labels(&assembly, 0.05, None).unwrap();
+        assert!(labels.bond.is_empty());
+        assert!(!labels.phase.contains(&binder_phase_id(&assembly)));
+        for (phase, fiber) in labels.phase.iter().zip(&labels.fiber) {
+            assert_eq!(*phase == 0, *fiber == 0);
+        }
+    }
+
+    #[test]
+    fn in_memory_labels_reject_a_non_tiling_voxel_size() {
+        let assembly = FiberAssembly::new(PeriodicCell::orthorhombic([1.0; 3], [false; 3]));
+        let error = voxelize_labels(&assembly, 0.3, None).unwrap_err();
+        assert!(matches!(error, PumaExportError::IncommensurateGrid { .. }));
     }
 }

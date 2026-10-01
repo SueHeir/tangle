@@ -6,6 +6,7 @@ mod collection;
 mod common;
 mod compaction;
 mod ct;
+mod fem;
 mod generators;
 mod image;
 mod junctions;
@@ -128,5 +129,6 @@ fn _tangle(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(ct::ct_overlap, module)?)?;
     module.add_function(wrap_pyfunction!(ct::ct_project, module)?)?;
     module.add_function(wrap_pyfunction!(ct::ct_back_project, module)?)?;
+    module.add_function(wrap_pyfunction!(fem::fem_voxel_labels, module)?)?;
     Ok(())
 }

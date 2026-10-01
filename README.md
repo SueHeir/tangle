@@ -9,8 +9,9 @@ geometry and solver run in Rust on the GPU (through CubeCL and WGPU, the
 cross-platform GPU API) or on the CPU.
 
 It exports the relaxed fibers to OVITO for viewing, to bonded-particle
-models for discrete-element (DEM) mechanics, and to voxel images for PuMA and
-other image-based solvers.
+models for discrete-element (DEM) mechanics, to voxel images for PuMA and
+other image-based solvers, and to solid meshes for finite-element solvers such
+as Nastran and Abaqus.
 
 ## Quick start
 
@@ -153,6 +154,10 @@ See [solver and architecture notes](docs/architecture.md) for details.
   TANGLE dependency. Occupied voxel volume and nominal fiber volume are
   different quantities; comparisons need matched definitions and resolution
   checks (see the [PuMA analysis guide](docs/puma_interoperability.md)).
+- **FEM (Nastran, Abaqus):** `tangle.fem` meshes the fibers as hexahedra
+  (one per voxel) or as tetrahedra that follow each fiber's surface (with
+  gmsh), and writes Nastran bulk data (`.bdf`) or Abaqus input (`.inp`); see
+  the [FEM export guide](docs/fem_export.md).
 - **CT scans:** `tangle.ct` fits Tangle fibers to a CT scan from the known
   fiber diameter and bend limit, and exports an assembly, a fitted
   population, per-voxel fiber labels and a per-fiber overlay on the scan.
@@ -180,6 +185,7 @@ See [solver and architecture notes](docs/architecture.md) for details.
 
 [Results/export tutorial](crates/tangle_python/python/tutorials/14_results_and_exports.ipynb)
 · [PuMA analysis guide](docs/puma_interoperability.md)
+· [FEM export guide](docs/fem_export.md)
 · [Fiber bonds (binder at junctions)](docs/fiber_bonds.md)
 · [CT fitting guide](docs/ct_fitting.md)
 · [CT fitting results](crates/tangle_python/python/examples/ct_results/README.md)
