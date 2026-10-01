@@ -6,6 +6,10 @@ DATA and VAL may each be several folders joined by commas (e.g. dense_hard-style
 
 Writes OUT/last.pt every checkpoint and OUT/best.pt at the lowest validation
 loss, and one line per log interval to stdout.
+
+Hints (--condition): each training crop is told a random part of what is true about its scan, and about a third
+of them nothing at all, so one network works with any hints or none (maps.draw_hints; --blank-rate, --size-rate,
+--hint-rate, --extra-rate). A network from before the newer hints grows their inputs, unread at first (--init).
 """
 
 import argparse
@@ -17,7 +21,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from maps import BINDER, CHANNELS, UNet3D, augment, load, loss_terms, normalize, size_code, targets, widen
+from maps import (BINDER, CHANNELS, HINT_CODE, UNet3D, augment, draw_hints, load, loss_terms, normalize, scan_hints,
+                  size_code, targets, widen)
 
 AMP = None  # autocast dtype on CUDA (set from --amp)
 WEIGHTS = {"heat": 1.0, "offset": 1.0, "direction": 1.0, "fiber": 0.5, "radius": 1.0, "binder": 1.0, "bondpt": 1.0}
@@ -25,9 +30,10 @@ WEIGHTS = {"heat": 1.0, "offset": 1.0, "direction": 1.0, "fiber": 0.5, "radius":
 
 class Crops(Dataset):
     def __init__(self, files, crop: int, per_volume: int, seed: int, train: bool = True, noise: float = 0.0,
-                 hint_rate: float = 0.4):
+                 hint_rates: dict | None = None):
+        """``hint_rates``: ``draw_hints``' chances (blank, sizes, binder, extra) for training crops."""
         self.files, self.crop, self.per_volume, self.seed, self.train = files, crop, per_volume, seed, train
-        self.noise, self.hint_rate = noise, hint_rate
+        self.noise, self.hint_rates = noise, hint_rates or {}
 
     def __len__(self):
         return len(self.files) * self.per_volume
@@ -40,12 +46,14 @@ class Crops(Dataset):
         window = tuple(slice(l, l + self.crop) for l in low)
         sample = targets(data, window)
         sample["image"] = normalize(data["volume"])[window][None]
-        # the scan's fiber sizes (each type's median equal-area diameter), as a user would give them: roughly
-        # (x/÷ ~10%) in training, and 20% of the time not at all
-        typ, rad = data["p_typ"], data["p_rad"]
-        sizes = [2.0 * float(np.median(rad[typ == t])) for t in np.unique(typ)]
+        # The hints, as a user would give them: in training, a random part of what is true about the scan (often
+        # nothing; see draw_hints); in validation, everything for every other scan and nothing for the rest, so
+        # the best checkpoint is the best one both ways.
+        truth = scan_hints(data)
         if self.train:
-            sizes = [] if rng.random() < 0.2 else [d * float(np.exp(rng.normal(0.0, 0.1))) for d in sizes]
+            said = draw_hints(truth, rng, **self.hint_rates)
+        else:
+            said = truth if (item // self.per_volume) % 2 == 0 else {}
         if self.train:
             sample = augment(sample, rng)
             # Grey level jitter: real scans differ in contrast and offset.
@@ -60,15 +68,7 @@ class Crops(Dataset):
                                         rng.uniform(0.6, 1.3, size=3))
                 field *= rng.uniform(0.3, 1.0) * self.noise / max(float(field.std()), 1e-6)
                 sample["image"] = sample["image"] + field[None]
-        # the bond hint, as a user would give it: "bonded / not bonded" hint_rate of the time (half of those with a
-        # rough bond size when bonded), otherwise nothing said (--hint-rate)
-        bonded = "bond_labels" in data.files and bool(data["bond_labels"].any())
-        hint, ratio = None, None
-        if not self.train or rng.random() < self.hint_rate:
-            hint = bonded
-            if bonded and "bond_ratio" in data.files and (not self.train or rng.random() < 0.5):
-                ratio = float(data["bond_ratio"]) * (float(np.exp(rng.normal(0.0, 0.15))) if self.train else 1.0)
-        sample["code"] = size_code(sizes, hint, ratio)
+        sample["code"] = size_code(**said)  # after the flips, which act on every map
         return {k: torch.from_numpy(np.ascontiguousarray(v)) for k, v in sample.items()}
 
 
@@ -100,7 +100,15 @@ def main():
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--init", type=Path, help="start from this checkpoint's weights (fine-tuning)")
-    parser.add_argument("--hint-rate", type=float, default=0.4, help="share of crops given the bond hint")
+    parser.add_argument("--blank-rate", type=float, default=0.35,
+                        help="share of training crops given no hints at all (the network must work without them)")
+    parser.add_argument("--size-rate", type=float, default=0.6,
+                        help="of the other crops, the share given the fiber types' diameters")
+    parser.add_argument("--hint-rate", type=float, default=0.5,
+                        help="of the other crops, the share told whether there is binder")
+    parser.add_argument("--extra-rate", type=float, default=0.5,
+                        help="of the other crops, the share given each further hint: the types' section shapes and "
+                             "hollowness (with the diameters), and whether there are broken pieces, dust, voids")
     parser.add_argument("--binder-weight", type=float, default=1.0, help="weight of the binder loss")
     parser.add_argument("--binder-positive", type=float, default=9.0, help="extra weight on true binder voxels")
     parser.add_argument("--condition", action="store_true", help="add the fiber-size conditioning (FiLM)")
@@ -141,11 +149,12 @@ def main():
     elif args.init:
         source = load(args.init, "cpu")
         args.base = source.down[0][0].out_channels
-        if source.head.out_channels == CHANNELS:
+        hints_in = source.film[0].in_features if getattr(source, "condition", False) else HINT_CODE
+        if source.head.out_channels == CHANNELS and hints_in == HINT_CODE:
             model = source.to(device)
-        elif source.layout in ("fibers", "bonds"):
-            # a network with fewer outputs (and maybe a shorter hint): grow it. Every weight it has is copied;
-            # new outputs start at "nothing here" and new hint inputs start unread.
+        elif source.layout in ("fibers", "bonds", "bondpoints"):
+            # a network with fewer outputs or a shorter hint: grow it. Every weight it has is copied; new
+            # outputs start at "nothing here" and new hint inputs start unread.
             model = UNet3D(base=args.base, group_sizes=source.group_sizes, condition=source.condition).to(device)
             grown = model.state_dict()
             for name, value in source.state_dict().items():
@@ -205,7 +214,9 @@ def main():
                 time.sleep(120)
         # Re-list each pass (or every --refresh-every steps) so volumes still being generated join as they land.
         files = volumes(args.data)
-        loader = DataLoader(Crops(files, args.crop, 2, step, noise=args.noise, hint_rate=args.hint_rate), batch_size=1, shuffle=True, num_workers=args.workers,
+        rates = {"blank": args.blank_rate, "sizes": args.size_rate, "binder": args.hint_rate, "extra": args.extra_rate}
+        loader = DataLoader(Crops(files, args.crop, 2, step, noise=args.noise, hint_rates=rates), batch_size=1,
+                            shuffle=True, num_workers=args.workers,
                             persistent_workers=False, prefetch_factor=2)
         model.train()
         tick = time.perf_counter()
