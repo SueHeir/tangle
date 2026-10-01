@@ -8,7 +8,9 @@ See [docs/ct_unet.md](../../../../../docs/ct_unet.md) for the method, results an
 | file | what it does |
 |---|---|
 | `make_data.py` | simulated training scans and their truth |
-| `maps.py` | the network, its targets, augmentation, losses, `predict` |
+| `mixed.py` | the `--mixed` scans: every kind of variety at random inside each scan |
+| `overlaps.py` | the check that no true fibers pass through each other |
+| `maps.py` | the network, its targets, its optional hints, augmentation, losses, `predict` |
 | `train.py` | training (and fine-tuning with `--init`, correlated noise with `--noise`) |
 | `trace_maps.py` | axis votes, tracking, tiled volumes, `tidy_up` (doubles, gap joins) |
 | `score_trace.py` | centerline F1 of the traced fibers against the truth |

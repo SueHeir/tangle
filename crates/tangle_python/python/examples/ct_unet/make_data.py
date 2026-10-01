@@ -12,10 +12,16 @@ equivalent radius; ovals also their semi-axes) and type, so the training
 targets (axis heatmap, offset to the axis, direction, type) are gathers at
 load time.
 
-usage: python make_data.py OUT FIRST COUNT [--scanned-share 0.2] [--varied]
+usage: python make_data.py OUT FIRST COUNT [--scanned-share 0.2] [--varied | --pairs | --hard-pairs | --mixed]
 
 ``--varied`` draws every structure from ``varied_settings``: 1-4 fiber types of any size, shape and brightness,
 any orientation, and a wide range of scanner settings (see there).
+
+``--mixed`` makes ``mixed_<index>`` scans (``mixed.py``): every kind of variety at random inside each scan
+(fiber shapes, packings, sections, binder, dust, broken pieces, voids, sample edges, scanner artifacts). Their
+volumes also hold ``type_info`` (per fiber type: equal-area diameter, thickness / width, hollow), ``hint_flags``
+(broken pieces, dust, voids present) and ``debris_mask`` (dust voxels), for the network's hints.
+Indices: training from 100001, validation 99001-99032, test 99501-99548.
 """
 
 import argparse
@@ -445,6 +451,8 @@ def main() -> None:
                         help="dense_hard scans with the fine fibers in touching pairs (pairs_<index>, from 20001)")
     parser.add_argument("--hard-pairs", action="store_true",
                         help="pairs made hard to split: thinner fibers, more blur, fewer photons (hardpairs_<index>)")
+    parser.add_argument("--mixed", action="store_true",
+                        help="every kind of variety at random inside each scan (mixed_<index>; see mixed.py)")
     parser.add_argument("--no-overlap-check", action="store_true",
                         help="keep structures whose fibers pass through each other (as every set made before had them)")
     args = parser.parse_args()
@@ -458,8 +466,9 @@ def main() -> None:
     cache = args.out / ".cache"
     for index in range(args.first, args.first + args.count):
         # Which settings family is a fixed function of the index, so reruns agree.
-        family = "varied" if args.varied else "pairs" if args.pairs else "hardpairs" if args.hard_pairs else (
-            "scanned" if np.random.default_rng(index).random() < args.scanned_share else "dense_hard")
+        family = ("varied" if args.varied else "pairs" if args.pairs else "hardpairs" if args.hard_pairs
+                  else "mixed" if args.mixed
+                  else "scanned" if np.random.default_rng(index).random() < args.scanned_share else "dense_hard")
         name = f"{family}_{index}"
         target = args.out / f"{name}.npz"
         if target.exists():
@@ -468,6 +477,10 @@ def main() -> None:
         try:
             if family == "varied":
                 scan, varied = varied_scan(index, cache, check=not args.no_overlap_check)
+            elif family == "mixed":
+                import mixed
+
+                scan, varied = mixed.mixed_scan(index, cache, check_overlaps=not args.no_overlap_check)
             else:
                 settings = {"dense_hard": ex.dense_hard_settings, "pairs": pairs_settings,
                             "hardpairs": hard_pairs_settings}.get(family, ex.scanned_settings)
@@ -489,12 +502,16 @@ def main() -> None:
             print(f"{name}: skipped (binder {float((scan.binder_occupancy > 0.5).mean()):.1%} > {EASY_MAX_BINDER:.0%})",
                   flush=True)
             continue
-        table = point_table(scan)
+        table = scan.table if family == "mixed" else point_table(scan)  # mixed: thinning fibers' radii per point
         near = nearest_points(scan.volume.shape, table["pos"])
         extra = {}
+        if family == "mixed":
+            extra.update(type_info=scan.type_info, hint_flags=scan.flags, debris_mask=scan.debris)
         if scan.bond_labels is not None:
             extra["bond_labels"] = scan.bond_labels.astype(np.uint16)
-            extra["bond_ratio"] = np.float32(varied["bonds"]["radius_ratio"])
+            ratio = scan.extra.get("bond_ratio") if family == "mixed" else varied["bonds"]["radius_ratio"]
+            if ratio:
+                extra["bond_ratio"] = np.float32(ratio)
             if scan.binder_occupancy is not None:
                 extra["binder_mask"] = scan.binder_occupancy > 0.5
             extra["bond_pairs"] = np.array([b["fibers"] + [0] * (2 - len(b["fibers"])) for b in scan.bonds]
