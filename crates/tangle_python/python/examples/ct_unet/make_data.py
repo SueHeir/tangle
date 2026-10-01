@@ -77,6 +77,8 @@ BOND_FIRST = 5001  # indices from here on may have binder bonds at their fiber j
 SHAPES_FIRST = 7001  # ... and from here on bonds of several shapes (bridge, meniscus, blob) and coatings
 STIFF_FIRST = 9001  # ... and from here on stiff, nearly straight fibers, bonded at their tight crossings
 WEB_FIRST = 11001  # ... and from here on big binder webs and fillets (no coatings), some flat fibers, milder noise
+EASY_FIRST = 12001  # ... and from here on the same, made clean (an easy start for training on webs)
+EASY_MAX_BINDER = 0.04  # easy scans with more binder than this share of the volume are skipped
 
 
 def varied_settings(index: int, focus: bool | None = None) -> dict:
@@ -171,7 +173,7 @@ def varied_settings(index: int, focus: bool | None = None) -> dict:
                          shape="meniscus",
                          coating=0.0)
     blur = float(rng.choice([0.0, 0.0, 0.5, 1.0]))
-    return {
+    settings = {
         "types": types,
         "orientation": orientation,
         "tilt": round(float(rng.uniform(0.1, 0.5)), 2),
@@ -192,6 +194,19 @@ def varied_settings(index: int, focus: bool | None = None) -> dict:
         "seed": 30_000 + index,
         **({"bonds": bonds} if index >= BOND_FIRST else {}),
     }
+    if index >= EASY_FIRST:
+        # easy web round: the web round made clean, to start training on: no blur, drift or rings, at least
+        # 1000 photons, a resolution no wider than half the thinnest fiber, smaller and fewer webs (binder a few
+        # percent of the volume)
+        re_ = np.random.default_rng(120_000 + index)
+        settings.update(noise_blur=0.0, drift=0.0, ring_strength=0.0, fiber_motion=round(float(re_.uniform(0.0, 0.5)), 2),
+                        photons=max(int(settings["photons"]), int(re_.integers(1000, 4000))),
+                        resolution=round(float(min(settings["resolution"], max(1.0, 0.5 * float(d[0])))), 2))
+        if settings.get("bonds") and settings["bonds"].get("probability", 0) > 0:
+            settings["bonds"].update(radius_ratio=round(float(re_.uniform(0.8, 1.5)), 2),
+                                     probability=round(float(re_.uniform(0.4, 0.8)), 2),
+                                     gap=round(float(re_.uniform(0.3, 1.5)), 2))
+    return settings
 
 
 def _max_curvature(line) -> float:
@@ -349,6 +364,11 @@ def main() -> None:
                 scan, varied = example.scan, None
         except Exception as error:  # a structure that fails to relax or render: skip it
             print(f"{name}: failed ({error})", flush=True)
+            continue
+        if (family == "varied" and index >= EASY_FIRST and scan.binder_occupancy is not None
+                and float((scan.binder_occupancy > 0.5).mean()) > EASY_MAX_BINDER):
+            print(f"{name}: skipped (binder {float((scan.binder_occupancy > 0.5).mean()):.1%} > {EASY_MAX_BINDER:.0%})",
+                  flush=True)
             continue
         table = point_table(scan)
         near = nearest_points(scan.volume.shape, table["pos"])
