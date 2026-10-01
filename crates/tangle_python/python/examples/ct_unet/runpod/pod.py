@@ -722,13 +722,14 @@ def supervise(work: Path, args) -> None:
 # Scans made on the pod: Tangle built from the repo at --ref, make_data.py run several at a time.
 EXAMPLES = "crates/tangle_python/python/examples"
 PROBE = """
+import sys
 import tangle
 from tangle.units import um
 cell = tangle.Cell([60 * um] * 3, periodic="xyz")
 fiber = tangle.Material("fiber", diameter=8 * um, min_bend_radius=40 * um)
 recipe = tangle.Recipe(cell)
 recipe.insert(tangle.FiberPopulation(material=fiber, count=10, length=(30 * um, 50 * um)))
-print(recipe.run(tangle.RelaxationSettings(backend="wgpu", max_iterations=50)))
+print(recipe.run(tangle.RelaxationSettings(backend=sys.argv[1], max_iterations=50)))
 """
 
 
@@ -783,11 +784,22 @@ def build_tangle(work: Path, ref: str, log) -> Path:
     sh(f"{sys.executable} -m pip install -q 'maturin>=1.8,<2' tifffile", env=env)
     wheels = work / "wheels"
     shutil.rmtree(wheels, ignore_errors=True)
-    sh(f"cd {repo} && {sys.executable} -m maturin build -q --release -m crates/tangle_python/Cargo.toml "
+    cuda = "--features cuda" if "\ncuda = " in (repo / "crates/tangle_python/Cargo.toml").read_text() else ""
+    sh(f"cd {repo} && {sys.executable} -m maturin build -q --release -m crates/tangle_python/Cargo.toml {cuda} "
        f"-i {sys.executable} -o {wheels}", env=env)
     sh(f"{sys.executable} -m pip install -q --force-reinstall --no-deps {wheels}/*.whl", env=env)
     built.write_text(commit + "\n")
     return repo
+
+
+def gpu_env() -> dict:
+    """The environment with the NVIDIA libraries pip installed for PyTorch (NVRTC among them) on the library path,
+    for Tangle's CUDA backend."""
+    import site
+
+    dirs = [str(d) for base in site.getsitepackages() for d in sorted(Path(base).glob("nvidia/*/lib"))]
+    path = ":".join(dirs + [p for p in [os.environ.get("LD_LIBRARY_PATH", "")] if p])
+    return {**os.environ, "LD_LIBRARY_PATH": path}
 
 
 def make_run(work: Path, args) -> None:
@@ -799,14 +811,23 @@ def make_run(work: Path, args) -> None:
         phase.write_text("building Tangle")
         with open(job / "build.log", "a") as log:
             repo = build_tangle(work, args.ref, log)
+        env = gpu_env()
         backend = args.backend
-        if backend == "auto":
+        if backend == "auto":  # the first of CUDA, wgpu (Vulkan) that relaxes a small structure, else the CPU
             phase.write_text("testing the GPU relaxation")
-            try:
-                ok = subprocess.run([sys.executable, "-c", PROBE], timeout=600, capture_output=True).returncode == 0
-            except subprocess.TimeoutExpired:
-                ok = False
-            backend = "wgpu" if ok else "cpu"
+            backend = "cpu"
+            for trial in ("cuda", "wgpu"):
+                try:
+                    result = subprocess.run([sys.executable, "-c", PROBE, trial], timeout=600, capture_output=True,
+                                            text=True, env=env)
+                    ok = result.returncode == 0
+                    print(stamp() + f"{trial}: {'works' if ok else result.stderr.strip()[-300:]}", flush=True)
+                except subprocess.TimeoutExpired:
+                    ok = False
+                    print(stamp() + f"{trial}: no answer in 10 minutes", flush=True)
+                if ok:
+                    backend = trial
+                    break
         jobs = args.jobs or max(1, cpus() // 2)
         print(stamp() + f"Tangle at {args.ref} ({(repo / '.built').read_text().strip()[:10]}), backend {backend}, "
               f"{jobs} at a time", flush=True)
@@ -817,7 +838,7 @@ def make_run(work: Path, args) -> None:
             chunks += [(folder, i, min(size, first + count - i), flags) for i in range(first, first + count, size)]
         phase.write_text("making scans")
         script = repo / EXAMPLES / "ct_unet" / "make_data.py"
-        env = {**os.environ, "TANGLE_BACKEND": backend, "PYTHONPATH": str(repo / EXAMPLES),
+        env = {**env, "TANGLE_BACKEND": backend, "PYTHONPATH": str(repo / EXAMPLES),
                "RAYON_NUM_THREADS": str(max(1, cpus() // jobs)), "OMP_NUM_THREADS": "1", "PYTHONUNBUFFERED": "1"}
         running = []
         while chunks or running:
@@ -942,8 +963,8 @@ def main():
     parser.add_argument("--poll", type=float, default=300, help="seconds between progress checks")
     parser.add_argument("--streams", type=int, default=8, help="push: ssh connections sending scans at once")
     parser.add_argument("--jobs", type=int, default=0, help="make: scans made at a time (default: one per 2 cores)")
-    parser.add_argument("--backend", choices=["auto", "wgpu", "cpu"], default="auto",
-                        help="make: Tangle's relaxation backend on the pod (auto: the GPU if it works there)")
+    parser.add_argument("--backend", choices=["auto", "cuda", "wgpu", "cpu"], default="auto",
+                        help="make: Tangle's relaxation backend on the pod (auto: CUDA, else wgpu, else the CPU)")
     parser.add_argument("--price", type=float, default=1.59, help="the pod's $ per hour, for the cost estimate")
     args = parser.parse_args(argv)
     if args.command != "stop" and not args.run:

@@ -69,6 +69,24 @@ the copy it trained with, under `code/`.
 training ends if nothing fetched it, so a forgotten pod costs at most an hour. A stopped pod keeps its disk, and
 the scans on it, for the next run; `--end terminate` deletes the pod instead, `--end keep` leaves it running.
 
+## Making scans on the pod
+
+`make` makes new training scans on the pod itself, so they never cross the home connection:
+
+```sh
+python pod.py make --ssh "ssh root@IP -p PORT -i ~/.ssh/id_ed25519" --run mixed_a -- data_mixed:100001:400:--mixed val_mixed:99001:32:--mixed
+```
+
+Each batch after `--` is `FOLDER:FIRST:COUNT[:make_data flags, comma-separated]`, the same as
+`make_data.py FOLDER FIRST COUNT flags`. The pod clones the repository at `--ref`, builds Tangle (once per
+commit, with the CUDA backend where the branch has it), finds a relaxation backend that works there (CUDA, then
+wgpu, then the CPU; `--backend` picks one), and runs `--jobs` scans at a time (default: one per two CPU cores).
+It keeps going if this computer disconnects; running the command again follows it, printing the scans made, the
+seconds and dollars per scan, and how many failed or were skipped. Logs are in `/workspace/unet/make/RUN/`.
+The overlap check stays on, as in `make_data.py`.
+
+Folders made this way train like any other: name them in `go`'s DATA and VAL, and `push` finds them on the pod.
+
 ## Which GPU
 
 The network is small and trains one 128-voxel crop at a time. Before each step, a CPU core has to cut the crop
