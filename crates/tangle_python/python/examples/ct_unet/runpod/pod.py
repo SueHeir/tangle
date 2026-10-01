@@ -156,8 +156,10 @@ def train_inputs(train_args, root: Path):
         names = []
         for entry in listing.split(","):
             local = Path(entry) if Path(entry).is_absolute() else root / entry
-            if not local.is_dir():
-                raise SystemExit(f"no folder {local}")
+            if not local.is_dir():  # made on the pod (pod.py make): push checks that it's there
+                folders.setdefault(local.name, None)
+                names.append(f"{WORK}/data/{local.name}")
+                continue
             if folders.setdefault(local.name, local.resolve()) != local.resolve():
                 raise SystemExit(f"two different folders are both named {local.name}")
             names.append(f"{WORK}/data/{local.name}")
@@ -184,7 +186,7 @@ def scan_list(folders: dict, skip: set) -> dict:
     """{path under WORK on the pod: local path} of every scan to train on."""
     out = {}
     for name, folder in folders.items():
-        for scan in sorted(folder.glob("*.npz")):
+        for scan in sorted(folder.glob("*.npz")) if folder else []:
             if f"{name}/{scan.stem}" not in skip:
                 out[f"data/{name}/{scan.name}"] = scan
     return out
@@ -224,6 +226,11 @@ def push(pod: Pod, args, train_args) -> list:
     say(f"{len(scans)} scans in {len(folders)} folders ({', '.join(folders)}), {len(skip)} excluded")
     info = pod.pod("setup")
     have = pod.pod("list")
+    for name in (n for n, f in folders.items() if f is None):
+        count = sum(k.startswith(f"data/{name}/") for k in have)
+        if not count:
+            raise SystemExit(f"no folder {name} here under {args.root} or on the pod")
+        say(f"{name}: {count} scans made on the pod")
     todo = {k: v for k, v in scans.items() if have.get(k) != v.stat().st_size}
     need = sum(v.stat().st_size for v in todo.values())
     if need > info["disk_free"] - 2e9:
@@ -342,9 +349,38 @@ def md5(path: Path) -> str:
     return digest.hexdigest()
 
 
+def make(pod: Pod, args, specs) -> None:
+    """Make scans on the pod (make_data.py from --ref, Tangle built there) and follow them until done."""
+    if not specs:
+        raise SystemExit("after --, give FOLDER:FIRST:COUNT[:make_data flags, comma-separated] for each batch")
+    words = ["make", args.run, "--ref", args.ref, "--jobs", str(args.jobs), "--backend", args.backend]
+    say(pod.pod(*words, "--", *specs).get("message", ""))
+    shown = None
+    while True:
+        state = pod.pod("make-status", args.run, check=False)
+        if not state:
+            say("the pod isn't answering; trying again")
+        else:
+            line = f"{state['phase']}: " + ", ".join(f"{f} {c['made']}/{c['wanted']}" for f, c in state["folders"].items())
+            if state.get("per_scan"):
+                line += (f"; {state['per_scan']:.0f} s per scan with {state['jobs']} at a time "
+                         f"({args.price * state['per_scan'] / 3600:.3f} $/scan), {state['failed']} failed or skipped")
+            if line != shown:
+                say(line)
+                shown = line
+            if state["phase"] in ("done", "failed"):
+                if state["phase"] == "failed":
+                    raise SystemExit(f"making scans failed; see {WORK}/make/{args.run}/supervisor.log on the pod")
+                return
+        time.sleep(min(args.poll, 120))
+
+
 def home(args, train_args):
     pod = Pod(args.ssh)
     pod.install()
+    if args.command == "make":
+        make(pod, args, train_args)
+        return
     if args.command == "status":
         say(json.dumps(pod.pod("status", args.run), indent=1))
         return
@@ -465,6 +501,14 @@ def on_pod(argv):
         p.add_argument("--local-code", action="store_true")
         p.add_argument("--attempt", default="")
     sub.add_parser("stop").add_argument("how", nargs="?", default="stop")
+    for name in ("make", "make-run"):
+        p = sub.add_parser(name)
+        p.add_argument("run")
+        p.add_argument("--ref", default="claude/ct-unet")
+        p.add_argument("--jobs", type=int, default=0)
+        p.add_argument("--backend", default="auto")
+        p.add_argument("--attempt", default="")
+    sub.add_parser("make-status").add_argument("run")
     args = parser.parse_args(argv)
     args.rest = rest
     work = Path(WORK)
@@ -488,6 +532,12 @@ def on_pod(argv):
     elif args.what == "stop":
         stop_pod(args.how)
         print("{}")
+    elif args.what == "make":
+        print(json.dumps(make_launch(work, args)))
+    elif args.what == "make-run":
+        make_run(work, args)
+    elif args.what == "make-status":
+        print(json.dumps(make_status(work / "make" / args.run)))
 
 
 def pod_setup(work: Path) -> dict:
@@ -642,6 +692,152 @@ def supervise(work: Path, args) -> None:
     stop_pod(args.end)
 
 
+# Scans made on the pod: Tangle built from the repo at --ref, make_data.py run several at a time.
+EXAMPLES = "crates/tangle_python/python/examples"
+PROBE = """
+import tangle
+from tangle.units import um
+cell = tangle.Cell([60 * um] * 3, periodic="xyz")
+fiber = tangle.Material("fiber", diameter=8 * um, min_bend_radius=40 * um)
+recipe = tangle.Recipe(cell)
+recipe.insert(tangle.FiberPopulation(material=fiber, count=10, length=(30 * um, 50 * um)))
+print(recipe.run(tangle.RelaxationSettings(backend="wgpu", max_iterations=50)))
+"""
+
+
+def make_specs(rest) -> list:
+    """FOLDER:FIRST:COUNT[:flags] as (folder, first, count, [flags])."""
+    out = []
+    for spec in rest:
+        parts = spec.split(":", 3)
+        if len(parts) < 3:
+            raise SystemExit(f"{spec!r}: expected FOLDER:FIRST:COUNT[:flag,flag]")
+        out.append((parts[0], int(parts[1]), int(parts[2]), parts[3].split(",") if len(parts) > 3 and parts[3] else []))
+    return out
+
+
+def make_launch(work: Path, args) -> dict:
+    job = work / "make" / args.run
+    if job.exists() and pid_alive(job / "supervisor.pid"):
+        return {"message": f"{args.run} is already making scans on the pod; following it"}
+    job.mkdir(parents=True, exist_ok=True)
+    make_specs(args.rest)
+    (job / "specs.json").write_text(json.dumps(args.rest))
+    for marker in ("DONE", "FAILED"):
+        (job / marker).unlink(missing_ok=True)
+    command = [sys.executable, os.path.abspath(__file__), "_pod", "make-run", args.run, "--ref", args.ref,
+               "--jobs", str(args.jobs), "--backend", args.backend, "--", *args.rest]
+    with open(job / "supervisor.log", "a") as log:
+        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                start_new_session=True, cwd=work)
+    (job / "supervisor.pid").write_text(str(proc.pid))
+    return {"message": f"{args.run}: building Tangle (if needed) and making scans on the pod"}
+
+
+def build_tangle(work: Path, ref: str, log) -> Path:
+    """The repo at ``ref`` in WORK/tangle, with its Python package built and installed (once per commit)."""
+    repo = work / "tangle"
+    sh = lambda command, **kw: subprocess.run(command, shell=True, check=True, stdout=log,  # noqa: E731
+                                              stderr=subprocess.STDOUT, executable="/bin/bash", **kw)
+    if not (repo / ".git").exists():
+        sh(f"git clone -q https://github.com/SueHeir/tangle.git {repo}")
+    sh(f"git -C {repo} fetch -q origin {shlex.quote(ref)} && git -C {repo} checkout -q -f FETCH_HEAD")
+    commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    built = repo / ".built"
+    if built.exists() and built.read_text().strip() == commit:
+        return repo
+    env = {**os.environ, "PIP_BREAK_SYSTEM_PACKAGES": "1", "PIP_ROOT_USER_ACTION": "ignore",
+           "PATH": f"{Path.home()}/.cargo/bin:{os.environ.get('PATH', '')}"}
+    if shutil.which("cc") is None or shutil.which("pkg-config") is None:
+        sh("apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config "
+           "libssl-dev libzstd-dev git curl", env=env)
+    if shutil.which("cargo", path=env["PATH"]) is None:
+        sh("curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal", env=env)
+    sh(f"{sys.executable} -m pip install -q 'maturin>=1.8,<2' tifffile", env=env)
+    wheels = work / "wheels"
+    shutil.rmtree(wheels, ignore_errors=True)
+    sh(f"cd {repo} && {sys.executable} -m maturin build -q --release -m crates/tangle_python/Cargo.toml "
+       f"-i {sys.executable} -o {wheels}", env=env)
+    sh(f"{sys.executable} -m pip install -q --force-reinstall --no-deps {wheels}/*.whl", env=env)
+    built.write_text(commit + "\n")
+    return repo
+
+
+def make_run(work: Path, args) -> None:
+    """Build Tangle, pick the backend, then run make_data.py on index chunks, ``--jobs`` at a time."""
+    job = work / "make" / args.run
+    stamp = lambda: time.strftime("%Y-%m-%d %H:%M:%S ")  # noqa: E731
+    phase = job / "PHASE"
+    try:
+        phase.write_text("building Tangle")
+        with open(job / "build.log", "a") as log:
+            repo = build_tangle(work, args.ref, log)
+        backend = args.backend
+        if backend == "auto":
+            phase.write_text("testing the GPU relaxation")
+            try:
+                ok = subprocess.run([sys.executable, "-c", PROBE], timeout=600, capture_output=True).returncode == 0
+            except subprocess.TimeoutExpired:
+                ok = False
+            backend = "wgpu" if ok else "cpu"
+        jobs = args.jobs or max(1, cpus() // 2)
+        print(stamp() + f"Tangle at {args.ref} ({(repo / '.built').read_text().strip()[:10]}), backend {backend}, "
+              f"{jobs} at a time", flush=True)
+        (job / "setup.json").write_text(json.dumps({"backend": backend, "jobs": jobs, "started": time.time()}))
+        chunks = []
+        for folder, first, count, flags in make_specs(args.rest):
+            size = max(1, min(5, count // jobs))
+            chunks += [(folder, i, min(size, first + count - i), flags) for i in range(first, first + count, size)]
+        phase.write_text("making scans")
+        script = repo / EXAMPLES / "ct_unet" / "make_data.py"
+        env = {**os.environ, "TANGLE_BACKEND": backend, "PYTHONPATH": str(repo / EXAMPLES),
+               "RAYON_NUM_THREADS": str(max(1, cpus() // jobs)), "OMP_NUM_THREADS": "1", "PYTHONUNBUFFERED": "1"}
+        running = []
+        while chunks or running:
+            running = [r for r in running if r.poll() is None]
+            while chunks and len(running) < jobs:
+                folder, first, count, flags = chunks.pop(0)
+                log = open(job / f"{folder}_{first}.log", "a")
+                running.append(subprocess.Popen([sys.executable, str(script), str(work / "data" / folder), str(first),
+                                                 str(count), *flags], stdin=subprocess.DEVNULL, stdout=log,
+                                                stderr=subprocess.STDOUT, env=env, cwd=script.parent))
+            time.sleep(5)
+        phase.write_text("done")
+        (job / "DONE").write_text(stamp() + "\n")
+        print(stamp() + "all scans made", flush=True)
+    except Exception as error:
+        phase.write_text("failed")
+        (job / "FAILED").write_text(f"{error!r}\n")
+        print(stamp() + f"failed: {error!r}", flush=True)
+
+
+def make_status(job: Path) -> dict:
+    if not job.exists():
+        return {"phase": "none", "folders": {}}
+    phase = (job / "PHASE").read_text().strip() if (job / "PHASE").exists() else "starting"
+    if phase not in ("done", "failed") and not pid_alive(job / "supervisor.pid"):
+        phase = "stopped"
+    folders, made = {}, 0
+    for folder, first, count, _ in make_specs(json.loads((job / "specs.json").read_text())):
+        have = sum((job.parents[1] / "data" / folder / f"varied_{i}.npz").exists() or
+                   any((job.parents[1] / "data" / folder).glob(f"*_{i}.npz")) for i in range(first, first + count))
+        entry = folders.setdefault(folder, {"made": 0, "wanted": 0})
+        entry["made"] += have
+        entry["wanted"] += count
+        made += have
+    logs = [p.read_text(errors="replace") for p in job.glob("*_*.log")]
+    state = {"phase": phase, "folders": folders, "made": made,
+             "failed": sum(t.count(": failed (") + t.count(": skipped (") for t in logs)}
+    try:
+        setup = json.loads((job / "setup.json").read_text())
+        state["jobs"] = setup["jobs"]
+        if made:
+            state["per_scan"] = (time.time() - setup["started"]) * setup["jobs"] / made
+    except (OSError, ValueError, KeyError):
+        pass
+    return state
+
+
 def run_status(run: Path) -> dict:
     if not run.exists():
         return {"state": "none"}
@@ -702,7 +898,7 @@ def main():
     train_args = argv[argv.index("--") + 1:] if "--" in argv else []
     argv = argv[:argv.index("--")] if "--" in argv else argv
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["go", "push", "train", "wait", "status", "fetch", "stop"])
+    parser.add_argument("command", choices=["go", "push", "train", "wait", "status", "fetch", "stop", "make"])
     parser.add_argument("--ssh", required=True, help="the pod's 'SSH over exposed TCP' line, in quotes")
     parser.add_argument("--run", help="run name (its folder under runs/), e.g. r16")
     parser.add_argument("--root", type=Path, default=Path("."), help="the folder holding the training sets")
@@ -717,10 +913,15 @@ def main():
     parser.add_argument("--grace", type=float, default=60,
                         help="minutes the pod waits for the run to be fetched after training ends, then ends anyway")
     parser.add_argument("--poll", type=float, default=300, help="seconds between progress checks")
+    parser.add_argument("--jobs", type=int, default=0, help="make: scans made at a time (default: one per 2 cores)")
+    parser.add_argument("--backend", choices=["auto", "wgpu", "cpu"], default="auto",
+                        help="make: Tangle's relaxation backend on the pod (auto: the GPU if it works there)")
     parser.add_argument("--price", type=float, default=1.59, help="the pod's $ per hour, for the cost estimate")
     args = parser.parse_args(argv)
     if args.command != "stop" and not args.run:
         parser.error("--run is required")
+    if args.command == "make" and args.ref == "claude/ct-unet":
+        pass  # make_data.py and its families live on claude/ct-unet
     if args.command in ("go", "push", "train") and not train_args:
         parser.error("give train.py's arguments after --")
     args.dest = args.dest or args.root / "runs"
