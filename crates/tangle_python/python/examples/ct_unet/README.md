@@ -15,3 +15,4 @@ See [docs/ct_unet.md](../../../../../docs/ct_unet.md) for the method, results an
 | `diameters.py`, `check_diameters.py` | optional per-node diameters and oval widths, and their check |
 | `fit_maps.py` | feeds a clean image made from the maps to `ct.fit_fibers` (a first attempt; it scores poorly) |
 | `make_figure.py` | the figure in the docs |
+| `runpod/pod.py` | training on a rented GPU pod in one command (see [runpod/README.md](runpod/README.md)) |
