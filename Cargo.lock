@@ -1572,7 +1572,7 @@ dependencies = [
 [[package]]
 name = "grass_app"
 version = "0.1.1"
-source = "git+https://github.com/SueHeir/grass.git?tag=v0.1.1#83198be92efa43320b32f986d7dd72550e3bc141"
+source = "git+https://github.com/SueHeir/grass.git?rev=f62e7a5#f62e7a53ec6e3655943798acb40b57d1c02502c9"
 dependencies = [
  "downcast-rs 1.2.1",
  "grass_scheduler",
@@ -1581,7 +1581,7 @@ dependencies = [
 [[package]]
 name = "grass_derive"
 version = "0.1.1"
-source = "git+https://github.com/SueHeir/grass.git?tag=v0.1.1#83198be92efa43320b32f986d7dd72550e3bc141"
+source = "git+https://github.com/SueHeir/grass.git?rev=f62e7a5#f62e7a53ec6e3655943798acb40b57d1c02502c9"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -1592,7 +1592,7 @@ dependencies = [
 [[package]]
 name = "grass_scheduler"
 version = "0.1.1"
-source = "git+https://github.com/SueHeir/grass.git?tag=v0.1.1#83198be92efa43320b32f986d7dd72550e3bc141"
+source = "git+https://github.com/SueHeir/grass.git?rev=f62e7a5#f62e7a53ec6e3655943798acb40b57d1c02502c9"
 dependencies = [
  "grass_derive",
 ]
