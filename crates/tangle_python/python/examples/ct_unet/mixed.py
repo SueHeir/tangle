@@ -135,6 +135,13 @@ def mixed_settings(index: int) -> dict:
         "matrix_delta_beta": round(float(rng.uniform(4.0, 16.0)), 1),
         "shading": round(float(rng.uniform(0.0, 0.15)), 3),  # slow brightness change across each slice
     }
+    # Touching fibers stay separable: packed fibers (bundles, yarns, pairs) are never blurred past 0.8 of their
+    # diameter. Resin's lower contrast is made up with photons, so the noise against the fibers stays the same.
+    packed = [t["diameter"] for t in types if t["packing"] != "single"]
+    if packed:
+        scanner["resolution"] = round(min(scanner["resolution"], max(1.0, 0.8 * min(packed))), 2)
+    if scanner["matrix"]:
+        scanner["photons"] = round(scanner["photons"] / (1.0 - scanner["matrix"] / float(bright.min())) ** 2)
     return {"index": index, "fill": fill, "total": round(total, 4), "orientation": orientation,
             "tilt": round(float(rng.uniform(0.05, 0.5)), 2), "aligned_axis": int(rng.integers(0, 3)),
             "types": types, "pockets": pockets, "binder": binder, "dust": dust, "edge": edge, "fov": fov,
