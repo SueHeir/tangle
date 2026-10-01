@@ -1,0 +1,5 @@
+# What the tutorial's commands write when run from this folder (docs/ct_unet_tutorial.md)
+demo/
+*_check.png
+*_check_fibers.png
+*_fibers/

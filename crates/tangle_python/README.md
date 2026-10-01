@@ -482,7 +482,8 @@ for exact definitions, supported comparisons, and current limitations.
   `ct_tiled_scan.py` fits a large synthetic scan in tiles,
   `ct_redraw_study.py` studies the fitter's redraw decisions,
   `ct_synthetic/` makes the synthetic-scan figures, and `ct_unet/` holds the
-  CT map network ([guide](../../docs/ct_unet.md)).
+  CT map network ([guide](../../docs/ct_unet.md); to run it on your own scan,
+  the [tutorial](../../docs/ct_unet_tutorial.md)).
 
 ## Topic reference notebooks
 
