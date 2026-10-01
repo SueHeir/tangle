@@ -37,8 +37,7 @@ fiber = tangle.Material("fiber", diameter=10 * um, min_bend_radius=50 * um)
 population = tangle.FiberPopulation(material=fiber, count=40, length=(60 * um, 100 * um))
 
 recipe = tangle.Recipe(cell)          # steps are recorded here...
-recipe.insert(tangle.generate_fiber_population(cell, population))
-recipe.relax_until_converged()
+recipe.insert(population)
 result = recipe.run()                 # ...and simulated here, on the GPU
 result.write_ovito("network.dump")
 

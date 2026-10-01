@@ -245,6 +245,44 @@ pub(crate) fn widen(value: f32) -> f64 {
     value.to_string().parse().unwrap_or(value as f64)
 }
 
+/// A float as Python would print a value the user typed: ten significant
+/// digits, so `10 * um` reads `1e-05` rather than `9.999999999999999e-06`.
+pub(crate) fn py_float(value: f64) -> String {
+    let rounded: f64 = format!("{value:.9e}").parse().unwrap_or(value);
+    if rounded != 0.0 && (rounded.abs() < 1.0e-4 || rounded.abs() >= 1.0e16) {
+        let text = format!("{rounded:e}");
+        // Python pads the exponent to two digits: 1e-05.
+        match text.split_once('e') {
+            Some((mantissa, exponent)) => {
+                let (sign, digits) = exponent
+                    .strip_prefix('-')
+                    .map_or(("+", exponent), |digits| ("-", digits));
+                format!("{mantissa}e{sign}{digits:0>2}")
+            }
+            None => text,
+        }
+    } else if rounded.fract() == 0.0 && rounded.abs() < 1.0e16 {
+        format!("{rounded:.1}")
+    } else {
+        format!("{rounded}")
+    }
+}
+
+/// `[a, b, c]` with each value as [`py_float`].
+pub(crate) fn py_floats(values: &[f64]) -> String {
+    let items: Vec<String> = values.iter().map(|value| py_float(*value)).collect();
+    format!("[{}]", items.join(", "))
+}
+
+/// Python's spelling of a bool.
+pub(crate) fn py_bool(value: bool) -> &'static str {
+    if value {
+        "True"
+    } else {
+        "False"
+    }
+}
+
 /// Formats `Class(field=repr(value), ...)` from Python-visible attributes, so
 /// reprs show Python values (`None`, lists) rather than Rust debug output.
 pub(crate) fn repr_fields(

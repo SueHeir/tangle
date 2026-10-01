@@ -280,14 +280,15 @@ class Assembly:
     def section_semi_axes(self) -> list[tuple[float, float]]: ...
     def insert(
         self,
-        collection: FiberCollection,
+        fibers: FiberCollection | FiberPopulation,
         *,
         name: str | None = ...,
         translation: Point = ...,
         rotation: Matrix3 | None = ...,
     ) -> FiberSelection:
-        """Record inserting ``collection``, optionally moved by ``translation``
-        (meters) and ``rotation``. Returns a selection of the new fibers."""
+        """Record inserting ``fibers``, optionally moved by ``translation``
+        (meters) and ``rotation``. A ``FiberPopulation`` is generated in the
+        recipe's cell first. Returns a selection of the new fibers."""
     def characterize(self) -> AnalysisReport: ...
     def characterize_neighbors(
         self,
@@ -980,7 +981,8 @@ class Recipe:
         debug_ovito_session_path: Path | None = ...,
         debug_ovito_coloring: OvitoColoring = ...,
     ) -> RunResult:
-        """Simulate every recorded step and return the relaxed fibers.
+        """Simulate every recorded step and return the relaxed fibers. A
+        recipe that only inserts fibers relaxes them until converged.
         ``settings`` defaults to ``RelaxationSettings()`` (GPU)."""
 
 class RunResult:

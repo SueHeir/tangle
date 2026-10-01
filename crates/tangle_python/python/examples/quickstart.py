@@ -22,9 +22,8 @@ fiber = tangle.Material("fiber", diameter=10 * um, min_bend_radius=50 * um)
 population = tangle.FiberPopulation(material=fiber, count=40, length=(60 * um, 100 * um))
 
 recipe = tangle.Recipe(cell)
-recipe.insert(tangle.generate_fiber_population(cell, population))
-recipe.relax_until_converged()
-result = recipe.run()  # solver lengths default to fractions of the fiber diameter
+recipe.insert(population)
+result = recipe.run()  # relaxes the inserted fibers until no two overlap
 print(f"relaxed {result.fiber_count} fibers in {result.iterations} iterations, converged={result.converged}")
 
 result.write_ovito(output / "network.dump")
