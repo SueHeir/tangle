@@ -14,7 +14,7 @@ import numpy as np
 from . import _confidence, _junctions, _moves, _refine, _regrow
 from ._ends import end_cost, end_statistics, evidence_scale
 from ._geometry import polyline_length, rasterize, tangents
-from ._image import HessianField, Levels, half_widths, normalize
+from ._image import HessianField, Levels, core_holes, half_widths, normalize
 from ._trace import trace_fibers
 
 # A study hook: when set, called with every redraw pass's decisions (see
@@ -1512,7 +1512,7 @@ def _mask_image(
         values = np.unique(volume)
         mask = volume == values[-1] if values.size == 2 else np.zeros(volume.shape, dtype=bool)
     if settings.fill_mask_holes:
-        mask |= _core_holes(mask, np.pi * (largest_radius + 1.0) ** 2)
+        mask |= core_holes(mask, np.pi * (largest_radius + 1.0) ** 2)
     if exclude is not None:
         mask &= ~np.asarray(exclude, dtype=bool)
     image = mask.astype(np.float32)
@@ -1525,17 +1525,7 @@ def _fill_core_holes(image: np.ndarray, largest_radius: float) -> None:
     """Fill (in place, as fiber: 1) the core-sized holes of a normalized grey
     scan's foreground, as a mask's and the grey ranges' are: a threshold of a
     noisy scan leaves speckle holes in dim fibers."""
-    image[_core_holes(image > 0.5, np.pi * (largest_radius + 1.0) ** 2)] = 1.0
-
-
-def _core_holes(mask: np.ndarray, max_area: float) -> np.ndarray:
-    """Enclosed holes no larger than a fiber's cross-section, slice by slice
-    along each axis. A hollow fiber is a closed ring in the slices across
-    it (in 3D it is a tube open at both ends, so a 3D fill misses it); larger
-    holes are void between fibers that happen to enclose it in a slice."""
-    from . import _native
-
-    return _native.core_holes(mask, max_area)
+    image[core_holes(image > 0.5, np.pi * (largest_radius + 1.0) ** 2)] = 1.0
 
 
 class _Fitter:

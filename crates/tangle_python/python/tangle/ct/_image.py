@@ -135,3 +135,13 @@ def half_widths(
     profiles = np.stack([np.median(part, axis=0) for part in np.split(values, np.cumsum(sizes)[:-1])])
     out[used] = half_radius(profiles, distances, 0.5 * reach)
     return out
+
+
+def core_holes(mask: np.ndarray, max_area: float) -> np.ndarray:
+    """Enclosed holes no larger than a fiber's cross-section, slice by slice
+    along each axis. A hollow fiber is a closed ring in the slices across
+    it (in 3D it is a tube open at both ends, so a 3D fill misses it); larger
+    holes are void between fibers that happen to enclose it in a slice."""
+    from . import _native
+
+    return _native.core_holes(mask, max_area)

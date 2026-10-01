@@ -64,7 +64,7 @@ A `bool` array, or one with only two values (the larger is fiber), is a
 
 1. Holes in the mask no larger than a fiber core (area ≤ π (r_max + 1)²,
    r_max the largest type's radius) are filled, slice by slice along each
-   axis (`_fit._core_holes`). A hollow fiber is a closed ring in the slices
+   axis (`_image.core_holes`). A hollow fiber is a closed ring in the slices
    across it but a tube open at both ends in 3D, so a 3D fill would miss
    it; larger enclosed holes are void that crossing fibers happen to
    surround in a slice, and stay. `FitSettings.fill_mask_holes` turns this

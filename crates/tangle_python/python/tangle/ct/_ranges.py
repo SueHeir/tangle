@@ -47,7 +47,7 @@ def range_image(
     """
     from . import _native
 
-    from ._fit import _core_holes
+    from ._image import core_holes
 
     grey = np.asarray(volume, dtype=np.float32)
     if denoise_sigma > 0:
@@ -80,12 +80,12 @@ def range_image(
             out=image,
         )
     if fill_holes_area:
-        holes = _core_holes(image > 0.5, fill_holes_area)
+        holes = core_holes(image > 0.5, fill_holes_area)
         image[holes] = 1.0
         for k in range(len(ranges)):
             # A dim core inside a ring of this type's grey is this type too.
             plane = ((types >> k) & 1).astype(bool)
-            types |= _core_holes(plane, fill_holes_area).astype(np.uint8) << k
+            types |= core_holes(plane, fill_holes_area).astype(np.uint8) << k
     if exclude is not None:
         excluded = np.asarray(exclude, dtype=bool)
         image[excluded] = 0.0

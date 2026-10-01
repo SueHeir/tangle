@@ -37,7 +37,7 @@ from __future__ import annotations
 import numpy as np
 
 from ._evaluate import _samples_inside
-from ._geometry import sample_image
+from ._geometry import runs, sample_image
 
 _STEP = 0.5  # voxels between samples
 _CUT_RUN = 3.0  # voxels: shortest off-ridge run cut out
@@ -72,7 +72,7 @@ def ridge_finish(fitter, lines, radii, types, grey: np.ndarray, sharp: np.ndarra
             continue
         _, dist = _argmax_offset(sharp, s, _tangents(s), r, smooth=7)
         keep = np.ones(len(s), dtype=bool)
-        for a, b in _runs(dist > 0.5 * r):
+        for a, b in runs(dist > 0.5 * r):
             if (b - a) * _STEP >= _CUT_RUN:
                 keep[a:b] = False
         keep &= ~inside_coarse(s)
@@ -194,14 +194,8 @@ def _refine_center(grey, s, r, shape, reach=0.3, values=21, shift_over=11):
     return _samples_inside(s + shift, shape, _STEP)
 
 
-def _runs(mask):
-    m = np.asarray(mask, dtype=bool)
-    edges = np.flatnonzero(np.diff(np.r_[0, m.astype(int), 0]))
-    return list(zip(edges[::2], edges[1::2]))
-
-
 def _pieces(s, keep):
-    return [s[a:b] for a, b in _runs(keep)]
+    return [s[a:b] for a, b in runs(keep)]
 
 
 def _coarse_sections(fitter, lines, radii, types, fine, full=False):
@@ -393,12 +387,12 @@ def finish_holes(fitter, holes, lines, radii, types, grey: np.ndarray):
         if getattr(fitter, "rim_hessian", None) is not None:
             dist = np.where((dist >= r - 0.5) & fitter.curves_down(s, t), 0.0, dist)
         keep = np.ones(len(s), dtype=bool)
-        for a, b in _runs(dist > 0.5 * r):
+        for a, b in runs(dist > 0.5 * r):
             if (b - a) * _STEP >= _CUT_RUN:
                 keep[a:b] = False
         keep &= ~inside_coarse(s)
         if floor is not None:
-            for a, b in _runs(sample_image(grey, s) < floor):
+            for a, b in runs(sample_image(grey, s) < floor):
                 if (b - a) * _STEP >= _CUT_RUN:
                     keep[a:b] = False
         pieces = [p for p in _pieces(s, keep) if len(p) * _STEP >= min_length]

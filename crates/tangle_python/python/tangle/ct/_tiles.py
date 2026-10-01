@@ -61,7 +61,7 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 
 from ._fit import FiberSpec, FitResult, FitSettings, fit_fibers
-from ._geometry import polyline_length
+from ._geometry import UnionFind, polyline_length, runs
 from ._image import Levels
 
 SCHEMA = "tangle.ct.tiles/1"
@@ -533,7 +533,7 @@ def stitch(
             owners = grid.owner(line)
             own = np.all(owners == np.asarray(fit.index), axis=1)
             confidence = fit.confidence[f] if fit.confidence is not None else None
-            for start, stop in _runs(own):
+            for start, stop in runs(own):
                 sid = len(stretches)
                 stretches.append(
                     {
@@ -691,13 +691,6 @@ def _parts(chain, stretches, with_confidence):
     return parts, kept
 
 
-def _runs(flags: np.ndarray) -> list[tuple[int, int]]:
-    """``[start, stop)`` of every run of True."""
-    padded = np.concatenate([[False], flags, [False]]).astype(np.int8)
-    change = np.flatnonzero(np.diff(padded))
-    return [(int(a), int(b)) for a, b in zip(change[::2], change[1::2])]
-
-
 def _walk(line: np.ndarray, start: int, step: int, reach: float) -> np.ndarray:
     """Nodes from ``start`` in direction ``step`` while within ``reach`` of arc length."""
     out = [line[start]]
@@ -745,26 +738,13 @@ def _neighbours(a: tuple[int, int, int], b: tuple[int, int, int] | None) -> bool
     return b is not None and bool(np.all(np.abs(np.subtract(a, b)) <= 1))
 
 
-class _Chains:
+class _Chains(UnionFind):
     """Union-find over stretches, so no join closes a chain into a loop."""
 
     def __init__(self, count: int, links: dict[tuple[int, int], tuple[int, int]]) -> None:
-        self.parent = list(range(count))
+        super().__init__()
         for first, second in links.items():
             self.union(first[0], second[0])
-
-    def find(self, i: int) -> int:
-        while self.parent[i] != i:
-            self.parent[i] = self.parent[self.parent[i]]
-            i = self.parent[i]
-        return i
-
-    def union(self, i: int, j: int) -> bool:
-        i, j = self.find(i), self.find(j)
-        if i == j:
-            return False
-        self.parent[j] = i
-        return True
 
 
 def _link(links, chains: _Chains, candidates) -> None:

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._geometry import sample_image
+from ._geometry import UnionFind, dense, sample_image
 
 _ANGLE = 35.0  # degrees
 _REACH = 4.0  # short radii
@@ -115,7 +115,7 @@ def _candidate(fitter, line_a, line_b, ea, eb, r, band):
     b_over, b_keep = B[:j], B[j:]
     if len(a_keep) < 2 or len(b_keep) < 2 or not len(a_over) or not len(b_over):
         return None
-    dense_a, dense_b = _dense(A), _dense(B)
+    dense_a, dense_b = dense(A, 0.5), dense(B, 0.5)
     near_b = dense_b[np.argmin(np.linalg.norm(a_over[:, None, :] - dense_b[None, :, :], axis=2), axis=1)]
     near_a = dense_a[np.argmin(np.linalg.norm(b_over[:, None, :] - dense_a[None, :, :], axis=2), axis=1)]
     if np.max(np.linalg.norm(a_over - near_b, axis=1)) > _SIDE * r * 1.1:
@@ -144,15 +144,6 @@ def _one_fiber(grey, p, q, band) -> bool:
 
 def _unit(v):
     return v / max(float(np.linalg.norm(v)), 1e-12)
-
-
-def _dense(line, step: float = 0.5):
-    seg = np.linalg.norm(np.diff(line, axis=0), axis=1)
-    s = np.r_[0.0, np.cumsum(seg)]
-    if s[-1] <= 0:
-        return line
-    q = np.arange(0.0, s[-1] + 1e-9, step)
-    return np.stack([np.interp(q, s, line[:, j]) for j in range(3)], axis=1)
 
 
 def straight_join(fitter, lines, radii, types, kinds, max_gap, max_angle, max_offset, max_overlap, support):
@@ -214,24 +205,17 @@ def straight_join(fitter, lines, radii, types, kinds, max_gap, max_angle, max_of
             candidates.append((max(off_a, off_b), a, b, True))
     candidates.sort(key=lambda c: c[0])
     partner: dict[int, tuple[int, bool]] = {}
-    group = {i: i for i in ids}
-
-    def root(i):
-        while group[i] != i:
-            group[i] = group[group[i]]
-            i = group[i]
-        return i
-
+    sets = UnionFind()
+    members = set(ids)
     joins = 0
     for _, a, b, overlap in candidates:
         if a in partner or b in partner:
             continue
-        ra, rb = root(owner[a][0]), root(owner[b][0])
-        if ra == rb:
+        if sets.find(owner[a][0]) == sets.find(owner[b][0]):
             continue
         partner[a] = (b, overlap)
         partner[b] = (a, overlap)
-        group[ra] = rb
+        sets.union(owner[b][0], owner[a][0])
         joins += 1
     if not joins:
         return lines, radii, types, 0
@@ -239,7 +223,7 @@ def straight_join(fitter, lines, radii, types, kinds, max_gap, max_angle, max_of
     used = set()
     out_lines, out_radii, out_types = [], [], []
     for i in range(len(lines)):
-        if i not in group:
+        if i not in members:
             out_lines.append(lines[i]), out_radii.append(radii[i]), out_types.append(types[i])
             continue
         if i in used:
