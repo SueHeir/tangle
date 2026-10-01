@@ -33,14 +33,14 @@ Every script explains its options with `--help`.
   own. On a Mac or Linux:
 
   ```sh
-  python3 -m venv ct-env
-  source ct-env/bin/activate
+  python3 -m venv .venv-ct
+  source .venv-ct/bin/activate
   python -m pip install numpy scipy tifffile matplotlib torch
   ```
 
-  (On Windows, `py -m venv ct-env` and `ct-env\Scripts\activate`.) The
+  (On Windows, `py -m venv .venv-ct` and `.venv-ct\Scripts\activate`.) The
   `python` in the commands below is the environment's, so activate it again in
-  each new terminal (`source ct-env/bin/activate`, from the folder you made it
+  each new terminal (`source .venv-ct/bin/activate`, from the folder you made it
   in; a Mac has no plain `python` outside one). If you have built Tangle
   already ([Python guide](../crates/tangle_python/README.md)), activate its
   environment instead and install only `torch` there.
