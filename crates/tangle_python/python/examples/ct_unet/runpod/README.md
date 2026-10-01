@@ -108,11 +108,11 @@ with numbers that differ slightly from the 32-bit runs. It only helps when the G
 | a training run | (steps x seconds per step + about 5% for the validation checks) x the hourly price |
 
 Measured so far: on the Windows PC (RTX 3060 Ti), r13's 40,000 steps took 0.57 s per step, about 7.5 hours with
-the validation checks. The pod's seconds per step are printed during the first run; until then, a rough guess
-for an 8-core A100 is 0.1 to 0.3 s per step, so a 40,000-step run would take about 1 to 3.5 hours, $2 to $6.
+the validation checks. On an 18-core A100 80GB PCIe pod ($1.59/h), r16's 40,000 steps ran at 0.171 s per step
+with `--amp bf16` (GPU about 70% busy, 0.03 s per step waiting for crops): about 2 hours, $3.20.
 
-The first push to a new pod copies every scan over the home internet connection while the pod bills: for
-40 GB, about 30 minutes at 200 Mbit/s upload and 2 hours at 50 Mbit/s. Later runs on the same (stopped and
+The first push to a new pod copies every scan over the home internet connection while the pod bills: 47 GB took
+about 13 minutes at ~500 Mbit/s over 8 connections (one connection alone managed ~80 Mbit/s). Later runs on the same (stopped and
 restarted) pod only send new scans. If training on RunPod becomes routine, a RunPod **network volume** keeps the
 scans for $0.07 per GB per month (100 GB: $7) and any new pod in its data center can use them, so they are
 copied once; `pod.py` works the same with one (attach it when deploying; it is mounted at `/workspace`).
