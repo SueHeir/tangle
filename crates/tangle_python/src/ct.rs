@@ -18,7 +18,7 @@ use tangle_ct::moves::{
 };
 use tangle_ct::raster::Section;
 use tangle_ct::refine::{curvature_ratio, cut_void, end_step, support, OwnerLookup, VoidRules};
-use tangle_ct::render::{box_size, local_residual, render_occupancy_sections, Corner};
+use tangle_ct::render::{box_size, render_occupancy_sections, Corner};
 use tangle_ct::trace::{trace_fibers, FiberSearch, TraceSettings, Tracer};
 use tangle_ct::Shape;
 
@@ -679,46 +679,6 @@ pub(crate) fn ct_render_occupancy(
         sections.as_deref(),
     ));
     Ok(())
-}
-
-/// Squared residual of rendering the lines (max-union with `base`) against
-/// the scan over box `[low, high)` (see `_ends.local_residual`).
-#[pyfunction]
-#[pyo3(signature = (image, low, high, nodes, counts, radii, edge, base=None))]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn ct_local_residual(
-    image: PyBuffer<f32>,
-    low: Corner,
-    high: Corner,
-    nodes: PyBuffer<f64>,
-    counts: Vec<usize>,
-    radii: Vec<f64>,
-    edge: f64,
-    base: Option<PyBuffer<f64>>,
-) -> PyResult<f64> {
-    let shape = volume_shape(&image, "image")?;
-    per_line(&radii, &counts, "radius")?;
-    let lines = lines_of(&nodes, &counts)?;
-    let base = match &base {
-        Some(buffer) => {
-            let values = read(buffer, "base")?;
-            if values.len() != box_size(low, high) {
-                return Err(PyValueError::new_err("base must have the box's shape"));
-            }
-            Some(values)
-        }
-        None => None,
-    };
-    Ok(local_residual(
-        read(&image, "image")?,
-        shape,
-        low,
-        high,
-        &line_refs(&lines),
-        &radii,
-        base,
-        edge,
-    ))
 }
 
 /// Duplicates removed and trimmed (see `_moves.trim_duplicates`).

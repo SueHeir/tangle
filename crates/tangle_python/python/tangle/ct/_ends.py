@@ -124,33 +124,6 @@ def evidence_scale(image: np.ndarray, lines: list[np.ndarray], radii: np.ndarray
     return 2.0 * max(variance, 1e-4) * np.pi * radius * radius
 
 
-def local_box(points: np.ndarray, margin: float, shape: tuple[int, int, int]) -> tuple[np.ndarray, np.ndarray]:
-    upper = np.array(shape[::-1])
-    low = np.maximum(np.floor(points.min(axis=0) - margin).astype(int), 0)
-    high = np.minimum(np.ceil(points.max(axis=0) + margin).astype(int), upper)
-    return low, high
-
-
-def local_residual(
-    image: np.ndarray,
-    low: np.ndarray,
-    high: np.ndarray,
-    lines: list[np.ndarray],
-    radii: np.ndarray,
-    base: np.ndarray | None = None,
-) -> float:
-    """Squared residual of rendering ``lines`` against ``image`` over box ``[low, high)``.
-
-    ``base`` is an already-rendered occupancy of the box (for example the
-    unchanged neighbors) that ``lines`` are added to.
-    """
-    from . import _native
-
-    if np.any(np.asarray(high) <= np.asarray(low)):
-        return 0.0
-    return _native.local_residual(image, low, high, lines, radii, base, 1.2)
-
-
 def near_box(lines: list[np.ndarray], radii: np.ndarray, low: np.ndarray, high: np.ndarray, skip: tuple[int, ...] = ()) -> list[int]:
     """Indices of fibers whose bounding boxes reach into ``[low, high)``."""
     return [

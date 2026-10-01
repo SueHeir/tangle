@@ -8,7 +8,7 @@ use pyo3::types::{PyAny, PyType};
 use tangle_app::{TanglePreparedAssemblyPlugin, TangleStage, TangleWorkflowPlugin};
 use tangle_characterize::characterize_assembly;
 use tangle_checkpoint::{CheckpointConfig, CheckpointPlugin, CheckpointReport};
-use tangle_core::{FiberAssembly, Vec3};
+use tangle_core::{FiberAssembly, Section, Vec3};
 use tangle_export::{
     build_bpm_model, write_bpm_lammps_data, write_ovito_assembly_frame, write_ovito_view_script,
     write_puma_bundle, BpmExportConfig, BpmExportMode, OvitoColoring, OvitoRepresentation,
@@ -32,9 +32,10 @@ use crate::collection::{
 };
 use crate::common::{
     axis_name, nonnegative_finite, parse_axis, parse_axis_mask, parse_choice, positive_finite,
-    unit_fraction,
+    py_bool, py_float, unit_fraction, widen,
 };
 use crate::compaction::PyCompactionSettings;
+use crate::generators::{generate_population, PyFiberPopulation};
 use crate::junctions::PyJunctionPolicy;
 use crate::settings::{PyRelaxationOverrides, PyRelaxationSettings, PySolvePolicy};
 
@@ -245,14 +246,26 @@ impl PyRecipe {
         self.stack_axis
     }
 
-    #[pyo3(signature = (collection, *, name=None, translation=[0.0, 0.0, 0.0], rotation=None))]
+    /// `fibers` is a `FiberCollection`, or a `FiberPopulation` to generate
+    /// in this recipe's cell first.
+    #[pyo3(signature = (fibers, *, name=None, translation=[0.0, 0.0, 0.0], rotation=None))]
     fn insert(
         &mut self,
-        collection: PyRef<'_, PyFiberCollection>,
+        fibers: &Bound<'_, PyAny>,
         name: Option<String>,
         translation: Vec3,
         rotation: Option<[[f64; 3]; 3]>,
     ) -> PyResult<PyFiberSelection> {
+        let generated;
+        let collection = if let Ok(population) = fibers.extract::<PyRef<'_, PyFiberPopulation>>() {
+            let cell = self.model.lock().expect("assembly lock poisoned").assembly.cell;
+            generated = generate_population(cell, self.stack_axis, &population, "fiber population")?;
+            &generated
+        } else {
+            &*fibers.extract::<PyRef<'_, PyFiberCollection>>().map_err(|_| {
+                PyTypeError::new_err("insert() takes a FiberCollection or a FiberPopulation")
+            })?
+        };
         if collection.fibers.is_empty() {
             return Err(PyValueError::new_err(
                 "cannot insert an empty fiber collection",
@@ -265,7 +278,7 @@ impl PyRecipe {
             .ok_or_else(|| PyValueError::new_err("formation step overflow"))?;
         let selection_name = name.unwrap_or_else(|| collection.name.clone());
         let selection = self.model.lock().expect("assembly lock poisoned").insert(
-            &collection,
+            collection,
             selection_name.clone(),
             step,
             translation,
@@ -660,12 +673,23 @@ impl PyRecipe {
             }
             None
         };
-        let relaxation = settings.to_rust()?;
+        let relaxation = settings.to_rust_for(smallest_diameter(&model.assembly))?;
+        // A recipe that only inserts fibers relaxes them: inserting and then
+        // running is the common case, and nothing else would move them.
+        let mut operations = self.operations.clone();
+        if operations
+            .iter()
+            .all(|operation| matches!(operation, FormationOperation::ActivateFibersThrough(_)))
+        {
+            operations.push(FormationOperation::RelaxUntilConverged {
+                maximum_iterations: relaxation.max_iterations,
+            });
+        }
         let assembly = model.assembly.clone();
         drop(model);
         let recipe = FormationRecipeConfig {
             layer_axis: self.stack_axis,
-            operations: self.operations.clone(),
+            operations,
         };
         let stack_axis = self.stack_axis;
         let result = py.detach(move || {
@@ -1060,9 +1084,9 @@ impl PyRunResult {
             ),
             self.model().assembly.topology.fibers.len(),
             self.iterations,
-            self.converged,
-            self.max_penetration,
-            self.max_curvature_ratio,
+            py_bool(self.converged),
+            py_float(widen(self.max_penetration)),
+            py_float(widen(self.max_curvature_ratio)),
             self.active_segments,
         )
     }
@@ -1087,6 +1111,8 @@ fn run_native_recipe(
 ) -> Result<PyRunResult, RunFailure> {
     let operation_count = recipe.operations.len();
     let mut app = App::new();
+    // Python callers print their own results; keep GRASS's timing table off stdout.
+    app.disable_timing_print();
     app.add_plugins(TangleWorkflowPlugin {
         initial: TangleStage::Relax,
     })
@@ -1204,4 +1230,19 @@ fn assembly_centerlines(assembly: &FiberAssembly) -> Vec<Vec<Vec3>> {
             assembly.geometry.placed.positions[start..end].to_vec()
         })
         .collect()
+}
+
+/// The smallest cross-section width among the assembly's fibers (an oval's
+/// short width), or `None` without fibers, as when resuming a checkpoint.
+fn smallest_diameter(assembly: &FiberAssembly) -> Option<f64> {
+    assembly
+        .topology
+        .fibers
+        .iter()
+        .filter_map(|fiber| assembly.sections.entries.get(fiber.section.0 as usize))
+        .map(|section| match section {
+            Section::Circular { radius } => 2.0 * radius,
+            Section::Elliptical { semi_axes } => 2.0 * semi_axes[0].min(semi_axes[1]),
+        })
+        .reduce(f64::min)
 }

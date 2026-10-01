@@ -16,7 +16,9 @@ use crate::analysis::{
     characterize_neighbors, characterize_shape, PyAnalysisReport, PyNeighborReport,
     PyPumaExportReport, PyShapeReport,
 };
-use crate::common::{axis_name, parse_axis, parse_axis_mask, DEFAULT_STACK_AXIS};
+use crate::common::{
+    axis_name, parse_axis, parse_axis_mask, py_bool, py_float, py_floats, DEFAULT_STACK_AXIS,
+};
 
 /// Orthorhombic simulation cell. `stack_axis` is the direction plies stack
 /// along; recipes, generators, and compaction default to it.
@@ -85,11 +87,12 @@ impl PyCell {
     }
 
     fn __repr__(&self) -> String {
+        let periodic: Vec<&str> = self.inner.periodic.iter().map(|&axis| py_bool(axis)).collect();
         format!(
-            "Cell(lengths={:?}, periodic={:?}, origin={:?}, stack_axis={:?})",
-            self.lengths(),
-            self.inner.periodic,
-            self.inner.origin,
+            "Cell(lengths={}, periodic=[{}], origin={}, stack_axis={:?})",
+            py_floats(&self.lengths()),
+            periodic.join(", "),
+            py_floats(&self.inner.origin),
             axis_name(self.stack_axis)
         )
     }
@@ -221,12 +224,16 @@ impl PyMaterial {
     }
 
     fn __repr__(&self) -> String {
-        let mut text = format!("Material(name={:?}, diameter={}", self.name, self.diameter);
+        let mut text = format!(
+            "Material(name={:?}, diameter={}",
+            self.name,
+            py_float(self.diameter)
+        );
         if let Some(radius) = self.min_bend_radius {
-            text.push_str(&format!(", min_bend_radius={radius}"));
+            text.push_str(&format!(", min_bend_radius={}", py_float(radius)));
         }
         if let Some(thickness) = self.thickness {
-            text.push_str(&format!(", thickness={thickness}"));
+            text.push_str(&format!(", thickness={}", py_float(thickness)));
         }
         text.push(')');
         text

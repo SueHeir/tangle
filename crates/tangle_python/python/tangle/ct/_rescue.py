@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._geometry import polyline_length, sample_image, tangents
+from ._geometry import dense, frame, polyline_length, sample_image, tangents
 
 _MIN_COARSE = 20.0  # voxels: shortest candidate piece kept
 _MIN_FINE = 10.0  # voxels: shortest fine piece kept after the cut
@@ -57,12 +57,12 @@ def coarse_rescue(fitter, lines, radii, types, void: float):
     if grey is None or not fine_lines or not candidates:
         return lines, radii, types, {"candidates": traced, "accepted": 0}
     reference = float(np.median(np.concatenate([sample_image(grey, line) for line in fine_lines])))
-    fine_tree = cKDTree(np.concatenate([_dense(line, 1.0) for line in fine_lines]))
+    fine_tree = cKDTree(np.concatenate([dense(line, 1.0) for line in fine_lines]))
     accepted = []
     for line in candidates:
         line = np.asarray(line, dtype=np.float64)
         p90 = _disc_p90(grey, line, r)
-        shared = float(np.mean(fine_tree.query(_dense(line, 1.0))[0] <= 3.0))
+        shared = float(np.mean(fine_tree.query(dense(line, 1.0))[0] <= 3.0))
         if (p90 - void) < s.coarse_rescue_grey * (reference - void) and shared < s.coarse_rescue_shared:
             accepted.append(line)
     if len(accepted) > 1:
@@ -109,28 +109,10 @@ def coarse_rescue(fitter, lines, radii, types, void: float):
     return out_lines, np.asarray(out_radii, dtype=np.float64), np.asarray(out_types, dtype=int), info
 
 
-def _dense(line: np.ndarray, step: float) -> np.ndarray:
-    line = np.asarray(line, dtype=np.float64)
-    seg = np.linalg.norm(np.diff(line, axis=0), axis=1)
-    s = np.r_[0.0, np.cumsum(seg)]
-    if len(line) < 2 or s[-1] <= 0:
-        return line
-    q = np.arange(0.0, s[-1] + 1e-9, step)
-    return np.stack([np.interp(q, s, line[:, j]) for j in range(3)], axis=1)
-
-
-def _frame(line: np.ndarray):
-    t = tangents(line)
-    helper = np.where(np.abs(t[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
-    e1 = np.cross(t, helper)
-    e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
-    return t, e1, np.cross(t, e1)
-
-
 def _disc_p90(grey: np.ndarray, line: np.ndarray, r: float) -> float:
     """90th percentile of the grey over discs of radius ``r`` across the line's interior nodes."""
     inner = line[1:-1] if len(line) > 2 else line
-    _, e1, e2 = _frame(inner)
+    _, e1, e2 = frame(inner)
     steps = np.arange(-r, r + 1e-9, 0.75)
     u, v = np.meshgrid(steps, steps)
     keep = u**2 + v**2 <= r * r
@@ -149,7 +131,7 @@ def _coarse_index(lines, radii, long_axes):
         if len(line) < 2:
             continue
         if axes is None:
-            axes = _frame(line)[1]
+            axes = frame(line)[1]
         seg = np.linalg.norm(np.diff(line, axis=0), axis=1)
         s = np.r_[0.0, np.cumsum(seg)]
         if s[-1] <= 0:

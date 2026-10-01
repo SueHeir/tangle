@@ -253,7 +253,9 @@ pub(crate) struct PyRelaxationSettings {
     #[pyo3(get, set)]
     pub pin_fiber_ends: bool,
     #[pyo3(get, set)]
-    pub penetration_tolerance: f64,
+    /// `None` sizes it from the smallest fiber at `Recipe.run` (see
+    /// `DIAMETER_FRACTIONS`).
+    pub penetration_tolerance: Option<f64>,
     #[pyo3(get, set)]
     pub force_full_iterations: bool,
     #[pyo3(get, set)]
@@ -275,8 +277,9 @@ pub(crate) struct PyRelaxationSettings {
     pub curvature_cleanup_sweeps: usize,
     #[pyo3(get, set)]
     pub twist_stiffness: f64,
+    /// `None` sizes it from the smallest fiber at `Recipe.run`.
     #[pyo3(get, set)]
-    pub max_step: f64,
+    pub max_step: Option<f64>,
     #[pyo3(get, set)]
     pub max_iterations: usize,
     #[pyo3(get, set)]
@@ -302,7 +305,7 @@ impl Default for PyRelaxationSettings {
             backend: RelaxationBackend::Wgpu,
             motion_model: config.motion_model,
             pin_fiber_ends: config.pin_fiber_ends,
-            penetration_tolerance: widen(config.penetration_tolerance),
+            penetration_tolerance: None,
             force_full_iterations: config.force_full_iterations,
             correction_fraction: widen(config.correction_fraction),
             contact_aggregation: config.contact_aggregation,
@@ -314,7 +317,7 @@ impl Default for PyRelaxationSettings {
             constraint_iterations: config.constraint_iterations,
             curvature_cleanup_sweeps: config.curvature_cleanup_sweeps,
             twist_stiffness: widen(config.twist_stiffness),
-            max_step: widen(config.max_step),
+            max_step: None,
             max_iterations: config.max_iterations,
             iterations_per_batch: config.iterations_per_batch,
             debug_snapshot_interval: config.debug_snapshot_interval,
@@ -390,7 +393,8 @@ impl PyRelaxationSettings {
             ),
             self.backend(),
             self.motion_model(),
-            self.penetration_tolerance,
+            self.penetration_tolerance
+                .map_or_else(|| "None".to_string(), |value| value.to_string()),
             self.max_iterations,
             self.iterations_per_batch,
             if self.adaptive_segmentation.is_some() {
@@ -451,9 +455,35 @@ impl PyRelaxationSettings {
     }
 }
 
+/// Unset length settings, as fractions of the smallest fiber diameter:
+/// `penetration_tolerance` and `max_step`.
+pub(crate) const DIAMETER_FRACTIONS: (f64, f64) = (0.01, 0.1);
+
 impl PyRelaxationSettings {
+    /// The solver configuration with unset length settings left at the
+    /// Rust defaults; `Recipe.run` uses [`Self::to_rust_for`] instead.
     pub(crate) fn to_rust(&self) -> PyResult<RelaxationConfig> {
-        if !self.penetration_tolerance.is_finite() || self.penetration_tolerance < 0.0 {
+        self.to_rust_for(None)
+    }
+
+    /// The solver configuration, sizing unset length settings from the
+    /// smallest fiber diameter when it is known.
+    pub(crate) fn to_rust_for(
+        &self,
+        smallest_diameter: Option<f64>,
+    ) -> PyResult<RelaxationConfig> {
+        let defaults = RelaxationConfig::default();
+        let (tolerance_fraction, step_fraction) = DIAMETER_FRACTIONS;
+        let penetration_tolerance = self.penetration_tolerance.unwrap_or_else(|| {
+            smallest_diameter.map_or(widen(defaults.penetration_tolerance), |diameter| {
+                tolerance_fraction * diameter
+            })
+        });
+        let max_step = self.max_step.unwrap_or_else(|| {
+            smallest_diameter
+                .map_or(widen(defaults.max_step), |diameter| step_fraction * diameter)
+        });
+        if !penetration_tolerance.is_finite() || penetration_tolerance < 0.0 {
             return Err(PyValueError::new_err(
                 "penetration_tolerance must be nonnegative and finite",
             ));
@@ -495,7 +525,7 @@ impl PyRelaxationSettings {
                 "iteration and sweep counts must be positive",
             ));
         }
-        if !self.max_step.is_finite() || self.max_step <= 0.0 {
+        if !max_step.is_finite() || max_step <= 0.0 {
             return Err(PyValueError::new_err(
                 "max_step must be positive and finite",
             ));
@@ -535,7 +565,7 @@ impl PyRelaxationSettings {
             motion_model: self.motion_model,
             adaptive_segmentation,
             pin_fiber_ends: self.pin_fiber_ends,
-            penetration_tolerance: self.penetration_tolerance as f32,
+            penetration_tolerance: penetration_tolerance as f32,
             force_full_iterations: self.force_full_iterations,
             correction_fraction: self.correction_fraction as f32,
             contact_aggregation: self.contact_aggregation,
@@ -547,7 +577,7 @@ impl PyRelaxationSettings {
             constraint_iterations: self.constraint_iterations,
             curvature_cleanup_sweeps: self.curvature_cleanup_sweeps,
             twist_stiffness: self.twist_stiffness as f32,
-            max_step: self.max_step as f32,
+            max_step: max_step as f32,
             max_iterations: self.max_iterations,
             iterations_per_batch: self.iterations_per_batch,
             cell_list: CellListConfig {

@@ -581,7 +581,7 @@ class CtToolTests(unittest.TestCase):
     def test_core_holes_match_slice_by_slice_fill(self):
         from scipy.ndimage import binary_fill_holes, label
 
-        from tangle.ct._fit import _core_holes
+        from tangle.ct._image import core_holes
 
         mask = np.random.default_rng(7).random((20, 24, 28)) < 0.6
         expected = np.zeros(mask.shape, dtype=bool)
@@ -592,7 +592,7 @@ class CtToolTests(unittest.TestCase):
                 small = np.bincount(ids.ravel(), minlength=count + 1) <= 3
                 small[0] = False
                 found[k] |= small[ids]
-        np.testing.assert_array_equal(_core_holes(mask, 3), expected)
+        np.testing.assert_array_equal(core_holes(mask, 3), expected)
 
     def test_native_volume_operations_match_scipy(self):
         from scipy.ndimage import distance_transform_edt, gaussian_filter, map_coordinates, maximum_filter

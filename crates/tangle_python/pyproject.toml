@@ -18,6 +18,11 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 
+[project.optional-dependencies]
+# The core package needs nothing else. tangle.ct (CT fitting) needs NumPy and
+# SciPy; tifffile and matplotlib write its TIFF and PNG outputs.
+ct = ["numpy>=1.24", "scipy>=1.10", "tifffile", "matplotlib"]
+
 [tool.maturin]
 module-name = "tangle._tangle"
 python-source = "python"

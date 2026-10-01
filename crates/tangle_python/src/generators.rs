@@ -1,7 +1,7 @@
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use tangle_core::FiberAssembly;
+use tangle_core::{FiberAssembly, PeriodicCell};
 use tangle_generate::{
     generate_biased_fiber_population, generate_fiber_pair_crossing, generate_multisegment_crossing,
     generate_point_crossing, CenterlineShape, FiberPairCrossingConfig, FiberPopulationSpec,
@@ -400,9 +400,10 @@ pub(crate) struct PyFiberPopulation {
     pub segments_per_fiber: usize,
     #[pyo3(get, set)]
     pub seed: u64,
-    length: ScalarDistribution,
+    /// `None` sizes it from the fiber diameter (see `DIAMETER_MULTIPLES`).
+    length: Option<ScalarDistribution>,
     diameter: Option<ScalarDistribution>,
-    curvature_amplitude: ScalarDistribution,
+    curvature_amplitude: Option<ScalarDistribution>,
     /// Physical length of the parent fiber that each generated centerline
     /// represents a window of. Recorded in provenance; it does not change
     /// the generated geometry.
@@ -413,6 +414,10 @@ pub(crate) struct PyFiberPopulation {
     #[pyo3(get, set)]
     pub max_attempts_per_fiber: usize,
 }
+
+/// Unset `length` and `curvature_amplitude` ranges, in multiples of the mean
+/// fiber diameter. They reproduce the Rust defaults for the default fiber.
+const DIAMETER_MULTIPLES: [(f64, f64); 2] = [(16.0, 24.0), (0.0, 0.8)];
 
 impl Default for PyFiberPopulation {
     fn default() -> Self {
@@ -431,9 +436,9 @@ impl Default for PyFiberPopulation {
             count: spec.count,
             segments_per_fiber: spec.segments_per_fiber,
             seed: spec.seed,
-            length: spec.length,
+            length: None,
             diameter: None,
-            curvature_amplitude: spec.intrinsic_curvature_amplitude,
+            curvature_amplitude: None,
             nominal_parent_length: spec.nominal_parent_length,
             orientation: Orientation::Isotropic,
             position: Position::Uniform,
@@ -453,13 +458,13 @@ impl PyFiberPopulation {
     }
 
     #[getter]
-    fn length(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        range_to_py(py, self.length)
+    fn length(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.length.map(|value| range_to_py(py, value)).transpose()
     }
 
     #[setter]
-    fn set_length(&mut self, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.length = parse_range(value, "length")?;
+    fn set_length(&mut self, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        self.length = value.map(|value| parse_range(value, "length")).transpose()?;
         Ok(())
     }
 
@@ -479,13 +484,17 @@ impl PyFiberPopulation {
     }
 
     #[getter]
-    fn curvature_amplitude(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        range_to_py(py, self.curvature_amplitude)
+    fn curvature_amplitude(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.curvature_amplitude
+            .map(|value| range_to_py(py, value))
+            .transpose()
     }
 
     #[setter]
-    fn set_curvature_amplitude(&mut self, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.curvature_amplitude = parse_range(value, "curvature_amplitude")?;
+    fn set_curvature_amplitude(&mut self, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        self.curvature_amplitude = value
+            .map(|value| parse_range(value, "curvature_amplitude"))
+            .transpose()?;
         Ok(())
     }
 
@@ -558,18 +567,28 @@ impl PyFiberPopulation {
         let diameter = self
             .diameter
             .unwrap_or(ScalarDistribution::Constant(self.material.diameter));
+        let mean_diameter = match diameter {
+            ScalarDistribution::Constant(value) => value,
+            ScalarDistribution::Uniform { minimum, maximum } => 0.5 * (minimum + maximum),
+        };
+        let [length, curvature_amplitude] = DIAMETER_MULTIPLES.map(|(low, high)| {
+            ScalarDistribution::Uniform {
+                minimum: low * mean_diameter,
+                maximum: high * mean_diameter,
+            }
+        });
         FiberPopulationSpec {
             count: self.count,
             segments_per_fiber: self.segments_per_fiber,
             seed: self.seed,
-            length: self.length,
+            length: self.length.unwrap_or(length),
             nominal_parent_length: self.nominal_parent_length,
             radius: scale_range(diameter, 0.5),
             thickness_ratio: self
                 .material
                 .thickness
                 .map(|thickness| thickness / self.material.diameter),
-            intrinsic_curvature_amplitude: self.curvature_amplitude,
+            intrinsic_curvature_amplitude: self.curvature_amplitude.unwrap_or(curvature_amplitude),
             orientation: self.orientation.to_rust(stack_axis),
             position: self.position.to_rust(stack_axis),
             minimum_bend_radius: self.material.min_bend_radius,
@@ -708,11 +727,21 @@ pub(crate) fn generate_fiber_population_py(
     population: PyRef<'_, PyFiberPopulation>,
     name: String,
 ) -> PyResult<PyFiberCollection> {
-    let mut assembly = FiberAssembly::new(cell.inner);
+    generate_population(cell.inner, cell.stack_axis, &population, &name)
+}
+
+/// Generates `population` in an empty copy of `cell`.
+pub(crate) fn generate_population(
+    cell: PeriodicCell,
+    stack_axis: usize,
+    population: &PyFiberPopulation,
+    name: &str,
+) -> PyResult<PyFiberCollection> {
+    let mut assembly = FiberAssembly::new(cell);
     population.check_combination()?;
-    generate_biased_fiber_population(&mut assembly, &population.to_rust(cell.stack_axis))
+    generate_biased_fiber_population(&mut assembly, &population.to_rust(stack_axis))
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    PyFiberCollection::from_assembly(name, &assembly)
+    PyFiberCollection::from_assembly(name.to_string(), &assembly)
 }
 
 fn shape(name: &str, amplitude: f64, label: &str) -> PyResult<CenterlineShape> {

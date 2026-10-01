@@ -219,6 +219,10 @@ class PumaExportReport:
 # --- Geometry ----------------------------------------------------------------
 
 class Cell:
+    """Orthorhombic simulation box. ``lengths`` in meters; ``periodic`` names the
+    periodic axes (``"xy"``, ``"xyz"``, ...). ``stack_axis`` is the direction
+    plies stack along; recipes, generators and compaction default to it."""
+
     def __init__(
         self,
         lengths: Point,
@@ -237,6 +241,10 @@ class Cell:
     def stack_axis(self) -> int: ...
 
 class Material:
+    """A fiber type: ``diameter`` in meters, an optional ``min_bend_radius`` the
+    relaxation keeps fibers above, and an optional ``thickness`` for an oval
+    section (``diameter`` is then the long width)."""
+
     def __init__(
         self,
         name: str,
@@ -259,6 +267,9 @@ class Material:
     def is_oval(self) -> bool: ...
 
 class Assembly:
+    """Fibers placed in a cell, without a recipe. Use it for imported geometry
+    (for example centerlines from a CT fit) that only needs analysis or export."""
+
     def __init__(self, cell: Cell) -> None: ...
     @property
     def fiber_count(self) -> int: ...
@@ -269,12 +280,15 @@ class Assembly:
     def section_semi_axes(self) -> list[tuple[float, float]]: ...
     def insert(
         self,
-        collection: FiberCollection,
+        fibers: FiberCollection | FiberPopulation,
         *,
         name: str | None = ...,
         translation: Point = ...,
         rotation: Matrix3 | None = ...,
-    ) -> FiberSelection: ...
+    ) -> FiberSelection:
+        """Record inserting ``fibers``, optionally moved by ``translation``
+        (meters) and ``rotation``. A ``FiberPopulation`` is generated in the
+        recipe's cell first. Returns a selection of the new fibers."""
     def characterize(self) -> AnalysisReport: ...
     def characterize_neighbors(
         self,
@@ -305,9 +319,14 @@ class Assembly:
         include_interface: bool = ...,
         ambiguity_tolerance: float | None = ...,
         bond_radius_ratio: float | None = ...,
-    ) -> PumaExportReport: ...
+    ) -> PumaExportReport:
+        """Voxelize the fibers for PuMA at ``voxel_size`` (meters) into
+        ``output_directory``."""
 
 class FiberCollection:
+    """A detached, reusable set of fiber centerlines (meters). It need not be
+    overlap-free; a ``Recipe`` inserts it and relaxation separates the fibers."""
+
     name: str
     def __init__(self, name: str = ...) -> None: ...
     def add_fiber(
@@ -427,13 +446,18 @@ class DensityGradientPosition:
 Position = UniformPosition | LayeredPosition | DensityGradientPosition
 
 class FiberPopulation:
+    """Random fibers for ``generate_fiber_population``: how many, their material,
+    length, diameter and curvature (a value or a ``(low, high)`` range, in
+    meters), and how they are oriented and positioned. Unset, ``length`` is
+    16-24 fiber diameters and ``curvature_amplitude`` 0-0.8 diameters."""
+
     material: Material
     count: int
     segments_per_fiber: int
     seed: int
-    length: Range
+    length: Range | None
     diameter: Range | None
-    curvature_amplitude: Range
+    curvature_amplitude: Range | None
     nominal_parent_length: float | None
     orientation: Orientation
     position: Position
@@ -445,9 +469,9 @@ class FiberPopulation:
         count: int = ...,
         segments_per_fiber: int = ...,
         seed: int = ...,
-        length: Range = ...,
+        length: Range | None = ...,
         diameter: Range | None = ...,
-        curvature_amplitude: Range = ...,
+        curvature_amplitude: Range | None = ...,
         nominal_parent_length: float | None = ...,
         orientation: Orientation = ...,
         position: Position = ...,
@@ -496,7 +520,9 @@ def generate_fiber_population(
     population: FiberPopulation,
     *,
     name: str = ...,
-) -> FiberCollection: ...
+) -> FiberCollection:
+        """Place ``population``'s random fibers in ``cell``. The fibers may
+    overlap; insert them into a ``Recipe`` and relax."""
 
 # --- Settings, policies, and overrides ---------------------------------------
 
@@ -673,10 +699,16 @@ class CompactionSettings:
     def replace(self, **changes: Any) -> CompactionSettings: ...
 
 class RelaxationSettings:
+    """Run-wide solver settings for ``Recipe.run``. Most runs change at most
+    ``backend`` (``"wgpu"`` for the GPU, ``"cpu"`` without one),
+    ``penetration_tolerance`` or ``max_iterations``. Unset,
+    ``penetration_tolerance`` is 1% and ``max_step`` 10% of the smallest
+    fiber diameter in the recipe."""
+
     backend: Backend
     motion_model: MotionModel
     pin_fiber_ends: bool
-    penetration_tolerance: float
+    penetration_tolerance: float | None
     force_full_iterations: bool
     correction_fraction: float
     contact_aggregation: ContactAggregation
@@ -688,7 +720,7 @@ class RelaxationSettings:
     constraint_iterations: int
     curvature_cleanup_sweeps: int
     twist_stiffness: float
-    max_step: float
+    max_step: float | None
     max_iterations: int
     iterations_per_batch: int
     debug_snapshot_interval: int | None
@@ -703,7 +735,7 @@ class RelaxationSettings:
         backend: Backend = ...,
         motion_model: MotionModel = ...,
         pin_fiber_ends: bool = ...,
-        penetration_tolerance: float = ...,
+        penetration_tolerance: float | None = ...,
         force_full_iterations: bool = ...,
         correction_fraction: float = ...,
         contact_aggregation: ContactAggregation = ...,
@@ -715,7 +747,7 @@ class RelaxationSettings:
         constraint_iterations: int = ...,
         curvature_cleanup_sweeps: int = ...,
         twist_stiffness: float = ...,
-        max_step: float = ...,
+        max_step: float | None = ...,
         max_iterations: int = ...,
         iterations_per_batch: int = ...,
         debug_snapshot_interval: int | None = ...,
@@ -866,6 +898,10 @@ class HeldTargets:
     ) -> bool: ...
 
 class Recipe:
+    """An ordered list of manufacturing steps on one cell. Each method records a
+    step (insert fibers, relax, needle, compact, ...); nothing is simulated
+    until ``run``."""
+
     @property
     def stack_axis(self) -> int: ...
     def __init__(self, cell: Cell | Assembly, *, stack_axis: Axis | None = ...) -> None: ...
@@ -877,7 +913,9 @@ class Recipe:
         translation: Point = ...,
         rotation: Matrix3 | None = ...,
     ) -> FiberSelection: ...
-    def relax_until_converged(self, *, max_iterations: int = ...) -> None: ...
+    def relax_until_converged(self, *, max_iterations: int = ...) -> None:
+        """Record a relaxation step that runs until the ``RelaxationSettings``
+        tolerances are met, or for at most ``max_iterations`` (default 2000)."""
     def relax_for(self, iterations: int) -> None: ...
     def settle_targets(self, *, tolerance: float, max_iterations: int) -> None: ...
     def solve(
@@ -942,9 +980,15 @@ class Recipe:
         debug_ovito_view_script_path: Path | None = ...,
         debug_ovito_session_path: Path | None = ...,
         debug_ovito_coloring: OvitoColoring = ...,
-    ) -> RunResult: ...
+    ) -> RunResult:
+        """Simulate every recorded step and return the relaxed fibers. A
+        recipe that only inserts fibers relaxes them until converged.
+        ``settings`` defaults to ``RelaxationSettings()`` (GPU)."""
 
 class RunResult:
+    """The relaxed fibers from ``Recipe.run``, with run statistics, analysis
+    (``characterize*``) and exports (OVITO, BPM, PuMA)."""
+
     @property
     def fiber_count(self) -> int: ...
     @property
@@ -1029,7 +1073,9 @@ class RunResult:
         session_path: Path | None = ...,
         coloring: OvitoColoring = ...,
         bond_radius_ratio: float | None = ...,
-    ) -> None: ...
+    ) -> None:
+        """Write an OVITO dump of the fibers, and optionally a view script and
+        an OVITO session."""
     def export_bpm(
         self,
         data_path: Path,
@@ -1039,7 +1085,9 @@ class RunResult:
         density: float = ...,
         atom_type: int = ...,
         bond_type: int = ...,
-    ) -> tuple[int, int]: ...
+    ) -> tuple[int, int]:
+        """Write a LAMMPS data file of bonded spheres or spherocylinders for a DEM
+        bonded-particle model. Returns ``(atom_count, bond_count)``."""
     def export_puma(
         self,
         output_directory: Path,
@@ -1133,7 +1181,6 @@ def ct_resample(nodes: Any, counts: list[int], spacing: float) -> tuple[list[flo
 def ct_support(image: Any, nodes: Any, counts: list[int]) -> list[float]: ...
 def ct_curvature_ratio(nodes: Any, counts: list[int], min_bend_radius: float) -> list[float]: ...
 def ct_render_occupancy(low: Sequence[int], high: Sequence[int], nodes: Any, counts: list[int], radii: list[float], edge: float, out: Any, ratios: list[float] | None = ..., axes: Any | None = ...) -> None: ...
-def ct_local_residual(image: Any, low: Sequence[int], high: Sequence[int], nodes: Any, counts: list[int], radii: list[float], edge: float, base: Any | None = None) -> float: ...
 def ct_trim_duplicates(nodes: Any, counts: list[int], radii: list[float], min_length: float, closeness: float) -> tuple[tuple[list[float], list[int]], list[float]]: ...
 def ct_remove_unsupported(image: Any, nodes: Any, counts: list[int], radii: list[float], min_length: float, min_support: float) -> tuple[tuple[list[float], list[int]], list[float]]: ...
 def ct_merge_fragments(image: Any, nodes: Any, counts: list[int], radii: list[float], max_gap: float, max_angle_degrees: float, min_bridge_support: float, min_bend_radius: float | None, kink_threshold: float, end_cost: float, scale: float, max_prior_gap: float | None, max_prior_angle_degrees: float) -> tuple[tuple[list[float], list[int]], list[float], int]: ...

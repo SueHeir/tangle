@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ._geometry import polyline_length, resample
+from ._geometry import UnionFind, polyline_length, resample
 from ._refine import curvature_ratio
 
 
@@ -365,19 +365,10 @@ def assemble(
     and radius). A connection that would close a loop is left out.
     """
     link: dict[tuple[int, int], tuple[int, int, np.ndarray]] = {}
-    root = list(range(len(pieces)))
-
-    def find(k: int) -> int:
-        while root[k] != k:
-            root[k] = root[root[k]]
-            k = root[k]
-        return k
-
+    sets = UnionFind()
     for piece, end, other, other_end, curve in connections:
-        a, b = find(piece), find(other)
-        if a == b:
+        if not sets.union(piece, other):
             continue  # would close a loop
-        root[b] = a
         link[(piece, end)] = (other, other_end, curve)
         link[(other, other_end)] = (piece, end, curve[::-1])
 

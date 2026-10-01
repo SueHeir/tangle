@@ -277,3 +277,53 @@ def rasterize(
     radii = np.asarray(radii, dtype=np.float64)
     reaches = radii if reach is None else np.broadcast_to(np.asarray(reach, dtype=np.float64), radii.shape)
     return _native.rasterize(shape, centerlines, radii, reaches, signed, sections)
+
+
+def runs(flags: np.ndarray) -> list[tuple[int, int]]:
+    """``[start, stop)`` of every run of True."""
+    padded = np.concatenate([[False], np.asarray(flags, dtype=bool), [False]]).astype(np.int8)
+    change = np.flatnonzero(np.diff(padded))
+    return [(int(a), int(b)) for a, b in zip(change[::2], change[1::2])]
+
+
+def dense(line: np.ndarray, step: float) -> np.ndarray:
+    """Points along ``line`` exactly ``step`` apart in arc length, from its
+    first node (the last point falls within ``step`` of the far end)."""
+    line = np.asarray(line, dtype=np.float64)
+    seg = np.linalg.norm(np.diff(line, axis=0), axis=1)
+    s = np.r_[0.0, np.cumsum(seg)]
+    if len(line) < 2 or s[-1] <= 0:
+        return line
+    q = np.arange(0.0, s[-1] + 1e-9, step)
+    return np.stack([np.interp(q, s, line[:, j]) for j in range(3)], axis=1)
+
+
+def frame(line: np.ndarray):
+    """Unit tangent and two unit normals at every node."""
+    t = tangents(line)
+    helper = np.where(np.abs(t[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
+    e1 = np.cross(t, helper)
+    e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
+    return t, e1, np.cross(t, e1)
+
+
+class UnionFind:
+    """Disjoint sets over any hashable keys (each key starts alone)."""
+
+    def __init__(self) -> None:
+        self.parent: dict = {}
+
+    def find(self, key):
+        parent = self.parent
+        while parent.get(key, key) != key:
+            parent[key] = parent.get(parent[key], parent[key])
+            key = parent[key]
+        return key
+
+    def union(self, keep, other) -> bool:
+        """Put ``other``'s set under ``keep``'s root; False if already one set."""
+        keep, other = self.find(keep), self.find(other)
+        if keep == other:
+            return False
+        self.parent[other] = keep
+        return True

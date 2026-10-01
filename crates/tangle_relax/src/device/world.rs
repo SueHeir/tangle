@@ -123,6 +123,7 @@ pub struct DeviceFiberWorld<R: Runtime> {
     intrinsic_positions: Handle,
     segment_vertices: Handle,
     segment_fibers: Handle,
+    vertex_arc_lengths: Handle,
     segment_radii: Handle,
     segment_lane_offsets: Handle,
     directors: Handle,
@@ -416,6 +417,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             client.create_from_slice(f32::as_bytes(&packed.intrinsic_positions));
         let segment_vertices = client.create_from_slice(u32::as_bytes(&packed.segment_vertices));
         let segment_fibers = client.create_from_slice(u32::as_bytes(&packed.segment_fibers));
+        let vertex_arc_lengths =
+            client.create_from_slice(f32::as_bytes(&packed.vertex_arc_lengths()));
         let segment_radii = client.create_from_slice(f32::as_bytes(&packed.segment_radii));
         let segment_lane_offsets =
             client.create_from_slice(f32::as_bytes(&packed.segment_lane_offsets));
@@ -581,6 +584,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             intrinsic_positions,
             segment_vertices,
             segment_fibers,
+            vertex_arc_lengths,
             segment_radii,
             segment_lane_offsets,
             directors,
@@ -1032,6 +1036,10 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     BufferArg::from_raw_parts(
                         self.segment_fibers.clone(),
                         self.packed.segment_fibers.len(),
+                    ),
+                    BufferArg::from_raw_parts(
+                        self.vertex_arc_lengths.clone(),
+                        self.packed.vertex_count(),
                     ),
                     BufferArg::from_raw_parts(
                         self.segment_radii.clone(),
