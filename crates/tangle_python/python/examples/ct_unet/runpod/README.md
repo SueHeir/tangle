@@ -49,7 +49,8 @@ folder comes back to `--dest/RUN` (default `ROOT/runs/RUN`).
 stopped when run again:
 
 1. **push:** copies the scans the pod doesn't have yet (`.npz` files only; scans listed in `--exclude` stay
-   home), printing the speed and the time left, then checks every scan's zip checksum on the pod and sends any
+   home) over 8 ssh connections at once (`--streams`; one connection alone reached only ~80 Mbit/s from home),
+   printing the speed and the time left, then checks every scan's zip checksum on the pod and sends any
    bad one again. A broken-off copy resumes where it stopped.
 2. **train:** starts `train.py` on the pod in the background, so it keeps going if this computer sleeps or the
    connection drops. It always passes `--resume`: a run restarted after a pod restart continues from its last
@@ -123,4 +124,7 @@ copied once; `pod.py` works the same with one (attach it when deploying; it is m
 - **Not enough disk:** edit the pod, raise the Volume Disk, run the same command again.
 - **train.py stopped:** `go` prints the end of `train.log`. The pod stays up for `--grace` minutes, so a fixed
   command can resume the run; then it stops itself.
+- **"unrecognized arguments" on Windows** when started through PowerShell's `Start-Process`: it splits
+  `--ssh "ssh root@... -p ..."` at the spaces. Give that argument its own double quotes inside the argument
+  list (`'--ssh', '"ssh root@IP -p PORT -i KEY"'`), or run `python pod.py ...` directly in the terminal.
 - **Watching on the pod itself:** `tail -f /workspace/unet/runs/RUN/train.log` in a pod terminal.

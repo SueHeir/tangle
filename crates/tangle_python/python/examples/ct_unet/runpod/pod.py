@@ -192,29 +192,56 @@ def scan_list(folders: dict, skip: set) -> dict:
     return out
 
 
-def send(pod: Pod, files: dict) -> None:
-    """Stream ``files`` ({path under WORK: local path}) to the pod as one tar."""
-    total = sum(p.stat().st_size for p in files.values())
-    say(f"sending {len(files)} files, {total / 1e9:.1f} GB")
-    proc = subprocess.Popen(pod.base + [f"mkdir -p {WORK} && tar -xf - -C {WORK}"], stdin=subprocess.PIPE)
-    started = last = time.time()
-    done = 0
-    try:
-        with tarfile.open(fileobj=proc.stdin, mode="w|", bufsize=1 << 20) as tar:
-            for k, (name, local) in enumerate(files.items(), 1):
-                tar.add(str(local), arcname=name, recursive=False)
-                done += local.stat().st_size
-                if time.time() - last > 60 or k == len(files):
-                    last = time.time()
-                    rate = done / max(last - started, 1e-6)
-                    say(f"sent {k}/{len(files)} files, {done / 1e9:.1f} of {total / 1e9:.1f} GB, "
-                        f"{rate / 1e6:.1f} MB/s, about {hours((total - done) / max(rate, 1))} left")
-        proc.stdin.close()
-    except OSError as error:  # a broken pipe: ssh dropped
-        proc.kill()
-        raise SystemExit(f"the copy broke off ({error}); run the same command again to send the rest")
-    if proc.wait() != 0:
-        raise SystemExit("the copy failed on the pod; run the same command again to send the rest")
+def send(pod: Pod, files: dict, streams: int = 8) -> None:
+    """Send ``files`` ({path under WORK: local path}) to the pod as ``streams`` tars at once, over separate ssh
+    connections: one ssh stream tops out well below a fast home connection over a long round trip."""
+    import threading
+
+    sizes = {k: v.stat().st_size for k, v in files.items()}
+    total = sum(sizes.values())
+    lists = [[] for _ in range(max(1, min(streams, len(files))))]
+    loads = [0] * len(lists)
+    for name in sorted(files, key=sizes.get, reverse=True):  # largest first onto the lightest list
+        k = loads.index(min(loads))
+        lists[k].append(name)
+        loads[k] += sizes[name]
+    say(f"sending {len(files)} files, {total / 1e9:.1f} GB, over {len(lists)} connections")
+    lock = threading.Lock()
+    progress = {"files": 0, "bytes": 0}
+    errors = []
+
+    def one(names):
+        proc = subprocess.Popen(pod.base + [f"mkdir -p {WORK} && tar -xf - -C {WORK}"], stdin=subprocess.PIPE)
+        try:
+            with tarfile.open(fileobj=proc.stdin, mode="w|", bufsize=1 << 20) as tar:
+                for name in names:
+                    if errors:
+                        break
+                    tar.add(str(files[name]), arcname=name, recursive=False)
+                    with lock:
+                        progress["files"] += 1
+                        progress["bytes"] += sizes[name]
+            proc.stdin.close()
+        except OSError as error:  # a broken pipe: ssh dropped
+            errors.append(f"the copy broke off ({error})")
+            proc.kill()
+        if proc.wait() != 0 and not errors:
+            errors.append("the copy failed on the pod")
+
+    threads = [threading.Thread(target=one, args=(names,), daemon=True) for names in lists]
+    for thread in threads:
+        thread.start()
+    started = time.time()
+    while any(t.is_alive() for t in threads):
+        for thread in threads:
+            thread.join(timeout=60 / len(threads))
+        with lock:
+            k, done = progress["files"], progress["bytes"]
+        rate = done / max(time.time() - started, 1e-6)
+        say(f"sent {k}/{len(files)} files, {done / 1e9:.1f} of {total / 1e9:.1f} GB, {rate / 1e6:.1f} MB/s "
+            f"({rate * 8 / 1e6:.0f} Mbit/s), about {hours((total - done) / max(rate, 1))} left")
+    if errors:
+        raise SystemExit(f"{errors[0]}; run the same command again to send the rest")
 
 
 def push(pod: Pod, args, train_args) -> list:
@@ -239,7 +266,7 @@ def push(pod: Pod, args, train_args) -> list:
                          f"{math.ceil((need + have.get('_bytes', 0)) / 1e9 * 1.2 + 10)} GB (the pod restarts; "
                          f"/workspace is kept), then run this again.")
     say(f"{len(scans) - len(todo)} scans already on the pod, {len(todo)} to send")
-    send(pod, {**todo, **extras})
+    send(pod, {**todo, **extras}, args.streams)
     names = json.dumps(list(scans)).encode()
     for _ in range(2):
         bad = pod.pod("check", data=names).get("bad", [])
@@ -247,7 +274,7 @@ def push(pod: Pod, args, train_args) -> list:
             say("every scan on the pod passed its CRC check")
             break
         say(f"{len(bad)} scans failed the CRC check on the pod; sending them again")
-        send(pod, {k: scans[k] for k in bad})
+        send(pod, {k: scans[k] for k in bad}, args.streams)
     else:
         raise SystemExit(f"still failing the CRC check: {bad}; check these files here")
     return remote_args
@@ -913,6 +940,7 @@ def main():
     parser.add_argument("--grace", type=float, default=60,
                         help="minutes the pod waits for the run to be fetched after training ends, then ends anyway")
     parser.add_argument("--poll", type=float, default=300, help="seconds between progress checks")
+    parser.add_argument("--streams", type=int, default=8, help="push: ssh connections sending scans at once")
     parser.add_argument("--jobs", type=int, default=0, help="make: scans made at a time (default: one per 2 cores)")
     parser.add_argument("--backend", choices=["auto", "wgpu", "cpu"], default="auto",
                         help="make: Tangle's relaxation backend on the pod (auto: the GPU if it works there)")
