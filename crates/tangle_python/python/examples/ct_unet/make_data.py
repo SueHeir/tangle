@@ -76,6 +76,7 @@ FOCUS_FIRST = 4001  # indices from here on use the focused draw (varied_settings
 BOND_FIRST = 5001  # indices from here on may have binder bonds at their fiber junctions
 SHAPES_FIRST = 7001  # ... and from here on bonds of several shapes (bridge, meniscus, blob) and coatings
 STIFF_FIRST = 9001  # ... and from here on stiff, nearly straight fibers, bonded at their tight crossings
+WEB_FIRST = 11001  # ... and from here on big binder webs and fillets (no coatings), some flat fibers, milder noise
 
 
 def varied_settings(index: int, focus: bool | None = None) -> dict:
@@ -154,6 +155,21 @@ def varied_settings(index: int, focus: bool | None = None) -> dict:
                      "radius_ratio": round(float(rs.uniform(0.5, 1.5)), 2),
                      "shape": str(rs.choice(["bridge", "meniscus", "meniscus", "blob"]))}
         orientation = str(rs.choice(["planar", "planar", "biaxial", "biaxial", "aligned", "isotropic"]))
+    if index >= WEB_FIRST:
+        # web round: binder as fillets and webs (meniscus shape) that also span fibers a few voxels apart (a wide capture
+        # gap and a bond size of 1-2.2 fiber radii), never coatings; about half the types flat (width ratio
+        # 0.3-0.6); binder about as bright as the fibers
+        rw = np.random.default_rng(110_000 + index)
+        for t in types:
+            if rw.random() < 0.5:
+                t["ratio"] = round(float(rw.uniform(0.3, 0.6)), 2)
+        if bonds is not None:
+            bonds.update(probability=round(float(rw.uniform(0.5, 1.0)), 2),
+                         gap=round(float(rw.uniform(0.5, 2.5)), 2),
+                         radius_ratio=round(float(rw.uniform(1.0, 2.2)), 2),
+                         brightness=round(float(rw.uniform(0.7, 1.1)), 2),
+                         shape="meniscus",
+                         coating=0.0)
     blur = float(rng.choice([0.0, 0.0, 0.5, 1.0]))
     return {
         "types": types,
@@ -163,7 +179,8 @@ def varied_settings(index: int, focus: bool | None = None) -> dict:
         "curvature": ([round(float(rng.uniform(0.05, 0.2)), 2), round(float(rng.uniform(0.3, 0.8)), 2)]
                       if index < STIFF_FIRST else [0.0, round(float(rng.uniform(0.02, 0.15)), 2)]),
         "brightness_spread": round(float(rng.uniform(0.0, 0.4)), 2),
-        "photons": round(1300 * float(rng.uniform(0.5, 2.0)) / max(1.0, 23 * blur**2)),
+        "photons": round(1300 * float(rng.uniform(0.5, 2.0)) / max(1.0, 23 * blur**2)
+                         * (2.0 if index >= WEB_FIRST else 1.0)),
         "noise_blur": blur,
         # the focused round caps the blur (FWHM, um = voxels) at the thinnest fiber's diameter: blurrier scans
         # merge touching thin fibers beyond what any method can undo
