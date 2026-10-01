@@ -189,8 +189,11 @@ def main():
                                                        "out": str(args.out), "init": str(args.init), "weights": WEIGHTS}, indent=1, default=str) + "\n")
 
     val_files = volumes(args.val)
-    val_loader = DataLoader(Crops(val_files, args.crop, 1, 0, train=False), batch_size=1, num_workers=2)
-    started, window = time.perf_counter(), []
+    # Validation crops are the same every time, so any number of workers gives the same loss; more of them
+    # keep a fast GPU from idling through each check.
+    val_loader = DataLoader(Crops(val_files, args.crop, 1, 0, train=False), batch_size=1,
+                            num_workers=max(2, args.workers))
+    started, window, waited = time.perf_counter(), [], 0.0  # waited: time the loop spent waiting for crops
     while step < args.steps:
         # Pacing: hold training until each paced folder has its share of the scans for the coming steps.
         for spec in args.pace:
@@ -205,7 +208,9 @@ def main():
         loader = DataLoader(Crops(files, args.crop, 2, step, noise=args.noise, hint_rate=args.hint_rate), batch_size=1, shuffle=True, num_workers=args.workers,
                             persistent_workers=False, prefetch_factor=2)
         model.train()
+        tick = time.perf_counter()
         for batch in loader:
+            waited += time.perf_counter() - tick
             loss, terms = run_batch(model, batch, device)
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -220,8 +225,11 @@ def main():
             if step % args.log_every == 0:
                 mean = {k: np.mean([w[k] for w in window]) for k in window[0]}
                 window = []
+                # data: seconds per step spent waiting for crops (near the step time = the CPU is the limit)
                 print(f"step {step} files {len(files)} " + " ".join(f"{k} {v:.4f}" for k, v in mean.items())
-                      + f" lr {scheduler.get_last_lr()[0]:.2e} {time.perf_counter() - started:.0f} s", flush=True)
+                      + f" lr {scheduler.get_last_lr()[0]:.2e} {time.perf_counter() - started:.0f} s"
+                      + f" data {waited / args.log_every:.3f} s/step", flush=True)
+                waited = 0.0
             if step % args.val_every == 0 or step == args.steps:
                 model.eval()
                 with torch.no_grad():
@@ -239,6 +247,7 @@ def main():
                 model.train()
             if step >= args.steps or refresh:
                 break
+            tick = time.perf_counter()
 
 
 if __name__ == "__main__":
