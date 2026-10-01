@@ -9,7 +9,12 @@ In Python, give a material a `thickness` smaller than its `diameter`. The
 diameter is the long width and the thickness is the short one:
 
 ```python
+import tangle
+from tangle.units import um
+
 oval = tangle.Material("oval fiber", diameter=30 * um, thickness=20 * um)
+collection = tangle.FiberCollection("ovals")
+points = [[0, 0, 0], [300 * um, 0, 0]]
 collection.add_fiber(points, oval)                      # long axis lies flat
 collection.add_fiber(points, oval, long_axis=[0, 0, 1])  # long axis given
 ```

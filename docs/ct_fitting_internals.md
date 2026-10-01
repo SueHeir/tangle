@@ -195,8 +195,7 @@ The fibers move only in Tangle's own relaxation, the GPU by default
      where the tip itself is void, left traces that ran into the end cap
      about r too long.)
 2. **Upload.** Fibers are resampled to segments of 1.25 of their own
-   diameters (never shorter than one: Tangle's contact treats non-adjacent
-   segments of one fiber as colliding) and placed in a closed cell padded by
+   diameters and placed in a closed cell padded by
    3 r_max around the scan. Each fiber gets a material with its radius and
    its type's bend limit, and a straight rest shape with its own segment
    lengths: bending then resists every curve, and a kinked fit does not
@@ -778,6 +777,8 @@ finish on are skipped for a mask.
 benchmark below recommends for scans of packed bundles, with grey ranges:
 
 ```python
+import tangle.ct as ct
+
 ct.FitSettings(
     bright_seed_strength=0.05, grey_checked_traces=True,
     graded_image=True, graded_smallest_only=True,

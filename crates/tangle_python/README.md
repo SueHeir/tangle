@@ -46,8 +46,10 @@ fit = ct.fit_fibers(scan.volume, scan.voxel_size, ct.FiberSpec(diameter=10 * um)
 fit.write("fit", volume=scan.volume)  # fit.json, labels.tif, overlay.png
 ```
 
-Lengths are in meters. Unset length settings (fiber length and waviness,
-overlap tolerance, step size) follow the fiber diameter. Without a GPU, use
+Lengths are in meters. Length settings you leave unset follow the fiber
+diameter: `RelaxationSettings.penetration_tolerance` is 1% and `max_step` 10%
+of the smallest fiber diameter, and a `FiberPopulation`'s `length` is 16-24
+and `curvature_amplitude` 0-0.8 diameters. Without a GPU, use
 `recipe.run(tangle.RelaxationSettings(backend="cpu"))` and
 `ct.FitSettings(backend="cpu")`. The sections below cover installation in
 more detail (Windows, Conda, notebooks) and the rest of the API.
@@ -93,7 +95,7 @@ python3 -m venv .venv-tangle
 source .venv-tangle/bin/activate
 python -m pip install --upgrade pip
 python -m pip install "maturin>=1.8,<2" jupyterlab ipykernel
-maturin develop --release \
+maturin develop --release --extras ct \
   --manifest-path crates/tangle_python/Cargo.toml
 ```
 
@@ -109,7 +111,7 @@ conda create --name tangle python=3.12 -y
 conda activate tangle
 python -m pip install --upgrade pip
 python -m pip install "maturin>=1.8,<2" jupyterlab ipykernel
-maturin develop --release \
+maturin develop --release --extras ct \
   --manifest-path crates/tangle_python/Cargo.toml
 python -m ipykernel install --user \
   --name tangle --display-name "Python (TANGLE)"
@@ -128,7 +130,7 @@ For Windows PowerShell, after installing Rust and the native build tools:
 py -m venv .venv-tangle
 .\.venv-tangle\Scripts\Activate.ps1
 python -m pip install "maturin>=1.8,<2" jupyterlab ipykernel
-maturin develop --release --manifest-path crates/tangle_python/Cargo.toml
+maturin develop --release --extras ct --manifest-path crates/tangle_python/Cargo.toml
 python -m ipykernel install --user --name tangle --display-name "Python (TANGLE)"
 ```
 
@@ -200,7 +202,9 @@ compaction and `fit_cell_to_active_fibers` default to the same axis. Recipe
 operations are ordered manufacturing instructions, not physical timesteps.
 
 `insert()` changes the recipe's starting assembly immediately; every other
-operation is recorded and runs inside `run()`. `run()` does not modify the
+operation is recorded and runs inside `run()`. A recipe with only inserts
+relaxes until converged when run; once it has any other step, add
+`relax_until_converged()` where you want the fibers relaxed. `run()` does not modify the
 input `Assembly`: read the result from `result.assembly`. A failed operation
 raises `tangle.RecipeError`, which carries `operation_index`, `operation`,
 `iteration` and `reason`.
@@ -284,11 +288,12 @@ recipe.solve(
 ```
 
 Layer placement and needling hold fibers on targets until released. Use them
-as context managers to release at the end of the block:
+as context managers to release at the end of the block. A layer is numbered by
+the `insert()` call that added it, from 0; this recipe has one:
 
 ```python
 with recipe.needle_layer(
-    2,
+    0,
     footprint=tangle.CircularFootprint.random(diameter=150 * um, seed=7),
     depth=350 * um,
 ):
@@ -464,12 +469,20 @@ for exact definitions, supported comparisons, and current limitations.
   Python and insert and relax them in sequence.
 - `puma_cross_validation.py` / `puma_cross_validation.ipynb` compare native
   centerline metrics with an independently imported PuMA voxel workspace.
+- `bonded_fibers.py` bonds a felt at its fiber crossings and exports the
+  bonds; `oval_fibers.py` stacks plies of flat oval fibers.
+- `periodic_domain_sweep.py` sweeps periodic domain sizes of biased in-plane
+  stacks for DIRT.
 - `native/` mirrors the complete Rust example suite using the same native
   generators and solver. See `native/README.md` for the configuration map.
 - `ct_examples.py` fits Tangle fibers to synthetic CT scans with `tangle.ct`
   and scores them against the truth. See the
   [CT fitting guide](../../docs/ct_fitting.md) and the
   [results, with pictures](python/examples/ct_results/README.md).
+  `ct_tiled_scan.py` fits a large synthetic scan in tiles,
+  `ct_redraw_study.py` studies the fitter's redraw decisions,
+  `ct_synthetic/` makes the synthetic-scan figures, and `ct_unet/` holds the
+  CT map network ([guide](../../docs/ct_unet.md)).
 
 ## Topic reference notebooks
 

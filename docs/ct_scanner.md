@@ -324,6 +324,8 @@ at 1, the
 noise is 0.213 without noise blur (1300 photons), 0.295 at 0.5 (226
 photons) and 0.167 at 1 (57 photons).
 
+From `crates/tangle_python/python/examples/`:
+
 ```
 python ct_examples.py --scanned tune     # scanned_1 … scanned_16
 python ct_examples.py --scanned check    # scanned_101 … scanned_108

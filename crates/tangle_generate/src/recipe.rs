@@ -865,6 +865,25 @@ fn control_formation_recipe(
     mut state: ResMut<FormationRecipeState>,
     mut next: ResMut<NextState<TangleStage>>,
 ) {
+    // Stops the recipe at the current operation with `reason`; Python sees
+    // it as a RecipeError rather than a crash.
+    macro_rules! stop_recipe {
+        ($reason:expr) => {{
+            state.failure = Some(FormationFailure {
+                operation: state.next_operation,
+                iteration: relaxation.iterations,
+                reason: $reason,
+            });
+            state.released = true;
+            if let Some(world) = device.world.as_mut() {
+                world.clear_layer_targets();
+                world.clear_vertex_targets();
+            }
+            release_workflow(&mut workflow);
+            next.set(TangleStage::Done);
+            return;
+        }};
+    }
     if state.initial_layer_targets.is_empty()
         && config.operations.iter().any(|operation| {
             matches!(
@@ -970,19 +989,7 @@ fn control_formation_recipe(
                             .join(", ");
                         format!("unknown material {material_name:?}; known materials: {known}")
                     };
-                    state.failure = Some(FormationFailure {
-                        operation: state.next_operation,
-                        iteration: relaxation.iterations,
-                        reason,
-                    });
-                    state.released = true;
-                    if let Some(world) = device.world.as_mut() {
-                        world.clear_layer_targets();
-                        world.clear_vertex_targets();
-                    }
-                    release_workflow(&mut workflow);
-                    next.set(TangleStage::Done);
-                    return;
+                    stop_recipe!(reason);
                 }
                 let limit = FiberBendLimit {
                     minimum_bend_radius: *minimum_bend_radius,
@@ -1052,10 +1059,12 @@ fn control_formation_recipe(
                 max_translation,
             } => {
                 let index = *layer as usize;
-                assert!(
-                    index < state.current_layer_targets.len(),
-                    "layer {layer} is outside the generated layer range"
-                );
+                if index >= state.current_layer_targets.len() {
+                    stop_recipe!(format!(
+                        "cannot place layer {layer}: only {} layers exist",
+                        state.current_layer_targets.len()
+                    ));
+                }
                 state.current_layer_targets[index] = state.current_layer_targets[index - 1] + *gap;
                 device
                     .world
@@ -1080,13 +1089,15 @@ fn control_formation_recipe(
                 );
             }
             FormationOperation::NeedleLayer(needling) => {
-                assert!(
-                    state
-                        .active_formation_step
-                        .is_some_and(|step| step >= needling.layer),
-                    "cannot needle inactive layer {}",
-                    needling.layer
-                );
+                if !state
+                    .active_formation_step
+                    .is_some_and(|step| step >= needling.layer)
+                {
+                    stop_recipe!(format!(
+                        "cannot needle layer {}: it has not been inserted yet",
+                        needling.layer
+                    ));
+                }
                 let world = device
                     .world
                     .as_mut()

@@ -7,6 +7,7 @@ individual settings. Each script below has a matching notebook beside it.
 
 | Concept | Python script | Native notes |
 | --- | --- | --- |
+| Quick start: a network, then a CT fit of it | [quickstart](../crates/tangle_python/python/examples/quickstart.py) | Python only; start here |
 | Minimal crossing | [crossed_fibers](../crates/tangle_python/python/examples/crossed_fibers.py) | Small complete workflow |
 | Rigid separation | [fibers_through_center_point](../crates/tangle_python/python/examples/native/fibers_through_center_point.py) | [README](fibers_through_center_point/README.md) |
 | Rest shape and bend limits | [multisegment_flexible_relaxation](../crates/tangle_python/python/examples/native/multisegment_flexible_relaxation.py) | [README](multisegment_flexible_relaxation/README.md) |
