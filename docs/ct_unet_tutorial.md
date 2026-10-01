@@ -28,13 +28,22 @@ Every script explains its options with `--help`.
 
 ## What you need
 
-- **Python 3.10 or newer** with NumPy, SciPy, tifffile, matplotlib and
-  PyTorch:
+- **Python 3.11 or newer** (what Tangle itself needs) with NumPy, SciPy,
+  tifffile, matplotlib and PyTorch, best in a virtual environment of their
+  own. On a Mac or Linux:
 
   ```sh
+  python3 -m venv ct-env
+  source ct-env/bin/activate
   python -m pip install numpy scipy tifffile matplotlib torch
   ```
 
+  (On Windows, `py -m venv ct-env` and `ct-env\Scripts\activate`.) The
+  `python` in the commands below is the environment's, so activate it again in
+  each new terminal (`source ct-env/bin/activate`, from the folder you made it
+  in; a Mac has no plain `python` outside one). If you have built Tangle
+  already ([Python guide](../crates/tangle_python/README.md)), activate its
+  environment instead and install only `torch` there.
   On a PC with an NVIDIA graphics card, install the CUDA build of PyTorch
   instead (the command for your system is on [pytorch.org](https://pytorch.org)).
   A few file formats need one more package, named in the error message if you
@@ -42,7 +51,8 @@ Every script explains its options with `--help`.
   JPEG or BMP slices).
 - **A GPU helps a lot.** The network runs on an Apple silicon GPU, an NVIDIA GPU
   or the CPU; on the CPU it is much slower, fine for a small piece but not for
-  a whole scan.
+  a whole scan. On an Apple M5 Pro, the demo scan of step 1 takes 4 s with the
+  GPU and 70 s on the CPU alone.
 - **The trained network**, a `.pt` file. It is not published yet: train one
   with `train.py` (see [Running it](ct_unet.md#running-it) in the guide) or ask
   the Tangle authors for the current one. Below it is called `best.pt`; use
@@ -74,8 +84,22 @@ voxels with two kinds of gently curved fibers (10.5 and 21 µm across), and the
 true fibers in `demo/truth/`. `find_fibers.py` finds the fibers in it and
 writes everything to `demo/found/`. `compare_fibers.py` prints how much of the
 true fibers' length was found (recall), how much of what was found lies on a
-true fiber (precision), and how well the diameters and types match. Open
-`demo/found/overlay.png` to see what a result looks like.
+true fiber (precision), and how well the diameters and types match. With the
+current network on an Apple M5 Pro, the three commands take about 1 s, 4 s
+and under a second, and the comparison reads:
+
+```text
+found 66 fibers, 12.5 mm; true 67 fibers, 12.1 mm
+centerlines within 0.5 true radii: recall 0.996, precision 0.966, F1 0.981
+true type 1: 53 fibers, median diameter 10.5 um; 51 found fibers lie on them, median diameter 10.4 um
+true type 2: 14 fibers, median diameter 21 um; 14 found fibers lie on them, median diameter 20.1 um
+typed like the true fiber they lie on: 100.0% of the matched found length
+```
+
+Your numbers should come out close to these (another network file gives
+somewhat different ones); much lower ones mean something is wrong with the
+install or the network file. Open `demo/found/overlay.png` to see what a
+result looks like.
 
 The demo scan is much simpler than a real scan; it shows that the install and
 the network file work, not how well the method does on your sample.
@@ -86,8 +110,9 @@ the network file work, not how well the method does on your sample.
 python check_scan.py my_scan.tif
 ```
 
-It prints what the file holds and saves `my_scan_check.png`, the middle slice
-in each direction next to the histogram of grey values:
+It saves `my_scan_check.png` in the current folder (or the one given with
+`--out`), the middle slice in each direction next to the histogram of grey
+values, and prints what the file holds:
 
 ```text
 my_scan.tif: TIFF stack (ImageJ), 1024 x 1024 x 800 voxels (x, y, z), uint16, 1.7 GB
@@ -173,8 +198,8 @@ python find_fibers.py my_scan.tif --weights best.pt --diameters 12um,30um --cent
 ```
 
 `--center-crop 256` analyses a 256-voxel cube from the middle (27 tiles for
-the network), which is quick on a GPU. The results go to `my_scan_fibers/` (or
-the folder you give with `--out`).
+the network), which is quick on a GPU: about 10 s in all on an M5 Pro. The
+results go to `my_scan_fibers/` (or the folder you give with `--out`).
 
 Open `overlay.png` for a quick look, then **open `overlay.tif` in Fiji**
 (File > Open; it opens as a stack in micrometers) and page through the slices.
@@ -205,7 +230,9 @@ python find_fibers.py my_scan.tif --weights best.pt --diameters 12um,30um
 ```
 
 It prints how many 128-voxel tiles the network has to look at and, as it goes,
-the time left. On a big scan this takes a while; meanwhile:
+the time left. On an M5 Pro the network takes about 0.3 s a tile on the GPU
+(a 384-voxel cube, 125 tiles, took 42 s in all) and about 8 s a tile on the
+CPU. On a big scan this takes a while; meanwhile:
 
 - **Stopping is safe.** Press Ctrl-C, or let the computer sleep. Running the
   same command again carries on from the saved progress in
@@ -239,7 +266,7 @@ the time left. On a big scan this takes a while; meanwhile:
 | `diameters.csv` | with `--diameter-profile`: the diameter at every voxel along every fiber, and an oval's long and short widths | Excel, Python |
 | `fibers.vtk`, `bonds.vtk` | the centerlines and bonds | ParaView |
 | `fibers.dump`, `view_in_ovito.py` | the fibers as chains of capsules, and bonds | OVITO |
-| `fit.json` | the fibers in Tangle's format | Tangle (step 7) |
+| `fit.json` | the fibers in Tangle's format, smoothed to its bend limit | Tangle (step 7) |
 | `run.json` | every setting of the run | a text editor |
 
 **Coordinates and units.** Everything is in micrometers, measured from the
@@ -301,9 +328,16 @@ print(run.max_penetration)
 populations = fit.suggested_population()     # FiberPopulation(s) with the measured statistics, one per type
 ```
 
-The traced centerlines can overlap a little where fibers touch; `relax` pushes
-them apart with Tangle's own solver. From an assembly, everything else in
-Tangle applies: analysis, OVITO and PuMA export (see the
+Tangle takes a fiber only if it bends no tighter than its type's bend limit
+(5 diameters unless set otherwise), and traced centerlines wiggle by a fraction
+of a voxel. So in `fit.json` each centerline is resampled one radius of its
+type apart and smoothed where it bends tighter than that; `summary.txt` says
+how far this moved the fibers (on the demo scan, 2.6 µm at most), and the
+tables and stacks keep the traced lines. The traced centerlines can also
+overlap a little where fibers touch; `relax` pushes them apart with Tangle's
+own solver. On the demo scan it takes under 2 s on an M5 Pro's GPU and leaves
+overlaps of a few nanometers. From an assembly, everything else in Tangle
+applies: analysis, OVITO and PuMA export (see the
 [PuMA guide](puma_interoperability.md)).
 
 ## Options at a glance
