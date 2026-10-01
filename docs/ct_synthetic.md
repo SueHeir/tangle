@@ -123,7 +123,8 @@ training.
 ## Making one
 
 ```python
-import ct_examples as ex                       # crates/tangle_python/python/examples
+from pathlib import Path
+import ct_examples as ex                       # run from crates/tangle_python/python/examples
 example = ex.EXAMPLES["dense_hard_7"](Path("cache/dense_hard_7.json"))
 scan = example.scan                            # the SyntheticScan
 ```
@@ -132,5 +133,5 @@ or build any structure and scan it directly, as in the example at the top of
 [ct_scanner.md](ct_scanner.md). To redo the pictures on this page:
 
 ```sh
-python examples/ct_synthetic/make_figures.py CACHE_DIR docs/media --ovito PYTHON_WITH_OVITO
+python crates/tangle_python/python/examples/ct_synthetic/make_figures.py CACHE_DIR docs/media --ovito PYTHON_WITH_OVITO
 ```

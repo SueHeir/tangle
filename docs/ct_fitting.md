@@ -24,9 +24,10 @@ Every step of the method: [ct_fitting_internals.md](ct_fitting_internals.md).
 The fibers move in Tangle's own solver (`tangle.ImageRelaxer`), on the GPU
 by default, with the scan as an extra force. Contact, segment lengths and
 the bend limit hold throughout, so every fit comes out as round,
-non-overlapping tubes within the bend limit. The rest is Python and needs
-NumPy and SciPy. `tifffile` and `matplotlib` are optional and add the TIFF
-and PNG outputs.
+non-overlapping tubes within the bend limit. The rest is Python; install with
+`maturin develop --release --extras ct ...` (see the
+[Python guide](../crates/tangle_python/README.md)) for NumPy, SciPy and the
+TIFF and PNG writers.
 
 The input is the **raw grey scan with a grey profile per fiber type**
 (`FiberSpec(profile=(...))`: the type's grey at evenly spaced radii from
@@ -42,14 +43,24 @@ they are. Pass `exclude=` with a mask of voxels known not to be fiber to
 hide them from the fit.
 
 ```python
+import numpy as np
+import tangle
 import tangle.ct as ct
 from tangle.units import um
 
+# Something to try it on: a simulated scan of 40 random 10 um fibers.
+# With your own scan, `volume` is its (z, y, x) array (see ct.open_scan).
+recipe = tangle.Recipe(tangle.Cell([150 * um] * 3, periodic="xyz"))
+recipe.insert(tangle.FiberPopulation(material=tangle.Material("fiber", diameter=10 * um), count=40))
+scan = ct.synthetic_ct(recipe.run(), voxel_size=1.5 * um)
+volume, mask = scan.volume, scan.fiber_mask()
+not_fiber = np.zeros(mask.shape, dtype=bool)
+
 spec = ct.FiberSpec(diameter=10 * um, min_bend_radius=40 * um)
-fit = ct.fit_fibers(mask, voxel_size=1.3 * um, spec=spec)   # mask: (z, y, x) array
+fit = ct.fit_fibers(mask, voxel_size=1.5 * um, spec=spec)   # mask: (z, y, x) array
 profiled = spec.replace(profile=(21e3, 21e3, 22e3, 30e3, 31e3))  # grey from axis to surface
-fit = ct.fit_fibers(volume, 1.3 * um, profiled)              # raw scan, fits judged on grey
-fit = ct.fit_fibers(mask, 1.3 * um, spec, exclude=not_fiber)  # optional: voxels known not to be fiber
+fit = ct.fit_fibers(volume, 1.5 * um, profiled)              # raw scan, fits judged on grey
+fit = ct.fit_fibers(mask, 1.5 * um, spec, exclude=not_fiber)  # optional: voxels known not to be fiber
 fit.write("fit_output", volume=volume)   # fit.json, labels.tif, overlay.tif, overlay.png
 assembly = fit.to_assembly()             # cell = scanned volume, not periodic
 population = fit.suggested_population()  # generate statistically similar structures
@@ -366,7 +377,7 @@ Tile size trades memory and time per tile against the share of each tile
 spent on padding: a tile fits `(1 + 2 overlap / tile)³` times its core's
 volume, e.g. 1.95 times for 256-voxel cores with 32 voxels of overlap. Each tile is an ordinary `fit_fibers` run with
 the same settings, so everything else in this page applies per tile.
-`examples/ct_tiled_scan.py` fits a large synthetic scan in tiles (or whole,
+`crates/tangle_python/python/examples/ct_tiled_scan.py` fits a large synthetic scan in tiles (or whole,
 for comparison) and scores it.
 
 ## Examples
@@ -417,9 +428,11 @@ its own seed, so a name is always the same structure: 8–16 µm fibers at
 noise and blur, all in a scan 160 voxels a side. `score.json` records the
 settings. They run only when named, or with `--varied`.
 
+From `crates/tangle_python/python/examples/`:
+
 ```
 python ct_examples.py --list
-python ct_examples.py                       # all but varied_*, into $TANGLE_CT_OUTPUT or examples/output/ct
+python ct_examples.py                       # all but varied_*, into $TANGLE_CT_OUTPUT or output/ct next to the script
 python ct_examples.py --varied              # all, including varied_*
 python ct_examples.py two_types scenario_gap_6r --output ~/ct-results
 python ct_examples.py --varied --blur 0.45    # every scan with less blur (PSF sigma, voxels)

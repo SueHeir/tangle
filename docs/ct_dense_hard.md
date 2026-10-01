@@ -113,6 +113,7 @@ SETTINGS=(
   --set straight_join=true --set bend_finish=true --set bend_finish_grey_min=0.4
   --set model_recenter=true --set residual_births=true
 )
+# from crates/tangle_python/python/examples/
 python ct_examples.py dense_hard_5 --input broad "${SETTINGS[@]}"
 python ct_examples.py $(seq -f 'dense_hard_%g' 1 18) --input broad "${SETTINGS[@]}" --output ~/ct-dense-hard
 DENSE_HARD_COUNT=36 python ct_examples.py $(seq -f 'dense_hard_%g' 19 36) --input broad "${SETTINGS[@]}"

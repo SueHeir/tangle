@@ -431,6 +431,17 @@ class RecipeTests(unittest.TestCase):
         self.assertIn("strict", caught.exception.operation)
         self.assertIn("penetration", caught.exception.reason)
 
+    def test_needling_a_layer_not_yet_inserted_raises_recipe_error(self):
+        recipe = tangle.Recipe(tangle.Cell([1.0, 1.0, 1.0]))
+        recipe.insert(two_crossing_fibers())
+        with recipe.needle_layer(
+            2, footprint=tangle.CircularFootprint([0.5, 0.5], diameter=0.2), depth=0.1
+        ):
+            recipe.relax_for(1)
+        with self.assertRaises(tangle.RecipeError) as caught:
+            recipe.run(tangle.RelaxationSettings(backend="cpu"))
+        self.assertIn("not been inserted", caught.exception.reason)
+
     def test_a_result_assembly_continues_in_a_new_recipe(self):
         recipe = tangle.Recipe(tangle.Cell([1.0, 1.0, 1.0]))
         fibers = two_crossing_fibers()
