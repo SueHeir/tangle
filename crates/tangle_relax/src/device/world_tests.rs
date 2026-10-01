@@ -2108,3 +2108,60 @@ fn off_center_contact_turns_an_oval() {
     relaxed.validate().unwrap();
     assert!(relaxed.geometry.placed.directors[0][2].abs() > 0.01);
 }
+
+#[test]
+fn a_fiber_through_the_middle_of_a_flat_oval_is_pushed_out() {
+    // A round fiber pierces a flat oval face-on, a little off its center
+    // line. The oval's lanes lie on both sides of it: pushed apart lane by
+    // lane they cancel and the pair stays locked, so every lane must move
+    // the oval the same way, until the fiber is past its edge.
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([4.0; 3], [false; 3]));
+    let material = assembly.materials.add("fiber");
+    let oval = assembly.sections.add(Section::Elliptical {
+        semi_axes: [0.15, 0.075],
+    });
+    let round = assembly.sections.add(Section::Circular { radius: 0.05 });
+    let axis = [[1.0, 2.0, 2.0], [3.0, 2.0, 2.0]];
+    let through = [[2.0, 2.03, 1.0], [2.0, 2.03, 3.0]];
+    assembly
+        .add_fiber(FiberId(1), material, oval, &axis, &axis)
+        .unwrap();
+    assembly
+        .add_fiber(FiberId(2), material, round, &through, &through)
+        .unwrap();
+    let (world, status) = relax_ovals(&assembly);
+    assert!(status.converged, "{status:?}");
+    let positions = world.download_positions();
+    let apart = 0.5 * (positions[7] + positions[10]) - 0.5 * (positions[1] + positions[4]);
+    assert!(
+        apart > 0.2 - 1.0e-3,
+        "fiber {apart} from the oval's center line"
+    );
+}
+
+#[test]
+fn deeply_overlapping_parallel_flat_ovals_stay_stacked() {
+    // Parallel flat ovals stacked face to face, offset sideways and sharing
+    // most of their thickness, so lanes of each lie past the other's. They
+    // still come apart mostly by their thickness: the upper one stays above,
+    // and they are not pushed past each other's edges.
+    for (side, height) in [(0.05, 0.01), (0.1, 0.03)] {
+        let assembly = oval_pair(
+            [
+                [1.0, 2.0 + side, 2.0 + height],
+                [3.0, 2.0 + side, 2.0 + height],
+            ],
+            [false; 3],
+        );
+        let (world, status) = relax_ovals(&assembly);
+        assert!(status.converged, "{status:?}");
+        let positions = world.download_positions();
+        let sideways = 0.5 * (positions[7] + positions[10]) - 0.5 * (positions[1] + positions[4]);
+        let up = 0.5 * (positions[8] + positions[11]) - 0.5 * (positions[2] + positions[5]);
+        assert!(up > 0.05, "upper oval ended {up} above the lower one");
+        assert!(
+            sideways.abs() < 0.3,
+            "ovals {sideways} apart sideways, past their width"
+        );
+    }
+}

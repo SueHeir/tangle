@@ -534,6 +534,107 @@ pub fn find_segment_corrections(
                         eb2y = t2z * b2x - t2x * b2z;
                         eb2z = t2x * b2y - t2y * b2x;
                     }
+                    // A fiber through the middle of an oval has lanes on both
+                    // sides of it, and their own normals push the oval both
+                    // ways at once (and turn it square to the fiber, where it
+                    // locks). The closest points of the two center lines say
+                    // which way the oval must go: a lane lying past the other
+                    // fiber, seen from that line, is pushed along this shared
+                    // normal instead of its own, so every lane moves the oval
+                    // the same way.
+                    let oval_pair = lanes1 > 1 || lanes2 > 1;
+                    let mut shared_x = 0.0_f32;
+                    let mut shared_y = 0.0_f32;
+                    let mut shared_z = 0.0_f32;
+                    if oval_pair {
+                        let rx = p1x - p2x;
+                        let ry = p1y - p2y;
+                        let rz = p1z - p2z;
+                        let a = d1x * d1x + d1y * d1y + d1z * d1z;
+                        let e = d2x * d2x + d2y * d2y + d2z * d2z;
+                        let f = d2x * rx + d2y * ry + d2z * rz;
+                        let mut s = 0.0_f32;
+                        let mut t = 0.0_f32;
+                        if a <= length_epsilon && e > length_epsilon {
+                            t = (f / e).clamp(0.0, 1.0);
+                        } else if a > length_epsilon {
+                            let c = d1x * rx + d1y * ry + d1z * rz;
+                            if e <= length_epsilon {
+                                s = (-c / a).clamp(0.0, 1.0);
+                            } else {
+                                let b = d1x * d2x + d1y * d2y + d1z * d2z;
+                                let denominator = a * e - b * b;
+                                if denominator.abs() > parallel_relative_epsilon * a * e {
+                                    s = ((b * f - c * e) / denominator).clamp(0.0, 1.0);
+                                }
+                                let projected = (b * s + f) / e;
+                                if projected < 0.0 {
+                                    s = (-c / a).clamp(0.0, 1.0);
+                                } else if projected > 1.0 {
+                                    t = 1.0;
+                                    s = ((b - c) / a).clamp(0.0, 1.0);
+                                } else {
+                                    t = projected;
+                                }
+                            }
+                        }
+                        shared_x = p2x + d2x * t - p1x - d1x * s;
+                        shared_y = p2y + d2y * t - p1y - d1y * s;
+                        shared_z = p2z + d2z * t - p1z - d1z * s;
+                        let mut shared_length =
+                            (shared_x * shared_x + shared_y * shared_y + shared_z * shared_z)
+                                .sqrt();
+                        if shared_length <= 1.0e-7_f32 {
+                            // The center lines meet: use their common
+                            // perpendicular, signed so both segments agree.
+                            shared_x = d1y * d2z - d1z * d2y;
+                            shared_y = d1z * d2x - d1x * d2z;
+                            shared_z = d1x * d2y - d1y * d2x;
+                            shared_length =
+                                (shared_x * shared_x + shared_y * shared_y + shared_z * shared_z)
+                                    .sqrt();
+                            if shared_length <= 1.0e-7_f32 {
+                                if d1x.abs() <= d1y.abs() && d1x.abs() <= d1z.abs() {
+                                    shared_x = 0.0;
+                                    shared_y = d1z;
+                                    shared_z = -d1y;
+                                } else if d1y.abs() <= d1z.abs() {
+                                    shared_x = -d1z;
+                                    shared_y = 0.0;
+                                    shared_z = d1x;
+                                } else {
+                                    shared_x = d1y;
+                                    shared_y = -d1x;
+                                    shared_z = 0.0;
+                                }
+                                shared_length = (shared_x * shared_x
+                                    + shared_y * shared_y
+                                    + shared_z * shared_z)
+                                    .sqrt();
+                            }
+                            if shared_length <= 1.0e-7_f32 {
+                                shared_x = 1.0;
+                                shared_y = 0.0;
+                                shared_z = 0.0;
+                                shared_length = 1.0;
+                            }
+                            let dominant = if shared_x.abs() >= shared_y.abs()
+                                && shared_x.abs() >= shared_z.abs()
+                            {
+                                shared_x
+                            } else if shared_y.abs() >= shared_z.abs() {
+                                shared_y
+                            } else {
+                                shared_z
+                            };
+                            if (dominant < 0.0) != (segment_index > other) {
+                                shared_length = -shared_length;
+                            }
+                        }
+                        shared_x /= shared_length;
+                        shared_y /= shared_length;
+                        shared_z /= shared_length;
+                    }
                     for lane1 in 0..lanes1 {
                         let mut c1 = 0.0_f32;
                         if lanes1 > 1 {
@@ -635,6 +736,11 @@ pub fn find_segment_corrections(
                             let distance =
                                 (delta_x * delta_x + delta_y * delta_y + delta_z * delta_z).sqrt();
                             let penetration = lane_radius1 + lane_radius2 - distance;
+                            let along_shared =
+                                delta_x * shared_x + delta_y * shared_y + delta_z * shared_z;
+                            let across = oval_pair
+                                && penetration > 0.0
+                                && (along_shared < 0.0 || distance <= 1.0e-7_f32);
                             let canonical = listed
                                 || (proxy_of(s, proxies) == proxy
                                     && proxy_of(t, segment_proxies[other]) == other_proxy);
@@ -647,7 +753,11 @@ pub fn find_segment_corrections(
                                 let mut nx = 0.0_f32;
                                 let mut ny = 0.0_f32;
                                 let mut nz = 0.0_f32;
-                                if distance > 1.0e-7_f32 {
+                                if across {
+                                    nx = shared_x;
+                                    ny = shared_y;
+                                    nz = shared_z;
+                                } else if distance > 1.0e-7_f32 {
                                     let inverse_distance = 1.0 / distance;
                                     nx = delta_x * inverse_distance;
                                     ny = delta_y * inverse_distance;

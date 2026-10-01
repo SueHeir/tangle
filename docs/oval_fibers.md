@@ -36,7 +36,12 @@ director:
 - There are 2 to 5 lanes, spaced so that the flat sides dip by less than 5 %.
 
 Contact is resolved between every pair of lanes. A contact on an outer lane
-moves the centerline and also turns the oval about its own axis.
+moves the centerline and also turns the oval about its own axis. When another
+fiber runs through the middle of an oval, some lanes lie past it, on the far
+side from the oval's centerline. Those lanes push along the normal between the
+two centerlines instead of their own, so every lane moves the oval the same
+way. Pushed apart lane by lane, the two sides would cancel and the pair would
+stay locked.
 `RelaxationSettings.twist_stiffness`, 0.1 by default, keeps the long axis
 smoothly varying along the fiber. Walls touch the outer lane nearest to them,
 so a flat oval rests on a wall with its thin side.
