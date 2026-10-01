@@ -16,6 +16,8 @@ use crate::common::{choice_name, parse_choice, repr_fields, widen, with_kwargs};
 const BACKENDS: &[(&str, RelaxationBackend)] = &[
     ("wgpu", RelaxationBackend::Wgpu),
     ("cpu", RelaxationBackend::Cpu),
+    #[cfg(feature = "cuda")]
+    ("cuda", RelaxationBackend::Cuda),
 ];
 const MOTION_MODELS: &[(&str, FiberMotion)] = &[
     ("flexible", FiberMotion::Flexible),
