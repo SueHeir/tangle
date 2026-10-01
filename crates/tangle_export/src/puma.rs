@@ -150,6 +150,31 @@ pub enum PumaExportError {
     Analysis(AnalysisWriteError),
 }
 
+/// The voxel size nearest `voxel_size` that divides every cell length into
+/// whole voxels, when the lengths share one (equal or commensurate edges).
+fn tiling_voxel_size(lengths: Vec3, voxel_size: f64) -> Option<(f64, [usize; 3])> {
+    let shortest = (0..3).min_by(|&a, &b| lengths[a].total_cmp(&lengths[b]))?;
+    let base = (lengths[shortest] / voxel_size).round().max(1.0);
+    // Try the shortest edge's nearest counts first, then its neighbours.
+    for step in [0.0, 1.0, -1.0, 2.0, -2.0] {
+        let count = base + step;
+        if count < 1.0 {
+            continue;
+        }
+        let size = lengths[shortest] / count;
+        let mut counts = [0usize; 3];
+        let tiles = (0..3).all(|axis| {
+            let real = lengths[axis] / size;
+            counts[axis] = real.round() as usize;
+            (real - real.round()).abs() / real.max(1.0) <= 1.0e-9
+        });
+        if tiles {
+            return Some((size, counts));
+        }
+    }
+    None
+}
+
 impl fmt::Display for PumaExportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -162,10 +187,24 @@ impl fmt::Display for PumaExportError {
                 voxel_size,
                 lengths,
                 suggested_counts,
-            } => write!(
-                formatter,
-                "voxel size {voxel_size:.6e} does not tile cell lengths {lengths:?}; nearest counts are {suggested_counts:?}"
-            ),
+            } => {
+                write!(
+                    formatter,
+                    "voxel size {voxel_size:.6e} does not divide the cell lengths [{:.6e}, {:.6e}, {:.6e}] into whole voxels; ",
+                    lengths[0], lengths[1], lengths[2]
+                )?;
+                match tiling_voxel_size(*lengths, *voxel_size) {
+                    Some((size, counts)) => write!(
+                        formatter,
+                        "try voxel_size={size:.6e} ({} x {} x {} voxels)",
+                        counts[0], counts[1], counts[2]
+                    ),
+                    None => write!(
+                        formatter,
+                        "nearest counts are {suggested_counts:?}; make each cell length a multiple of the voxel size"
+                    ),
+                }
+            }
             Self::UnsupportedSection { section_index } => write!(
                 formatter,
                 "section {section_index} cannot be voxelized"
@@ -1245,6 +1284,17 @@ mod tests {
         let phase_bytes = u64::from_le_bytes(domain[appended..appended + 8].try_into().unwrap());
         assert_eq!(phase_bytes, 2_000);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_voxel_size_that_does_not_tile_suggests_one_that_does() {
+        let message = PumaExportError::IncommensurateGrid {
+            voxel_size: 1.3e-6,
+            lengths: [150.0e-6; 3],
+            suggested_counts: [115; 3],
+        }
+        .to_string();
+        assert!(message.contains("try voxel_size=1.304348e-6 (115 x 115 x 115 voxels)"), "{message}");
     }
 
     #[test]
