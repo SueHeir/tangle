@@ -503,6 +503,9 @@ def main() -> None:
                   flush=True)
             continue
         table = scan.table if family == "mixed" else point_table(scan)  # mixed: thinning fibers' radii per point
+        if not len(table["pos"]):  # e.g. a sparse scan whose fibers all lie past a cut face: nothing to learn from
+            print(f"{name}: skipped (no fibers in the volume)", flush=True)
+            continue
         near = nearest_points(scan.volume.shape, table["pos"])
         extra = {}
         if family == "mixed":
