@@ -340,7 +340,13 @@ def main() -> None:
     parser.add_argument("count", type=int)
     parser.add_argument("--scanned-share", type=float, default=0.2)
     parser.add_argument("--varied", action="store_true")
+    parser.add_argument("--fast-relax", action="store_true",
+                        help="relax the truth structures for at most 3000 steps with a tighter neighbor skin (about "
+                             "8x faster, the same structures to within a few percent); for training sets, not tests")
     args = parser.parse_args()
+    if args.fast_relax:
+        import ct_examples as ex
+        ex.TRUTH_RELAXATION = {"max_iterations": 3000, "neighbor_skin_scale": 0.5, "neighbor_capacity": 192}
     sys.path.append(str(Path(__file__).resolve().parents[1]))
     import ct_examples as ex
 
