@@ -285,8 +285,10 @@ def main():
         share = (torch.utils.data.distributed.DistributedSampler(crops, num_replicas=world, rank=rank, seed=step)
                  if shared else None)
         loader = DataLoader(crops, batch_size=args.batch, shuffle=share is None, sampler=share, drop_last=True,
-                            num_workers=args.workers,
-                            persistent_workers=False, prefetch_factor=2)
+                            num_workers=args.workers, persistent_workers=False, prefetch_factor=2,
+                            # pinned batches: a helper thread copies each one into page-locked memory, so the
+                            # host-to-GPU copy runs alongside the step instead of in the training loop itself
+                            pin_memory=device.startswith("cuda"))
         model.train()
         tick = time.perf_counter()
         for batch in loader:
