@@ -13,6 +13,7 @@ targets (axis heatmap, offset to the axis, direction, type) are gathers at
 load time.
 
 usage: python make_data.py OUT FIRST COUNT [--scanned-share 0.2] [--varied | --pairs | --hard-pairs | --mixed]
+    [--blur-cap 0.4]
 
 ``--varied`` draws every structure from ``varied_settings``: 1-4 fiber types of any size, shape and brightness,
 any orientation, and a wide range of scanner settings (see there).
@@ -26,10 +27,17 @@ Indices: training from 100001, validation 99001-99032, test 99501-99548.
 ``--bends`` makes ``bends_<index>`` scans (``mixed.bends_settings``): two fiber types of one material and size,
 one straight and one bendable, so only bending tells them apart. Indices: training from 200001, validation
 199001-199032, test 199501-199548.
+
+``--blur-cap F`` keeps every scan's blur at most F times its thinnest fiber type's diameter (``cap_blur``), in any
+family, to leave out scans blurrier than the scanners the network is meant for. (On the test scans the network
+finds fibers much worse past about half the thinnest diameter: F1 about 0.7, against 0.88 or better up to 0.4.)
+Without the option every family draws the blur it always has, so earlier sets can be made again exactly.
 """
 
 import argparse
+import copy
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -91,6 +99,7 @@ EASY_FIRST = 12001  # ... and from here on the same, made clean (an easy start f
 EASY_MAX_BINDER = 0.04  # easy scans with more binder than this share of the volume are skipped
 MIXED_MAX_BINDER = 0.15  # ... and mixed scans with more than this (dense, nearly all crossings bonded with big bonds)
 PAIRS_FIRST = 20001  # pairs_<index> (--pairs): dense_hard scans whose fine fibers lie in touching pairs
+MOTION_FWHM = 2.0 * math.sqrt(2.0 * math.log(2.0))  # cap_blur: fiber motion (RMS) as a Gaussian blur's width
 HARD_PAIRS_FIRST = 21001  # hardpairs_<index> (--hard-pairs): the same made hard to split (see hard_pairs_settings)
 # The true structure must not have fibers passing through each other (overlaps.py): while a pair still shares more
 # than a quarter of the thinner fiber's thickness, relax further (steps, in turn), then try a new placement.
@@ -338,8 +347,35 @@ def overlap_report(truth) -> dict:
     return overlaps.summary(fibers, overlaps.overlapping_pairs(fibers))
 
 
-def varied_scan(index: int, cache: Path, check: bool = True):
-    """Relax (cached) and scan ``varied_<index>``; returns (SyntheticScan, settings)."""
+def cap_blur(settings: dict, cap: float) -> dict:
+    """``settings`` (of any family) with the scan's blur cut back to at most ``cap`` times its thinnest fiber
+    type's diameter. The blur is the scanner's (``resolution``, a full width at half maximum) and the fibers' motion
+    (``fiber_motion``, an RMS displacement, counted as a Gaussian blur of that sigma: width ``MOTION_FWHM`` times
+    it) together, added in quadrature. Where they come to more than the cap, both shrink by the same factor, so the
+    scan keeps its mix of the two; the rest of the draw stays as it was. The result records ``blur_cap``."""
+    s = copy.deepcopy(settings)
+    if "scanner" in s:  # mixed and bends
+        where, resolution_key, motion_key = s["scanner"], "resolution", "fiber_motion"
+        thinnest = min(float(t["diameter"]) for t in s["types"])
+    elif "resolution_um" in s:  # the ct_examples families: dense_hard, scanned, pairs, hard pairs
+        where, resolution_key, motion_key = s, "resolution_um", "fiber_motion_um"
+        thinnest = min(float(s[k]) for k in ("fine_um", "coarse_um") if s.get(k))
+    else:  # varied
+        where, resolution_key, motion_key = s, "resolution", "fiber_motion"
+        thinnest = min(float(t["diameter"]) for t in s["types"])
+    resolution, motion = float(where.get(resolution_key) or 0.0), float(where.get(motion_key) or 0.0)
+    blur = math.hypot(resolution, MOTION_FWHM * motion)
+    if blur > cap * thinnest:
+        shrink = cap * thinnest / blur
+        where[resolution_key] = round(resolution * shrink, 3)
+        where[motion_key] = round(motion * shrink, 3)
+    s["blur_cap"] = cap
+    return s
+
+
+def varied_scan(index: int, cache: Path, check: bool = True, blur_cap: float | None = None):
+    """Relax (cached) and scan ``varied_<index>``; returns (SyntheticScan, settings). ``blur_cap``: see
+    ``cap_blur``."""
     import hashlib
     from dataclasses import replace
 
@@ -349,6 +385,8 @@ def varied_scan(index: int, cache: Path, check: bool = True):
     from tangle.units import um
 
     v = varied_settings(index)
+    if blur_cap:
+        v = cap_blur(v, blur_cap)
     for placement in range(PLACEMENTS if check else 1):  # fibers still through each other: place them anew
         for crowd in (1.0, 0.6, 0.35):  # too crowded to place every fiber: fewer fibers, same everything else
             try:
@@ -462,7 +500,14 @@ def main() -> None:
                         help="two types of one material and size, one straight, one bendable (bends_<index>)")
     parser.add_argument("--no-overlap-check", action="store_true",
                         help="keep structures whose fibers pass through each other (as every set made before had them)")
+    parser.add_argument("--blur-cap", type=float, default=None,
+                        help="keep each scan's blur (scanner and fiber motion together) at most this many times its "
+                             "thinnest fiber type's diameter (see cap_blur); off by default")
     args = parser.parse_args()
+
+    def capped(settings):  # a family's settings with the blur cap, when one is asked for
+        return (lambda index: cap_blur(settings(index), args.blur_cap)) if args.blur_cap else settings
+
     if args.fast_relax:
         import ct_examples as ex
         ex.TRUTH_RELAXATION = {"max_iterations": 3000, "neighbor_skin_scale": 0.5, "neighbor_capacity": 192}
@@ -483,17 +528,17 @@ def main() -> None:
         started = time.perf_counter()
         try:
             if family == "varied":
-                scan, varied = varied_scan(index, cache, check=not args.no_overlap_check)
+                scan, varied = varied_scan(index, cache, check=not args.no_overlap_check, blur_cap=args.blur_cap)
             elif family in ("mixed", "bends"):
                 import mixed
 
                 scan, varied = mixed.mixed_scan(index, cache, check_overlaps=not args.no_overlap_check,
-                                                settings=mixed.bends_settings if family == "bends" else
-                                                mixed.mixed_settings)
+                                                settings=capped(mixed.bends_settings if family == "bends" else
+                                                                mixed.mixed_settings))
             else:
                 settings = {"dense_hard": ex.dense_hard_settings, "pairs": pairs_settings,
                             "hardpairs": hard_pairs_settings}.get(family, ex.scanned_settings)
-                example = ex.scanned(index, settings)(cache / f"{name}.json")
+                example = ex.scanned(index, capped(settings))(cache / f"{name}.json")
                 scan, varied = example.scan, None
                 if not args.no_overlap_check:  # no relaxing further here: a structure that fails is left out
                     import overlaps
