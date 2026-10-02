@@ -16,6 +16,8 @@ the per-fiber typing (``fiber_types.py``) work for any mix of sizes. The first n
 fine / coarse logits in place of 10-11) still load; ``predict`` turns their output into this layout.
 """
 
+import math
+
 import numpy as np
 import torch
 from torch import nn
@@ -360,17 +362,29 @@ def predict(model: nn.Module, volume: np.ndarray, device: str, grey: tuple[float
 
 
 def widen(small: nn.Module, base: int) -> nn.Module:
-    """A wider copy of ``small`` (Net2Net style) that starts out computing nearly the same maps.
+    """A wider copy of ``small`` (Net2Net style) that starts out computing the same maps.
 
     Every layer's trained channels are copied into the first channels of the wider layer; the new channels get
     fresh weights for their own outputs but zero weight wherever they feed an old channel, so on the first step
-    they change nothing downstream. Group norm regroups some layers' channels, so the start is close to, not
-    exactly, the small network.
+    they change nothing downstream. Each level keeps its norm groups' size, so the old channels stay in groups of
+    their own; ``base`` must keep every level a whole number of groups (a ValueError names widths that do). A
+    hint-conditioned network stays conditioned: its hint network is copied and every old channel keeps its scale
+    and shift, while the new channels start with none. It keeps ``small``'s outputs and hint inputs: grow those
+    first (train.py --init does) to widen a network from before the newer outputs or hints.
     """
-    old_w = [small.down[0][0].out_channels * 2**k for k in range(len(small.down))]
+    levels = len(small.down)
+    old_w = [small.down[0][0].out_channels * 2**k for k in range(levels)]
     sizes = [w // small.down[k][1].num_groups for k, w in enumerate(old_w)]
-    wide = UNet3D(base=base, channels=small.head.out_channels, group_sizes=sizes)
-    new_w = [base * 2**k for k in range(len(small.down))]
+    new_w = [base * 2**k for k in range(levels)]
+    if base <= old_w[0] or any(n % size for n, size in zip(new_w, sizes)):
+        step = math.lcm(*(size // math.gcd(size, 2**k) for k, size in enumerate(sizes)))
+        fits = [(old_w[0] // step + 1 + i) * step for i in range(3)]
+        raise ValueError(f"can't widen base {old_w[0]} to {base}: its norm groups ({', '.join(map(str, sizes))} "
+                         f"channels, level by level) need a wider base that is a multiple of {step}, e.g. "
+                         f"{', '.join(map(str, fits))}")
+    condition = getattr(small, "condition", False)
+    wide = UNet3D(base=base, channels=small.head.out_channels, group_sizes=sizes, condition=condition,
+                  code_size=small.film[0].in_features if condition else HINT_CODE)
     small_state, wide_state = small.state_dict(), wide.state_dict()
     for name, target in wide_state.items():
         source = small_state[name]
@@ -378,7 +392,16 @@ def widen(small: nn.Module, base: int) -> nn.Module:
             wide_state[name] = source.clone()
             continue
         target = target.clone()
-        if target.ndim > 1:
+        if name.startswith("film."):
+            # the hint network's last layer: per block, a scale row for each channel, then a shift row for each;
+            # the old channels keep theirs, the new ones start at zero (left as they are)
+            target.zero_()
+            old_at = new_at = 0
+            for o, n in zip(small.film_widths, wide.film_widths):
+                target[new_at:new_at + o] = source[old_at:old_at + o]
+                target[new_at + n:new_at + n + o] = source[old_at + o:old_at + 2 * o]
+                old_at, new_at = old_at + 2 * o, new_at + 2 * n
+        elif target.ndim > 1:
             target[:, source.shape[1]:] = 0.0  # new inputs feed nothing yet
             if name.startswith("merge.") and name.endswith(".0.weight"):
                 # the first conv of a merge block reads [upsampled, skip]: both halves move

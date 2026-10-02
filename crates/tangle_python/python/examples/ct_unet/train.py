@@ -93,6 +93,9 @@ def main():
     parser.add_argument("out", type=Path)
     parser.add_argument("--steps", type=int, default=20000)
     parser.add_argument("--crop", type=int, default=128)
+    parser.add_argument("--batch", type=int, default=1,
+                        help="training crops per step (a big GPU sits partly idle on one 128^3 crop); validation "
+                             "stays one crop at a time, so its loss compares across batch sizes")
     parser.add_argument("--base", type=int, default=16)
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--log-every", type=int, default=50)
@@ -143,10 +146,7 @@ def main():
     WEIGHTS["binder"] = args.binder_weight
     maps_module.BINDER_POSITIVE = args.binder_positive
 
-    if args.widen:
-        model = widen(load(args.init, "cpu"), args.widen).to(device)
-        args.base = args.widen
-    elif args.init:
+    if args.init:
         source = load(args.init, "cpu")
         args.base = source.down[0][0].out_channels
         hints_in = source.film[0].in_features if getattr(source, "condition", False) else HINT_CODE
@@ -180,6 +180,14 @@ def main():
                 model.head.bias[:10] = head_b[:10]
     else:
         model = UNet3D(base=args.base).to(device)
+    if args.widen:  # after --init has grown the outputs and hint inputs, so the wide network has them all
+        if not args.init:
+            raise SystemExit("--widen widens the --init network: give --init too")
+        try:
+            model = widen(model.cpu(), args.widen).to(device)
+        except ValueError as error:
+            raise SystemExit(f"--widen: {error}") from None
+        args.base = args.widen
     step, best = 0, float("inf")
     if args.condition and not getattr(model, "condition", False):
         conditioned = UNet3D(base=args.base, channels=model.head.out_channels, group_sizes=model.group_sizes,
@@ -215,8 +223,8 @@ def main():
         # Re-list each pass (or every --refresh-every steps) so volumes still being generated join as they land.
         files = volumes(args.data)
         rates = {"blank": args.blank_rate, "sizes": args.size_rate, "binder": args.hint_rate, "extra": args.extra_rate}
-        loader = DataLoader(Crops(files, args.crop, 2, step, noise=args.noise, hint_rates=rates), batch_size=1,
-                            shuffle=True, num_workers=args.workers,
+        loader = DataLoader(Crops(files, args.crop, 2, step, noise=args.noise, hint_rates=rates),
+                            batch_size=args.batch, shuffle=True, drop_last=True, num_workers=args.workers,
                             persistent_workers=False, prefetch_factor=2)
         model.train()
         tick = time.perf_counter()
