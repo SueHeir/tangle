@@ -217,7 +217,8 @@ See [solver and architecture notes](docs/architecture.md) for details.
   the known fiber sizes and whether the sample is bonded can be given as hints.
   On the simulated `dense_hard` sets it traces 99.5% centerline F1, against
   91.5% for the grey fitter, and whole scans run in overlapping tiles. See the
-  [CT map network guide](docs/ct_unet.md).
+  [CT map network guide](docs/ct_unet.md), and the
+  [tutorial](docs/ct_unet_tutorial.md) for running it on your own scan.
 
   ![Simulated scan, network maps and traced fibers](docs/media/ct-unet-maps.png)
 
@@ -228,6 +229,7 @@ See [solver and architecture notes](docs/architecture.md) for details.
 · [CT fitting results](crates/tangle_python/python/examples/ct_results/README.md)
 · [Synthetic CT scans](docs/ct_synthetic.md)
 · [CT map network](docs/ct_unet.md)
+· [CT network tutorial](docs/ct_unet_tutorial.md)
 
 ## Backends and reproducibility
 

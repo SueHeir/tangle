@@ -3,10 +3,15 @@
 A 3D U-Net, trained on Tangle's simulated scans, turns a CT scan into maps (axis heatmap, offset to each
 voxel's own axis, sign-free direction, fiber type), and a short tracer reads the fibers off the maps.
 Centerline F1 on the simulated `dense_hard` sets: 0.995, against 0.915 for the grey fitter.
-See [docs/ct_unet.md](../../../../../docs/ct_unet.md) for the method, results and commands.
+See [docs/ct_unet.md](../../../../../docs/ct_unet.md) for the method, results and commands, and the
+[tutorial](../../../../../docs/ct_unet_tutorial.md) to run it on your own scan.
 
 | file | what it does |
 |---|---|
+| `check_scan.py` | a first look at any scan: size, voxel size, grey levels, and the fiber sizes the network finds |
+| `find_fibers.py` | the fibers of any scan, from tiles of the network to tables, Fiji stacks, ParaView, OVITO and `fit.json` |
+| `scan_io.py`, `fiber_outputs.py` | reading scans in the common formats; writing the results |
+| `make_demo_scan.py`, `compare_fibers.py` | a small made-up scan with known fibers, and scoring found fibers against known ones |
 | `make_data.py` | simulated training scans and their truth |
 | `mixed.py` | the `--mixed` scans: every kind of variety at random inside each scan |
 | `overlaps.py` | the check that no true fibers pass through each other |

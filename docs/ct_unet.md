@@ -6,6 +6,9 @@ make fibers easy to follow, and a short tracer reads the fibers off the maps.
 The traced centerlines can then go through one Tangle solve (contacts, bend
 limits, known fiber sizes) like any fit.
 
+To run it on your own scan, step by step, see the
+[tutorial](ct_unet_tutorial.md).
+
 The code is in
 [`crates/tangle_python/python/examples/ct_unet/`](../crates/tangle_python/python/examples/ct_unet/).
 It needs PyTorch (Apple GPU, CUDA or CPU), NumPy, SciPy and, for the figure,
@@ -191,7 +194,10 @@ for measurement, not for simulation input.
 
 ## Running it
 
-From `crates/tangle_python/python/examples/ct_unet/`, with `tangle` importable:
+For your own scan in any common format, `find_fibers.py` does all of the below
+and writes the results for Fiji, ParaView, OVITO and Tangle: see the
+[tutorial](ct_unet_tutorial.md). Training and scoring, from
+`crates/tangle_python/python/examples/ct_unet/`, with `tangle` importable:
 
 ```sh
 python make_data.py DATA 1001 400                      # training scans (indices past the test sets)
