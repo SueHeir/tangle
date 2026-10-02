@@ -1,3 +1,4 @@
+# Copied from examples/ct_unet/maps.py by its sync_package.py: change that file, then run it again.
 """The CT map network: a 3D U-Net from a scan to maps a fiber fitter reads easily.
 
 Output channels, per voxel (vectors in voxel units, components in (x, y, z)

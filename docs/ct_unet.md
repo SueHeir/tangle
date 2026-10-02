@@ -72,11 +72,16 @@ one network handles any number of fiber types.
 
 **Hints.** The network can be told what is known about the sample, through a
 small code that scales and shifts the features after every block (FiLM; it
-starts as a no-op, so a trained network can be extended with it): the fiber
-diameters (a soft histogram of their logs), and whether the scan is bonded (and
-the bond size relative to the fibers). Each hint is optional; training crops
-get it only part of the time (sizes jittered by ±10%), so the network works
-with or without.
+starts as a no-op, so a trained network can be extended with it). Every hint
+is optional: the fiber types' diameters (any number as a soft histogram of
+their logs, and up to four one by one, each with its section shape and whether
+it is hollow, if known), whether there is binder (and the bond size relative to
+the fibers), and whether the sample has short broken fiber pieces, dust or
+voids (`maps.size_code`). Training crops get a random part of what is true
+about their scan, about a third of them nothing at all (sizes jittered by
+±10%), so one network works with any hints or none (`maps.draw_hints`).
+Networks trained before the type, broken-piece, dust and void hints read only
+the first part of the code (sizes and binder) and work exactly as before.
 
 The network is a plain 3D U-Net: four 2x poolings (128³ down to 8³), two
 3x3x3 convolutions with group norm per level, skip connections, and a 1x1 head.
@@ -144,6 +149,19 @@ are cheap gathers at load time. The sets:
   (Tangle's junction capture, bond size 0.3-1.5 fiber radii); from 7001 the
   binder takes several shapes (bridge, meniscus, blob) and some fibers carry a
   binder coating that bonds nothing.
+- **`mixed`** (`--mixed`, from 100001; validation 99001-99032, test
+  99501-99548): every kind of variety at random inside each scan
+  ([`mixed.py`](../crates/tangle_python/python/examples/ct_unet/mixed.py)).
+  Fibers straight, gently bent, tightly curled or crimped (a wave or a zigzag,
+  flat or helical), some with loops or hairpins; single, in bundles, in twisted
+  yarn-like bundles or in touching pairs; round, oval or hollow, with a spread
+  of diameters or thinning along their length. Binder bonds, webs and blobs
+  (some with air bubbles), dust (a few grains dense enough to streak), short
+  broken fiber pieces and voids; cut faces with air beyond them and the edge
+  of the field of view; nearly empty to dense. The scanner's flaws too: rings,
+  streaks, beam-hardening cupping, slice-to-slice drift, phase halos, resin
+  embedding. Every structure passes the overlap check, fibers against each
+  other and against themselves (loops, hairpins, coils).
 
 [`train.py`](../crates/tangle_python/python/examples/ct_unet/train.py): 128³
 random crops (several data folders at once, a folder named twice counts twice),

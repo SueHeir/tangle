@@ -117,6 +117,10 @@ def main():
     parser.add_argument("--bond-threshold", type=float, default=0.5, help="binder probability that counts as binder")
     parser.add_argument("--known-sizes", action="store_true",
                         help="give the network (if conditioned) and the typing each type's true diameter")
+    parser.add_argument("--all-hints", action="store_true",
+                        help="give the network every hint the truth allows (maps.scan_hints: sizes, section shapes, "
+                             "hollowness, binder, broken pieces, dust, voids; for ct_examples scans sizes and no "
+                             "binder); the typing gets the sizes too")
     parser.add_argument("--min-length", type=float, help="voxels (default: 3 x the smallest true diameter)")
     args = parser.parse_args()
     model = None
@@ -124,7 +128,7 @@ def main():
         import torch
         from maps import load, predict
 
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
+        device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         model = load(args.maps, device)
     scores, typing = [], []
     for name in args.examples:
@@ -144,7 +148,12 @@ def main():
             radii = None
         else:
             sizes = [2.0 * float(np.median(truth_radii[truth_types == t])) for t in np.unique(truth_types)]
-            if model is not None:
+            if model is not None and args.all_hints:
+                from maps import scan_hints
+
+                said = scan_hints(np.load(name)) if data is not None else {"diameters": sizes, "bonds": False}
+                maps = predict(model, volume, device, **said)
+            elif model is not None:
                 bonded = data is not None and "bond_labels" in data and bool(np.any(data["bond_labels"]))
                 maps = predict(model, volume, device, diameters=sizes if args.known_sizes else None,
                                bonds=bonded if args.bond_hint else None)
@@ -161,7 +170,7 @@ def main():
         extra = ""
         if radii is not None and k > 1 and len(lines) >= k:
             grey = levels(volume[::2, ::2, ::2])
-            if args.known_sizes:
+            if args.known_sizes or args.all_hints:
                 kinds = assign_by_size(radii, sizes)
             else:
                 kinds, _ = assign_types(features(lines, radii, volume, grey), k)

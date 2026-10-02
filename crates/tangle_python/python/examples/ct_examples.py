@@ -135,6 +135,11 @@ DIFF_COLORS = {"missed": (230, 50, 50), "extra": (60, 120, 255), "wrong_fiber": 
 FILES = ("raw.tif", "input.tif", "true.tif", "segment.tif", "diff.tif", "confidence.tif", "fit.json", "score.json")
 
 
+
+# Relaxation of the true structures. Crowded mixed-size packings stall long before the cap (the worst overlap and
+# bend stop improving within ~2000 steps), so make_data --fast-relax trades the cap down for training scans.
+TRUTH_RELAXATION: dict = {"max_iterations": 12_000}
+
 def render_scan(*args, **kwargs) -> ct.SyntheticScan:
     """``ct.synthetic_ct``, with the scan blur set by ``--blur`` if given."""
     if BLUR is not None:
@@ -171,7 +176,7 @@ def relaxed_truth(cache: Path, cell: tangle.Cell, populations: list) -> tangle.A
         started = time.perf_counter()
         run = recipe.run(
             tangle.RelaxationSettings(
-                backend=BACKEND, max_iterations=12_000, max_step=1.0 * um, penetration_tolerance=0.1 * um
+                backend=BACKEND, max_step=1.0 * um, penetration_tolerance=0.1 * um, **TRUTH_RELAXATION
             )
         )
         print(f"  truth relaxed: {run} ({time.perf_counter() - started:.0f} s)")

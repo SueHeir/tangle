@@ -18,12 +18,22 @@ resumes where it stopped:
     >>> scan = ct.open_scan("scan.tif")          # read from disk tile by tile
     >>> fit = ct.fit_tiled(scan, 1.3e-6, spec, checkpoint="fit_tiles")
 
+With a trained CT map network (a 3D U-Net; ``docs/ct_unet.md``), the fibers
+come from the network instead, with every output the network tutorial writes
+(``docs/ct_unet_tutorial.md``); this needs PyTorch:
+
+    >>> settings = ct.NetworkSettings(network="best.pt", diameters=[12e-6, 30e-6])
+    >>> fit = ct.find_fibers("scan.tif", settings)   # scan_fibers/: summary, stacks, tables
+    >>> relaxed, run = fit.relax()
+
 Requires NumPy and SciPy; ``tifffile`` and ``matplotlib`` are optional (TIFF
 and PNG outputs). Install them with ``pip install numpy scipy tifffile
 matplotlib``.
 """
 
+from ._bpm import BinderSpheres, add_bpm_binder_bonds, add_bpm_binder_spheres, write_bpm_ovito
 from ._evaluate import geometry_report, score
+from ._find import NetworkSettings, find_fibers
 from ._fit import FiberSpec, FitResult, FitSettings, fit_fibers, load_fit
 from ._image import Levels
 from ._profile import CrossSection
@@ -38,10 +48,15 @@ __all__ = [
     "FitResult",
     "FitSettings",
     "Levels",
+    "NetworkSettings",
     "Scanner",
     "Binder",
+    "BinderSpheres",
     "SyntheticScan",
+    "add_bpm_binder_bonds",
+    "add_bpm_binder_spheres",
     "fiber_palette",
+    "find_fibers",
     "fit_fibers",
     "fit_tiled",
     "geometry_report",
@@ -54,4 +69,5 @@ __all__ = [
     "save_overlay_figure",
     "score",
     "synthetic_ct",
+    "write_bpm_ovito",
 ]

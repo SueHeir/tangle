@@ -12,10 +12,20 @@ equivalent radius; ovals also their semi-axes) and type, so the training
 targets (axis heatmap, offset to the axis, direction, type) are gathers at
 load time.
 
-usage: python make_data.py OUT FIRST COUNT [--scanned-share 0.2] [--varied]
+usage: python make_data.py OUT FIRST COUNT [--scanned-share 0.2] [--varied | --pairs | --hard-pairs | --mixed]
 
 ``--varied`` draws every structure from ``varied_settings``: 1-4 fiber types of any size, shape and brightness,
 any orientation, and a wide range of scanner settings (see there).
+
+``--mixed`` makes ``mixed_<index>`` scans (``mixed.py``): every kind of variety at random inside each scan
+(fiber shapes, packings, sections, binder, dust, broken pieces, voids, sample edges, scanner artifacts). Their
+volumes also hold ``type_info`` (per fiber type: equal-area diameter, thickness / width, hollow), ``hint_flags``
+(broken pieces, dust, voids present) and ``debris_mask`` (dust voxels), for the network's hints.
+Indices: training from 100001, validation 99001-99032, test 99501-99548.
+
+``--bends`` makes ``bends_<index>`` scans (``mixed.bends_settings``): two fiber types of one material and size,
+one straight and one bendable, so only bending tells them apart. Indices: training from 200001, validation
+199001-199032, test 199501-199548.
 """
 
 import argparse
@@ -75,6 +85,17 @@ VARIED_SIDE = 160  # voxels (1 um); everything below is in voxels, the physical 
 FOCUS_FIRST = 4001  # indices from here on use the focused draw (varied_settings(focus=True))
 BOND_FIRST = 5001  # indices from here on may have binder bonds at their fiber junctions
 SHAPES_FIRST = 7001  # ... and from here on bonds of several shapes (bridge, meniscus, blob) and coatings
+STIFF_FIRST = 9001  # ... and from here on stiff, nearly straight fibers, bonded at their tight crossings
+WEB_FIRST = 11001  # ... and from here on big binder webs and fillets (no coatings), some flat fibers, milder noise
+EASY_FIRST = 12001  # ... and from here on the same, made clean (an easy start for training on webs)
+EASY_MAX_BINDER = 0.04  # easy scans with more binder than this share of the volume are skipped
+MIXED_MAX_BINDER = 0.15  # ... and mixed scans with more than this (dense, nearly all crossings bonded with big bonds)
+PAIRS_FIRST = 20001  # pairs_<index> (--pairs): dense_hard scans whose fine fibers lie in touching pairs
+HARD_PAIRS_FIRST = 21001  # hardpairs_<index> (--hard-pairs): the same made hard to split (see hard_pairs_settings)
+# The true structure must not have fibers passing through each other (overlaps.py): while a pair still shares more
+# than a quarter of the thinner fiber's thickness, relax further (steps, in turn), then try a new placement.
+RELAX_MORE = (3000, 9000, 15000)
+PLACEMENTS = 3
 
 
 def varied_settings(index: int, focus: bool | None = None) -> dict:
@@ -138,15 +159,47 @@ def varied_settings(index: int, focus: bool | None = None) -> dict:
                  "coating_thickness": round(float(rng.uniform(0.7, 2.0)), 2)}
     orientation = str(rng.choice(["planar", "planar", "aligned", "biaxial", "isotropic"]
                                  + (["isotropic"] if focus else [])))
+    if index >= STIFF_FIRST:
+        # stiff round: bend limits of 40-400 diameters and little waviness, most scans bonded at tight crossings
+        # (surfaces within 0.2-0.8 voxel), fibers mostly in layers
+        rs = np.random.default_rng(90_000 + index)  # a separate stream: the draws above stay as they were
+        for t in types:
+            t["bend"] = round(float(np.exp(rs.uniform(np.log(40.0), np.log(400.0)))), 1)
+        if bonds is not None or rs.random() < 0.85:
+            base = bonds or {"delta_beta": round(float(rs.uniform(4.0, 16.0)), 1), "shape": "bridge", "coating": 0.0,
+                             "coating_thickness": 1.0, "radius_ratio": 1.0,
+                             "brightness": round(float(rs.uniform(0.3, 1.2)), 2)}
+            bonds = {**base, "probability": round(float(rs.uniform(0.6, 1.0)), 2),
+                     "gap": round(float(rs.uniform(0.2, 0.8)), 2),
+                     "radius_ratio": round(float(rs.uniform(0.5, 1.5)), 2),
+                     "shape": str(rs.choice(["bridge", "meniscus", "meniscus", "blob"]))}
+        orientation = str(rs.choice(["planar", "planar", "biaxial", "biaxial", "aligned", "isotropic"]))
+    if index >= WEB_FIRST:
+        # web round: binder as fillets and webs (meniscus shape) that also span fibers a few voxels apart (a wide capture
+        # gap and a bond size of 1-2.2 fiber radii), never coatings; about half the types flat (width ratio
+        # 0.3-0.6); binder about as bright as the fibers
+        rw = np.random.default_rng(110_000 + index)
+        for t in types:
+            if rw.random() < 0.5:
+                t["ratio"] = round(float(rw.uniform(0.3, 0.6)), 2)
+        if bonds is not None:
+            bonds.update(probability=round(float(rw.uniform(0.5, 1.0)), 2),
+                         gap=round(float(rw.uniform(0.5, 2.5)), 2),
+                         radius_ratio=round(float(rw.uniform(1.0, 2.2)), 2),
+                         brightness=round(float(rw.uniform(0.7, 1.1)), 2),
+                         shape="meniscus",
+                         coating=0.0)
     blur = float(rng.choice([0.0, 0.0, 0.5, 1.0]))
-    return {
+    settings = {
         "types": types,
         "orientation": orientation,
         "tilt": round(float(rng.uniform(0.1, 0.5)), 2),
         "length_fraction": [round(float(rng.uniform(0.35, 0.6)), 2), round(float(rng.uniform(0.7, 0.98)), 2)],
-        "curvature": [round(float(rng.uniform(0.05, 0.2)), 2), round(float(rng.uniform(0.3, 0.8)), 2)],
+        "curvature": ([round(float(rng.uniform(0.05, 0.2)), 2), round(float(rng.uniform(0.3, 0.8)), 2)]
+                      if index < STIFF_FIRST else [0.0, round(float(rng.uniform(0.02, 0.15)), 2)]),
         "brightness_spread": round(float(rng.uniform(0.0, 0.4)), 2),
-        "photons": round(1300 * float(rng.uniform(0.5, 2.0)) / max(1.0, 23 * blur**2)),
+        "photons": round(1300 * float(rng.uniform(0.5, 2.0)) / max(1.0, 23 * blur**2)
+                         * (2.0 if index >= WEB_FIRST else 1.0)),
         "noise_blur": blur,
         # the focused round caps the blur (FWHM, um = voxels) at the thinnest fiber's diameter: blurrier scans
         # merge touching thin fibers beyond what any method can undo
@@ -158,14 +211,57 @@ def varied_settings(index: int, focus: bool | None = None) -> dict:
         "seed": 30_000 + index,
         **({"bonds": bonds} if index >= BOND_FIRST else {}),
     }
+    if index >= EASY_FIRST:
+        # easy web round: the web round made clean, to start training on: no blur, drift or rings, at least
+        # 1000 photons, a resolution no wider than half the thinnest fiber, smaller and fewer webs (binder a few
+        # percent of the volume)
+        re_ = np.random.default_rng(120_000 + index)
+        settings.update(noise_blur=0.0, drift=0.0, ring_strength=0.0, fiber_motion=round(float(re_.uniform(0.0, 0.5)), 2),
+                        photons=max(int(settings["photons"]), int(re_.integers(1000, 4000))),
+                        resolution=round(float(min(settings["resolution"], max(1.0, 0.5 * float(d[0])))), 2))
+        if settings.get("bonds") and settings["bonds"].get("probability", 0) > 0:
+            settings["bonds"].update(radius_ratio=round(float(re_.uniform(0.8, 1.5)), 2),
+                                     probability=round(float(re_.uniform(0.4, 0.8)), 2),
+                                     gap=round(float(re_.uniform(0.3, 1.5)), 2))
+    return settings
 
 
-def with_bonds(cache_file: Path, cell, populations, bonds: dict, seed: int):
-    """The cached relaxed structure again, with its touching crossings captured as bonded junctions and a short
-    relaxation to settle them (a RunResult that export_puma can draw bonds for)."""
+def pairs_settings(index: int) -> dict:
+    """``pairs_<index>``: ``dense_hard_settings`` with the fine fibers in touching side-by-side pairs (bundles of
+    two, a hair apart, in the fibers' plane) in place of bundles of 7 or 19."""
+    import ct_examples as ex
+
+    return {**ex.dense_hard_settings(index), "per_bundle": 2}
+
+
+def hard_pairs_settings(index: int) -> dict:
+    """``hardpairs_<index>``: ``pairs_settings`` made hard to split: fine fibers 3.5-6 voxels across (so more of
+    them), a scanner blur from half to all of their diameter, 40-100% of the photons and more fiber motion."""
+    import ct_examples as ex
+
+    rng = np.random.default_rng(210_000 + index)
+    fine = round(float(rng.uniform(3.5, 6.0)), 2)
+    return {**pairs_settings(index), "fine_um": fine,
+            "resolution_um": round(float(rng.uniform(0.5, 1.0) * fine), 2),
+            "photons": round(ex.SCANNER.photons * float(rng.uniform(0.4, 1.0))),
+            "fiber_motion_um": round(float(rng.uniform(0.5, 1.5)), 2)}
+
+
+def _max_curvature(line) -> float:
+    """The largest turning angle per unit length along a polyline (1 / its tightest bend radius)."""
+    p = np.asarray(line, float)
+    if len(p) < 3:
+        return 0.0
+    d = np.diff(p, axis=0)
+    n = np.linalg.norm(d, axis=1)
+    cos = np.clip(np.einsum("ij,ij->i", d[:-1], d[1:]) / np.maximum(n[:-1] * n[1:], 1e-30), -1.0, 1.0)
+    return float(np.max(np.arccos(cos) / np.maximum(0.5 * (n[:-1] + n[1:]), 1e-30)))
+
+
+def cached_recipe(cache_file: Path, cell, populations):
+    """A recipe holding the cached relaxed structure (and the cache's contents)."""
     import tangle
     import ct_examples as ex
-    from tangle.units import um
 
     data = json.loads(cache_file.read_text())
     recipe = tangle.Recipe(cell)
@@ -175,8 +271,11 @@ def with_bonds(cache_file: Path, cell, populations, bonds: dict, seed: int):
         axes = data["long_axes"][start:start + count] if "long_axes" in data else None
         start += count
         material = ex._material(population)
-        looser = tangle.Material(material.name, diameter=material.diameter,
-                                 min_bend_radius=0.99 * material.min_bend_radius, thickness=material.thickness)
+        bend = 0.99 * material.min_bend_radius
+        if bend:  # stiff fibers can end their relaxation a little past their limit: loosen it to what they reached
+            bend = min(bend, 0.9 / max(max(_max_curvature(line) for line in lines), 1e-30)) if lines else bend
+        looser = tangle.Material(material.name, diameter=material.diameter, min_bend_radius=bend,
+                                 thickness=material.thickness)
         collection = tangle.FiberCollection(material.name)
         for k, line in enumerate(lines):
             if material.is_oval and axes is not None:
@@ -184,6 +283,17 @@ def with_bonds(cache_file: Path, cell, populations, bonds: dict, seed: int):
             else:
                 collection.add_fiber(line, looser)
         recipe.insert(collection, name=material.name)
+    return recipe, data
+
+
+def with_bonds(cache_file: Path, cell, populations, bonds: dict, seed: int):
+    """The cached relaxed structure again, with its touching crossings captured as bonded junctions and a short
+    relaxation to settle them (a RunResult that export_puma can draw bonds for)."""
+    import tangle
+    import ct_examples as ex
+    from tangle.units import um
+
+    recipe, _ = cached_recipe(cache_file, cell, populations)
     recipe.capture_junctions(tangle.JunctionPolicy(
         "binder", "bond", max_surface_gap=bonds["gap"] * um, min_crossing_angle=0.0,
         probability=bonds["probability"], seed=seed, max_per_fiber_pair=1))
@@ -191,7 +301,44 @@ def with_bonds(cache_file: Path, cell, populations, bonds: dict, seed: int):
                                                 penetration_tolerance=0.1 * um))
 
 
-def varied_scan(index: int, cache: Path):
+class FibersOverlap(Exception):
+    """The relaxed truth still has fibers passing through each other."""
+
+
+def relax_further(cache_file: Path, cell, populations, steps: int) -> None:
+    """Relax the structure again from its placement for ``steps`` more than last time, and cache the result.
+
+    Not from the cache: rebuilt from relaxed centerlines, each fiber's bent shape would be its rest shape, so its
+    bend limit has to be loosened to what the worst fiber reached (``cached_recipe``), and over thousands of
+    steps every fiber then bends that far. Starting over repeats the earlier steps, but every fiber keeps its own
+    rest shape and bend limit.
+    """
+    import ct_examples as ex
+
+    more = json.loads(cache_file.read_text()).get("more_steps", 0) + steps
+    saved = dict(ex.TRUTH_RELAXATION)
+    ex.TRUTH_RELAXATION["max_iterations"] = saved.get("max_iterations", 12_000) + more
+    try:
+        cache_file.unlink()
+        ex.relaxed_truth(cache_file, cell, populations)
+    finally:
+        ex.TRUTH_RELAXATION.clear()
+        ex.TRUTH_RELAXATION.update(saved)
+    data = json.loads(cache_file.read_text())
+    data["more_steps"] = more
+    cache_file.write_text(json.dumps(data) + "\n")
+
+
+def overlap_report(truth) -> dict:
+    """``overlaps.summary`` of a true structure (lengths in 1 um voxels)."""
+    import overlaps
+    from tangle.units import um
+
+    fibers = overlaps.from_structure(truth, 1 * um)
+    return overlaps.summary(fibers, overlaps.overlapping_pairs(fibers))
+
+
+def varied_scan(index: int, cache: Path, check: bool = True):
     """Relax (cached) and scan ``varied_<index>``; returns (SyntheticScan, settings)."""
     import hashlib
     from dataclasses import replace
@@ -202,15 +349,20 @@ def varied_scan(index: int, cache: Path):
     from tangle.units import um
 
     v = varied_settings(index)
-    for crowd in (1.0, 0.6, 0.35):  # too crowded to place every fiber: fewer fibers, same everything else
-        try:
-            return _varied_scan(v, index, cache, crowd)
-        except Exception as error:
-            if "could not place" not in str(error) or crowd == 0.35:
-                raise
+    for placement in range(PLACEMENTS if check else 1):  # fibers still through each other: place them anew
+        for crowd in (1.0, 0.6, 0.35):  # too crowded to place every fiber: fewer fibers, same everything else
+            try:
+                return _varied_scan(v, index, cache, crowd, placement, check)
+            except FibersOverlap as error:
+                print(f"varied_{index}: placement {placement}: {error}", flush=True)
+                break
+            except Exception as error:
+                if "could not place" not in str(error) or crowd == 0.35:
+                    raise
+    raise FibersOverlap(f"fibers still pass through each other after {PLACEMENTS} placements")
 
 
-def _varied_scan(v, index, cache, crowd):
+def _varied_scan(v, index, cache, crowd, placement=0, check=True):
     import hashlib
     from dataclasses import replace
 
@@ -241,7 +393,8 @@ def _varied_scan(v, index, cache, crowd):
                     if v["orientation"] == "biaxial" else tangle.UniformPosition())
         population = tangle.FiberPopulation(
             material=material, count=max(int(count * crowd) // spec["bundle"], 1),
-            segments_per_fiber=max(4, int(length[0] / (1.25 * diameter))), seed=v["seed"] + t, length=length,
+            segments_per_fiber=max(4, int(length[0] / (1.25 * diameter))), seed=v["seed"] + t + 1000 * placement,
+            length=length,
             # thick fibers in a 160-voxel box cannot wave by a large share of their diameter within their bend
             # limit; a retry (crowd < 1) also halves the waviness
             curvature_amplitude=tuple(c * diameter * min(1.0, 8.0 / spec["diameter"]) * (1.0 if crowd == 1.0 else 0.5)
@@ -251,16 +404,35 @@ def _varied_scan(v, index, cache, crowd):
         populations.append(ex.bundles(cell, population, spec["bundle"]) if spec["bundle"] > 1 else population)
         shade = {"rim": spec["rim"] * um, "core": spec["core"]} if spec["rim"] else {}
         profiles.append((diameter, ct.CrossSection(brightness=spec["brightness"], **shade)))
-    key = hashlib.sha1(json.dumps({**v, "crowd": crowd}, sort_keys=True).encode()).hexdigest()[:8]
-    truth = ex.relaxed_truth(cache / f"varied_{index}-{key}.json", cell, populations)
+    tried = {**v, "crowd": crowd, **({"placement": placement} if placement else {})}
+    key = hashlib.sha1(json.dumps(tried, sort_keys=True).encode()).hexdigest()[:8]
+    cache_file = cache / f"varied_{index}-{key}.json"
+
+    def final_truth():
+        truth = ex.relaxed_truth(cache_file, cell, populations)
+        return with_bonds(cache_file, cell, populations, v["bonds"], v["seed"]) if v.get("bonds") else truth
+
+    truth = final_truth()
+    report = None
+    if check:
+        report = overlap_report(truth)
+        for steps in RELAX_MORE:
+            if not report["quarter"]:
+                break
+            relax_further(cache_file, cell, populations, steps)
+            truth = final_truth()
+            report = overlap_report(truth)
+        if report["quarter"]:
+            raise FibersOverlap(f"{report['quarter']} fiber pairs past a quarter after "
+                                f"{json.loads(cache_file.read_text()).get('more_steps', 0)} more steps")
+        report["more_steps"] = json.loads(cache_file.read_text()).get("more_steps", 0)
     binder = None
     if v.get("bonds"):
         b = v["bonds"]
-        truth = with_bonds(cache / f"varied_{index}-{key}.json", cell, populations, b, v["seed"])
         binder = ct.Binder(radius_ratio=b["radius_ratio"], brightness=b["brightness"], delta_beta=b["delta_beta"],
                            shape=b.get("shape", "bridge"), coating=b.get("coating", 0.0),
                            coating_thickness=b.get("coating_thickness", 1.0))
-    v = {**v, "crowd": crowd}
+    v = {**tried, **({"truth_check": report} if report else {})}
     scanner = replace(ex.SCANNER, photons=v["photons"], noise_blur=v["noise_blur"], resolution=v["resolution"] * um,
                       propagation=v["propagation"], fiber_motion=v["fiber_motion"] * um, drift=v["drift"] * um,
                       ring_strength=v["ring_strength"],
@@ -277,7 +449,23 @@ def main() -> None:
     parser.add_argument("count", type=int)
     parser.add_argument("--scanned-share", type=float, default=0.2)
     parser.add_argument("--varied", action="store_true")
+    parser.add_argument("--fast-relax", action="store_true",
+                        help="relax the truth structures for at most 3000 steps with a tighter neighbor skin (about "
+                             "8x faster, the same structures to within a few percent); for training sets, not tests")
+    parser.add_argument("--pairs", action="store_true",
+                        help="dense_hard scans with the fine fibers in touching pairs (pairs_<index>, from 20001)")
+    parser.add_argument("--hard-pairs", action="store_true",
+                        help="pairs made hard to split: thinner fibers, more blur, fewer photons (hardpairs_<index>)")
+    parser.add_argument("--mixed", action="store_true",
+                        help="every kind of variety at random inside each scan (mixed_<index>; see mixed.py)")
+    parser.add_argument("--bends", action="store_true",
+                        help="two types of one material and size, one straight, one bendable (bends_<index>)")
+    parser.add_argument("--no-overlap-check", action="store_true",
+                        help="keep structures whose fibers pass through each other (as every set made before had them)")
     args = parser.parse_args()
+    if args.fast_relax:
+        import ct_examples as ex
+        ex.TRUTH_RELAXATION = {"max_iterations": 3000, "neighbor_skin_scale": 0.5, "neighbor_capacity": 192}
     sys.path.append(str(Path(__file__).resolve().parents[1]))
     import ct_examples as ex
 
@@ -285,8 +473,9 @@ def main() -> None:
     cache = args.out / ".cache"
     for index in range(args.first, args.first + args.count):
         # Which settings family is a fixed function of the index, so reruns agree.
-        family = "varied" if args.varied else (
-            "scanned" if np.random.default_rng(index).random() < args.scanned_share else "dense_hard")
+        family = ("varied" if args.varied else "pairs" if args.pairs else "hardpairs" if args.hard_pairs
+                  else "mixed" if args.mixed else "bends" if args.bends
+                  else "scanned" if np.random.default_rng(index).random() < args.scanned_share else "dense_hard")
         name = f"{family}_{index}"
         target = args.out / f"{name}.npz"
         if target.exists():
@@ -294,20 +483,50 @@ def main() -> None:
         started = time.perf_counter()
         try:
             if family == "varied":
-                scan, varied = varied_scan(index, cache)
+                scan, varied = varied_scan(index, cache, check=not args.no_overlap_check)
+            elif family in ("mixed", "bends"):
+                import mixed
+
+                scan, varied = mixed.mixed_scan(index, cache, check_overlaps=not args.no_overlap_check,
+                                                settings=mixed.bends_settings if family == "bends" else
+                                                mixed.mixed_settings)
             else:
-                settings = ex.dense_hard_settings if family == "dense_hard" else ex.scanned_settings
+                settings = {"dense_hard": ex.dense_hard_settings, "pairs": pairs_settings,
+                            "hardpairs": hard_pairs_settings}.get(family, ex.scanned_settings)
                 example = ex.scanned(index, settings)(cache / f"{name}.json")
                 scan, varied = example.scan, None
-        except Exception as error:  # a structure that fails to relax or render: skip it
+                if not args.no_overlap_check:  # no relaxing further here: a structure that fails is left out
+                    import overlaps
+
+                    fibers = overlaps.from_scan(scan)
+                    report = overlaps.summary(fibers, overlaps.overlapping_pairs(fibers))
+                    if report["quarter"]:
+                        raise FibersOverlap(f"{report['quarter']} fiber pairs past a quarter")
+                    varied = {"family": family, "truth_check": report}
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as error:  # a structure that fails to relax or render (a Tangle panic too): skip it
             print(f"{name}: failed ({error})", flush=True)
             continue
-        table = point_table(scan)
+        most = EASY_MAX_BINDER if family == "varied" and index >= EASY_FIRST else (
+            MIXED_MAX_BINDER if family in ("mixed", "bends") else None)
+        if most is not None and scan.binder_occupancy is not None and float((scan.binder_occupancy > 0.5).mean()) > most:
+            print(f"{name}: skipped (binder {float((scan.binder_occupancy > 0.5).mean()):.1%} > {most:.0%})", flush=True)
+            continue
+        made_here = family in ("mixed", "bends")  # rendered by mixed.py: its own point table (thinning fibers' radii)
+        table = scan.table if made_here else point_table(scan)
+        if not len(table["pos"]):  # e.g. a sparse scan whose fibers all lie past a cut face: nothing to learn from
+            print(f"{name}: skipped (no fibers in the volume)", flush=True)
+            continue
         near = nearest_points(scan.volume.shape, table["pos"])
         extra = {}
+        if made_here:
+            extra.update(type_info=scan.type_info, hint_flags=scan.flags, debris_mask=scan.debris)
         if scan.bond_labels is not None:
             extra["bond_labels"] = scan.bond_labels.astype(np.uint16)
-            extra["bond_ratio"] = np.float32(varied["bonds"]["radius_ratio"])
+            ratio = scan.extra.get("bond_ratio") if made_here else varied["bonds"]["radius_ratio"]
+            if ratio:
+                extra["bond_ratio"] = np.float32(ratio)
             if scan.binder_occupancy is not None:
                 extra["binder_mask"] = scan.binder_occupancy > 0.5
             extra["bond_pairs"] = np.array([b["fibers"] + [0] * (2 - len(b["fibers"])) for b in scan.bonds]

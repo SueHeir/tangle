@@ -1,3 +1,4 @@
+# Copied from examples/ct_unet/trace_maps.py by its sync_package.py: change that file, then run it again.
 """Fibers straight from the network's maps: axis votes, then tracking along the predicted direction.
 
 1. Every voxel the network calls fiber votes for its axis at voxel + offset.
@@ -20,7 +21,7 @@ usage (scoring against the truth): see score_trace.py
 import numpy as np
 from scipy.spatial import cKDTree
 
-from maps import DIRECTION, FIBER, OFFSET, RADIUS
+from .maps import DIRECTION, FIBER, OFFSET, RADIUS
 
 # Tuned on the network's own maps (r19; 34 test scans, then all 9 test sets): short steps, a tight look-ahead and
 # strict direction agreement keep a track from stepping onto a fiber that crosses it, the main loss on dense

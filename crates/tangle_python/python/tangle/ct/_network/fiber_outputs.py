@@ -1,3 +1,4 @@
+# Copied from examples/ct_unet/fiber_outputs.py by its sync_package.py: change that file, then run it again.
 """Writing the fibers find_fibers.py finds: tables, Tangle's fit.json, ParaView and OVITO files, TIFF stacks.
 
 Lengths are in micrometers and coordinates are measured from the corner of the analysed region (the crop, if
@@ -29,7 +30,7 @@ OUTPUTS = ("summary.txt", "run.json", "fit.json", "fibers.csv", "centerlines.csv
 
 def clear_outputs(out: Path) -> None:
     """Delete the files an earlier run wrote to ``out`` (not ``work/``), so none outlives the fibers it shows."""
-    from scan_io import ScanError
+    from .scan_io import ScanError
 
     for name in OUTPUTS:
         try:

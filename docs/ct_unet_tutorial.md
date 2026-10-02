@@ -204,7 +204,8 @@ results go to `my_scan_fibers/` (or the folder you give with `--out`).
 Open `overlay.png` for a quick look, then **open `overlay.tif` in Fiji**
 (File > Open; it opens as a stack in micrometers) and page through the slices.
 Each traced fiber is tinted and outlined in its own color, the same color all
-along it; bonds are yellow dots. (With `--invert` the overlay shows the scan
+along it; where the sample may be bonded, the binder the network sees is
+orange and bonds are yellow dots. (With `--invert` the overlay shows the scan
 inverted, as the network saw it.) Things to look for:
 
 | what you see | what to change |
@@ -257,15 +258,15 @@ CPU. On a big scan this takes a while; meanwhile:
 |---|---|---|
 | `summary.txt` | fiber counts and diameters per type, lengths, orientation, bonds, volume fractions, and how the run was made | any text editor |
 | `overlay.png` | the middle slice each way, the scan above and the traced fibers below | any image viewer |
-| `overlay.tif` | the scan with every traced fiber tinted and outlined, bonds in yellow (RGB stack) | Fiji |
+| `overlay.tif` | the scan with every traced fiber tinted and outlined, binder in orange, bonds in yellow (RGB stack) | Fiji |
 | `labels.tif` | each voxel's fiber number (0 = no fiber), as drawn from the traced centerlines and diameters | Fiji (Image > Lookup Tables > glasbey shows each fiber in its own color) |
-| `binder.tif` | with `--binder`: solid voxels outside every traced fiber (255), see below | Fiji |
+| `binder.tif` | with `--binder`: the binder outside every traced fiber (255), see below | Fiji |
 | `fibers.csv` | one row per fiber (columns below) | Excel, Python, R |
 | `centerlines.csv` | every centerline point: fiber, point number, x, y, z | Excel, Python |
-| `bonds.csv` | every bond: its number, the two fibers it joins, where it is, how strong the network's signal was | Excel, Python |
+| `bonds.csv` | every bond: its number, the two fibers it joins, where it is, how strong the network's bond-point signal was, and how many binder voxels join the pair there | Excel, Python |
 | `diameters.csv` | with `--diameter-profile`: the diameter at every voxel along every fiber, and an oval's long and short widths | Excel, Python |
 | `fibers.vtk`, `bonds.vtk` | the centerlines and bonds | ParaView |
-| `fibers.dump`, `view_in_ovito.py` | the fibers as chains of capsules, and bonds | OVITO |
+| `fibers.dump`, `view_in_ovito.py` | the fibers as chains of capsules, the binder as spheres, and bonds | OVITO |
 | `fit.json` | the fibers in Tangle's format, smoothed to its bend limit | Tangle (step 7) |
 | `run.json` | every setting of the run | a text editor |
 
@@ -297,13 +298,24 @@ or `type`.
 **In OVITO:** run `view_in_ovito.py` with OVITO's Python (`ovitos
 view_in_ovito.py`, or `python view_in_ovito.py` where the `ovito` package is
 installed) and open the `fibers.ovito` it saves; or load `fibers.dump` in
-OVITO directly and set the particle shape to Spherocylinder.
+OVITO directly and set the particle shape to Spherocylinder. The fibers are
+particle type 1, the binder type 2 (a sphere per binder voxel, orange in the
+saved session; Construct surface mesh on type 2 turns it into a surface) and
+the bonds type 3.
 
-**Binder.** `--binder` writes `binder.tif`: voxels brighter than the solid/void
-split that are not inside a traced fiber (fibers always win, with a one-voxel
-margin so fiber edges don't count as binder), without pieces smaller than 20
-voxels. It depends on how well the fibers were traced: missed fibers turn up
-as binder.
+**Binder and bonds.** Unless told `--bonded no`, the network also marks binder:
+the voxels it calls binder outside every traced fiber (the fibers always win;
+inside a blob of binder the network often says fiber too, so its own fiber
+call would leave only the blob's rim). They are orange in the overlays, their
+share of the region is in `summary.txt`, and `--binder` writes them to
+`binder.tif` (255) without pieces smaller than 20 voxels. A bond is where the
+network marks a bond point, or else where its binder joins two traced fibers
+(at least 4 binder voxels within 2.5 voxels of both surfaces). In `bonds.csv`
+the first kind has the bond point's `strength` and the second the number of
+`binder_voxels`. With a network that predates the binder, `binder.tif` holds
+the voxels brighter than the solid/void split that are not inside a traced
+fiber (with a one-voxel margin so fiber edges don't count): missed fibers turn
+up there as binder.
 
 **Diameters along each fiber.** `--diameter-profile` runs the network a second
 time to measure the diameter at every voxel along every fiber (see
@@ -339,6 +351,93 @@ own solver. On the demo scan it takes under 2 s on an M5 Pro's GPU and leaves
 overlaps of a few nanometers. From an assembly, everything else in Tangle
 applies: analysis, OVITO and PuMA export (see the
 [PuMA guide](puma_interoperability.md)).
+
+For a big region, relax the fibers coarse-grained, and export them for
+particle and finite-element models:
+
+```python
+from tangle import fem
+
+relaxed, run = fit.coarse_grained().relax(adaptive=True)
+run.export_bpm("fibers_bpm.data")                         # LAMMPS bonded-particle model
+hexes = fem.hex_mesh(relaxed.to_assembly(), voxel_size=fit.voxel_size)
+hexes.write_abaqus("fibers_hex.inp")                       # or write_nastran("fibers_hex.bdf")
+hexes.write_vtu("fibers_hex.vtu")                          # to look at in ParaView
+```
+
+`coarse_grained()` keeps only the nodes that hold each fiber within a tenth of
+its diameter, so a straight stretch becomes one segment (at most 10 diameters
+long), and `relax(adaptive=True)` turns on Tangle's adaptive segmentation,
+which splits segments again where fibers touch. A relaxed fiber that the
+solve's tolerance leaves a hair past its bend limit is smoothed just inside it,
+so the result is always valid Tangle again. `export_bpm` writes one particle
+per segment, bonded along each fiber. The meshes come from `tangle.fem` (see
+the [FEM export guide](fem_export.md)): bricks from voxels, or with gmsh
+installed, tetrahedra that follow each fiber's surface (`fem.tet_mesh`).
+ParaView can't read the Nastran file's nodes, so `write_vtu` writes a copy it
+opens; color it by `fiber_id`.
+
+**With binder.** The fit that `ct.find_fibers` returns (below) also holds the
+network's bonds and, with `binder=True` in its settings (`--binder`), its
+binder. The mesh takes the binder as bricks, and the particle model takes it in
+one of two ways:
+
+```python
+hexes = fem.hex_mesh(relaxed.to_assembly(), voxel_size=fit.voxel_size, binder=fit.binder)
+
+run.export_bpm("binder_bonds.data")
+ct.add_bpm_binder_bonds("binder_bonds.data", fit.bonds, fit.voxel_size)        # a) bonds from fiber to fiber
+run.export_bpm("binder_spheres.data")
+ct.add_bpm_binder_spheres("binder_spheres.data", fit.binder, fit.voxel_size)   # b) the binder as spheres
+ct.write_bpm_ovito("binder_spheres.data")                                      # binder_spheres.dump, for OVITO
+```
+
+`binder=fit.binder` meshes the binder voxels outside the relaxed fibers as
+bricks that share nodes with the fibers they touch, so the binder holds the
+fibers together in the mesh too; they have fiber id 0 and the material
+`"binder"`. In the particle model, `add_bpm_binder_bonds` bonds each pair of
+fibers the network found bonded once, between their two particles nearest the
+bond (bond type 2; the bonds along each fiber are type 1).
+`add_bpm_binder_spheres` fills the binder with spheres about a fiber across
+(`diameter=` changes that), each with the mass of the binder it stands for,
+and bonds each one to the fibers its binder touches (bond type 2) and to the
+spheres whose binder meets its own (bond type 3). A sphere is made smaller
+where it would reach into a fiber its binder doesn't touch, so nothing starts
+out overlapping without a bond. `write_bpm_ovito` writes either file as a dump
+to open in OVITO (set the particle shape to Spherocylinder): the fibers'
+particles are type 1, the binder spheres type 2 and the bonds between particles
+type 3. The default export is one capsule per relaxed segment, which LAMMPS
+doesn't read (see the [Python guide](../crates/tangle_python/README.md#bpm-export));
+for LAMMPS, export with `mode="spheres_exact"` and add the binder the same way.
+
+## From Python, in one call
+
+With Tangle built (and PyTorch in the same environment), steps 4 to 7 are one
+call: `tangle.ct.find_fibers` takes the scan's file name and the settings, runs
+`find_fibers.py`'s whole pipeline, writes all of the same results and returns
+the fibers as a Tangle fit.
+
+```python
+import tangle.ct as ct
+
+settings = ct.NetworkSettings(
+    network="best.pt",               # the trained network
+    diameters=[12e-6, 30e-6],        # meters, one per fiber type (optional)
+    bonded=False,                    # optional
+    center_crop=256,                 # or crop="x=100:612,y=0:512,z=200:456"
+)
+fit = ct.find_fibers("my_scan.tif", settings)  # writes my_scan_fibers/, as find_fibers.py does
+print(len(fit.centerlines), "fibers and", len(fit.bonds), "bonds; everything else is in", fit.folder)
+relaxed, run = fit.relax()
+```
+
+Every option in the table below is a field of `NetworkSettings` with the same
+name (`--diameter-profile` is `diameter_profile`), with lengths in meters as in
+the rest of `tangle.ct`. The result is the same `FitResult` that `ct.load_fit`
+reads from `fit.json`, plus `fit.folder`, where everything was written,
+`fit.bonds` and, with `binder=True`, `fit.binder` (step 7 shows what they are
+for). It runs the same code as the scripts: the scripts in `ct_unet/` are
+where it is changed, and their `sync_package.py` copies them into the package.
 
 ## Options at a glance
 
@@ -393,7 +492,7 @@ applies: analysis, OVITO and PuMA export (see the
 - Fibers must be 3.5 to 28 voxels across (bin for thicker ones), brighter than
   their surroundings (or `--invert`), in cubic voxels, with mostly empty space
   around them (or `--levels`).
-- Bonds come from the network's bond-point peaks and are found less reliably
-  than fibers (see the guide's numbers).
+- Bonds come from the network's bond points and binder, and are found less
+  reliably than fibers (see the guide's numbers).
 - The result is centerlines with diameters and types, not a solved
   structure: `fit.relax()` in Tangle makes it one.

@@ -20,7 +20,7 @@ from maps import load, predict  # noqa: E402
 from trace_maps import trace  # noqa: E402
 
 checkpoint, cache, *names = sys.argv[1:]
-device = "mps" if torch.backends.mps.is_available() else "cpu"
+device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 model = load(checkpoint, device)
 for name in names:
     scan = ex.EXAMPLES[name](Path(cache) / f"{name}.json").scan

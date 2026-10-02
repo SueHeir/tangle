@@ -10,6 +10,10 @@ description = "Python bindings for TANGLE fiber generation and GPU formation rec
 name = "_tangle"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# CUDA solver backend (NVIDIA GPUs): `RelaxationSettings(backend="cuda")`
+cuda = ["tangle_relax/cuda"]
+
 [dependencies]
 grass_app.workspace = true
 pyo3 = { version = "0.27", features = ["abi3-py311"] }

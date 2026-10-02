@@ -13,7 +13,7 @@ import numpy as np
 
 from . import _confidence, _junctions, _moves, _refine, _regrow
 from ._ends import end_cost, end_statistics, evidence_scale
-from ._geometry import polyline_length, rasterize, tangents
+from ._geometry import coarse_nodes, polyline_length, rasterize, tangents, within_bend_limit
 from ._image import HessianField, Levels, core_holes, half_widths, normalize
 from ._trace import trace_fibers
 
@@ -704,13 +704,40 @@ class FitResult:
         assembly.insert(self.to_collection(), name="ct fit")
         return assembly
 
-    def relax(self, settings: Any | None = None) -> tuple["FitResult", Any]:
+    def coarse_grained(self, tolerance: float | None = None, max_segment: float | None = None) -> "FitResult":
+        """The same fibers on fewer nodes: only those that keep each centerline within ``tolerance`` of its
+        original nodes, so a straight stretch becomes one segment, with no segment longer than ``max_segment``
+        (meters; defaults 0.1 and 10 of each fiber's own diameter). Tangle's relaxation then runs on far fewer
+        segments; with ``relax(adaptive=True)`` it splits them again only where fibers touch."""
+        kept = []
+        for line, radius in zip(self.centerlines, self.radii):
+            diameter = 2.0 * float(radius)
+            tol = tolerance / self.voxel_size if tolerance is not None else 0.1 * diameter
+            longest = max_segment / self.voxel_size if max_segment is not None else 10.0 * diameter
+            kept.append(coarse_nodes(line, tol, longest))
+        before = sum(len(line) for line in self.centerlines)
+        return replace(
+            self,
+            centerlines=[np.asarray(line)[k] for line, k in zip(self.centerlines, kept)],
+            confidence=None if self.confidence is None else [np.asarray(c)[k] for c, k in zip(self.confidence, kept)],
+            long_axes=None if self.long_axes is None else
+            [None if axes is None else np.asarray(axes)[k] for axes, k in zip(self.long_axes, kept)],
+            history=self.history + [{"stage": "coarse-grained", "nodes_before": before,
+                                     "nodes_after": int(sum(len(k) for k in kept)),
+                                     "tolerance_m": tolerance, "max_segment_m": max_segment}],
+        )
+
+    def relax(self, settings: Any | None = None, adaptive: bool = False) -> tuple["FitResult", Any]:
         """Remove remaining overlaps with Tangle's own contact relaxation.
 
         Returns the relaxed fit and the ``RunResult`` (which reports
-        ``max_penetration`` and ``max_curvature_ratio``). The default settings
-        use Tangle's default backend (WGPU, the local GPU); pass
-        ``RelaxationSettings(backend="cpu", ...)`` where no GPU is available.
+        ``max_penetration`` and ``max_curvature_ratio``, and exports OVITO,
+        BPM and PuMA files). The default settings use Tangle's default backend
+        (WGPU, the local GPU); pass ``RelaxationSettings(backend="cpu", ...)``
+        where no GPU is available. ``adaptive=True`` turns on Tangle's
+        adaptive segmentation (unless ``settings`` already set it): segments
+        split where fibers touch and merge again where they run free, which
+        pairs with :meth:`coarse_grained`.
         """
         import tangle
 
@@ -721,10 +748,26 @@ class FitResult:
                 max_step=0.25 * float(self.radii.mean()) * self.voxel_size,
                 penetration_tolerance=0.02 * self.spec.diameter,
             )
+        if adaptive and settings.adaptive_segmentation is None:
+            settings = settings.replace(adaptive_segmentation=tangle.AdaptiveSegmentationSettings())
         recipe.relax_until_converged(max_iterations=int(settings.max_iterations))
         run = recipe.run(settings)
         relaxed = [np.asarray(line) / self.voxel_size for line in run.centerlines()]
-        return replace(self, centerlines=relaxed, confidence=None, history=self.history + [{"stage": "tangle relax", "max_penetration_m": run.max_penetration}]), run
+        # The solve keeps every fiber's bending within its limit to a small tolerance, and a fiber left a hair
+        # past it would be refused when this fit becomes an assembly again: smooth those just inside.
+        smoothed = 0
+        for index, line in enumerate(relaxed):
+            spec = self.spec_of(index)
+            relaxed[index], moved = within_bend_limit(line, (spec.min_bend_radius or 5.0 * spec.diameter) / self.voxel_size,
+                                                      margin=0.999, step=0.05)
+            smoothed += moved
+        long_axes = self.long_axes
+        if long_axes is not None and any(len(a) != len(b) for a, b in zip(relaxed, self.centerlines)):
+            # adaptive segmentation changed the node counts: each new node takes the axis of the old node at
+            # the nearest share of the fiber's length
+            long_axes = [None if axes is None else np.asarray(axes)[_nearest_share(old, new)]
+                         for axes, old, new in zip(long_axes, self.centerlines, relaxed)]
+        return replace(self, centerlines=relaxed, confidence=None, long_axes=long_axes, history=self.history + [{"stage": "tangle relax", "max_penetration_m": run.max_penetration, "adaptive": bool(settings.adaptive_segmentation is not None), "smoothed_to_bend_limit": smoothed}]), run
 
     # -- statistics for a generator config ------------------------------------
     def population_summary(self) -> dict[str, Any]:
@@ -932,6 +975,17 @@ def _write_stack(stem: Path, array: np.ndarray, voxel_size: float, rgb: bool = F
         metadata={"spacing": pixel, "unit": "um", "axes": "ZYXS" if rgb else "ZYX"},
     )
     return path
+
+
+def _nearest_share(old: np.ndarray, new: np.ndarray) -> np.ndarray:
+    """For each node of ``new``, the node of ``old`` (the same fiber on other nodes) at the nearest share of the
+    fiber's length."""
+    def shares(line):
+        steps = np.linalg.norm(np.diff(np.asarray(line, float), axis=0), axis=1)
+        arc = np.concatenate([[0.0], np.cumsum(steps)])
+        return arc / max(float(arc[-1]), 1e-12)
+
+    return np.clip(np.searchsorted(shares(old), shares(new)), 0, len(old) - 1)
 
 
 def load_fit(path: str | Path) -> FitResult:

@@ -1,3 +1,4 @@
+# Copied from examples/ct_unet/fiber_types.py by its sync_package.py: change that file, then run it again.
 """Fiber types from traced fibers: per-fiber features, then clustering into K types.
 
 The network only finds fibers; types are decided per fiber, from features averaged along its whole length, so

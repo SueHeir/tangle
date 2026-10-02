@@ -5,6 +5,7 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
+from xml.etree import ElementTree
 
 import tangle
 
@@ -88,6 +89,21 @@ def read_abaqus(path):
     return blocks
 
 
+def read_vtu(path):
+    """The ``Piece`` element of a written ``.vtu`` and its appended arrays, by name."""
+    data = Path(path).read_bytes()
+    start = data.index(b'<AppendedData encoding="raw">')
+    base = data.index(b"_", start) + 1  # the arrays' offsets count from just after the "_"
+    root = ElementTree.fromstring(data[:start].decode("ascii") + "</VTKFile>")
+    dtypes = {"Float64": "<f8", "Int64": "<i8", "Int32": "<i4", "UInt8": "u1"}
+    arrays = {}
+    for array in root.iter("DataArray"):
+        at = base + int(array.get("offset"))
+        size = int(np.frombuffer(data[at : at + 8], dtype="<u8")[0])
+        arrays[array.get("Name")] = np.frombuffer(data[at + 8 : at + 8 + size], dtype=dtypes[array.get("type")])
+    return root.find("UnstructuredGrid/Piece"), arrays
+
+
 @unittest.skipIf(fem is None, "tangle.fem needs NumPy")
 class HexMeshTests(unittest.TestCase):
     def test_one_brick_per_voxel_of_the_puma_grid(self):
@@ -113,6 +129,35 @@ class HexMeshTests(unittest.TestCase):
     def test_a_voxel_size_that_does_not_tile_suggests_one(self):
         with self.assertRaisesRegex(ValueError, "try voxel_size="):
             fem.hex_mesh(one_fiber(), 0.3)
+
+    def test_a_binder_mask_adds_binder_bricks_that_bond_the_fibers(self):
+        assembly = touching_cross()
+        fibers = fem.hex_mesh(assembly, 0.05)  # a 20 x 20 x 20 voxel grid
+        binder = np.zeros((20, 20, 20), dtype=bool)  # (z, y, x)
+        binder[9:11, 6:14, 8:12] = True  # a box around the crossing, partly inside both fibers
+        mesh = fem.hex_mesh(assembly, 0.05, binder=binder)
+
+        def voxels(mesh, chosen):
+            """(z, y, x) of the chosen elements' voxels: node 0 is a brick's low corner."""
+            low = np.round((mesh.nodes[mesh.elements[chosen, 0]] - mesh.cell_origin) / 0.05).astype(int)
+            return {(z, y, x) for x, y, z in low.tolist()}
+
+        filled = voxels(fibers, slice(None))
+        expected = {voxel for voxel in zip(*np.nonzero(binder)) if voxel not in filled}  # the fibers win
+        is_binder = mesh.element_fibers == 0
+        self.assertTrue(expected and len(expected) < binder.sum())
+        self.assertEqual(voxels(mesh, is_binder), {tuple(int(i) for i in voxel) for voxel in expected})
+        self.assertEqual(mesh.element_count, fibers.element_count + len(expected))
+        self.assertEqual(mesh.materials, ("fiber", "binder"))
+        self.assertTrue((mesh.element_materials[is_binder] == 1).all())
+        binder_nodes = set(mesh.elements[is_binder].ravel().tolist())
+        for fiber in (1, 2):
+            self.assertEqual((mesh.element_fibers == fiber).sum(), (fibers.element_fibers == fiber).sum())
+            self.assertTrue(binder_nodes & set(mesh.elements[mesh.element_fibers == fiber].ravel().tolist()))
+
+    def test_a_binder_mask_must_match_the_grid(self):
+        with self.assertRaisesRegex(ValueError, "binder must be a"):
+            fem.hex_mesh(touching_cross(), 0.05, binder=np.zeros((20, 20, 19), dtype=bool))
 
     def test_a_run_result_works_like_its_assembly(self):
         class Result:
@@ -180,6 +225,17 @@ class WriterTests(unittest.TestCase):
         for name, indices in self.mesh.node_sets().items():
             rows = keywords.get(f"*NSET, NSET={name}", [])
             self.assertEqual([int(value) for row in rows for value in row], (indices + 1).tolist())
+
+    def test_vtu_reads_back(self):
+        piece, arrays = read_vtu(self.mesh.write_vtu(self.path / "mesh.vtu", scale=1e3))
+        self.assertEqual(int(piece.get("NumberOfPoints")), self.mesh.node_count)
+        self.assertEqual(int(piece.get("NumberOfCells")), self.mesh.element_count)
+        np.testing.assert_allclose(arrays["Points"].reshape(-1, 3), self.mesh.nodes * 1e3, rtol=1e-12)
+        np.testing.assert_array_equal(arrays["connectivity"].reshape(-1, 8), self.mesh.elements)
+        np.testing.assert_array_equal(arrays["offsets"], 8 * np.arange(1, self.mesh.element_count + 1))
+        np.testing.assert_array_equal(arrays["types"], 12)  # VTK_HEXAHEDRON
+        np.testing.assert_array_equal(arrays["fiber_id"], self.mesh.element_fibers)
+        np.testing.assert_array_equal(arrays["material"], self.mesh.element_materials)
 
     def test_material_values_must_be_physical(self):
         with self.assertRaises(ValueError):
@@ -250,8 +306,11 @@ class TetMeshTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             _, elements, _, _ = read_nastran(mesh.write_nastran(Path(directory) / "mesh.bdf"))
             blocks = read_abaqus(mesh.write_abaqus(Path(directory) / "mesh.inp"))
+            _, arrays = read_vtu(mesh.write_vtu(Path(directory) / "mesh.vtu"))
         self.assertEqual(elements[1], ("CTETRA", mesh.element_fibers[0], (mesh.elements[0] + 1).tolist()))
         self.assertTrue(any(line.startswith("*ELEMENT, TYPE=C3D10") for line, _ in blocks))
+        np.testing.assert_array_equal(arrays["types"], 24)  # VTK_QUADRATIC_TETRA, in the same node order
+        np.testing.assert_array_equal(arrays["connectivity"].reshape(-1, 10), mesh.elements)
 
 
 if __name__ == "__main__":

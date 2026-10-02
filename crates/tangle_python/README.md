@@ -372,7 +372,13 @@ particles, bonds = result.export_bpm(
 ```
 
 The data can be consumed by DIRT or another compatible LAMMPS BPM workflow;
-TANGLE does not generate the downstream runtime configuration.
+TANGLE does not generate the downstream runtime configuration. The column
+names of each section are in the comments at the top of the file. For fibers
+found in a CT scan, `tangle.ct.add_bpm_binder_bonds` and
+`tangle.ct.add_bpm_binder_spheres` add the binder the scan shows, as bonds
+between fibers or as bonded spheres, and `tangle.ct.write_bpm_ovito` writes a
+file to look at in OVITO (see the
+[CT network tutorial](../../docs/ct_unet_tutorial.md#7-into-tangle)).
 Capsule atom styles require a compatible downstream implementation; they are
 not automatically supported by a stock LAMMPS installation. `atom_type` is the
 starting type, with materials assigned consecutive types; the Python export
@@ -473,8 +479,10 @@ tets = fem.tet_mesh(result, order=2)  # 10-node tetrahedra on each fiber's surfa
 tets.write_abaqus("output/felt_tet.inp", pet)
 ```
 
-`hex_mesh` uses the `export_puma` voxels, and fibers that touch share nodes.
-`tet_mesh` meshes every fiber as its own body, cut at the cell walls. The
+`hex_mesh` uses the `export_puma` voxels, and fibers that touch share nodes;
+`binder=` adds binder voxels, such as a CT scan's. `tet_mesh` meshes every
+fiber as its own body, cut at the cell walls. `write_vtu` writes a copy of
+either mesh to look at in ParaView. The
 [FEM export guide](../../docs/fem_export.md) covers element types, units,
 materials and the [`fem_mesh` example](python/examples/fem_mesh.py).
 
