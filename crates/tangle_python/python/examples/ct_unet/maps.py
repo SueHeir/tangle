@@ -180,35 +180,42 @@ def _bond_points(data, window, shape):
 
 
 def targets(data, window=None) -> dict:
-    """Training targets for ``data`` (a make_data npz), optionally in a (z, y, x) slice ``window``."""
+    """Training targets for ``data`` (a make_data npz), optionally in a (z, y, x) slice ``window``.
+
+    In float32, with the voxel centres broadcast along each axis rather than built as a (z, y, x, 3) grid: this
+    is most of the CPU time of a training crop."""
     near = data["near"] if window is None else data["near"][window]
     labels = data["labels"] if window is None else data["labels"][window]
-    pos, tan, fid, rad, typ = (data[f"p_{k}"] for k in ("pos", "tan", "fid", "rad", "typ"))
+    pos, tan, fid, rad = (data[f"p_{k}"] for k in ("pos", "tan", "fid", "rad"))
     nz, ny, nx = near.shape
     z0, y0, x0 = (0, 0, 0) if window is None else (window[0].start, window[1].start, window[2].start)
-    grid = np.stack(np.meshgrid(np.arange(nx) + x0 + 0.5, np.arange(ny) + y0 + 0.5, np.arange(nz) + z0 + 0.5,
-                                indexing="xy"), axis=-1)  # (y, x, z, 3) from meshgrid order
-    grid = np.transpose(grid, (2, 0, 1, 3))  # (z, y, x, 3) holding (x, y, z)
     has = near >= 0
     i = np.where(has, near, 0)
-    offset = pos[i] - grid
-    distance = np.linalg.norm(offset, axis=-1)
-    sigma = np.maximum(1.0, 0.3 * rad[i])
-    heat = np.where(has, np.exp(-0.5 * (distance / sigma) ** 2), 0.0).astype(np.float32)
+    p = pos.astype(np.float32, copy=False)[i]
+    offset = np.empty((3, nz, ny, nx), np.float32)  # (x, y, z) components
+    np.subtract(p[..., 0], np.arange(nx, dtype=np.float32) + np.float32(x0 + 0.5), out=offset[0])
+    np.subtract(p[..., 1], (np.arange(ny, dtype=np.float32) + np.float32(y0 + 0.5))[:, None], out=offset[1])
+    np.subtract(p[..., 2], (np.arange(nz, dtype=np.float32) + np.float32(z0 + 0.5))[:, None, None], out=offset[2])
+    r = rad.astype(np.float32, copy=False)[i]
+    sigma = np.maximum(np.float32(1.0), np.float32(0.3) * r)
+    heat = np.exp(np.float32(-0.5) * (offset[0] ** 2 + offset[1] ** 2 + offset[2] ** 2) / (sigma * sigma))
+    heat[~has] = 0.0
     # Offsets and directions only where the voxel's nearest axis is its own fiber's.
-    own = has & (labels > 0) & (fid[i] == labels)
-    t = tan[i]
+    own = (has & (labels > 0) & (fid[i] == labels)).astype(np.float32)
+    t = tan.astype(np.float32, copy=False)[i]
     direction = np.stack([t[..., 0] ** 2, t[..., 1] ** 2, t[..., 2] ** 2, t[..., 0] * t[..., 1],
                           t[..., 0] * t[..., 2], t[..., 1] * t[..., 2]], axis=0)
+    offset *= own
+    direction *= own
     return {
         "heat": heat[None],
-        "offset": np.moveaxis(offset, -1, 0).astype(np.float32) * own[None],
-        "direction": direction.astype(np.float32) * own[None],
-        "own": own[None].astype(np.float32),
+        "offset": offset,
+        "direction": direction,
+        "own": own[None],
         "fiber": (labels > 0)[None].astype(np.float32),
         "binder": _binder(data, window, labels.shape),
         "bondpt": _bond_points(data, window, labels.shape),
-        "radius": (np.log(np.maximum(rad[i], 0.5)) * own)[None].astype(np.float32),
+        "radius": (np.log(np.maximum(r, np.float32(0.5))) * own)[None],
     }
 
 
@@ -216,7 +223,7 @@ def targets(data, window=None) -> dict:
 def flip(sample: dict, axis: int) -> dict:
     """Mirror along x (axis 0), y (1) or z (2) of the (x, y, z) components."""
     array_axis = {0: -1, 1: -2, 2: -3}[axis]
-    out = {k: np.flip(v, array_axis).copy() for k, v in sample.items()}
+    out = {k: np.flip(v, array_axis) for k, v in sample.items()}  # views: the caller makes them contiguous once
     out["offset"][axis] *= -1
     for c, (a, b) in zip(range(3, 6), [(0, 1), (0, 2), (1, 2)]):
         if axis in (a, b):
@@ -225,7 +232,7 @@ def flip(sample: dict, axis: int) -> dict:
 
 
 def swap_xy(sample: dict) -> dict:
-    out = {k: np.swapaxes(v, -1, -2).copy() for k, v in sample.items()}
+    out = {k: np.swapaxes(v, -1, -2) for k, v in sample.items()}  # views, as in flip
     out["offset"] = out["offset"][[1, 0, 2]]
     out["direction"] = out["direction"][[1, 0, 2, 3, 5, 4]]
     return out

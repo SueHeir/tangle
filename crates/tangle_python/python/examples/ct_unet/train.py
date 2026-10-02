@@ -36,6 +36,22 @@ AMP = None  # autocast dtype on CUDA (set from --amp)
 WEIGHTS = {"heat": 1.0, "offset": 1.0, "direction": 1.0, "fiber": 0.5, "radius": 1.0, "binder": 1.0, "bondpt": 1.0}
 
 
+class _ReadOnce(dict):
+    """A scan's npz with each array read once: NpzFile decompresses an array again on every access, and a crop
+    reads several of them more than once (the volume, the binder mask, the point tables)."""
+
+    def __init__(self, npz):
+        super().__init__()
+        self.npz, self.files = npz, npz.files
+
+    def __missing__(self, key):
+        value = self[key] = self.npz[key]
+        return value
+
+    def __contains__(self, key):
+        return key in self.files
+
+
 class Crops(Dataset):
     def __init__(self, files, crop: int, per_volume: int, seed: int, train: bool = True, noise: float = 0.0,
                  hint_rates: dict | None = None):
@@ -48,7 +64,7 @@ class Crops(Dataset):
 
     def __getitem__(self, item):
         rng = np.random.default_rng((self.seed, item, int(time.time() * 1e3) if self.train else 0))
-        data = np.load(self.files[item // self.per_volume])
+        data = _ReadOnce(np.load(self.files[item // self.per_volume]))
         shape = data["volume"].shape
         low = [int(rng.integers(0, s - self.crop + 1)) if self.train else (s - self.crop) // 2 for s in shape]
         window = tuple(slice(l, l + self.crop) for l in low)
