@@ -123,11 +123,11 @@ def find_fibers(scan: str | os.PathLike, settings: NetworkSettings,
     ``to_assembly()``, ``relax()`` and the other exports. Three more attributes: ``folder``, where everything was
     written; ``binder``, with ``settings.binder``, the binder as a boolean ``(z, y, x)`` voxel mask as in
     ``binder.tif`` (else None), which ``tangle.fem.hex_mesh(..., binder=fit.binder)`` meshes; and ``bonds``, a list
-    of the bonds the network found, which :func:`add_bpm_bonds` puts into a bonded-particle model. Each bond is a
-    dict with ``fibers`` (the two fibers' indices in ``centerlines``), ``position`` (x, y, z in voxels, as the
-    centerlines), ``strength`` (the height of the network's bond-point peak; NaN for a bond found where its binder
-    joins two fibers with no peak) and ``binder_voxels`` (how many binder voxels join the pair there; 0 for a
-    bond-point bond).
+    of the bonds the network found, each a dict with ``fibers`` (the two fibers' indices in ``centerlines``),
+    ``position`` (x, y, z in voxels, as the centerlines), ``strength`` (the height of the network's bond-point
+    peak; NaN for a bond found where its binder joins two fibers with no peak) and ``binder_voxels`` (how many
+    binder voxels join the pair there; 0 for a bond-point bond). :func:`add_bpm_binder_bonds` and
+    :func:`add_bpm_binder_spheres` put the bonds or the binder into a bonded-particle model.
     """
     from ._network import find_fibers as pipeline  # the network needs PyTorch: imported only when used
 
@@ -211,83 +211,3 @@ def _read_binder(path: Path):
     import tifffile
 
     return tifffile.imread(path) > 0
-
-
-def add_bpm_bonds(path: str | os.PathLike, bonds, voxel_size: float, bond_type: int = 2) -> int:
-    """Bond fibers to each other in a bonded-particle (DEM) file that ``RunResult.export_bpm`` wrote: where the
-    network found binder or a bond point holding two fibers together, so the model holds them together too.
-
-    ``bonds`` are as :func:`find_fibers` gives them (``fit.bonds``): the two fibers' indices and a position in
-    voxels of ``voxel_size``. Each pair of fibers gets one bond of ``bond_type``, at its first bond in the list,
-    between the two fibers' particles nearest that position (nearest the axis, for capsules). The new bonds go
-    after the file's bonds along each fiber, and its bond and bond-type counts are updated. The fibers keep their
-    order through ``coarse_grained``, ``relax`` and ``export_bpm``, so fiber ``k`` is the file's molecule
-    ``k + 1``. Returns how many bonds were added.
-    """
-    path = Path(path)
-    lines = path.read_text().splitlines()
-    titles = {line.split()[0]: index for index, line in enumerate(lines)
-              if line.split()[:1] in (["Atoms"], ["Capsules"], ["Bonds"])}
-    if "Atoms" not in titles or "Bonds" not in titles:
-        raise ValueError(f"{path} has no Atoms or no Bonds section; is it a file export_bpm wrote?")
-
-    def section(name: str) -> tuple[list[list[str]], int]:
-        """A section's data rows, and where its last line (row or comment) ends."""
-        rows, end = [], titles[name] + 1
-        for index in range(titles[name] + 1, len(lines)):
-            line = lines[index]
-            if line[:1].isalpha():  # the next section's title
-                break
-            if line.strip():
-                end = index + 1
-                if not line.lstrip().startswith("#"):
-                    rows.append(line.split())
-        return rows, end
-
-    atoms = section("Atoms")[0]  # id molecule type diameter density x y z
-    ids = np.array([int(row[0]) for row in atoms])
-    molecules = np.array([int(row[1]) for row in atoms])
-    centers = np.array([[float(value) for value in row[5:8]] for row in atoms])
-    half, axes = np.zeros(len(atoms)), np.zeros((len(atoms), 3))  # spheres: a point each
-    if "Capsules" in titles:  # atom-id half-length axis-x axis-y axis-z
-        row_of = {atom: index for index, atom in enumerate(ids)}
-        for row in section("Capsules")[0]:
-            half[row_of[int(row[0])]] = float(row[1])
-            axes[row_of[int(row[0])]] = [float(value) for value in row[2:5]]
-    by_molecule = np.argsort(molecules, kind="stable")
-    sorted_molecules = molecules[by_molecule]
-
-    def nearest(molecule: int, point: np.ndarray) -> int | None:
-        """The id of the molecule's particle nearest ``point``, or None if it has none."""
-        start, stop = np.searchsorted(sorted_molecules, [molecule, molecule + 1])
-        mine = by_molecule[start:stop]
-        if not len(mine):
-            return None
-        along = np.clip(((point - centers[mine]) * axes[mine]).sum(1), -half[mine], half[mine])
-        gap = np.linalg.norm(centers[mine] + along[:, None] * axes[mine] - point, axis=1)
-        return int(ids[mine[np.argmin(gap)]])
-
-    pairs, new = set(), []
-    for bond in bonds:
-        i, j = sorted(int(fiber) for fiber in bond["fibers"])
-        if i == j or (i, j) in pairs:
-            continue
-        point = np.asarray(bond["position"], dtype=float) * voxel_size
-        a, b = nearest(i + 1, point), nearest(j + 1, point)
-        if a is None or b is None:  # a fiber the file doesn't have
-            continue
-        pairs.add((i, j))
-        new.append((a, b))
-    if not new:
-        return 0
-    rows, end = section("Bonds")
-    first = max((int(row[0]) for row in rows), default=0) + 1
-    lines[end:end] = [f"{first + k} {bond_type} {a} {b}" for k, (a, b) in enumerate(new)]
-    for index in range(min(titles.values())):  # the header's counts
-        words = lines[index].split()
-        if words[1:] == ["bonds"]:
-            lines[index] = f"{len(rows) + len(new)} bonds"
-        elif words[1:] == ["bond", "types"]:
-            lines[index] = f"{max(int(words[0]), bond_type)} bond types"
-    path.write_text("\n".join(lines) + "\n")
-    return len(new)

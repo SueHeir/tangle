@@ -372,7 +372,13 @@ particles, bonds = result.export_bpm(
 ```
 
 The data can be consumed by DIRT or another compatible LAMMPS BPM workflow;
-TANGLE does not generate the downstream runtime configuration.
+TANGLE does not generate the downstream runtime configuration. The column
+names of each section are in the comments at the top of the file. For fibers
+found in a CT scan, `tangle.ct.add_bpm_binder_bonds` and
+`tangle.ct.add_bpm_binder_spheres` add the binder the scan shows, as bonds
+between fibers or as bonded spheres, and `tangle.ct.write_bpm_ovito` writes a
+file to look at in OVITO (see the
+[CT network tutorial](../../docs/ct_unet_tutorial.md#7-into-tangle)).
 Capsule atom styles require a compatible downstream implementation; they are
 not automatically supported by a stock LAMMPS installation. `atom_type` is the
 starting type, with materials assigned consecutive types; the Python export

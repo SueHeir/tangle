@@ -31,8 +31,9 @@ and PNG outputs). Install them with ``pip install numpy scipy tifffile
 matplotlib``.
 """
 
+from ._bpm import BinderSpheres, add_bpm_binder_bonds, add_bpm_binder_spheres, write_bpm_ovito
 from ._evaluate import geometry_report, score
-from ._find import NetworkSettings, add_bpm_bonds, find_fibers
+from ._find import NetworkSettings, find_fibers
 from ._fit import FiberSpec, FitResult, FitSettings, fit_fibers, load_fit
 from ._image import Levels
 from ._profile import CrossSection
@@ -50,8 +51,10 @@ __all__ = [
     "NetworkSettings",
     "Scanner",
     "Binder",
+    "BinderSpheres",
     "SyntheticScan",
-    "add_bpm_bonds",
+    "add_bpm_binder_bonds",
+    "add_bpm_binder_spheres",
     "fiber_palette",
     "find_fibers",
     "fit_fibers",
@@ -66,4 +69,5 @@ __all__ = [
     "save_overlay_figure",
     "score",
     "synthetic_ct",
+    "write_bpm_ovito",
 ]

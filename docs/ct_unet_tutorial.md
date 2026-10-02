@@ -379,19 +379,36 @@ opens; color it by `fiber_id`.
 
 **With binder.** The fit that `ct.find_fibers` returns (below) also holds the
 network's bonds and, with `binder=True` in its settings (`--binder`), its
-binder, and both exports can take them:
+binder. The mesh takes the binder as bricks, and the particle model takes it in
+one of two ways:
 
 ```python
-ct.add_bpm_bonds("fibers_bpm.data", fit.bonds, fit.voxel_size)  # bonds fiber to fiber
 hexes = fem.hex_mesh(relaxed.to_assembly(), voxel_size=fit.voxel_size, binder=fit.binder)
+
+run.export_bpm("binder_bonds.data")
+ct.add_bpm_binder_bonds("binder_bonds.data", fit.bonds, fit.voxel_size)        # a) bonds from fiber to fiber
+run.export_bpm("binder_spheres.data")
+ct.add_bpm_binder_spheres("binder_spheres.data", fit.binder, fit.voxel_size)   # b) the binder as spheres
+ct.write_bpm_ovito("binder_spheres.data")                                      # binder_spheres.dump, for OVITO
 ```
 
-`add_bpm_bonds` bonds each pair of fibers the network found bonded once,
-between their two particles nearest the bond, as bond type 2 (the bonds along
-each fiber are type 1). `binder=fit.binder` meshes the binder voxels outside
-the relaxed fibers as bricks that share nodes with the fibers they touch, so
-the binder holds the fibers together in the mesh too; they have fiber id 0
-and the material `"binder"`.
+`binder=fit.binder` meshes the binder voxels outside the relaxed fibers as
+bricks that share nodes with the fibers they touch, so the binder holds the
+fibers together in the mesh too; they have fiber id 0 and the material
+`"binder"`. In the particle model, `add_bpm_binder_bonds` bonds each pair of
+fibers the network found bonded once, between their two particles nearest the
+bond (bond type 2; the bonds along each fiber are type 1).
+`add_bpm_binder_spheres` fills the binder with spheres about a fiber across
+(`diameter=` changes that), each with the mass of the binder it stands for,
+and bonds each one to the fibers its binder touches (bond type 2) and to the
+spheres whose binder meets its own (bond type 3). A sphere is made smaller
+where it would reach into a fiber its binder doesn't touch, so nothing starts
+out overlapping without a bond. `write_bpm_ovito` writes either file as a dump
+to open in OVITO (set the particle shape to Spherocylinder): the fibers'
+particles are type 1, the binder spheres type 2 and the bonds between particles
+type 3. The default export is one capsule per relaxed segment, which LAMMPS
+doesn't read (see the [Python guide](../crates/tangle_python/README.md#bpm-export));
+for LAMMPS, export with `mode="spheres_exact"` and add the binder the same way.
 
 ## From Python, in one call
 
