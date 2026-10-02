@@ -61,6 +61,18 @@ stopped when run again:
 
 Other commands: `status` (where the run is), `stop` (stop the pod now).
 
+**Adding scans while it trains.** Scans made after the run started can join it:
+
+```sh
+python pod.py add --ssh "ssh root@IP -p PORT -i ~/.ssh/id_ed25519" --root C:\path\to\unet --every 15 -- data_mixed
+```
+
+sends the scans in the named folders that the pod doesn't have yet, every 15 minutes until stopped with Ctrl-C
+(without `--every`, once). Scans written in the last 2 minutes wait for the next round. Every scan lands in a
+staging folder first and is moved into `data/` only after its CRC check passes, so `train.py` never reads half
+a file (`push` works the same way). The run uses them from its next file refresh: start it with
+`--refresh-every 500` and with the folder already in DATA (with at least one scan in it).
+
 **The code that trains** is `train.py` and `maps.py` from the branch `--ref` (default `claude/ct-unet`),
 downloaded on the pod. `--code-dir FOLDER` sends this computer's copies instead. Either way the run folder keeps
 the copy it trained with, under `code/`.

@@ -41,6 +41,7 @@ import time
 from pathlib import Path, PurePosixPath
 
 WORK = "/workspace/unet"  # on the pod: data/, inputs/, runs/ (the pod's volume disk keeps them while it is stopped)
+STAGING = "incoming"  # scans land here and move into data/ once whole
 REPO = "https://raw.githubusercontent.com/SueHeir/tangle"
 CODE_PATH = "crates/tangle_python/python/examples/ct_unet"
 CODE_FILES = ("train.py", "maps.py")
@@ -244,6 +245,44 @@ def send(pod: Pod, files: dict, streams: int = 8) -> None:
         raise SystemExit(f"{errors[0]}; run the same command again to send the rest")
 
 
+def deliver(pod: Pod, files: dict, streams: int) -> None:
+    """Send scans ({path under WORK: local path}) into a staging folder on the pod, then move each one that passes
+    its CRC check into place: a running train.py only ever sees whole scans. Failed ones are sent once more."""
+    for attempt in range(2):
+        pod.pod("unstage")
+        send(pod, {f"{STAGING}/{k}": v for k, v in files.items()}, streams)
+        bad = pod.pod("adopt", data=json.dumps(list(files)).encode()).get("bad", [])
+        if not bad:
+            return
+        say(f"{len(bad)} scans failed their CRC check on the pod" + ("; sending them again" if not attempt else ""))
+        files = {k: files[k] for k in bad}
+    raise SystemExit(f"still failing the CRC check: {sorted(files)}; check these files here")
+
+
+def add(pod: Pod, args, folders) -> None:
+    """Send new scans in ``folders`` (under --root) to a pod, also while it trains, every --every minutes."""
+    if not folders:
+        raise SystemExit("after --, name the folders (under --root) to send new scans from, e.g. -- data_mixed")
+    while True:
+        have = pod.pod("list")
+        cutoff = time.time() - 120  # leave alone scans still being written here
+        todo = {}
+        for name in folders:
+            local = Path(name) if Path(name).is_absolute() else args.root / name
+            if not local.is_dir():
+                raise SystemExit(f"no folder {local}")
+            todo.update({f"data/{local.name}/{f.name}": f for f in sorted(local.glob("*.npz"))
+                         if f.stat().st_mtime < cutoff and have.get(f"data/{local.name}/{f.name}") != f.stat().st_size})
+        if todo:
+            deliver(pod, todo, args.streams)
+            say(f"added {len(todo)} scans; the run picks them up at its next file refresh (--refresh-every)")
+        else:
+            say("no new scans")
+        if not args.every:
+            return
+        time.sleep(args.every * 60)
+
+
 def push(pod: Pod, args, train_args) -> list:
     folders, remote_args, extras, skip = train_inputs(train_args, args.root)
     scans = scan_list(folders, skip)
@@ -266,7 +305,10 @@ def push(pod: Pod, args, train_args) -> list:
                          f"{math.ceil((need + have.get('_bytes', 0)) / 1e9 * 1.2 + 10)} GB (the pod restarts; "
                          f"/workspace is kept), then run this again.")
     say(f"{len(scans) - len(todo)} scans already on the pod, {len(todo)} to send")
-    send(pod, {**todo, **extras}, args.streams)
+    if extras:
+        send(pod, extras, args.streams)
+    if todo:
+        deliver(pod, todo, args.streams)
     names = json.dumps(list(scans)).encode()
     for _ in range(2):
         bad = pod.pod("check", data=names).get("bad", [])
@@ -274,7 +316,7 @@ def push(pod: Pod, args, train_args) -> list:
             say("every scan on the pod passed its CRC check")
             break
         say(f"{len(bad)} scans failed the CRC check on the pod; sending them again")
-        send(pod, {k: scans[k] for k in bad}, args.streams)
+        deliver(pod, {k: scans[k] for k in bad}, args.streams)
     else:
         raise SystemExit(f"still failing the CRC check: {bad}; check these files here")
     return remote_args
@@ -422,6 +464,9 @@ def home(args, train_args):
     if args.command == "make":
         make(pod, args, train_args)
         return
+    if args.command == "add":
+        add(pod, args, train_args)
+        return
     if args.command == "status":
         say(json.dumps(pod.pod("status", args.run), indent=1))
         return
@@ -529,7 +574,7 @@ def on_pod(argv):
     argv = argv[:argv.index("--")] if "--" in argv else argv
     parser = argparse.ArgumentParser(prog="pod.py _pod")
     sub = parser.add_subparsers(dest="what", required=True)
-    for name in ("setup", "list", "check"):
+    for name in ("setup", "list", "check", "adopt", "unstage"):
         sub.add_parser(name)
     for name in ("status", "md5"):
         sub.add_parser(name).add_argument("run")
@@ -559,6 +604,11 @@ def on_pod(argv):
         files = {str(p.relative_to(work)): p.stat().st_size for p in (work / "data").glob("*/*.npz")}
         files["_bytes"] = sum(files.values())
         print(json.dumps(files))
+    elif args.what == "adopt":
+        print(json.dumps({"bad": adopt(work, json.load(sys.stdin))}))
+    elif args.what == "unstage":
+        shutil.rmtree(work / STAGING, ignore_errors=True)
+        print("{}")
     elif args.what == "check":
         print(json.dumps({"bad": crc_check(work, json.load(sys.stdin))}))
     elif args.what == "md5":
@@ -628,6 +678,32 @@ def crc_check(work: Path, names) -> list:
     record.write_text(json.dumps(ok))
     print(f"CRC-checked {len(todo)} scans ({len(paths) - len(todo)} checked before or missing): {len(bad)} bad",
           flush=True)
+    return bad
+
+
+def adopt(work: Path, names) -> list:
+    """Move staged scans that pass their CRC check into place (a rename on the same disk, so train.py never sees
+    part of a file); returns the ones that failed, which are deleted."""
+    from concurrent.futures import ProcessPoolExecutor
+
+    staged = [work / STAGING / n for n in names]
+    with ProcessPoolExecutor(max(1, cpus())) as pool:
+        results = list(pool.map(_crc_one, map(str, staged), chunksize=8))
+    record = work / "data" / ".crc_ok.json"
+    ok = json.loads(record.read_text()) if record.exists() else {}
+    bad = []
+    for name, source, good in zip(names, staged, results):
+        if not good:
+            bad.append(name)
+            source.unlink(missing_ok=True)
+            continue
+        target = work / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, target)
+        ok[str(target)] = [target.stat().st_size, target.stat().st_mtime]
+    record.write_text(json.dumps(ok))
+    shutil.rmtree(work / STAGING, ignore_errors=True)
+    print(f"moved {len(names) - len(bad)} scans into place, {len(bad)} failed their CRC check", flush=True)
     return bad
 
 
@@ -960,7 +1036,7 @@ def main():
     train_args = argv[argv.index("--") + 1:] if "--" in argv else []
     argv = argv[:argv.index("--")] if "--" in argv else argv
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["go", "push", "train", "wait", "status", "fetch", "stop", "make"])
+    parser.add_argument("command", choices=["go", "push", "train", "wait", "status", "fetch", "stop", "make", "add"])
     parser.add_argument("--ssh", required=True, help="the pod's 'SSH over exposed TCP' line, in quotes")
     parser.add_argument("--run", help="run name (its folder under runs/), e.g. r16")
     parser.add_argument("--root", type=Path, default=Path("."), help="the folder holding the training sets")
@@ -976,6 +1052,8 @@ def main():
                         help="minutes the pod waits for the run to be fetched after training ends, then ends anyway")
     parser.add_argument("--poll", type=float, default=300, help="seconds between progress checks")
     parser.add_argument("--streams", type=int, default=8, help="push: ssh connections sending scans at once")
+    parser.add_argument("--every", type=float, default=0,
+                        help="add: look for new scans again every this many minutes, until stopped (Ctrl-C)")
     parser.add_argument("--jobs", type=int, default=0, help="make: scans made at a time (default: one per 2 cores)")
     parser.add_argument("--backend", choices=["auto", "cuda", "wgpu", "cpu"], default="auto",
                         help="make: Tangle's relaxation backend on the pod (auto: CUDA, else wgpu, else the CPU)")
@@ -985,10 +1063,8 @@ def main():
     misplaced = sorted({w.split("=")[0] for w in train_args} & ours)
     if misplaced:
         parser.error(f"{', '.join(misplaced)} came after --, where train.py's arguments go; put them before --")
-    if args.command != "stop" and not args.run:
+    if args.command not in ("stop", "add") and not args.run:
         parser.error("--run is required")
-    if args.command == "make" and args.ref == "claude/ct-unet":
-        pass  # make_data.py and its families live on claude/ct-unet
     if args.command in ("go", "push", "train") and not train_args:
         parser.error("give train.py's arguments after --")
     args.dest = args.dest or args.root / "runs"
