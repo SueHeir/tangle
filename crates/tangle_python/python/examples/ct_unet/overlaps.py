@@ -210,6 +210,8 @@ def _closest_approaches(fib: Fibers):
     over, _ = _joining(fib, A, B)
     keep = over > -1.0
     A, B, over = A[keep], B[keep], over[keep]
+    if not len(A):  # pairs within reach, none of them close
+        return A, B, np.zeros(0), np.zeros(0)
     fa, fb = fib.F[A], fib.F[B]
     A, B = np.where(fa > fb, B, A), np.where(fa > fb, A, B)
     key = np.minimum(fa, fb) * (len(fib.a) + 1) + np.maximum(fa, fb)
