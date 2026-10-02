@@ -102,9 +102,10 @@ It keeps going if this computer disconnects; running the command again follows i
 seconds and dollars per scan, and how many failed or were skipped. Logs are in `/workspace/unet/make/RUN/`.
 The overlap check stays on, as in `make_data.py`.
 
-Measured on an A100 PCIe pod (2026-10-01): the container has no Vulkan driver, so wgpu doesn't start, and
-Tangle's CUDA backend stopped on a kernel the CUDA code generator can't compile yet. On the CPU alone none of 20
-mixed scans finished in 19 minutes, so until the CUDA backend works there, make scans at home and push them.
+Pods have no Vulkan driver, so wgpu doesn't start there; `make` uses Tangle's CUDA backend instead (working
+from claude/ct-unet d62612b on; on the Windows PC it matched wgpu and relaxed about 20% faster). Rendering each
+scan's image then takes most of the time, about 10 s per scan on one CPU core, so the pod's CPU cores set the
+pace. Making scans while a run trains takes cores from its crop workers; prefer `--jobs` small then.
 
 Folders made this way train like any other: name them in `go`'s DATA and VAL, and `push` finds them on the pod.
 
