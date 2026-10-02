@@ -15,7 +15,7 @@ CORNERS = np.array(
 )
 
 
-def hex_mesh(assembly, voxel_size: float, *, bond_radius_ratio: float | None = None) -> FemMesh:
+def hex_mesh(assembly, voxel_size: float, *, bond_radius_ratio: float | None = None, binder=None) -> FemMesh:
     """Mesh the fibers with one 8-node hexahedron per voxel they fill.
 
     The voxels are exactly those of ``export_puma``: a grid that spans the
@@ -33,6 +33,12 @@ def hex_mesh(assembly, voxel_size: float, *, bond_radius_ratio: float | None = N
             with this radius as a fraction of the thinner fiber's radius
             (as ``export_puma`` does). Binder elements get fiber id 0 and
             the material ``"binder"``.
+        binder: also mesh these voxels as binder: a boolean ``(z, y, x)``
+            array over the same voxel grid (``nz, ny, nx`` voxels of
+            ``voxel_size`` across the cell), such as a CT scan's binder
+            segmented on that grid. Voxels a fiber fills stay fiber; the
+            rest become binder elements that share nodes with their
+            neighbors, so they bond the fibers they touch.
 
     Returns:
         A :class:`FemMesh` of ``"hex8"`` elements.
@@ -42,6 +48,14 @@ def hex_mesh(assembly, voxel_size: float, *, bond_radius_ratio: float | None = N
     nx, ny, nz = counts
     phase = np.frombuffer(phase, dtype="<u2")
     owner = np.frombuffer(owner, dtype="<u4")
+    if binder is not None:
+        mask = np.asarray(binder, dtype=bool)
+        if mask.shape != (nz, ny, nx):
+            raise ValueError(f"binder must be a (z, y, x) mask of the {nz} x {ny} x {nx} voxel grid; got {mask.shape}")
+        extra = mask.ravel() & (phase == 0)  # the fibers win: only voxels no fiber fills
+        if extra.any():
+            phase, owner = phase.copy(), owner.copy()
+            phase[extra], owner[extra] = 1, 0  # filled, and owned by no fiber: binder
     filled = np.flatnonzero(phase)
     if filled.size == 0:
         raise ValueError("no fiber fills a voxel of the cell; check the voxel size and the fibers")

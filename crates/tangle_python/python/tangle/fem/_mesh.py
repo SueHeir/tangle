@@ -299,6 +299,60 @@ class FemMesh:
                     _write_list(handle, (indices + 1).tolist())
         return path
 
+    def write_vtu(self, path: str | Path, *, scale: float = 1.0) -> Path:
+        """Write the mesh as a VTK unstructured grid (``.vtu``), to look at in
+        ParaView: the elements with each one's TANGLE fiber id (0 for binder)
+        and material (an index into ``materials``) as cell data. ParaView's
+        own Nastran reader cannot read the long-field nodes that
+        :meth:`write_nastran` writes.
+
+        Args:
+            path: the file to write, usually ``.vtu``.
+            scale: multiplies every coordinate; ``1e6`` writes micrometers.
+
+        Returns:
+            The path written.
+        """
+        path = Path(path)
+        vtk_type = {"hex8": 12, "tet4": 10, "tet10": 24}[self.element_type]  # VTK_HEXAHEDRON, TETRA, QUADRATIC_TETRA
+        k = ELEMENT_NODE_COUNTS[self.element_type]
+        arrays = [  # (name, VTK type, components, data): written raw, one after another, each after its byte count
+            ("Points", "Float64", 3, np.ascontiguousarray(_scaled(self.nodes, scale), dtype="<f8")),
+            ("connectivity", "Int64", 1, np.ascontiguousarray(self.elements, dtype="<i8")),
+            ("offsets", "Int64", 1, np.arange(k, k * (len(self.elements) + 1), k, dtype="<i8")),
+            ("types", "UInt8", 1, np.full(len(self.elements), vtk_type, dtype="u1")),
+            ("fiber_id", "Int64", 1, np.ascontiguousarray(self.element_fibers, dtype="<i8")),
+            ("material", "Int32", 1, np.ascontiguousarray(self.element_materials, dtype="<i4")),
+        ]
+        offsets, at = [], 0
+        for _, _, _, data in arrays:
+            offsets.append(at)
+            at += 8 + data.nbytes
+
+        def tag(index: int) -> str:
+            name, kind, components, _ = arrays[index]
+            return (f'<DataArray type="{kind}" Name="{name}" NumberOfComponents="{components}" '
+                    f'format="appended" offset="{offsets[index]}"/>')
+
+        header = (
+            '<?xml version="1.0"?>\n'
+            '<VTKFile type="UnstructuredGrid" version="1.0" byte_order="LittleEndian" header_type="UInt64">\n'
+            "<UnstructuredGrid>\n"
+            f'<Piece NumberOfPoints="{len(self.nodes)}" NumberOfCells="{len(self.elements)}">\n'
+            f"<Points>{tag(0)}</Points>\n"
+            f"<Cells>{tag(1)}{tag(2)}{tag(3)}</Cells>\n"
+            f'<CellData Scalars="fiber_id">{tag(4)}{tag(5)}</CellData>\n'
+            "</Piece>\n</UnstructuredGrid>\n"
+            '<AppendedData encoding="raw">\n_'
+        )
+        with path.open("wb") as handle:
+            handle.write(header.encode("ascii"))
+            for _, _, _, data in arrays:
+                handle.write(np.uint64(data.nbytes).tobytes())
+                handle.write(data.tobytes())
+            handle.write(b"\n</AppendedData>\n</VTKFile>\n")
+        return path
+
     def _property_ids(self) -> tuple[list[tuple[int, int]], int]:
         """``(pid, material index)`` of every fiber, and the binder's pid (0
         without binder)."""

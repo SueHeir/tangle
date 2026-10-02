@@ -1,3 +1,4 @@
+# Copied from examples/ct_unet/find_fibers.py by its sync_package.py: change that file, then run it again.
 """Find the fibers in a CT scan with the map network: centerlines, diameters, types and bonds.
 
     python find_fibers.py SCAN --weights NETWORK.pt --diameters 12um,30um
@@ -28,10 +29,10 @@ from pathlib import Path
 
 import numpy as np
 
-import fiber_outputs
-import scan_io
-from fiber_outputs import Fibers, polyline_length
-from scan_io import ScanError
+from . import fiber_outputs
+from . import scan_io
+from .fiber_outputs import Fibers, polyline_length
+from .scan_io import ScanError
 
 TILE, STRIDE = 128, 64  # the network's training crop, and a tile every half tile
 TRAINED = (3.5, 28.0)  # fiber diameters (voxels) the network was trained on
@@ -220,7 +221,7 @@ def find_in_region(region, voxel_um: float, model, device: str, grey, sizes_um=N
     ``sizes_um``: known fiber diameters (one per type), ``types``: the number of types when the sizes aren't
     known, ``bonded``: True, False or None (unknown). With ``work`` and ``key``, the votes are saved there and
     reused while ``key`` (a description of the region, network and hints) stays the same."""
-    from trace_maps import cells_to_points, tidy_up, track
+    from .trace_maps import cells_to_points, tidy_up, track
 
     shape = tuple(int(n) for n in region.shape)
     sizes = [d / voxel_um for d in sizes_um] if sizes_um else None
@@ -253,7 +254,7 @@ def find_in_region(region, voxel_um: float, model, device: str, grey, sizes_um=N
     say(f"  {len(lines):,} fibers")
     bonds = []
     if lines and (len(centers) or len(binder)):
-        from bonds import bonds_at, bonds_from_binder, merge_bonds, outside_fibers
+        from .bonds import bonds_at, bonds_from_binder, merge_bonds, outside_fibers
 
         # the fibers always win: the binder is what the network calls binder outside the traced fibers. (Inside a
         # blob of binder the network often says fiber as well, so its own fiber call would leave only the rims.)
@@ -288,9 +289,9 @@ def network_votes(region, model, device: str, grey, hints: dict, want_bonds: boo
     """Every fiber voxel's axis vote, pooled in 1-voxel cells over the whole region (``trace_maps.vote_cells``),
     the bond-point peaks (centers, strengths) and, with ``want_binder``, the voxels the network calls binder
     (``BINDER_CUTOFF``), as (x, y, z) voxel numbers. Saved to ``work`` as the tiles go, when it is given."""
-    from bonds import bond_peaks
-    from maps import BINDER
-    from trace_maps import merge_cells, vote_cells
+    from .bonds import bond_peaks
+    from .maps import BINDER
+    from .trace_maps import merge_cells, vote_cells
 
     plan = tile_plan(region.shape)
     layers, per_layer = plan[0], len(plan[1]) * len(plan[2])
@@ -375,7 +376,7 @@ def tile_plan(shape, tile: int = TILE, stride: int = STRIDE) -> list[list[tuple[
 def tile_maps(region, corner, model, device: str, grey, hints: dict) -> np.ndarray:
     """The network's maps of the tile at ``corner`` (z, y, x). A region thinner than a tile is padded with
     empty space (the void grey), as the network sees beyond the edges of its training crops."""
-    from maps import predict
+    from .maps import predict
 
     z, y, x = corner
     block = np.asarray(region[z:z + TILE, y:y + TILE, x:x + TILE], dtype=np.float32)
@@ -393,7 +394,7 @@ def tile_maps(region, corner, model, device: str, grey, hints: dict) -> np.ndarr
 def fiber_kinds(lines, radii, sizes, k, region, grey, voxel_um: float):
     """Each fiber's type (0 = the thinnest) and a name per type: by the nearest known diameter, or else by
     clustering the fibers' diameters and axis grey (``fiber_types``; ``k`` types, or 1-4 by BIC)."""
-    from fiber_types import assign_by_size, assign_types, features
+    from .fiber_types import assign_by_size, assign_types, features
 
     if sizes:
         kinds = assign_by_size(radii, sizes) if len(sizes) > 1 and lines else np.zeros(len(lines), int)
@@ -456,7 +457,7 @@ def backing(lines, positions) -> np.ndarray:
 
 def diameter_profiles(region, lines, model, device: str, grey, hints: dict, voxel_um: float) -> list[dict]:
     """The diameter at every voxel along every fiber (``diameters.Accumulator``): the network's second pass."""
-    from diameters import Accumulator
+    from .diameters import Accumulator
 
     plan = tile_plan(region.shape)
     total = len(plan[0]) * len(plan[1]) * len(plan[2])
@@ -582,7 +583,7 @@ def pick_device(name: str) -> str:
 
 
 def load_network(path: Path, device: str):
-    from maps import load
+    from .maps import load
 
     try:
         return load(path, device)

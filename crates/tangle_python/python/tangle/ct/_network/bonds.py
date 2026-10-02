@@ -1,3 +1,4 @@
+# Copied from examples/ct_unet/bonds.py by its sync_package.py: change that file, then run it again.
 """Bonds from the network's binder map: which traced fibers each blob of binder joins.
 
 A bond is the binder (voxels the network calls binder, probability > 0.5) between one pair of traced fibers:
@@ -9,7 +10,7 @@ import numpy as np
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
-from maps import BINDER
+from .maps import BINDER
 
 MIN_VOXELS = 4
 REACH = 2.5  # voxels from a traced fiber's surface
@@ -109,7 +110,7 @@ def score_bonds(found, true_centers, tolerance: float = 4.0):
 def extract_bond_points(maps: np.ndarray, lines, radii, threshold: float = 0.5):
     """Bonds from the bond-point map: every local peak above ``threshold`` is a bond, joining the two traced
     fibers whose surfaces are nearest it (both within ``REACH``)."""
-    from maps import BONDPT
+    from .maps import BONDPT
 
     heat = maps[BONDPT][0]
     peaks = (heat > threshold) & (heat == ndimage.maximum_filter(heat, size=5))
@@ -119,7 +120,7 @@ def extract_bond_points(maps: np.ndarray, lines, radii, threshold: float = 0.5):
 
 def bond_peaks(maps: np.ndarray, threshold: float = 0.5, window=None, origin=(0, 0, 0)):
     """(centers (x, y, z), strengths) of the bond-point peaks above ``threshold`` inside ``window``."""
-    from maps import BONDPT
+    from .maps import BONDPT
 
     heat = maps[BONDPT][0]
     peaks = (heat > threshold) & (heat == ndimage.maximum_filter(heat, size=5))

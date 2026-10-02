@@ -4,7 +4,7 @@ Two meshers return the same :class:`FemMesh`:
 
 ``hex_mesh(assembly, voxel_size)``
     One 8-node hexahedron per voxel the fibers fill, on the ``export_puma``
-    grid. Fibers that touch share nodes.
+    grid. Fibers that touch share nodes. ``binder=`` adds binder voxels.
 ``tet_mesh(assembly, element_size)``
     Tetrahedra that follow each fiber's round or oval surface, meshed with
     gmsh (``pip install gmsh``). Each fiber is its own body.
@@ -12,7 +12,8 @@ Two meshers return the same :class:`FemMesh`:
 Write a mesh with ``mesh.write_nastran("fibers.bdf")`` (bulk data: ``GRID``,
 ``CHEXA`` or ``CTETRA``, ``PSOLID``, ``MAT1``) or
 ``mesh.write_abaqus("fibers.inp")``. Pass an :class:`ElasticMaterial` to fill
-in the material. The module needs NumPy; ``tet_mesh`` also needs gmsh.
+in the material. ``mesh.write_vtu("fibers.vtu")`` writes a copy to look at in
+ParaView. The module needs NumPy; ``tet_mesh`` also needs gmsh.
 See ``docs/fem_export.md``.
 """
 
