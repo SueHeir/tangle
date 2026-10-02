@@ -64,11 +64,13 @@ def coarse_nodes(points: np.ndarray, tolerance: float, max_segment: float) -> np
     return np.unique(np.concatenate([nodes, np.asarray(extra, dtype=nodes.dtype)]))
 
 
-def within_bend_limit(points: np.ndarray, bend: float, margin: float = 0.98, sweeps: int = 2000) -> tuple[np.ndarray, bool]:
+def within_bend_limit(points: np.ndarray, bend: float, margin: float = 0.98, sweeps: int = 2000,
+                      step: float = 0.5) -> tuple[np.ndarray, bool]:
     """``points`` smoothed wherever the polyline turns tighter than ``margin`` of a bend radius ``bend`` (same
     units), measured as Tangle's validation does: 2 sin(angle / 2) over the mean of the two segments, at every
-    inner point. Points over move halfway to the middle of their neighbours, sweep after sweep (after ``sweeps``,
-    every inner point does); the ends stay put. Returns the points and whether any moved."""
+    inner point. Points over move ``step`` of the way to the middle of their neighbours, sweep after sweep (after
+    ``sweeps``, every inner point does); the ends stay put. A small ``step`` moves a point that is only just over
+    no further than it needs. Returns the points and whether any moved."""
     p = np.array(points, dtype=float)
     if len(p) < 3:
         return p, False
@@ -84,7 +86,7 @@ def within_bend_limit(points: np.ndarray, bend: float, margin: float = 0.98, swe
             break
         if sweep >= sweeps:  # a long stretch over the limit: smooth the whole line
             over[:] = True
-        point[over] += 0.5 * (0.5 * (before + after)[over] - point[over])  # point is a view into p
+        point[over] += step * (0.5 * (before + after)[over] - point[over])  # point is a view into p
         moved = True
     return p, moved
 

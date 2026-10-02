@@ -32,7 +32,7 @@ matplotlib``.
 """
 
 from ._evaluate import geometry_report, score
-from ._find import NetworkSettings, find_fibers
+from ._find import NetworkSettings, add_bpm_bonds, find_fibers
 from ._fit import FiberSpec, FitResult, FitSettings, fit_fibers, load_fit
 from ._image import Levels
 from ._profile import CrossSection
@@ -51,6 +51,7 @@ __all__ = [
     "Scanner",
     "Binder",
     "SyntheticScan",
+    "add_bpm_bonds",
     "fiber_palette",
     "find_fibers",
     "fit_fibers",

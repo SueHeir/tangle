@@ -9,7 +9,7 @@ two meshers, and both return the same `FemMesh`:
 | Elements | 8-node hexahedra (`CHEXA`, `C3D8`) | 4- or 10-node tetrahedra (`CTETRA`, `C3D4` or `C3D10`) |
 | Fiber surface | voxel steps, like a CT scan | follows the round or oval surface |
 | Fibers that touch | share nodes, so they are bonded | separate bodies, so the solver needs contact or glue |
-| Binder at junctions | yes, with `bond_radius_ratio` | no |
+| Binder | yes: bridges at junctions (`bond_radius_ratio`), or any voxels you give it (`binder`) | no |
 | Needs | NumPy | NumPy and [gmsh](https://gmsh.info) |
 
 Install the extras with `pip install numpy gmsh`, or `pip install "tangle[fem]"`.
@@ -29,6 +29,7 @@ pet = fem.ElasticMaterial(youngs_modulus=2.5e9, poisson_ratio=0.35, density=1380
 hexes = fem.hex_mesh(assembly, voxel_size=2 * um)
 hexes.write_nastran("felt_hex.bdf", pet)
 hexes.write_abaqus("felt_hex.inp", pet)
+hexes.write_vtu("felt_hex.vtu")  # to look at in ParaView
 
 tets = fem.tet_mesh(assembly, order=2)
 tets.write_nastran("felt_tet.bdf", pet)
@@ -41,7 +42,7 @@ GPU.
 
 ## Hexahedra from voxels
 
-`hex_mesh(assembly, voxel_size, *, bond_radius_ratio=None)` puts one 8-node
+`hex_mesh(assembly, voxel_size, *, bond_radius_ratio=None, binder=None)` puts one 8-node
 brick in every voxel the fibers fill. The voxels are exactly those of
 `export_puma`: the grid spans the cell, a voxel is filled when its center lies
 inside a fiber, and it belongs to the fiber whose surface is closest. So the
@@ -60,6 +61,12 @@ does.
 - `bond_radius_ratio` also meshes binder bridges at persistent junctions (see
   [fiber bonds](fiber_bonds.md)). Binder bricks get fiber id 0 and the
   material `"binder"`.
+- `binder` meshes other voxels as binder too: a boolean `(z, y, x)` array over
+  the same grid (`nz, ny, nx` voxels across the cell), such as the binder that
+  `tangle.ct.find_fibers` finds in a CT scan (`fit.binder`, with the cell of
+  `fit.to_assembly()` and `voxel_size=fit.voxel_size`). Voxels a fiber fills
+  stay fiber; the others become binder bricks, which share nodes with the
+  fibers they touch and so bond them.
 
 ## Tetrahedra from gmsh
 
@@ -146,6 +153,16 @@ Abaqus/CAE imports as an orphan mesh:
 The elements are `C3D8`, `C3D4` or `C3D10`. For bending of hexahedral fibers
 `element_type="C3D8I"` is usually better than `C3D8`.
 
+### ParaView
+
+`write_vtu(path, *, scale=1.0)` writes the mesh as a VTK unstructured grid
+(`.vtu`) that ParaView opens directly, with each element's TANGLE fiber id
+(`fiber_id`, 0 for binder) and material (`material`, an index into
+`mesh.materials`) as cell data. Color by `fiber_id` to see the fibers, or
+apply a Threshold on it from 0 to 0 to see only the binder. ParaView cannot
+read the `.bdf` itself: its Nastran reader does not read large-field `GRID*`
+nodes.
+
 ## Units
 
 TANGLE works in meters. Give material values in the unit system the file is
@@ -162,8 +179,7 @@ written in:
 `mesh.node_sets()` the face node sets. Dividing `mesh.volume` by the cell
 volume gives the solid fraction, which should be close to the
 `voxel_volume_fraction` of `export_puma` at a fine voxel size. To look at a
-mesh in ParaView, convert it with [meshio](https://github.com/nschloe/meshio)
-(not a TANGLE dependency): `meshio.read("felt_hex.inp").write("felt_hex.vtu")`.
+mesh, write it with `write_vtu` and open it in ParaView.
 
 ## Limits
 

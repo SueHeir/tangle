@@ -759,7 +759,7 @@ class FitResult:
         for index, line in enumerate(relaxed):
             spec = self.spec_of(index)
             relaxed[index], moved = within_bend_limit(line, (spec.min_bend_radius or 5.0 * spec.diameter) / self.voxel_size,
-                                                      margin=0.999)
+                                                      margin=0.999, step=0.05)
             smoothed += moved
         long_axes = self.long_axes
         if long_axes is not None and any(len(a) != len(b) for a, b in zip(relaxed, self.centerlines)):

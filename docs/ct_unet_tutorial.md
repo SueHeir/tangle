@@ -362,6 +362,7 @@ relaxed, run = fit.coarse_grained().relax(adaptive=True)
 run.export_bpm("fibers_bpm.data")                         # LAMMPS bonded-particle model
 hexes = fem.hex_mesh(relaxed.to_assembly(), voxel_size=fit.voxel_size)
 hexes.write_abaqus("fibers_hex.inp")                       # or write_nastran("fibers_hex.bdf")
+hexes.write_vtu("fibers_hex.vtu")                          # to look at in ParaView
 ```
 
 `coarse_grained()` keeps only the nodes that hold each fiber within a tenth of
@@ -373,6 +374,24 @@ so the result is always valid Tangle again. `export_bpm` writes one particle
 per segment, bonded along each fiber. The meshes come from `tangle.fem` (see
 the [FEM export guide](fem_export.md)): bricks from voxels, or with gmsh
 installed, tetrahedra that follow each fiber's surface (`fem.tet_mesh`).
+ParaView can't read the Nastran file's nodes, so `write_vtu` writes a copy it
+opens; color it by `fiber_id`.
+
+**With binder.** The fit that `ct.find_fibers` returns (below) also holds the
+network's bonds and, with `binder=True` in its settings (`--binder`), its
+binder, and both exports can take them:
+
+```python
+ct.add_bpm_bonds("fibers_bpm.data", fit.bonds, fit.voxel_size)  # bonds fiber to fiber
+hexes = fem.hex_mesh(relaxed.to_assembly(), voxel_size=fit.voxel_size, binder=fit.binder)
+```
+
+`add_bpm_bonds` bonds each pair of fibers the network found bonded once,
+between their two particles nearest the bond, as bond type 2 (the bonds along
+each fiber are type 1). `binder=fit.binder` meshes the binder voxels outside
+the relaxed fibers as bricks that share nodes with the fibers they touch, so
+the binder holds the fibers together in the mesh too; they have fiber id 0
+and the material `"binder"`.
 
 ## From Python, in one call
 
@@ -398,8 +417,9 @@ relaxed, run = fit.relax()
 Every option in the table below is a field of `NetworkSettings` with the same
 name (`--diameter-profile` is `diameter_profile`), with lengths in meters as in
 the rest of `tangle.ct`. The result is the same `FitResult` that `ct.load_fit`
-reads from `fit.json`, plus `fit.folder`, where everything was written, and
-`fit.bonds`. It runs the same code as the scripts: the scripts in `ct_unet/` are
+reads from `fit.json`, plus `fit.folder`, where everything was written,
+`fit.bonds` and, with `binder=True`, `fit.binder` (step 7 shows what they are
+for). It runs the same code as the scripts: the scripts in `ct_unet/` are
 where it is changed, and their `sync_package.py` copies them into the package.
 
 ## Options at a glance
