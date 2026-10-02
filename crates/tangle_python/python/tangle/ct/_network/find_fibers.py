@@ -38,7 +38,7 @@ TILE, STRIDE = 128, 64  # the network's training crop, and a tile every half til
 TRAINED = (3.5, 28.0)  # fiber diameters (voxels) the network was trained on
 MAX_AXIS = 7000  # trace_maps packs each vote's cell into one number: every axis must stay under ~7,000 voxels
 CELLS = ("key", "count", "position", "tensor", "radius")  # what trace_maps.vote_cells returns
-BINDER_CUTOFF = 0.5  # a voxel is binder where the network calls it binder at least this surely and not fiber
+BINDER_CUTOFF = 0.5  # a voxel is binder where the network calls it binder at least this surely, outside the fibers
 EXAMPLES = """examples:
   python find_fibers.py scan.tif --weights best.pt --center-crop 256       a first try in the middle
   python find_fibers.py scan.tif --weights best.pt --diameters 12um,30um   two fiber types of known size
@@ -139,7 +139,7 @@ def run(args) -> Path:
     vote_key = plain({"region": region_key, "levels": grey, "bonded": bonded,
                       "diameters": [round(d / voxel, 3) for d in sizes] if sizes else None,
                       "network": {"path": str(weights.resolve()), "bytes": stat.st_size, "modified": int(stat.st_mtime)},
-                      "tile": TILE, "stride": STRIDE, "version": 2})
+                      "tile": TILE, "stride": STRIDE, "version": 3})
     fibers, info = find_in_region(region, voxel, model, device, grey, sizes, args.types, bonded, min_length,
                                   work=work, key=vote_key, profile=args.diameter_profile)
 
@@ -254,8 +254,11 @@ def find_in_region(region, voxel_um: float, model, device: str, grey, sizes_um=N
     say(f"  {len(lines):,} fibers")
     bonds = []
     if lines and (len(centers) or len(binder)):
-        from .bonds import bonds_at, bonds_from_binder, merge_bonds
+        from .bonds import bonds_at, bonds_from_binder, merge_bonds, outside_fibers
 
+        # the fibers always win: the binder is what the network calls binder outside the traced fibers. (Inside a
+        # blob of binder the network often says fiber as well, so its own fiber call would leave only the rims.)
+        binder = binder[outside_fibers(binder + 0.5, lines, radii)]
         # bonds where the network marks a bond point, then where its binder joins two fibers with no point there
         at_points = bonds_at(centers, strengths, lines, radii) if len(centers) else []
         through_binder = bonds_from_binder(binder + 0.5, lines, radii) if len(binder) else []
@@ -285,10 +288,9 @@ def network_votes(region, model, device: str, grey, hints: dict, want_bonds: boo
                   key=None, want_binder: bool = False):
     """Every fiber voxel's axis vote, pooled in 1-voxel cells over the whole region (``trace_maps.vote_cells``),
     the bond-point peaks (centers, strengths) and, with ``want_binder``, the voxels the network calls binder
-    (``BINDER_CUTOFF``) and not fiber, as (x, y, z) voxel numbers. Saved to ``work`` as the tiles go, when it is
-    given."""
+    (``BINDER_CUTOFF``), as (x, y, z) voxel numbers. Saved to ``work`` as the tiles go, when it is given."""
     from .bonds import bond_peaks
-    from .maps import BINDER, FIBER
+    from .maps import BINDER
     from .trace_maps import merge_cells, vote_cells
 
     plan = tile_plan(region.shape)
@@ -331,8 +333,8 @@ def network_votes(region, model, device: str, grey, hints: dict, want_bonds: boo
                     c, s = bond_peaks(maps, 0.5, window, (oz, oy, ox))
                     centers.append(c)
                     strengths.append(s)
-                if want_binder:  # fiber always wins: binder only where the network doesn't call fiber
-                    z, y, x = np.nonzero((maps[BINDER][0][window] > BINDER_CUTOFF) & (maps[FIBER][0][window] <= 0.5))
+                if want_binder:
+                    z, y, x = np.nonzero(maps[BINDER][0][window] > BINDER_CUTOFF)
                     binder.append(np.stack([x + x0, y + y0, z + z0], 1).astype(np.int16))
                 done += 1
                 if time.time() - shown > 30:

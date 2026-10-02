@@ -301,16 +301,18 @@ installed) and open the `fibers.ovito` it saves; or load `fibers.dump` in
 OVITO directly and set the particle shape to Spherocylinder.
 
 **Binder and bonds.** Unless told `--bonded no`, the network also marks binder:
-voxels it calls binder and not fiber. They are orange in the overlays, their
+the voxels it calls binder outside every traced fiber (the fibers always win;
+inside a blob of binder the network often says fiber too, so its own fiber
+call would leave only the blob's rim). They are orange in the overlays, their
 share of the region is in `summary.txt`, and `--binder` writes them to
-`binder.tif` (255), outside every traced fiber (fibers always win), without
-pieces smaller than 20 voxels. A bond is where the network marks a bond point,
-or else where its binder joins two traced fibers (at least 4 binder voxels
-within 2.5 voxels of both surfaces). In `bonds.csv` the first kind has the
-bond point's `strength` and the second the number of `binder_voxels`. With a
-network that predates the binder, `binder.tif` holds the voxels brighter than
-the solid/void split that are not inside a traced fiber (with a one-voxel
-margin so fiber edges don't count): missed fibers turn up there as binder.
+`binder.tif` (255) without pieces smaller than 20 voxels. A bond is where the
+network marks a bond point, or else where its binder joins two traced fibers
+(at least 4 binder voxels within 2.5 voxels of both surfaces). In `bonds.csv`
+the first kind has the bond point's `strength` and the second the number of
+`binder_voxels`. With a network that predates the binder, `binder.tif` holds
+the voxels brighter than the solid/void split that are not inside a traced
+fiber (with a one-voxel margin so fiber edges don't count): missed fibers turn
+up there as binder.
 
 **Diameters along each fiber.** `--diameter-profile` runs the network a second
 time to measure the diameter at every voxel along every fiber (see

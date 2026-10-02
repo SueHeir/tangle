@@ -68,6 +68,21 @@ def bonds_from_binder(voxels: np.ndarray, lines, radii):
     return bonds
 
 
+def outside_fibers(voxels: np.ndarray, lines, radii) -> np.ndarray:
+    """Which of the voxel centers (x, y, z) lie outside every traced fiber (a capsule of its radius around its
+    centerline): where binder can be, since the fibers always win."""
+    keep = np.ones(len(voxels), bool)
+    if len(voxels) == 0 or not lines:
+        return keep
+    points = [_dense(l) for l in lines]
+    owner = np.concatenate([np.full(len(p), k) for k, p in enumerate(points)])
+    radius = np.asarray(radii, float)[owner]
+    tree = cKDTree(np.concatenate(points))
+    dist, idx = tree.query(voxels, k=8, distance_upper_bound=float(np.max(radii)) + 1.0)
+    ok = np.isfinite(dist)
+    return ~(ok & (dist <= radius[np.where(ok, idx, 0)])).any(axis=1)
+
+
 def score_bonds(found, true_centers, tolerance: float = 4.0):
     """Precision, recall and F1 of found bond centers against the true ones (each matched once, within
     ``tolerance`` voxels, nearest first)."""
