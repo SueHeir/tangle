@@ -46,6 +46,8 @@ TEST = range(99_501, 99_549)
 BENDS_FIRST = 200_001  # bends_<index> (bends_settings): training from here up
 BENDS_VAL = range(199_001, 199_033)
 BENDS_TEST = range(199_501, 199_549)
+SEAMS_FIRST = 129_001  # mixed scans from here up may also have binder seams (val 129001-129032, test 129501-129548,
+# training from 130001); the scans below keep exactly what they were made with
 SEED = 1_000_000  # each scan's random stream is default_rng(SEED + index): no other family's seeds are met
 MAX_FIBERS = 900  # a cap on fibers per scan (broken pieces included), for the relaxation's sake
 RELAX_MORE = (3000, 9000)  # more relaxation steps, in turn, while fibers still pass through each other
@@ -96,6 +98,17 @@ def mixed_settings(index: int) -> dict:
         if mode in ("blobs", "both"):
             binder["blobs"] = {"count": int(rng.integers(5, 60)), "size": [0.8, round(float(rng.uniform(1.2, 2.5)), 2)],
                                "bubbles": round(float(rng.uniform(0.0, 0.6)), 2)}
+    if index >= SEAMS_FIRST:
+        # Seams: binder filling the groove along fibers lying side by side, over their whole shared length (glued
+        # pairs, rafts, bound bundles). From a stream of its own, so the draws below stay as they were.
+        rs = np.random.default_rng([SEED + index, 9])
+        if (binder and rs.random() < 0.6) or (not binder and rs.random() < 0.25):
+            binder = binder or {"brightness": round(float(rs.uniform(0.3, 1.2)), 2),
+                                "delta_beta": round(float(rs.uniform(4.0, 16.0)), 1)}
+            binder["seams"] = {"share": round(float(rs.uniform(0.3, 1.0)), 2),  # of the side-by-side stretches
+                               "size": round(float(rs.uniform(0.5, 1.5)), 2),  # x the thinner fiber's radius
+                               "gap": round(float(rs.uniform(0.3, 1.5)), 2),  # voxels between the two surfaces
+                               "angle": round(float(rs.uniform(8.0, 20.0)), 1)}  # degrees between the fibers
 
     dust = None
     if rng.random() < 0.3:
@@ -731,6 +744,66 @@ def _ellipsoid(rng, shape, center, radius, aspect=(0.5, 1.0)):
     return (slice(lo[2], hi[2]), slice(lo[1], hi[1]), slice(lo[0], hi[0])), occ.astype(np.float32)
 
 
+def _seams(lines, radius, labels, seams: dict, rng) -> np.ndarray:
+    """Binder seams (one id each, 0 elsewhere): where two fibers lie side by side, surfaces within ``seams["gap"]``
+    voxels and axes within ``seams["angle"]`` degrees, for at least two diameters, the groove between them is filled
+    (void voxels whose distances to the two surfaces add up to at most ``seams["size"]`` x the thinner radius) all
+    along the shared stretch; ``seams["share"]`` of such stretches get one."""
+    from scipy.ndimage import distance_transform_edt
+
+    shape = labels.shape
+    out = np.zeros(shape, np.int32)
+    pts, fib, tan = [], [], []
+    for k, line in enumerate(lines):
+        dense = resample(line, 1.0)
+        if len(dense) < 3:
+            continue
+        t = np.gradient(dense, axis=0)
+        t /= np.maximum(np.linalg.norm(t, axis=1, keepdims=True), 1e-12)
+        pts.append(dense), fib.append(np.full(len(dense), k)), tan.append(t)
+    if len(pts) < 2:
+        return out
+    pts, fib, tan = np.concatenate(pts), np.concatenate(fib), np.concatenate(tan)
+    reach = 2.0 * float(radius.max()) + seams["gap"]
+    pairs = cKDTree(pts).query_pairs(reach, output_type="ndarray")
+    if not len(pairs):
+        return out
+    a, b = pairs[:, 0], pairs[:, 1]
+    fa, fb = fib[a], fib[b]
+    gap = np.linalg.norm(pts[a] - pts[b], axis=1) - radius[fa] - radius[fb]
+    keep = ((fa != fb) & (gap <= seams["gap"])
+            & (np.abs((tan[a] * tan[b]).sum(1)) >= np.cos(np.radians(seams["angle"]))))
+    a, b, fa, fb = a[keep], b[keep], fa[keep], fb[keep]
+    swap = fa > fb
+    a, b = np.where(swap, b, a), np.where(swap, a, b)
+    fa, fb = np.minimum(fa, fb), np.maximum(fa, fb)
+    seam_id = 0
+    for i, j in sorted(set(zip(fa.tolist(), fb.tolist()))):
+        mine = np.unique(a[(fa == i) & (fb == j)])  # points of fiber i alongside fiber j, in order along i
+        runs = np.split(mine, np.nonzero(np.diff(mine) > 2)[0] + 1)
+        size = seams["size"] * float(min(radius[i], radius[j]))
+        for run in runs:
+            if len(run) < 4.0 * min(radius[i], radius[j]) or rng.random() >= seams["share"]:  # two diameters
+                continue
+            p = pts[run]
+            pad = int(np.ceil(size + 2 * max(radius[i], radius[j]) + 3))
+            lo = np.maximum(np.floor(p.min(0)).astype(int) - pad, 0)[::-1]  # (z, y, x)
+            hi = np.minimum(np.floor(p.max(0)).astype(int) + pad + 1, np.array(shape[::-1]))[::-1]
+            box = tuple(slice(l, h) for l, h in zip(lo, hi))
+            lab = labels[box]
+            if not ((lab == i + 1).any() and (lab == j + 1).any()):
+                continue
+            d_i = distance_transform_edt(lab != i + 1)
+            d_j = distance_transform_edt(lab != j + 1)
+            z, y, x = np.indices(lab.shape)
+            local = np.stack([x + lo[2] + 0.5, y + lo[1] + 0.5, z + lo[0] + 0.5], axis=-1)
+            near, _ = cKDTree(p).query(local.reshape(-1, 3), distance_upper_bound=float(radius[i] + radius[j] + size))
+            region = (d_i + d_j <= size + 1.0) & (lab == 0) & np.isfinite(near).reshape(lab.shape)
+            seam_id += 1
+            out[box][region & (out[box] == 0)] = seam_id
+    return out
+
+
 def render(truth, fibers: list[Fiber], s: dict) -> MixedScan:
     """Scan the relaxed structure: shading (brightness, dim or hollow cores, thinning), binder, dust and edges,
     then the scan simulator (``tangle.ct._scanner``) with the scan's settings."""
@@ -835,6 +908,15 @@ def render(truth, fibers: list[Fiber], s: dict) -> MixedScan:
                                                     np.minimum(radius, BINDER_CAP / bonds["radius_ratio"]), binder,
                                                     s["seed"])
         binder_occ = binder_occ * (labels == 0)
+    if b and b.get("seams"):
+        seam_labels = _seams(lines, radius, labels, b["seams"], rng)
+        if seam_labels.any():
+            if bond_labels is None:
+                bond_labels, binder_occ = np.zeros(shape, np.int32), np.zeros(shape, np.float32)
+            free = (bond_labels == 0) & (seam_labels > 0)
+            bond_labels[free] = seam_labels[free] + bond_labels.max()
+            binder_occ = np.maximum(binder_occ, np.clip(gaussian_filter((seam_labels > 0).astype(np.float32), 0.5),
+                                                        0.0, 1.0) * (labels == 0))
     voids = bool(s["pockets"])
     if b and b.get("blobs"):
         blobs = b["blobs"]
