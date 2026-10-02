@@ -352,6 +352,28 @@ overlaps of a few nanometers. From an assembly, everything else in Tangle
 applies: analysis, OVITO and PuMA export (see the
 [PuMA guide](puma_interoperability.md)).
 
+For a big region, relax the fibers coarse-grained, and export them for
+particle and finite-element models:
+
+```python
+from tangle import fem
+
+relaxed, run = fit.coarse_grained().relax(adaptive=True)
+run.export_bpm("fibers_bpm.data")                         # LAMMPS bonded-particle model
+hexes = fem.hex_mesh(relaxed.to_assembly(), voxel_size=fit.voxel_size)
+hexes.write_abaqus("fibers_hex.inp")                       # or write_nastran("fibers_hex.bdf")
+```
+
+`coarse_grained()` keeps only the nodes that hold each fiber within a tenth of
+its diameter, so a straight stretch becomes one segment (at most 10 diameters
+long), and `relax(adaptive=True)` turns on Tangle's adaptive segmentation,
+which splits segments again where fibers touch. A relaxed fiber that the
+solve's tolerance leaves a hair past its bend limit is smoothed just inside it,
+so the result is always valid Tangle again. `export_bpm` writes one particle
+per segment, bonded along each fiber. The meshes come from `tangle.fem` (see
+the [FEM export guide](fem_export.md)): bricks from voxels, or with gmsh
+installed, tetrahedra that follow each fiber's surface (`fem.tet_mesh`).
+
 ## From Python, in one call
 
 With Tangle built (and PyTorch in the same environment), steps 4 to 7 are one

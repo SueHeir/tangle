@@ -27,6 +27,68 @@ def resample(points: np.ndarray, spacing: float) -> np.ndarray:
     return _native.resample([points], spacing)[0]
 
 
+def coarse_nodes(points: np.ndarray, tolerance: float, max_segment: float) -> np.ndarray:
+    """The nodes to keep so the polyline through them stays within ``tolerance`` of every original node, with no
+    segment longer than ``max_segment`` (both in the points' units): Douglas-Peucker, then long segments split
+    at the original nodes nearest their even divisions. Returns sorted node indices, both ends included."""
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    n = len(points)
+    if n < 3:
+        return np.arange(n)
+    keep = np.zeros(n, bool)
+    keep[[0, -1]] = True
+    stack = [(0, n - 1)]
+    while stack:
+        a, b = stack.pop()
+        if b - a < 2:
+            continue
+        chord = points[b] - points[a]
+        length = float(np.linalg.norm(chord))
+        offsets = points[a + 1:b] - points[a]
+        if length > 1e-12:
+            along = offsets @ (chord / length)
+            deviation = np.linalg.norm(offsets - along[:, None] * (chord / length), axis=1)
+        else:
+            deviation = np.linalg.norm(offsets, axis=1)
+        worst = int(np.argmax(deviation))
+        if deviation[worst] > tolerance:
+            keep[a + 1 + worst] = True
+            stack += [(a, a + 1 + worst), (a + 1 + worst, b)]
+    nodes = np.flatnonzero(keep)
+    arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))])
+    extra = []
+    for a, b in zip(nodes[:-1], nodes[1:]):
+        pieces = int(np.ceil((arc[b] - arc[a]) / max_segment))
+        for k in range(1, pieces):
+            extra.append(int(np.argmin(np.abs(arc[a:b + 1] - (arc[a] + k * (arc[b] - arc[a]) / pieces)))) + a)
+    return np.unique(np.concatenate([nodes, np.asarray(extra, dtype=nodes.dtype)]))
+
+
+def within_bend_limit(points: np.ndarray, bend: float, margin: float = 0.98, sweeps: int = 2000) -> tuple[np.ndarray, bool]:
+    """``points`` smoothed wherever the polyline turns tighter than ``margin`` of a bend radius ``bend`` (same
+    units), measured as Tangle's validation does: 2 sin(angle / 2) over the mean of the two segments, at every
+    inner point. Points over move halfway to the middle of their neighbours, sweep after sweep (after ``sweeps``,
+    every inner point does); the ends stay put. Returns the points and whether any moved."""
+    p = np.array(points, dtype=float)
+    if len(p) < 3:
+        return p, False
+    limit = margin / bend
+    moved = False
+    for sweep in range(11 * sweeps):
+        before, point, after = p[:-2], p[1:-1], p[2:]
+        u, v = point - before, after - point
+        lu, lv = np.linalg.norm(u, axis=1), np.linalg.norm(v, axis=1)
+        cosine = np.clip((u * v).sum(1) / np.maximum(lu * lv, 1e-12), -1.0, 1.0)
+        over = 2.0 * np.sin(0.5 * np.arccos(cosine)) > limit * 0.5 * (lu + lv)
+        if not over.any():
+            break
+        if sweep >= sweeps:  # a long stretch over the limit: smooth the whole line
+            over[:] = True
+        point[over] += 0.5 * (0.5 * (before + after)[over] - point[over])  # point is a view into p
+        moved = True
+    return p, moved
+
+
 def tangents(points: np.ndarray) -> np.ndarray:
     """Unit tangents at the nodes (central differences, one-sided at ends)."""
     t = np.gradient(points, axis=0) if len(points) > 1 else np.zeros_like(points)
