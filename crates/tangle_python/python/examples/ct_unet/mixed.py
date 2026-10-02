@@ -1024,8 +1024,12 @@ def mixed_scan(index: int, cache: Path, check_overlaps: bool = True):
             fibers = build_fibers(s, crowd, placement)
             if not fibers:
                 raise ValueError("no fibers placed")
-            structure = {k: s[k] for k in ("types", "total", "orientation", "tilt", "aligned_axis", "pockets", "seed")}
-            key = hashlib.sha1(json.dumps([structure, crowd, placement], sort_keys=True).encode()).hexdigest()[:8]
+            # keyed on the placed fibers themselves, so a cache never pairs one placement's relaxed lines with
+            # another's fibers (as when the placement code changes between runs)
+            placed = hashlib.sha1()
+            for f in fibers:
+                placed.update(np.round(f.line, 3).tobytes() + np.float64([f.diameter, f.ratio, f.bend]).tobytes())
+            key = hashlib.sha1(f"{placed.hexdigest()}{crowd}{placement}".encode()).hexdigest()[:8]
             cache_file = cache / f"mixed_{index}-{key}.json"
             try:
                 if not cache_file.exists():
