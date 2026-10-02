@@ -494,7 +494,9 @@ def main() -> None:
                     if report["quarter"]:
                         raise FibersOverlap(f"{report['quarter']} fiber pairs past a quarter")
                     varied = {"family": family, "truth_check": report}
-        except Exception as error:  # a structure that fails to relax or render: skip it
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as error:  # a structure that fails to relax or render (a Tangle panic too): skip it
             print(f"{name}: failed ({error})", flush=True)
             continue
         if (family == "varied" and index >= EASY_FIRST and scan.binder_occupancy is not None

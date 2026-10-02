@@ -632,7 +632,8 @@ def truth_from_cache(fibers: list[Fiber], s: dict, cache_file: Path):
     recipe.insert(collection, name="mixed")
     recipe.capture_junctions(tangle.JunctionPolicy(
         "binder", "bond", max_surface_gap=bonds["gap"] * um, min_crossing_angle=0.0,
-        probability=bonds["probability"], seed=s["seed"], max_per_fiber_pair=1))
+        probability=bonds["probability"], seed=s["seed"], max_per_fiber_pair=1,
+        candidate_capacity=1 << 21))  # dense scans of finely segmented fibers touch in very many places
     return recipe.run(tangle.RelaxationSettings(backend=ex.BACKEND, max_iterations=300, max_step=0.5 * um,
                                                 penetration_tolerance=0.1 * um))
 
