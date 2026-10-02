@@ -3,105 +3,61 @@
 
 **Thread Assembly, Network Generation, Linking, and Equilibration**
 
-TANGLE is an experimental framework for generating and relaxing fibrous
-materials. **Python is the primary user interface**: build fiber collections,
-compose manufacturing recipes, inspect the result, and export to downstream
-tools. Rust and CubeCL implement the geometry and numerical kernels underneath.
-Its central object is a
-`FiberAssembly`: intrinsic fiber centerlines, their placed geometry, persistent
-junction topology, a simulation cell, and enough provenance to reproduce how
-the assembly was made.
+TANGLE builds and relaxes virtual fibrous materials (felts, preforms,
+nonwovens) and fits fibers to CT scans. You use it from **Python**; the
+geometry and solver run in Rust on the GPU (through CubeCL and WGPU, the
+cross-platform GPU API) or on the CPU.
 
-The same assembly supports solver-neutral BPM and voxel exports:
+It exports the relaxed fibers to OVITO for viewing, to bonded-particle
+models for discrete-element (DEM) mechanics, to voxel images for PuMA and
+other image-based solvers, and to solid meshes for finite-element solvers such
+as Nastran and Abaqus.
 
-- particles, capsules, and bonds for DEM-BPM;
-- swept-volume voxelizations for PuMA and image-based solvers;
+## Quick start
 
-Dedicated FEM mesh and graph-analysis exporters are future work.
-
-Those representations are views or exports, not the canonical data model.
-
-## Python quick start
-
-Python is the simplest way to construct fiber collections and manufacturing
-recipes. The `tangle` extension calls the same Rust data model and CubeCL
-solver as the native applications; relaxation does not run as a Python loop.
-
-Start with the [installation guide](crates/tangle_python/README.md) or
-[tutorial 00](crates/tangle_python/python/tutorials/00_installation_and_environment.ipynb).
-This is currently a **source install**, not a published-wheel installation.
-You need Python 3.11+, Rust/Cargo, and a native compiler/linker. CubeCL downloads
-its matching LLVM build dependency; a system `llvm-config` is not required.
-
-After installing those prerequisites, from the repository root (macOS/Linux):
+TANGLE installs from source. You need Python 3.11+ and
+[Rust](https://rustup.rs/). From the repository root (macOS or Linux):
 
 ```console
 python3 -m venv .venv-tangle
 source .venv-tangle/bin/activate
-python -m pip install "maturin>=1.8,<2" jupyterlab ipykernel
-maturin develop --release --manifest-path crates/tangle_python/Cargo.toml
-python -m ipykernel install --user --name tangle --display-name "Python (TANGLE)"
-jupyter lab crates/tangle_python/python/tutorials
+python -m pip install "maturin>=1.8,<2"
+maturin develop --release --extras ct --manifest-path crates/tangle_python/Cargo.toml
 ```
+
+`--extras ct` adds NumPy and SciPy for CT fitting (`tangle.ct`). Then:
 
 ```python
 import tangle
-from tangle.units import mm, um
+from tangle.units import um
 
-fiber = tangle.Material("fiber", diameter=19 * um)
-layer = tangle.FiberCollection("first ply")
-layer.add_fiber(
-    [[-0.4 * mm, 0, 0], [0.4 * mm, 0, 0]],
-    fiber,
-    formation_layer=0,
-)
+cell = tangle.Cell([300 * um] * 3, periodic="xyz")
+fiber = tangle.Material("fiber", diameter=10 * um)
 
-# x and y are periodic, so z is the stacking axis.
-cell = tangle.Cell([1 * mm, 1 * mm, 2 * mm], periodic="xy")
 recipe = tangle.Recipe(cell)
-recipe.insert(layer, translation=[0.5 * mm, 0.5 * mm, 0.5 * mm])
-recipe.relax_until_converged()
+recipe.insert(tangle.FiberPopulation(material=fiber, count=40))
+result = recipe.run()  # relaxes until no two fibers overlap (GPU)
 
-settings = tangle.RelaxationSettings(
-    penetration_tolerance=0.1 * um,
-    adaptive_segmentation=tangle.AdaptiveSegmentationSettings(),
-    # backend="cpu" on a system without a usable GPU.
-)
-result = recipe.run(settings)
-print(result.converged, result.max_penetration, result.max_curvature_ratio)
-analysis = result.characterize()
-print(analysis.nominal_swept_volume_fraction)
+print(result)
+result.write_ovito("fibers.dump")
 ```
 
-Select the **Python (TANGLE)** notebook kernel. The installation guide includes
-Windows and Miniforge alternatives. After rebuilding the extension, restart
-the kernel before using new API arguments. Lengths are meters; `tangle.units`
-provides `um` and `mm` multipliers, and TANGLE does not otherwise convert units.
+Lengths are in meters (`um` and `mm` help). Settings you leave unset scale
+with the fiber diameter. Without a GPU, use
+`recipe.run(tangle.RelaxationSettings(backend="cpu"))`.
 
-All relaxation, cell-list, refinement, coarsening, compaction, checkpoint, and
-recipe-stage controls are keyword arguments and inspectable Python attributes
-with Rust-backed defaults. The [migration guide](docs/python_api_migration.md)
-maps names from before the 0.1 API cleanup. Executable scripts and matching notebooks cover the
-[small Python workflows](crates/tangle_python/python/examples) and
-[the native Rust example configurations](crates/tangle_python/python/examples/native).
-The [topic notebook series](crates/tangle_python/python/tutorials) treats one
-piece of the API at a time and enumerates every exposed setting. See the
-[Python guide](crates/tangle_python/README.md) for the complete API and
-installation notes. Follow [01: high-level overview](crates/tangle_python/python/tutorials/01_high_level_overview.ipynb)
-for staged insertion, relaxation, junction capture, and OVITO keyframes, then
-use the [example index](examples/README.md) to choose a larger workflow.
+**Next steps**
 
-TANGLE writes a versioned PuMA interoperability bundle through `export_puma()`:
-`domain.vti` carries phase IDs and exact centerline tangents, while JSON files
-preserve native characterization, material/fiber mappings, grid conventions,
-and ambiguity diagnostics. The paired
-[native fixture](examples/puma_cross_validation) and
-[Python notebook](crates/tangle_python/python/examples/puma_cross_validation.ipynb)
-build the same orthogonal-fiber fixture; the Python side imports `pumapy`
-directly for comparison. See the
-[interoperability specification](docs/puma_interoperability.md) for definitions
-and resolution-study guidance. PuMA remains a downstream application, not a
-TANGLE runtime dependency.
+1. The [Python guide](crates/tangle_python/README.md): installation on Windows
+   or Conda, a quick start that also fits a CT scan, and the full API.
+2. [Tutorial 01](crates/tangle_python/python/tutorials/01_high_level_overview.ipynb)
+   and the [topic notebooks](crates/tangle_python/python/tutorials): one piece
+   of the API at a time, every setting listed.
+3. The [example index](examples/README.md): larger workflows, from two crossed
+   fibers to a twenty-ply needled felt.
+
+Upgrading from before the 0.1 API cleanup? See the
+[migration guide](docs/python_api_migration.md).
 
 ## Twenty-ply felt construction
 
@@ -177,7 +133,7 @@ See [solver and architecture notes](docs/architecture.md) for details.
 
 - **OVITO:** final geometry or an opt-in multi-frame spherocylinder trajectory.
   Keyframes reduce snapshot traffic; dense debug output can dominate runtime.
-- **BPM:** `spheres-exact`, `spheres-dynamic`, `spherocylinders-exact`, and
+- **BPM (bonded-particle model, for DEM):** `spheres-exact`, `spheres-dynamic`, `spherocylinders-exact`, and
   `spherocylinders-constant`. TANGLE writes geometry and bonds, not DIRT runtime
   configuration files. Check downstream atom-style compatibility and overlap
   tolerances before running a dynamic solver.
@@ -193,9 +149,15 @@ See [solver and architecture notes](docs/architecture.md) for details.
 - **Oval fibers:** `Material(..., thickness=...)` gives fibers an oval
   cross-section that relaxes, twists and exports to OVITO and PuMA; see the
   [oval fiber notes](docs/oval_fibers.md). BPM export is round-only.
-- **PuMA:** capsule VTI/JSON bundles for direct `pumapy` analysis.
-  Occupied voxel volume and nominal fiber volume are different quantities;
-  comparisons need matched definitions and resolution checks.
+- **PuMA:** `export_puma()` writes a VTI/JSON bundle (phase ids, fiber
+  tangents, characterization) for direct `pumapy` analysis; PuMA is not a
+  TANGLE dependency. Occupied voxel volume and nominal fiber volume are
+  different quantities; comparisons need matched definitions and resolution
+  checks (see the [PuMA analysis guide](docs/puma_interoperability.md)).
+- **FEM (Nastran, Abaqus):** `tangle.fem` meshes the fibers as hexahedra
+  (one per voxel) or as tetrahedra that follow each fiber's surface (with
+  gmsh), and writes Nastran bulk data (`.bdf`) or Abaqus input (`.inp`); see
+  the [FEM export guide](docs/fem_export.md).
 - **CT scans:** `tangle.ct` fits Tangle fibers to a CT scan from the known
   fiber diameter and bend limit, and exports an assembly, a fitted
   population, per-voxel fiber labels and a per-fiber overlay on the scan.
@@ -224,6 +186,7 @@ See [solver and architecture notes](docs/architecture.md) for details.
 
 [Results/export tutorial](crates/tangle_python/python/tutorials/14_results_and_exports.ipynb)
 · [PuMA analysis guide](docs/puma_interoperability.md)
+· [FEM export guide](docs/fem_export.md)
 · [Fiber bonds (binder at junctions)](docs/fiber_bonds.md)
 · [CT fitting guide](docs/ct_fitting.md)
 · [CT fitting results](crates/tangle_python/python/examples/ct_results/README.md)

@@ -15,8 +15,8 @@ pub use ovito::{
     OvitoRepresentation, OvitoTrajectoryConfig, OvitoTrajectoryReport,
 };
 pub use puma::{
-    write_puma_bundle, PumaExportError, PumaExportReport, PumaVoxelExportConfig,
-    PUMA_BUNDLE_SCHEMA_VERSION,
+    voxelize_labels, write_puma_bundle, PumaExportError, PumaExportReport, PumaVoxelExportConfig,
+    VoxelLabels, PUMA_BUNDLE_SCHEMA_VERSION,
 };
 pub use trajectory::OvitoTrajectoryPlugin;
 

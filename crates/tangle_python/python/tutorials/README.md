@@ -31,7 +31,7 @@ python3 -m venv .venv-tangle
 source .venv-tangle/bin/activate
 python -m pip install --upgrade pip
 python -m pip install "maturin>=1.8,<2" jupyterlab ipykernel
-maturin develop --release --manifest-path crates/tangle_python/Cargo.toml
+maturin develop --release --extras ct --manifest-path crates/tangle_python/Cargo.toml
 python -m ipykernel install --user --name tangle --display-name "Python (TANGLE)"
 jupyter lab crates/tangle_python/python/tutorials
 ```
