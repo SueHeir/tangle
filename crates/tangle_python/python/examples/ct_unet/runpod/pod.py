@@ -325,7 +325,8 @@ def push(pod: Pod, args, train_args) -> list:
 
 
 def start(pod: Pod, args, remote_args) -> dict:
-    words = ["train", args.run, "--end", args.end, "--grace", str(args.grace), "--ref", args.ref, "--gpu", args.gpu]
+    words = ["train", args.run, "--end", args.end, "--grace", str(args.grace), "--ref", args.ref, "--gpu", args.gpu,
+             "--gpus", str(args.gpus)]
     if args.code_dir:
         words.append("--local-code")
     state = pod.pod(*words, "--", *remote_args)
@@ -561,14 +562,16 @@ def active_runs(work: Path, but: Path = None) -> dict:
     return out
 
 
-def free_gpu(work: Path, run: Path, wanted: str) -> str:
+def free_gpu(work: Path, run: Path, wanted: str, count: int = 1) -> str:
+    """The GPUs (\"0\", \"1\", \"0,1\", ...) for a run: ``wanted``, or the first ``count`` no other live run holds."""
     if wanted != "auto":
         return wanted
-    taken = set(active_runs(work, but=run).values())
-    for k in range(gpu_count()):
-        if str(k) not in taken:
-            return str(k)
-    raise SystemExit(f"every GPU of the pod is in use by a run ({', '.join(sorted(taken))}); pass --gpu to share one")
+    taken = {g for gpus in active_runs(work, but=run).values() for g in gpus.split(",")}
+    free = [str(k) for k in range(gpu_count()) if str(k) not in taken]
+    if len(free) < count:
+        raise SystemExit(f"the pod has {len(free)} free GPUs, the run wants {count} (GPUs {', '.join(sorted(taken))} "
+                         f"are in use); pass --gpu to choose")
+    return ",".join(free[:count])
 
 
 def pid_alive(path: Path) -> bool:
@@ -619,6 +622,7 @@ def on_pod(argv):
         p.add_argument("--local-code", action="store_true")
         p.add_argument("--attempt", default="")
         p.add_argument("--gpu", default="auto")
+        p.add_argument("--gpus", type=int, default=1)
     sub.add_parser("stop").add_argument("how", nargs="?", default="stop")
     for name in ("make", "make-run"):
         p = sub.add_parser(name)
@@ -758,7 +762,7 @@ def launch(work: Path, args) -> dict:
     if state["state"] == "done":
         return {**state, "message": f"{args.run} already finished on the pod"}
     run.mkdir(parents=True, exist_ok=True)
-    (run / "GPU").write_text(free_gpu(work, run, args.gpu))
+    (run / "GPU").write_text(free_gpu(work, run, args.gpu, args.gpus))
     for marker in ("EXIT", "FETCHED", "ENDED"):
         (run / marker).unlink(missing_ok=True)
     attempt = time.strftime("%Y%m%d-%H%M%S")
@@ -812,11 +816,14 @@ def supervise(work: Path, args) -> None:
     try:
         code = place_code(work, run, args.ref, args.local_code)
         workers = [] if "--workers" in args.rest else ["--workers", str(loader_workers())]
-        command = [sys.executable, str(code / "train.py"), *args.rest[:2], str(run), *args.rest[2:], *workers,
-                   "--resume"]
+        gpu = (run / "GPU").read_text().strip() if (run / "GPU").exists() else "0"
+        processes = len(gpu.split(","))
+        # one network on several GPUs: torchrun starts one train.py per GPU (each with its share of crop workers)
+        launcher = ["-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={processes}"] if processes > 1 else []
+        command = [sys.executable, *launcher, str(code / "train.py"), *args.rest[:2], str(run), *args.rest[2:],
+                   *workers, "--resume"]
         print(stamp() + " ".join(command), flush=True)
         with open(run / "gpu.csv", "a") as gpu_log, open(run / "train.log", "a") as log:
-            gpu = (run / "GPU").read_text().strip() if (run / "GPU").exists() else "0"
             monitor = subprocess.Popen(["nvidia-smi", "-i", gpu, "--query-gpu=timestamp,utilization.gpu,memory.used,power.draw",
                                         "--format=csv,noheader", "-l", "30"], stdout=gpu_log,
                                        stderr=subprocess.DEVNULL)
@@ -1096,6 +1103,8 @@ def main():
     parser.add_argument("--poll", type=float, default=300, help="seconds between progress checks")
     parser.add_argument("--gpu", default="auto",
                         help="train: the pod GPU (0, 1, ...) for this run; auto: the first one no other run uses")
+    parser.add_argument("--gpus", type=int, default=1,
+                        help="train: GPUs for this one run (train.py under torchrun, one process per GPU)")
     parser.add_argument("--streams", type=int, default=8, help="push: ssh connections sending scans at once")
     parser.add_argument("--every", type=float, default=0,
                         help="add: look for new scans again every this many minutes, until stopped (Ctrl-C)")

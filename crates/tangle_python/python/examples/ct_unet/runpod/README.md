@@ -66,6 +66,10 @@ gets a GPU of its own (`--gpu auto`, the default, takes the first one no other r
 half the pod's CPU cores and shared memory for its crops. The pod stops only after the last run ends: a run that
 finishes first just says the other is still going. The scans are shared, so the second `go` sends nothing new.
 
+**One run on both GPUs.** `--gpus 2` trains one network on two GPUs: `train.py` runs under `torchrun`, one
+process per GPU, each with half the cores and shared memory for its crops (needs a `train.py` that supports
+`torchrun`, from `--ref`).
+
 **Adding scans while it trains.** Scans made after the run started can join it:
 
 ```sh
