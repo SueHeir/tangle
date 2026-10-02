@@ -68,7 +68,8 @@ class NetworkSettings:
         Write ``overlay.tif`` and ``labels.tif``; ``None``: for regions under
         600 million voxels.
     ``binder``
-        Also write ``binder.tif``: solid voxels outside every traced fiber.
+        Also write ``binder.tif``: the binder (as the network sees it, unless
+        ``bonded`` is False) outside every traced fiber.
     ``diameter_profile``
         Also measure the diameter all along every fiber (``diameters.csv``);
         runs the network a second time.
@@ -121,7 +122,9 @@ def find_fibers(scan: str | os.PathLike, settings: NetworkSettings,
     Returns the fibers as a :class:`FitResult`, as ``load_fit`` reads ``fit.json`` back: ready for
     ``to_assembly()``, ``relax()`` and the other exports. Two more attributes: ``folder``, where everything was
     written, and ``bonds``, a list of the bonds the network found, each a dict with ``fibers`` (the two fibers'
-    indices in ``centerlines``), ``position`` (x, y, z in voxels, as the centerlines) and ``strength``.
+    indices in ``centerlines``), ``position`` (x, y, z in voxels, as the centerlines), ``strength`` (the height of
+    the network's bond-point peak; NaN for a bond found where its binder joins two fibers with no peak) and
+    ``binder_voxels`` (how many binder voxels join the pair there; 0 for a bond-point bond).
     """
     from ._network import find_fibers as pipeline  # the network needs PyTorch: imported only when used
 
@@ -193,4 +196,5 @@ def _read_bonds(path: Path, voxel_size: float) -> list[dict]:
     scale = 1e-6 / voxel_size  # micrometers to voxels of the analysed region
     return [{"fibers": (int(row["fiber_a"]) - 1, int(row["fiber_b"]) - 1),
              "position": np.array([float(row[f"{axis}_um"]) * scale for axis in "xyz"]),
-             "strength": float(row["strength"])} for row in rows]
+             "strength": float(row["strength"]) if row["strength"] else float("nan"),
+             "binder_voxels": int(row.get("binder_voxels") or 0)} for row in rows]

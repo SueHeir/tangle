@@ -47,11 +47,13 @@ class Fibers:
     radii: np.ndarray  # voxels
     types: np.ndarray  # 0 = the thinnest type
     support: np.ndarray  # share of each trace backed by the network's axis votes
-    bonds: list  # {"fibers": (i, j) indices into lines, "center": (x, y, z) voxels, "strength": peak height}
+    bonds: list  # {"fibers": (i, j) indices into lines, "center": (x, y, z) voxels, "strength": peak height (NaN for
+    #              a bond found through binder alone, which has "voxels": the binder voxels joining the pair)}
     voxel_um: float
     shape: tuple  # (z, y, x) voxels of the analysed region
     type_names: list  # one per type, e.g. "12 um"
     profiles: list | None = None  # diameters.Accumulator.result, in micrometers
+    binder: np.ndarray | None = None  # (n, 3) voxels (x, y, z) the network calls binder, for a binder-aware network
 
     @property
     def count(self) -> int:
@@ -182,9 +184,11 @@ def write_tables(fibers: Fibers, out: Path) -> list[Path]:
     paths.append(_write_points(out / "centerlines.csv", "fiber,point,x_um,y_um,z_um",
                                [np.asarray(line, float) * h for line in fibers.lines]))
     if fibers.bonds:
-        paths.append(write_csv(out / "bonds.csv", ["bond", "fiber_a", "fiber_b", "x_um", "y_um", "z_um", "strength"],
+        paths.append(write_csv(out / "bonds.csv", ["bond", "fiber_a", "fiber_b", "x_um", "y_um", "z_um", "strength",
+                                                   "binder_voxels"],
                                ([n + 1, b["fibers"][0] + 1, b["fibers"][1] + 1, *[_f(v * h) for v in b["center"]],
-                                 _f(b["strength"], 3)] for n, b in enumerate(fibers.bonds))))
+                                 _f(b["strength"], 3) if np.isfinite(b["strength"]) else "", b.get("voxels", 0)]
+                                for n, b in enumerate(fibers.bonds))))
     if fibers.profiles is not None:
         paths.append(_write_points(out / "diameters.csv", "fiber,node,x_um,y_um,z_um,diameter_um,long_um,short_um",
                                    [np.column_stack([p["nodes"] * h, p["diameter"], p["long"], p["short"]])
@@ -260,7 +264,8 @@ def write_fit_json(fibers: Fibers, path: Path, levels: dict, history: list[dict]
                    for k, (line, d, s, t) in enumerate(zip(lines, diameters, fibers.support, fibers.types))],
         "bonds": [{"fibers": [b["fibers"][0] + 1, b["fibers"][1] + 1],
                    "center": np.round(np.asarray(b["center"], float) * h, 10).tolist(),
-                   "strength": round(float(b["strength"]), 4)} for b in fibers.bonds],
+                   "strength": round(float(b["strength"]), 4) if np.isfinite(b["strength"]) else None,
+                   "binder_voxels": int(b.get("voxels", 0))} for b in fibers.bonds],
         "history": history,
     }
     path.write_text(json.dumps(data, indent=1) + "\n")
@@ -311,6 +316,7 @@ def write_vtk(fibers: Fibers, out: Path) -> list[Path]:
             np.savetxt(f, np.stack([np.ones(len(centers), int), np.arange(len(centers))], 1), fmt="%d")
             f.write(f"POINT_DATA {len(centers)}\n")
             for name, values, fmt in (("strength", [b["strength"] for b in fibers.bonds], "%.3f"),
+                                      ("binder_voxels", [b.get("voxels", 0) for b in fibers.bonds], "%d"),
                                       ("fiber_a", [b["fibers"][0] + 1 for b in fibers.bonds], "%d"),
                                       ("fiber_b", [b["fibers"][1] + 1 for b in fibers.bonds], "%d")):
                 f.write(f"SCALARS {name} {'int' if fmt == '%d' else 'float'} 1\nLOOKUP_TABLE default\n")
@@ -480,11 +486,13 @@ def _edges(labels: np.ndarray) -> np.ndarray:
 
 
 BOND_COLOR = np.array([255.0, 220.0, 40.0])
+BINDER_COLOR = np.array([255.0, 140.0, 0.0])
 
 
 def overlay_rgb(grey: np.ndarray, labels: np.ndarray, palette: np.ndarray, display, alpha: float = 0.35,
-                bonds: np.ndarray | None = None) -> np.ndarray:
-    """uint8 RGB of grey slices with each fiber tinted in its own color and outlined; bond voxels in yellow."""
+                bonds: np.ndarray | None = None, binder: np.ndarray | None = None) -> np.ndarray:
+    """uint8 RGB of grey slices with each fiber tinted in its own color and outlined, binder voxels outside the
+    fibers in orange and bond voxels in yellow."""
     low, high = display
     g = np.clip((np.asarray(grey, np.float32) - low) / max(high - low, 1e-12), 0.0, 1.0) * 255.0
     rgb = np.repeat(np.nan_to_num(g)[..., None], 3, axis=-1)
@@ -493,9 +501,25 @@ def overlay_rgb(grey: np.ndarray, labels: np.ndarray, palette: np.ndarray, displ
     rgb[inside] = (1.0 - alpha) * rgb[inside] + alpha * color
     edge = inside & _edges(labels)
     rgb[edge] = 0.75 * palette[labels[edge]] + 0.25 * 255.0
+    if binder is not None:
+        glue = binder & ~inside
+        rgb[glue] = 0.3 * rgb[glue] + 0.7 * BINDER_COLOR
     if bonds is not None:
         rgb[bonds] = BOND_COLOR
     return (rgb + 0.5).astype(np.uint8)
+
+
+def binder_mask(binder: np.ndarray | None, box) -> np.ndarray | None:
+    """The voxels of ``box`` (z0, z1, y0, y1, x0, x1) among ``binder`` ((n, 3) voxels x, y, z), or None without
+    binder."""
+    if binder is None:
+        return None
+    z0, z1, y0, y1, x0, x1 = box
+    mask = np.zeros((z1 - z0, y1 - y0, x1 - x0), bool)
+    v = binder[(binder[:, 2] >= z0) & (binder[:, 2] < z1) & (binder[:, 1] >= y0) & (binder[:, 1] < y1)
+               & (binder[:, 0] >= x0) & (binder[:, 0] < x1)].astype(int)
+    mask[v[:, 2] - z0, v[:, 1] - y0, v[:, 0] - x0] = True
+    return mask
 
 
 def bond_mask(centers: np.ndarray, box, radius: float = 1.5) -> np.ndarray | None:
@@ -544,16 +568,21 @@ def open_stack(path: Path, shape, dtype, voxel_um: float, rgb: bool = False):
 
 def write_stacks(fibers: Fibers, out: Path, region, display, overlay: bool = True, labels: bool = True,
                  binder_level: float | None = None, say=print) -> tuple[list[Path], dict]:
-    """overlay.tif (the scan with each traced fiber tinted, bonds in yellow), labels.tif (each voxel's fiber
-    number, 0 outside) and, given ``binder_level`` (the grey above which a voxel is solid), binder.tif: solid
-    voxels outside every traced fiber, with a 1-voxel margin so fiber edges don't count, and pieces under
-    ``SPECK`` voxels dropped (fibers always win). Returns the paths and volume fractions."""
+    """overlay.tif (the scan with each traced fiber tinted, the network's binder in orange, bonds in yellow),
+    labels.tif (each voxel's fiber number, 0 outside) and, given ``binder_level`` (the grey above which a voxel is
+    solid), binder.tif: the network's binder (``fibers.binder``) outside every traced fiber or, for a network
+    without binder, solid voxels outside every traced fiber with a 1-voxel margin so fiber edges don't count;
+    either way pieces under ``SPECK`` voxels are dropped (fibers always win). Returns the paths and volume
+    fractions."""
     nz, ny, nx = (int(n) for n in fibers.shape)
     n = fibers.count
     pieces = segments(fibers.lines, fibers.radii)
     palette = 255.0 * fiber_palette(n)
     centers = np.array([b["center"] for b in fibers.bonds], float) if fibers.bonds else None
-    margin = 1.0 if binder_level is not None else 0.0
+    net = fibers.binder if fibers.binder is not None else None
+    if net is not None:
+        net = net[np.argsort(net[:, 2], kind="stable")]  # by slice, to pick out each slab's binder quickly
+    margin = 1.0 if binder_level is not None and net is None else 0.0
     opened, paths = {}, []
     if overlay:
         opened["overlay"] = open_stack(out / "overlay.tif", (nz, ny, nx, 3), np.uint8, fibers.voxel_um, rgb=True)
@@ -565,7 +594,7 @@ def write_stacks(fibers: Fibers, out: Path, region, display, overlay: bool = Tru
         raw_path = out / "binder_uncleaned.npy"
         raw = np.lib.format.open_memmap(raw_path, mode="w+", dtype=np.uint8, shape=(nz, ny, nx))
     slab = max(1, int(8_000_000 // max(ny * nx, 1)))
-    inside_count, last = 0, time.time()
+    inside_count, binder_count, last = 0, 0, time.time()
     for z0 in range(0, nz, slab):
         z1 = min(z0 + slab, nz)
         box = (z0, z1, 0, ny, 0, nx)
@@ -575,15 +604,23 @@ def write_stacks(fibers: Fibers, out: Path, region, display, overlay: bool = Tru
         inside_count += int(inside.sum())
         if "labels" in opened:
             opened["labels"][0][z0:z1] = number
-        grey = np.asarray(region[z0:z1], np.float32) if overlay or raw is not None else None
+        glue = None
+        if net is not None:
+            lo, hi = np.searchsorted(net[:, 2], [z0, z1])
+            glue = binder_mask(net[lo:hi], box)
+            binder_count += int((glue & ~inside).sum())
+        grey = np.asarray(region[z0:z1], np.float32) if overlay or (raw is not None and net is None) else None
         if "overlay" in opened:
-            opened["overlay"][0][z0:z1] = overlay_rgb(grey, number, palette, display, bonds=bond_mask(centers, box))
+            opened["overlay"][0][z0:z1] = overlay_rgb(grey, number, palette, display, bonds=bond_mask(centers, box),
+                                                      binder=glue)
         if raw is not None:
-            raw[z0:z1] = (grey > binder_level) & ~(depth <= margin)
+            raw[z0:z1] = (glue & ~inside) if net is not None else (grey > binder_level) & ~(depth <= margin)
         if time.time() - last > 10:
             last = time.time()
             say(f"  drawing the fibers into the stacks: {100 * z1 / nz:.0f}%")
     fractions = {"fibers": inside_count / float(nz * ny * nx)}
+    if net is not None:
+        fractions["binder"] = binder_count / float(nz * ny * nx)
     for name in ("overlay", "labels"):
         if name in opened:
             array, path, finish = opened.pop(name)
@@ -656,7 +693,9 @@ def write_preview(fibers: Fibers, path: Path, region, display, title: str) -> Pa
         fiber, depth = draw(pieces, box)
         number = flat(np.where(depth <= 0, fiber, 0))
         marks = bond_mask(centers, box)
-        image = overlay_rgb(grey, number, palette, display, bonds=None if marks is None else flat(marks))
+        glue = binder_mask(fibers.binder, box)
+        image = overlay_rgb(grey, number, palette, display, bonds=None if marks is None else flat(marks),
+                            binder=None if glue is None else flat(glue))
         low, high = display
         axes[0, col].imshow(np.clip((grey - low) / max(high - low, 1e-12), 0, 1), cmap="gray", vmin=0, vmax=1,
                             interpolation="nearest")
@@ -718,9 +757,13 @@ def summary(fibers: Fibers, given_um: list | None, fractions: dict | None) -> li
     if weak:
         lines.append(f"Traces less than half backed by the network: {weak} (support < 0.5 in fibers.csv; check them)")
     if fibers.bonds:
-        lines.append(f"Bonds: {len(fibers.bonds):,} ({2 * len(fibers.bonds) / n:.2f} per fiber)")
+        points = sum(1 for b in fibers.bonds if np.isfinite(b["strength"]))
+        lines.append(f"Bonds: {len(fibers.bonds):,} ({2 * len(fibers.bonds) / n:.2f} per fiber): {points:,} at the "
+                     f"network's bond points, {len(fibers.bonds) - points:,} where its binder joins two fibers")
     if fractions:
         lines.append(f"Volume fraction of the drawn fibers: {100 * fractions['fibers']:.1f}%")
         if "binder" in fractions:
-            lines.append(f"Volume fraction of binder (solid outside the fibers): {100 * fractions['binder']:.2f}%")
+            what = "the network's binder outside the traced fibers" if fibers.binder is not None else \
+                "solid outside the fibers"
+            lines.append(f"Volume fraction of binder ({what}): {100 * fractions['binder']:.2f}%")
     return lines

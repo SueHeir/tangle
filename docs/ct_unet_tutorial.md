@@ -204,7 +204,8 @@ results go to `my_scan_fibers/` (or the folder you give with `--out`).
 Open `overlay.png` for a quick look, then **open `overlay.tif` in Fiji**
 (File > Open; it opens as a stack in micrometers) and page through the slices.
 Each traced fiber is tinted and outlined in its own color, the same color all
-along it; bonds are yellow dots. (With `--invert` the overlay shows the scan
+along it; where the sample may be bonded, the binder the network sees is
+orange and bonds are yellow dots. (With `--invert` the overlay shows the scan
 inverted, as the network saw it.) Things to look for:
 
 | what you see | what to change |
@@ -257,12 +258,12 @@ CPU. On a big scan this takes a while; meanwhile:
 |---|---|---|
 | `summary.txt` | fiber counts and diameters per type, lengths, orientation, bonds, volume fractions, and how the run was made | any text editor |
 | `overlay.png` | the middle slice each way, the scan above and the traced fibers below | any image viewer |
-| `overlay.tif` | the scan with every traced fiber tinted and outlined, bonds in yellow (RGB stack) | Fiji |
+| `overlay.tif` | the scan with every traced fiber tinted and outlined, binder in orange, bonds in yellow (RGB stack) | Fiji |
 | `labels.tif` | each voxel's fiber number (0 = no fiber), as drawn from the traced centerlines and diameters | Fiji (Image > Lookup Tables > glasbey shows each fiber in its own color) |
-| `binder.tif` | with `--binder`: solid voxels outside every traced fiber (255), see below | Fiji |
+| `binder.tif` | with `--binder`: the binder outside every traced fiber (255), see below | Fiji |
 | `fibers.csv` | one row per fiber (columns below) | Excel, Python, R |
 | `centerlines.csv` | every centerline point: fiber, point number, x, y, z | Excel, Python |
-| `bonds.csv` | every bond: its number, the two fibers it joins, where it is, how strong the network's signal was | Excel, Python |
+| `bonds.csv` | every bond: its number, the two fibers it joins, where it is, how strong the network's bond-point signal was, and how many binder voxels join the pair there | Excel, Python |
 | `diameters.csv` | with `--diameter-profile`: the diameter at every voxel along every fiber, and an oval's long and short widths | Excel, Python |
 | `fibers.vtk`, `bonds.vtk` | the centerlines and bonds | ParaView |
 | `fibers.dump`, `view_in_ovito.py` | the fibers as chains of capsules, and bonds | OVITO |
@@ -299,11 +300,17 @@ view_in_ovito.py`, or `python view_in_ovito.py` where the `ovito` package is
 installed) and open the `fibers.ovito` it saves; or load `fibers.dump` in
 OVITO directly and set the particle shape to Spherocylinder.
 
-**Binder.** `--binder` writes `binder.tif`: voxels brighter than the solid/void
-split that are not inside a traced fiber (fibers always win, with a one-voxel
-margin so fiber edges don't count as binder), without pieces smaller than 20
-voxels. It depends on how well the fibers were traced: missed fibers turn up
-as binder.
+**Binder and bonds.** Unless told `--bonded no`, the network also marks binder:
+voxels it calls binder and not fiber. They are orange in the overlays, their
+share of the region is in `summary.txt`, and `--binder` writes them to
+`binder.tif` (255), outside every traced fiber (fibers always win), without
+pieces smaller than 20 voxels. A bond is where the network marks a bond point,
+or else where its binder joins two traced fibers (at least 4 binder voxels
+within 2.5 voxels of both surfaces). In `bonds.csv` the first kind has the
+bond point's `strength` and the second the number of `binder_voxels`. With a
+network that predates the binder, `binder.tif` holds the voxels brighter than
+the solid/void split that are not inside a traced fiber (with a one-voxel
+margin so fiber edges don't count): missed fibers turn up there as binder.
 
 **Diameters along each fiber.** `--diameter-profile` runs the network a second
 time to measure the diameter at every voxel along every fiber (see
@@ -421,7 +428,7 @@ where it is changed, and their `sync_package.py` copies them into the package.
 - Fibers must be 3.5 to 28 voxels across (bin for thicker ones), brighter than
   their surroundings (or `--invert`), in cubic voxels, with mostly empty space
   around them (or `--levels`).
-- Bonds come from the network's bond-point peaks and are found less reliably
-  than fibers (see the guide's numbers).
+- Bonds come from the network's bond points and binder, and are found less
+  reliably than fibers (see the guide's numbers).
 - The result is centerlines with diameters and types, not a solved
   structure: `fit.relax()` in Tangle makes it one.
