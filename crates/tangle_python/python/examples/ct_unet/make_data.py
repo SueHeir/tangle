@@ -85,6 +85,7 @@ STIFF_FIRST = 9001  # ... and from here on stiff, nearly straight fibers, bonded
 WEB_FIRST = 11001  # ... and from here on big binder webs and fillets (no coatings), some flat fibers, milder noise
 EASY_FIRST = 12001  # ... and from here on the same, made clean (an easy start for training on webs)
 EASY_MAX_BINDER = 0.04  # easy scans with more binder than this share of the volume are skipped
+MIXED_MAX_BINDER = 0.15  # ... and mixed scans with more than this (dense, nearly all crossings bonded with big bonds)
 PAIRS_FIRST = 20001  # pairs_<index> (--pairs): dense_hard scans whose fine fibers lie in touching pairs
 HARD_PAIRS_FIRST = 21001  # hardpairs_<index> (--hard-pairs): the same made hard to split (see hard_pairs_settings)
 # The true structure must not have fibers passing through each other (overlaps.py): while a pair still shares more
@@ -499,10 +500,10 @@ def main() -> None:
         except BaseException as error:  # a structure that fails to relax or render (a Tangle panic too): skip it
             print(f"{name}: failed ({error})", flush=True)
             continue
-        if (family == "varied" and index >= EASY_FIRST and scan.binder_occupancy is not None
-                and float((scan.binder_occupancy > 0.5).mean()) > EASY_MAX_BINDER):
-            print(f"{name}: skipped (binder {float((scan.binder_occupancy > 0.5).mean()):.1%} > {EASY_MAX_BINDER:.0%})",
-                  flush=True)
+        most = EASY_MAX_BINDER if family == "varied" and index >= EASY_FIRST else (
+            MIXED_MAX_BINDER if family == "mixed" else None)
+        if most is not None and scan.binder_occupancy is not None and float((scan.binder_occupancy > 0.5).mean()) > most:
+            print(f"{name}: skipped (binder {float((scan.binder_occupancy > 0.5).mean()):.1%} > {most:.0%})", flush=True)
             continue
         table = scan.table if family == "mixed" else point_table(scan)  # mixed: thinning fibers' radii per point
         if not len(table["pos"]):  # e.g. a sparse scan whose fibers all lie past a cut face: nothing to learn from

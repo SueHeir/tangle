@@ -488,7 +488,7 @@ def build_fibers(s: dict, crowd: float = 1.0, placement: int = 0) -> list[Fiber]
             tries += 1
             d_mean = d0 * (float(np.exp(rng.normal(0.0, t["spread"]))) if t["spread"] else 1.0)
             d_mean = float(np.clip(d_mean, 0.75 * d0, 1.35 * d0))
-            length = side * float(rng.uniform(*t["length"]))
+            length = max(side * float(rng.uniform(*t["length"])), 3.0 * d_mean)  # thick short fibers: stubby rods
             # loops and hairpins in fibers thin enough to turn round within the volume (radius 1.2-4 diameters)
             kink = (t["loops"] > 0 and t["packing"] == "single" and t["shape"] in ("straight", "bent")
                     and d_mean <= 10.0 and rng.random() < t["loops"])
