@@ -587,8 +587,9 @@ class StubTests(unittest.TestCase):
             name for name in dir(native) if not name.startswith("_")
         } - declared
         self.assertEqual(undeclared, set())
-        # tangle.ct's native helpers are used through tangle.ct, not exported.
-        internal = {name for name in declared if name.startswith(("ct_", "Ct"))}
+        # tangle.ct's and tangle.fem's native helpers are used through those
+        # modules, not exported.
+        internal = {name for name in declared if name.startswith(("ct_", "Ct", "fem_"))}
         self.assertEqual(set(tangle.__all__) - {"units", "__version__"}, declared - internal)
 
 

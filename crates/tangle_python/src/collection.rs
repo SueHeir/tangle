@@ -568,6 +568,34 @@ impl PyAssembly {
             .collect()
     }
 
+    /// The stable id of every fiber, in fiber order.
+    fn fiber_ids(&self) -> Vec<u32> {
+        let model = self.model.lock().expect("assembly lock poisoned");
+        model
+            .assembly
+            .topology
+            .fibers
+            .iter()
+            .map(|fiber| fiber.id.0)
+            .collect()
+    }
+
+    /// The material name of every fiber, in fiber order.
+    fn fiber_materials(&self) -> Vec<String> {
+        let model = self.model.lock().expect("assembly lock poisoned");
+        let assembly = &model.assembly;
+        assembly
+            .topology
+            .fibers
+            .iter()
+            .map(|fiber| {
+                assembly.materials.entries[fiber.material.0 as usize]
+                    .name
+                    .clone()
+            })
+            .collect()
+    }
+
     /// Adds a collection's fibers directly, without a recipe or relaxation.
     ///
     /// Use this for imported geometry, such as centerlines tracked from a CT
