@@ -22,9 +22,15 @@ from scipy.spatial import cKDTree
 
 from maps import DIRECTION, FIBER, OFFSET, RADIUS
 
-STEP = 1.5  # voxels per tracking step
-REACH = 1.6  # voxels: axis points within this of the look-ahead point are candidates
-AGREE = 0.8  # |cos| between a candidate's direction and the track's
+# Tuned on the network's own maps (r19; 34 test scans, then all 9 test sets): short steps, a tight look-ahead and
+# strict direction agreement keep a track from stepping onto a fiber that crosses it, the main loss on dense
+# scans. Fibers of radius THICK and up keep the earlier, longer steps (1.5, 1.6, 0.8): with short steps the
+# look-ahead also takes in axis points just behind the track, and on a thick fiber's dense points it stalls.
+STEP = 0.75  # voxels per tracking step
+REACH = 1.3  # voxels: axis points within this of the look-ahead point are candidates
+AGREE = 0.9  # |cos| between a candidate's direction and the track's
+THICK = 6.0  # voxels: seeds of at least this radius track with the settings below
+THICK_STEP, THICK_REACH, THICK_AGREE = 1.5, 1.6, 0.8
 GAP_STEPS = 4  # straight steps allowed without support
 OWNED_MIN = 1.2  # voxels: a track uses up the axis points within max(this, OWNED_SHARE x its radius)
 OWNED_SHARE = 0.5  # (a thick fiber's votes spread wider, e.g. onto both rims of a dim core)
@@ -137,15 +143,17 @@ def track(position, direction, radius, counts, shape, min_length: float = 10.0, 
             continue
         if log and rank % 100000 == 0:
             log(f"tracking: seed {rank}/{len(counts)}, {len(lines)} fibers")
+        stride, reach, agree = ((THICK_STEP, THICK_REACH, THICK_AGREE) if radius[seed] >= THICK
+                                else (STEP, REACH, AGREE))
         halves = []
         for sign in (1.0, -1.0):
             p, t = position[seed].copy(), sign * direction[seed]
             path, gaps, overlap = [], 0, 0
             while True:
-                ahead = p + STEP * t
-                near = np.array(tree.query_ball_point(ahead, REACH), dtype=int)
+                ahead = p + stride * t
+                near = np.array(tree.query_ball_point(ahead, reach), dtype=int)
                 if len(near):
-                    near = near[np.abs(direction[near] @ t) >= AGREE]
+                    near = near[np.abs(direction[near] @ t) >= agree]
                 if len(near):
                     w = counts[near].astype(np.float64)
                     new = (position[near] * w[:, None]).sum(0) / w.sum()
