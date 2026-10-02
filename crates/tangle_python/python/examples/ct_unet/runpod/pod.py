@@ -545,12 +545,22 @@ def gpu_count() -> int:
         return 1
 
 
-def loader_workers() -> int:
-    """Crop workers for one train.py: its GPU's share of the cores (a pod with 2 GPUs runs 2 trainings), as long
-    as shared memory holds their crops (~150 MB each, two queued per worker)."""
+def loader_workers(batch: int = 1) -> int:
+    """Crop workers for one train.py: its GPU's share of the cores (a pod with 2 GPUs runs 2 trainings), capped so
+    shared memory holds their batches (~350 MB per crop in flight per worker; ``--batch N`` crops per step)."""
     share = gpu_count()
     shm = shutil.disk_usage("/dev/shm").total if os.path.isdir("/dev/shm") else 0
-    return max(1, min(cpus() // share, int((shm / share - 1e9) // 350e6), 32))
+    return max(1, min(cpus() // share, int((shm / share - 1e9) // (350e6 * max(1, batch))), 32))
+
+
+def option(args: list, name: str, default: str) -> str:
+    """The value of ``name`` in a train.py command line (``--name V`` or ``--name=V``)."""
+    for k, word in enumerate(args):
+        if word == name and k + 1 < len(args):
+            return args[k + 1]
+        if word.startswith(name + "="):
+            return word.split("=", 1)[1]
+    return default
 
 
 def active_runs(work: Path, but: Path = None) -> dict:
@@ -815,7 +825,8 @@ def supervise(work: Path, args) -> None:
         pass  # crop workers hand tensors over as open files; the default limit is usually enough
     try:
         code = place_code(work, run, args.ref, args.local_code)
-        workers = [] if "--workers" in args.rest else ["--workers", str(loader_workers())]
+        batch = int(option(args.rest, "--batch", "1"))
+        workers = [] if option(args.rest, "--workers", "") else ["--workers", str(loader_workers(batch))]
         gpu = (run / "GPU").read_text().strip() if (run / "GPU").exists() else "0"
         processes = len(gpu.split(","))
         # one network on several GPUs: torchrun starts one train.py per GPU (each with its share of crop workers)
