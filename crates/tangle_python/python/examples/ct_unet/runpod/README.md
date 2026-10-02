@@ -153,7 +153,11 @@ with numbers that differ slightly from the 32-bit runs. It only helps when the G
 
 Measured so far: on the Windows PC (RTX 3060 Ti), r13's 40,000 steps took 0.57 s per step, about 7.5 hours with
 the validation checks. On an 18-core A100 80GB PCIe pod ($1.59/h), r16's 40,000 steps ran at 0.171 s per step
-with `--amp bf16` (GPU about 70% busy, 0.03 s per step waiting for crops): about 2 hours, $3.20.
+with `--amp bf16` (GPU about 70% busy, 0.03 s per step waiting for crops): about 2 hours, $3.20. On a 2x H100
+pod (44 CPU cores), r19 at base 32 with `--gpus 2 --batch 4` (4 crops per GPU per step) ran at 0.31 s per step,
+about 26 crops per second, waiting 0.085 s per step for crops, with 26 crop workers per GPU and 20 GB of GPU memory
+each. One base-24 run on one GPU made 6.6 crops per second at `--batch 1`, 12.1 at 2, 14.0 at 4 and 15.6 at 8:
+past batch 2 or so the CPU cores, not the GPU, set the pace.
 
 The first push to a new pod copies every scan over the home internet connection while the pod bills: 47 GB took
 about 13 minutes at ~500 Mbit/s over 8 connections (one connection alone managed ~80 Mbit/s). Later runs on the same (stopped and
