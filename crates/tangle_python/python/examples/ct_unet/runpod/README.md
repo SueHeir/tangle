@@ -61,6 +61,11 @@ stopped when run again:
 
 Other commands: `status` (where the run is), `stop` (stop the pod now).
 
+**Two runs on a 2-GPU pod.** Start two `go` commands with different `--run` names (in two terminals). Each run
+gets a GPU of its own (`--gpu auto`, the default, takes the first one no other run uses; `--gpu 1` picks one) and
+half the pod's CPU cores and shared memory for its crops. The pod stops only after the last run ends: a run that
+finishes first just says the other is still going. The scans are shared, so the second `go` sends nothing new.
+
 **Adding scans while it trains.** Scans made after the run started can join it:
 
 ```sh

@@ -34,6 +34,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -248,10 +249,11 @@ def send(pod: Pod, files: dict, streams: int = 8) -> None:
 def deliver(pod: Pod, files: dict, streams: int) -> None:
     """Send scans ({path under WORK: local path}) into a staging folder on the pod, then move each one that passes
     its CRC check into place: a running train.py only ever sees whole scans. Failed ones are sent once more."""
+    stage = f"{STAGING}/{socket.gethostname()}-{os.getpid()}"  # its own, so two pushes at once can't collide
     for attempt in range(2):
-        pod.pod("unstage")
-        send(pod, {f"{STAGING}/{k}": v for k, v in files.items()}, streams)
-        bad = pod.pod("adopt", data=json.dumps(list(files)).encode()).get("bad", [])
+        pod.pod("unstage", stage)
+        send(pod, {f"{stage}/{k}": v for k, v in files.items()}, streams)
+        bad = pod.pod("adopt", stage, data=json.dumps(list(files)).encode()).get("bad", [])
         if not bad:
             return
         say(f"{len(bad)} scans failed their CRC check on the pod" + ("; sending them again" if not attempt else ""))
@@ -323,7 +325,7 @@ def push(pod: Pod, args, train_args) -> list:
 
 
 def start(pod: Pod, args, remote_args) -> dict:
-    words = ["train", args.run, "--end", args.end, "--grace", str(args.grace), "--ref", args.ref]
+    words = ["train", args.run, "--end", args.end, "--grace", str(args.grace), "--ref", args.ref, "--gpu", args.gpu]
     if args.code_dir:
         words.append("--local-code")
     state = pod.pod(*words, "--", *remote_args)
@@ -534,11 +536,39 @@ def cpus() -> int:
     return len(os.sched_getaffinity(0))
 
 
+def gpu_count() -> int:
+    try:
+        out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True).stdout
+        return max(1, sum(line.startswith("GPU ") for line in out.splitlines()))
+    except OSError:
+        return 1
+
+
 def loader_workers() -> int:
-    """Crop workers for train.py: one per core, as long as shared memory holds their crops (~150 MB each, two
-    queued per worker)."""
-    shm = shutil.disk_usage("/dev/shm").free if os.path.isdir("/dev/shm") else 0
-    return max(1, min(cpus(), int((shm - 1e9) // 350e6), 32))
+    """Crop workers for one train.py: its GPU's share of the cores (a pod with 2 GPUs runs 2 trainings), as long
+    as shared memory holds their crops (~150 MB each, two queued per worker)."""
+    share = gpu_count()
+    shm = shutil.disk_usage("/dev/shm").total if os.path.isdir("/dev/shm") else 0
+    return max(1, min(cpus() // share, int((shm / share - 1e9) // 350e6), 32))
+
+
+def active_runs(work: Path, but: Path = None) -> dict:
+    """{run folder: its GPU} of the runs whose supervisor still lives (training, or waiting to be fetched)."""
+    out = {}
+    for run in (work / "runs").glob("*"):
+        if run != but and pid_alive(run / "supervisor.pid") and not (run / "ENDED").exists():
+            out[run] = (run / "GPU").read_text().strip() if (run / "GPU").exists() else "0"
+    return out
+
+
+def free_gpu(work: Path, run: Path, wanted: str) -> str:
+    if wanted != "auto":
+        return wanted
+    taken = set(active_runs(work, but=run).values())
+    for k in range(gpu_count()):
+        if str(k) not in taken:
+            return str(k)
+    raise SystemExit(f"every GPU of the pod is in use by a run ({', '.join(sorted(taken))}); pass --gpu to share one")
 
 
 def pid_alive(path: Path) -> bool:
@@ -574,8 +604,10 @@ def on_pod(argv):
     argv = argv[:argv.index("--")] if "--" in argv else argv
     parser = argparse.ArgumentParser(prog="pod.py _pod")
     sub = parser.add_subparsers(dest="what", required=True)
-    for name in ("setup", "list", "check", "adopt", "unstage"):
+    for name in ("setup", "list", "check"):
         sub.add_parser(name)
+    for name in ("adopt", "unstage"):
+        sub.add_parser(name).add_argument("stage")
     for name in ("status", "md5"):
         sub.add_parser(name).add_argument("run")
     for name in ("train", "supervise"):
@@ -586,6 +618,7 @@ def on_pod(argv):
         p.add_argument("--ref", default="claude/ct-unet")
         p.add_argument("--local-code", action="store_true")
         p.add_argument("--attempt", default="")
+        p.add_argument("--gpu", default="auto")
     sub.add_parser("stop").add_argument("how", nargs="?", default="stop")
     for name in ("make", "make-run"):
         p = sub.add_parser(name)
@@ -605,9 +638,9 @@ def on_pod(argv):
         files["_bytes"] = sum(files.values())
         print(json.dumps(files))
     elif args.what == "adopt":
-        print(json.dumps({"bad": adopt(work, json.load(sys.stdin))}))
+        print(json.dumps({"bad": adopt(work, args.stage, json.load(sys.stdin))}))
     elif args.what == "unstage":
-        shutil.rmtree(work / STAGING, ignore_errors=True)
+        shutil.rmtree(work / args.stage, ignore_errors=True)
         print("{}")
     elif args.what == "check":
         print(json.dumps({"bad": crc_check(work, json.load(sys.stdin))}))
@@ -681,12 +714,12 @@ def crc_check(work: Path, names) -> list:
     return bad
 
 
-def adopt(work: Path, names) -> list:
+def adopt(work: Path, stage: str, names) -> list:
     """Move staged scans that pass their CRC check into place (a rename on the same disk, so train.py never sees
     part of a file); returns the ones that failed, which are deleted."""
     from concurrent.futures import ProcessPoolExecutor
 
-    staged = [work / STAGING / n for n in names]
+    staged = [work / stage / n for n in names]
     with ProcessPoolExecutor(max(1, cpus())) as pool:
         results = list(pool.map(_crc_one, map(str, staged), chunksize=8))
     record = work / "data" / ".crc_ok.json"
@@ -702,7 +735,7 @@ def adopt(work: Path, names) -> list:
         os.replace(source, target)
         ok[str(target)] = [target.stat().st_size, target.stat().st_mtime]
     record.write_text(json.dumps(ok))
-    shutil.rmtree(work / STAGING, ignore_errors=True)
+    shutil.rmtree(work / stage, ignore_errors=True)
     print(f"moved {len(names) - len(bad)} scans into place, {len(bad)} failed their CRC check", flush=True)
     return bad
 
@@ -725,7 +758,8 @@ def launch(work: Path, args) -> dict:
     if state["state"] == "done":
         return {**state, "message": f"{args.run} already finished on the pod"}
     run.mkdir(parents=True, exist_ok=True)
-    for marker in ("EXIT", "FETCHED"):
+    (run / "GPU").write_text(free_gpu(work, run, args.gpu))
+    for marker in ("EXIT", "FETCHED", "ENDED"):
         (run / marker).unlink(missing_ok=True)
     attempt = time.strftime("%Y%m%d-%H%M%S")
     (run / "ATTEMPT").write_text(attempt)
@@ -741,7 +775,8 @@ def launch(work: Path, args) -> dict:
         log_tail = (run / "supervisor.log").read_text().splitlines()[-15:]
         train_tail = (run / "train.log").read_text().splitlines()[-15:] if (run / "train.log").exists() else []
         raise SystemExit("training did not start:\n" + "\n".join(log_tail + train_tail))
-    return {"state": "running", "message": f"{args.run} started on the pod (from last.pt if it has one)"}
+    return {"state": "running", "message": f"{args.run} started on the pod's GPU {(run / 'GPU').read_text()} "
+                                           f"(from last.pt if it has one)"}
 
 
 def place_code(work: Path, run: Path, ref: str, local: bool) -> Path:
@@ -781,11 +816,13 @@ def supervise(work: Path, args) -> None:
                    "--resume"]
         print(stamp() + " ".join(command), flush=True)
         with open(run / "gpu.csv", "a") as gpu_log, open(run / "train.log", "a") as log:
-            monitor = subprocess.Popen(["nvidia-smi", "--query-gpu=timestamp,utilization.gpu,memory.used,power.draw",
+            gpu = (run / "GPU").read_text().strip() if (run / "GPU").exists() else "0"
+            monitor = subprocess.Popen(["nvidia-smi", "-i", gpu, "--query-gpu=timestamp,utilization.gpu,memory.used,power.draw",
                                         "--format=csv,noheader", "-l", "30"], stdout=gpu_log,
                                        stderr=subprocess.DEVNULL)
             train = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                     env={**os.environ, "PYTHONUNBUFFERED": "1"}, cwd=code)
+                                     env={**os.environ, "PYTHONUNBUFFERED": "1", "CUDA_VISIBLE_DEVICES": gpu},
+                                     cwd=code)
             (run / "train.pid").write_text(str(train.pid))
             exit_code = train.wait()
             monitor.terminate()
@@ -804,6 +841,12 @@ def supervise(work: Path, args) -> None:
         print(stamp() + "leaving the pod running (--end keep)", flush=True)
         return
     fetched = (run / "FETCHED").exists()
+    (run / "ENDED").write_text(stamp() + "\n")
+    others = active_runs(work, but=run)
+    if others:  # the last run to end stops the pod
+        print(stamp() + ("the run was fetched" if fetched else f"nothing fetched the run in {args.grace:g} min")
+              + f"; {', '.join(r.name for r in others)} still going, so the pod stays up", flush=True)
+        return
     print(stamp() + ("the run was fetched" if fetched else f"nothing fetched the run in {args.grace:g} min")
           + f"; {args.end} the pod", flush=True)
     stop_pod(args.end)
@@ -1051,6 +1094,8 @@ def main():
     parser.add_argument("--grace", type=float, default=60,
                         help="minutes the pod waits for the run to be fetched after training ends, then ends anyway")
     parser.add_argument("--poll", type=float, default=300, help="seconds between progress checks")
+    parser.add_argument("--gpu", default="auto",
+                        help="train: the pod GPU (0, 1, ...) for this run; auto: the first one no other run uses")
     parser.add_argument("--streams", type=int, default=8, help="push: ssh connections sending scans at once")
     parser.add_argument("--every", type=float, default=0,
                         help="add: look for new scans again every this many minutes, until stopped (Ctrl-C)")
