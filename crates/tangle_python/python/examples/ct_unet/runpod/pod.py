@@ -345,7 +345,7 @@ def fetch(pod: Pod, args, final: bool) -> Path:
                     if not member.isfile() or not parts or parts[0] != run or ".." in parts:
                         continue
                     target = dest.joinpath(*parts)
-                    target.parent.mkdir(parents=True, exist_ok=True)
+                    make_dir(target.parent)
                     part = target.with_name(target.name + ".part")
                     with tar.extractfile(member) as source, open(part, "wb") as out:
                         shutil.copyfileobj(source, out, 1 << 20)
@@ -366,6 +366,20 @@ def fetch(pod: Pod, args, final: bool) -> Path:
         if args.end != "keep":
             say(f"the pod will {args.end} itself within a minute (training is over and the run is here)")
     return dest / run
+
+
+def make_dir(path: Path) -> None:
+    """mkdir -p that survives Windows network shares, where creating a folder that exists can raise
+    FileExistsError (WinError 183) despite exist_ok."""
+    for folder in [*reversed(path.parents), path]:
+        try:
+            folder.mkdir(exist_ok=True)
+        except FileExistsError:
+            if not folder.is_dir():
+                raise
+        except PermissionError:  # a network share's root can be entered but not created
+            if not folder.exists():
+                raise
 
 
 def md5(path: Path) -> str:
@@ -967,6 +981,10 @@ def main():
                         help="make: Tangle's relaxation backend on the pod (auto: CUDA, else wgpu, else the CPU)")
     parser.add_argument("--price", type=float, default=1.59, help="the pod's $ per hour, for the cost estimate")
     args = parser.parse_args(argv)
+    ours = {a for action in parser._actions for a in action.option_strings} - {"-h", "--help"}
+    misplaced = sorted({w.split("=")[0] for w in train_args} & ours)
+    if misplaced:
+        parser.error(f"{', '.join(misplaced)} came after --, where train.py's arguments go; put them before --")
     if args.command != "stop" and not args.run:
         parser.error("--run is required")
     if args.command == "make" and args.ref == "claude/ct-unet":
