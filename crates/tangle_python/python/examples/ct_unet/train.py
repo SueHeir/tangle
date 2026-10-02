@@ -10,11 +10,19 @@ loss, and one line per log interval to stdout.
 Hints (--condition): each training crop is told a random part of what is true about its scan, and about a third
 of them nothing at all, so one network works with any hints or none (maps.draw_hints; --blank-rate, --size-rate,
 --hint-rate, --extra-rate). A network from before the newer hints grows their inputs, unread at first (--init).
+
+Several GPUs: ``torchrun --nproc_per_node N train.py ...`` trains one network on N GPUs, one process each. Every
+step, each GPU takes its own --batch crops, and their gradients are averaged before the one shared update, so a
+step learns from N x --batch crops (the learning rate is unchanged). The same --steps then covers N times the
+crops in about the same time; for the same crops as one GPU, give --steps / N. The first process writes the
+log, validates and saves; checkpoints load as before. Started without torchrun it runs as always.
 """
 
 import argparse
 import json
+import os
 import time
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -78,10 +86,15 @@ def save(state, path: Path):
     path.with_suffix(".tmp").replace(path)
 
 
+def bare(model):
+    """The network itself (inside the wrapper that shares it across GPUs, if any)."""
+    return getattr(model, "module", model)
+
+
 def run_batch(model, batch, device):
     batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
     with torch.autocast("cuda", dtype=AMP or torch.float32, enabled=AMP is not None):
-        out = model(batch["image"], batch["code"]) if getattr(model, "condition", False) else model(batch["image"])
+        out = model(batch["image"], batch["code"]) if getattr(bare(model), "condition", False) else model(batch["image"])
     terms = loss_terms(out.float(), batch)
     return sum(WEIGHTS[k] * v for k, v in terms.items()), terms
 
@@ -133,10 +146,26 @@ def main():
         return sorted(f for d in folders.split(",") for f in Path(d).glob("*.npz")
                       if f"{f.parent.name}/{f.stem}" not in skip)
 
-    device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    # Several GPUs (torchrun sets WORLD_SIZE): one process per GPU, gradients averaged across them each step.
+    shared = int(os.environ.get("WORLD_SIZE", "1")) > 1
+    rank, world = 0, 1
+    if shared:
+        import torch.distributed as dist
+
+        # a long timeout: the others wait while the first process validates or (--pace) waits for scans
+        dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo", timeout=timedelta(hours=12))
+        rank, world = dist.get_rank(), dist.get_world_size()
+        local = int(os.environ.get("LOCAL_RANK", "0"))
+        device = f"cuda:{local}" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local)
+    else:
+        device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    first = rank == 0  # the process that logs, validates and saves
     global AMP
-    AMP = None if args.amp == "off" or device != "cuda" else {"bf16": torch.bfloat16, "fp16": torch.float16}[args.amp]
-    if device == "cuda":
+    cuda = device.startswith("cuda")
+    AMP = None if args.amp == "off" or not cuda else {"bf16": torch.bfloat16, "fp16": torch.float16}[args.amp]
+    if cuda:
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.allow_tf32 = True
     scaler = torch.amp.GradScaler("cuda", enabled=AMP is torch.float16)
@@ -194,26 +223,33 @@ def main():
                              condition=True).to(device)
         conditioned.load_state_dict(model.state_dict(), strict=False)
         model = conditioned
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, total_steps=args.steps, pct_start=0.05)
     if args.resume and (args.out / "last.pt").exists():
         state = torch.load(args.out / "last.pt", map_location=device)
         model.load_state_dict(state["model"])
+    if shared:  # every process holds the same weights; the wrapper averages the gradients across GPUs
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local] if cuda else None)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, total_steps=args.steps, pct_start=0.05)
+    if args.resume and (args.out / "last.pt").exists():
         optimizer.load_state_dict(state["optimizer"])
         scheduler.load_state_dict(state["scheduler"])
         step, best = state["step"], state["best"]
-    (args.out / "config.json").write_text(json.dumps({**vars(args), "data": args.data, "val": args.val,
-                                                       "out": str(args.out), "init": str(args.init), "weights": WEIGHTS}, indent=1, default=str) + "\n")
+    if first:
+        (args.out / "config.json").write_text(json.dumps({**vars(args), "data": args.data, "val": args.val,
+                                                           "out": str(args.out), "init": str(args.init),
+                                                           "weights": WEIGHTS, "gpus": world}, indent=1,
+                                                          default=str) + "\n")
 
-    val_files = volumes(args.val)
-    # Validation crops are the same every time, so any number of workers gives the same loss; more of them
-    # keep a fast GPU from idling through each check.
-    val_loader = DataLoader(Crops(val_files, args.crop, 1, 0, train=False), batch_size=1,
-                            num_workers=max(2, args.workers))
+    if first:
+        val_files = volumes(args.val)
+        # Validation crops are the same every time, so any number of workers gives the same loss; more of them
+        # keep a fast GPU from idling through each check.
+        val_loader = DataLoader(Crops(val_files, args.crop, 1, 0, train=False), batch_size=1,
+                                num_workers=max(2, args.workers))
     started, window, waited = time.perf_counter(), [], 0.0  # waited: time the loop spent waiting for crops
     while step < args.steps:
         # Pacing: hold training until each paced folder has its share of the scans for the coming steps.
-        for spec in args.pace:
+        for spec in args.pace if first else []:
             folder, total = spec.rsplit(":", 1)
             span = args.refresh_every or args.steps
             need = min(int(total), int(np.ceil(int(total) * min(1.0, (step + span) / args.steps))))
@@ -221,10 +257,19 @@ def main():
                 print(f"PAUSED step {step}: {folder} has {have}/{need} scans, waiting", flush=True)
                 time.sleep(120)
         # Re-list each pass (or every --refresh-every steps) so volumes still being generated join as they land.
-        files = volumes(args.data)
+        # With several GPUs the first process lists them for all, so every process works through the same list.
+        files = volumes(args.data) if first else None
+        if shared:
+            box = [files]
+            dist.broadcast_object_list(box, src=0)
+            files = box[0]
         rates = {"blank": args.blank_rate, "sizes": args.size_rate, "binder": args.hint_rate, "extra": args.extra_rate}
-        loader = DataLoader(Crops(files, args.crop, 2, step, noise=args.noise, hint_rates=rates),
-                            batch_size=args.batch, shuffle=True, drop_last=True, num_workers=args.workers,
+        crops = Crops(files, args.crop, 2, step * world + rank, noise=args.noise, hint_rates=rates)
+        # several GPUs: each takes its own share of the crops (the same number each, so they stay in step)
+        share = (torch.utils.data.distributed.DistributedSampler(crops, num_replicas=world, rank=rank, seed=step)
+                 if shared else None)
+        loader = DataLoader(crops, batch_size=args.batch, shuffle=share is None, sampler=share, drop_last=True,
+                            num_workers=args.workers,
                             persistent_workers=False, prefetch_factor=2)
         model.train()
         tick = time.perf_counter()
@@ -240,33 +285,40 @@ def main():
             scheduler.step()
             step += 1
             refresh = args.refresh_every and step % args.refresh_every == 0
-            window.append({k: float(v.detach()) for k, v in terms.items()})
+            window.append({k: v.detach() for k, v in terms.items()})  # read at the log line: no GPU wait per step
             if step % args.log_every == 0:
-                mean = {k: np.mean([w[k] for w in window]) for k in window[0]}
+                mean = {k: float(torch.stack([w[k] for w in window]).mean()) for k in window[0]} if first else {}
                 window = []
                 # data: seconds per step spent waiting for crops (near the step time = the CPU is the limit)
-                print(f"step {step} files {len(files)} " + " ".join(f"{k} {v:.4f}" for k, v in mean.items())
-                      + f" lr {scheduler.get_last_lr()[0]:.2e} {time.perf_counter() - started:.0f} s"
-                      + f" data {waited / args.log_every:.3f} s/step", flush=True)
+                if first:
+                    print(f"step {step} files {len(files)} " + (f"gpus {world} " if shared else "")
+                          + " ".join(f"{k} {v:.4f}" for k, v in mean.items())
+                          + f" lr {scheduler.get_last_lr()[0]:.2e} {time.perf_counter() - started:.0f} s"
+                          + f" data {waited / args.log_every:.3f} s/step", flush=True)
                 waited = 0.0
-            if step % args.val_every == 0 or step == args.steps:
-                model.eval()
+            if (step % args.val_every == 0 or step == args.steps) and first:
+                net = bare(model)  # validated and saved as one plain network, whatever trained it
+                net.eval()
                 with torch.no_grad():
-                    vals = [run_batch(model, b, device) for b in val_loader]
+                    vals = [run_batch(net, b, device) for b in val_loader]
                 val = float(np.mean([float(v[0]) for v in vals]))
                 parts = {k: np.mean([float(v[1][k]) for v in vals]) for k in vals[0][1]}
                 print(f"VAL step {step} loss {val:.4f} " + " ".join(f"{k} {v:.4f}" for k, v in parts.items()), flush=True)
-                state = {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
-                         "scheduler": scheduler.state_dict(), "step": step, "best": min(best, val), "base": args.base, "condition": bool(getattr(model, "condition", False)), "layout": "bondpoints",
-                         "group_sizes": model.group_sizes}
+                state = {"model": net.state_dict(), "optimizer": optimizer.state_dict(),
+                         "scheduler": scheduler.state_dict(), "step": step, "best": min(best, val), "base": args.base, "condition": bool(getattr(net, "condition", False)), "layout": "bondpoints",
+                         "group_sizes": net.group_sizes}
                 save(state, args.out / "last.pt")
                 if val < best:
                     best = val
                     save(state, args.out / "best.pt")
                 model.train()
+            if shared and (step % args.val_every == 0 or step == args.steps):
+                dist.barrier()  # the others wait while the first validates
             if step >= args.steps or refresh:
                 break
             tick = time.perf_counter()
+    if shared:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
