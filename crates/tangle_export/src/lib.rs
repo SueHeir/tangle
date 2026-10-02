@@ -715,6 +715,14 @@ pub(crate) fn write_lammps_data(model: &DemBpmModel, path: &Path) -> Result<(), 
             mapping.atom_type, mapping.material.0, name, mapping.particles
         )?;
     }
+    // The column legends live in the header: LAMMPS and OVITO read every
+    // line after a section's blank line as data, so a comment line there
+    // is rejected.
+    writeln!(
+        writer,
+        "# Atoms columns: id molecule type diameter density x y z"
+    )?;
+    writeln!(writer, "# Bonds columns: id type atom1 atom2")?;
     writeln!(writer)?;
     writeln!(writer, "{} atoms", model.particles.len())?;
     writeln!(writer, "{} bonds", model.bonds.len())?;
@@ -752,7 +760,6 @@ pub(crate) fn write_lammps_data(model: &DemBpmModel, path: &Path) -> Result<(), 
     writeln!(writer)?;
     writeln!(writer, "Atoms # bpm/sphere")?;
     writeln!(writer)?;
-    writeln!(writer, "# id molecule type diameter density x y z")?;
     for particle in &model.particles {
         writeln!(
             writer,
@@ -770,7 +777,6 @@ pub(crate) fn write_lammps_data(model: &DemBpmModel, path: &Path) -> Result<(), 
     writeln!(writer)?;
     writeln!(writer, "Bonds")?;
     writeln!(writer)?;
-    writeln!(writer, "# id type atom1 atom2")?;
     for bond in &model.bonds {
         writeln!(
             writer,
@@ -800,6 +806,16 @@ pub(crate) fn write_capsule_lammps_data(
             mapping.atom_type, mapping.material.0, name, mapping.particles
         )?;
     }
+    // Legends in the header, as in `write_lammps_data`.
+    writeln!(
+        writer,
+        "# Atoms columns: id molecule type diameter density x y z"
+    )?;
+    writeln!(
+        writer,
+        "# Capsules columns: atom-id half-length axis-x axis-y axis-z"
+    )?;
+    writeln!(writer, "# Bonds columns: id type atom1 atom2")?;
     writeln!(writer)?;
     writeln!(writer, "{} atoms", model.capsules.len())?;
     writeln!(writer, "{} bonds", model.bonds.len())?;
@@ -837,7 +853,6 @@ pub(crate) fn write_capsule_lammps_data(
     writeln!(writer)?;
     writeln!(writer, "Atoms # bpm/sphere")?;
     writeln!(writer)?;
-    writeln!(writer, "# id molecule type diameter density x y z")?;
     for capsule in &model.capsules {
         writeln!(
             writer,
@@ -855,7 +870,6 @@ pub(crate) fn write_capsule_lammps_data(
     writeln!(writer)?;
     writeln!(writer, "Capsules")?;
     writeln!(writer)?;
-    writeln!(writer, "# atom-id half-length axis-x axis-y axis-z")?;
     for capsule in &model.capsules {
         writeln!(
             writer,
@@ -866,7 +880,6 @@ pub(crate) fn write_capsule_lammps_data(
     writeln!(writer)?;
     writeln!(writer, "Bonds")?;
     writeln!(writer)?;
-    writeln!(writer, "# id type atom1 atom2")?;
     for bond in &model.bonds {
         writeln!(
             writer,
@@ -1093,6 +1106,14 @@ mod tests {
         assert!(data.contains("# atom type 2 = TANGLE material 1 \"coarse_19um\""));
         assert!(data.contains("1 1 1 "));
         assert!(data.contains("7 2 2 "));
+        let lines: Vec<&str> = data.lines().collect();
+        let first_section = lines
+            .iter()
+            .position(|line| *line == "Atoms # bpm/sphere")
+            .unwrap();
+        assert!(lines[first_section..]
+            .iter()
+            .all(|line| !line.starts_with('#')));
     }
 
     #[test]
@@ -1186,7 +1207,17 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(data.contains("Atoms # bpm/sphere"));
         assert!(data.contains("\nCapsules\n"));
-        assert!(data.contains("# atom-id half-length axis-x axis-y axis-z"));
+        assert!(data.contains("# Capsules columns: atom-id half-length axis-x axis-y axis-z"));
+        // Nothing but data follows a section's blank line: LAMMPS and OVITO
+        // read those lines as rows.
+        let lines: Vec<&str> = data.lines().collect();
+        let first_section = lines
+            .iter()
+            .position(|line| *line == "Atoms # bpm/sphere")
+            .unwrap();
+        assert!(lines[first_section..]
+            .iter()
+            .all(|line| !line.starts_with('#')));
     }
 
     #[test]
