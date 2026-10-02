@@ -38,13 +38,14 @@ misuse. There are no deprecated aliases: old names raise `AttributeError` or
 ## Generation
 
 `FiberPopulationSettings` is now `FiberPopulation`, built with keywords.
+`recipe.insert(population)` generates and inserts it in one step.
 
 | Old `FiberPopulationSettings` field | New `FiberPopulation` argument |
 |---|---|
 | `material_name`, `minimum_bend_radius` | `material=Material(...)` |
-| `length_minimum`, `length_maximum` | `length=(min, max)` or a single value |
+| `length_minimum`, `length_maximum` | `length=(min, max)`, a single value, or `None` (default) for 16-24 fiber diameters |
 | `radius_minimum`, `radius_maximum` | `diameter=(min, max)`, a single value, or `None` for the material's diameter |
-| `curvature_amplitude_minimum`, `curvature_amplitude_maximum` | `curvature_amplitude=(min, max)` |
+| `curvature_amplitude_minimum`, `curvature_amplitude_maximum` | `curvature_amplitude=(min, max)`, a single value, or `None` (default) for 0-0.8 fiber diameters |
 | `orientation="isotropic"` | `orientation=IsotropicOrientation()` |
 | `orientation="planar"`, `orientation_axis`, `maximum_tilt` | `PlanarOrientation(normal=None, max_tilt=...)` (normal defaults to the stack axis) |
 | `orientation="layered_biaxial"`, `primary_fraction`, `cross_fraction`, `maximum_in_plane_deviation`, `layer_orientation_seed` | `LayeredBiaxialOrientation(primary_fraction=, cross_fraction=, max_in_plane_deviation=, max_tilt=, seed=)` |

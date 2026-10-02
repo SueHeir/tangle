@@ -12,7 +12,8 @@ To run it on your own scan, step by step, see the
 The code is in
 [`crates/tangle_python/python/examples/ct_unet/`](../crates/tangle_python/python/examples/ct_unet/).
 It needs PyTorch (Apple GPU, CUDA or CPU), NumPy, SciPy and, for the figure,
-matplotlib.
+matplotlib: `python -m pip install torch` on top of the `--extras ct` install.
+Run its scripts from that folder.
 
 ![One simulated scan, the network's maps and the traced fibers](media/ct-unet-maps.png)
 
@@ -213,7 +214,8 @@ python make_figure.py RUN2/best.pt CACHE ct-unet-maps.png
 
 `CACHE` is a folder of `ct_examples` truth caches (as `ct_examples.py --output`
 writes them); use the same caches as the grey-fitter runs you compare with, so
-the scans are identical. In Python, for your own scan:
+the scans are identical. In Python, for your own scan (from the `ct_unet`
+folder, so its modules import):
 
 ```python
 from maps import levels, load, predict

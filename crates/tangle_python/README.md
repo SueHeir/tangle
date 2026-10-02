@@ -46,8 +46,10 @@ fit = ct.fit_fibers(scan.volume, scan.voxel_size, ct.FiberSpec(diameter=10 * um)
 fit.write("fit", volume=scan.volume)  # fit.json, labels.tif, overlay.png
 ```
 
-Lengths are in meters. Unset length settings (fiber length and waviness,
-overlap tolerance, step size) follow the fiber diameter. Without a GPU, use
+Lengths are in meters. Length settings you leave unset follow the fiber
+diameter: `RelaxationSettings.penetration_tolerance` is 1% and `max_step` 10%
+of the smallest fiber diameter, and a `FiberPopulation`'s `length` is 16-24
+and `curvature_amplitude` 0-0.8 diameters. Without a GPU, use
 `recipe.run(tangle.RelaxationSettings(backend="cpu"))` and
 `ct.FitSettings(backend="cpu")`. The sections below cover installation in
 more detail (Windows, Conda, notebooks) and the rest of the API.
@@ -93,7 +95,7 @@ python3 -m venv .venv-tangle
 source .venv-tangle/bin/activate
 python -m pip install --upgrade pip
 python -m pip install "maturin>=1.8,<2" jupyterlab ipykernel
-maturin develop --release \
+maturin develop --release --extras ct \
   --manifest-path crates/tangle_python/Cargo.toml
 ```
 
@@ -109,7 +111,7 @@ conda create --name tangle python=3.12 -y
 conda activate tangle
 python -m pip install --upgrade pip
 python -m pip install "maturin>=1.8,<2" jupyterlab ipykernel
-maturin develop --release \
+maturin develop --release --extras ct \
   --manifest-path crates/tangle_python/Cargo.toml
 python -m ipykernel install --user \
   --name tangle --display-name "Python (TANGLE)"
@@ -128,7 +130,7 @@ For Windows PowerShell, after installing Rust and the native build tools:
 py -m venv .venv-tangle
 .\.venv-tangle\Scripts\Activate.ps1
 python -m pip install "maturin>=1.8,<2" jupyterlab ipykernel
-maturin develop --release --manifest-path crates/tangle_python/Cargo.toml
+maturin develop --release --extras ct --manifest-path crates/tangle_python/Cargo.toml
 python -m ipykernel install --user --name tangle --display-name "Python (TANGLE)"
 ```
 
@@ -200,7 +202,9 @@ compaction and `fit_cell_to_active_fibers` default to the same axis. Recipe
 operations are ordered manufacturing instructions, not physical timesteps.
 
 `insert()` changes the recipe's starting assembly immediately; every other
-operation is recorded and runs inside `run()`. `run()` does not modify the
+operation is recorded and runs inside `run()`. A recipe with only inserts
+relaxes until converged when run; once it has any other step, add
+`relax_until_converged()` where you want the fibers relaxed. `run()` does not modify the
 input `Assembly`: read the result from `result.assembly`. A failed operation
 raises `tangle.RecipeError`, which carries `operation_index`, `operation`,
 `iteration` and `reason`.
@@ -284,11 +288,12 @@ recipe.solve(
 ```
 
 Layer placement and needling hold fibers on targets until released. Use them
-as context managers to release at the end of the block:
+as context managers to release at the end of the block. A layer is numbered by
+the `insert()` call that added it, from 0; this recipe has one:
 
 ```python
 with recipe.needle_layer(
-    2,
+    0,
     footprint=tangle.CircularFootprint.random(diameter=150 * um, seed=7),
     depth=350 * um,
 ):
@@ -452,6 +457,27 @@ orthorhombic cells. It validates geometry structure and grid compatibility,
 not solver convergence. See the [analysis guide](../../docs/puma_interoperability.md)
 for exact definitions, supported comparisons, and current limitations.
 
+## FEM meshes (Nastran and Abaqus)
+
+`tangle.fem` builds solid finite-element meshes of an assembly or a run's
+result and writes them for Nastran (`.bdf` bulk data) or Abaqus (`.inp`). It
+needs NumPy, and gmsh for tetrahedra (`pip install numpy gmsh`):
+
+```python
+from tangle import fem
+
+pet = fem.ElasticMaterial(youngs_modulus=2.5e9, poisson_ratio=0.35, density=1380.0)
+hexes = fem.hex_mesh(result, voxel_size=2e-6)  # one 8-node brick per voxel
+hexes.write_nastran("output/felt_hex.bdf", pet)
+tets = fem.tet_mesh(result, order=2)  # 10-node tetrahedra on each fiber's surface
+tets.write_abaqus("output/felt_tet.inp", pet)
+```
+
+`hex_mesh` uses the `export_puma` voxels, and fibers that touch share nodes.
+`tet_mesh` meshes every fiber as its own body, cut at the cell walls. The
+[FEM export guide](../../docs/fem_export.md) covers element types, units,
+materials and the [`fem_mesh` example](python/examples/fem_mesh.py).
+
 ## Examples
 
 - `quickstart.py` builds a small network, then fits it back from a simulated
@@ -464,6 +490,10 @@ for exact definitions, supported comparisons, and current limitations.
   Python and insert and relax them in sequence.
 - `puma_cross_validation.py` / `puma_cross_validation.ipynb` compare native
   centerline metrics with an independently imported PuMA voxel workspace.
+- `bonded_fibers.py` bonds a felt at its fiber crossings and exports the
+  bonds; `oval_fibers.py` stacks plies of flat oval fibers.
+- `periodic_domain_sweep.py` sweeps periodic domain sizes of biased in-plane
+  stacks for DIRT.
 - `native/` mirrors the complete Rust example suite using the same native
   generators and solver. See `native/README.md` for the configuration map.
 - `ct_examples.py` fits Tangle fibers to synthetic CT scans with `tangle.ct`

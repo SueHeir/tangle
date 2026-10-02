@@ -329,7 +329,7 @@ NOTEBOOKS: dict[str, list[dict]] = {
         source .venv-tangle/bin/activate
         python -m pip install --upgrade pip
         python -m pip install "maturin>=1.8,<2" jupyterlab ipykernel
-        maturin develop --release --manifest-path crates/tangle_python/Cargo.toml
+        maturin develop --release --extras ct --manifest-path crates/tangle_python/Cargo.toml
         python -m ipykernel install --user --name tangle --display-name "Python (TANGLE)"
         python -c "import tangle; print(tangle.__file__)"
         ```
@@ -345,7 +345,7 @@ NOTEBOOKS: dict[str, list[dict]] = {
         .\\.venv-tangle\\Scripts\\Activate.ps1
         python -m pip install --upgrade pip
         python -m pip install "maturin>=1.8,<2" jupyterlab ipykernel
-        maturin develop --release --manifest-path crates/tangle_python/Cargo.toml
+        maturin develop --release --extras ct --manifest-path crates/tangle_python/Cargo.toml
         python -m ipykernel install --user --name tangle --display-name "Python (TANGLE)"
         python -c "import tangle; print(tangle.__file__)"
         ```
@@ -367,7 +367,7 @@ NOTEBOOKS: dict[str, list[dict]] = {
         conda activate tangle
         python -m pip install --upgrade pip
         python -m pip install "maturin>=1.8,<2" jupyterlab ipykernel
-        maturin develop --release --manifest-path crates/tangle_python/Cargo.toml
+        maturin develop --release --extras ct --manifest-path crates/tangle_python/Cargo.toml
         python -m ipykernel install --user --name tangle --display-name "Python (TANGLE)"
         python -c "import tangle; print(tangle.__file__)"
         ```
@@ -1177,6 +1177,8 @@ NOTEBOOKS: dict[str, list[dict]] = {
         )
         generated = tangle.generate_fiber_population(cell, population, name="four plies")
         print(len(generated), generated.layer_ids())
+        # To generate and insert in one step, pass the population itself:
+        # recipe.insert(population)
         """),
         code("""
         # replace() returns a modified copy, so variants share every other field.
@@ -1796,8 +1798,8 @@ NOTEBOOKS: dict[str, list[dict]] = {
             crossing.add_fiber([[0.2 * mm, 0.5 * mm, 0.5 * mm], [0.8 * mm, 0.5 * mm, 0.5 * mm]], fiber)
             crossing.add_fiber([[0.5 * mm, 0.2 * mm, 0.5 * mm], [0.5 * mm, 0.8 * mm, 0.5 * mm]], fiber)
             cell = tangle.Cell([1 * mm, 1 * mm, 1 * mm])
-            # Default tolerances suit millimeter-scale fibers, so state micrometer ones.
-            settings = tangle.RelaxationSettings(penetration_tolerance=0.1 * um, max_step=2 * um)
+            # Unset lengths (overlap tolerance, step) follow the fiber diameter.
+            settings = tangle.RelaxationSettings()
 
             # Save every 100 iterations so this 300-iteration run leaves a restart.
             source = tangle.CheckpointSettings(
@@ -1888,10 +1890,9 @@ NOTEBOOKS: dict[str, list[dict]] = {
         # Keep reference notebooks safe to execute top-to-bottom by default.
         RUN_SOLVER = False
         if RUN_SOLVER:
-            # Default tolerances suit millimeter-scale fibers, so state
-            # micrometer ones here. The default backend is "wgpu"; add
-            # backend="cpu" on a machine without a supported GPU.
-            settings = tangle.RelaxationSettings(penetration_tolerance=0.1 * um, max_step=2 * um)
+            # Unset lengths follow the fiber diameter. The default backend is
+            # "wgpu"; add backend="cpu" on a machine without a supported GPU.
+            settings = tangle.RelaxationSettings()
             try:
                 result = recipe.run(settings)
             except tangle.RecipeError as error:

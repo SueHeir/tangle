@@ -88,8 +88,7 @@ def relax(
     """One batch: ends, then the solver with the image force, then a settle.
 
     ``lines``, ``radii`` and ``bends`` (each fiber's bend limit) are in
-    voxels. On the device, fibers use segments of 1.25 diameters, because
-    Tangle's contact treats non-adjacent segments of one fiber as colliding.
+    voxels. On the device, fibers use segments of 1.25 diameters.
     ``reach`` is how far past each fiber's last node the foreground ends
     (its radius plus the mask margin; the radius by default), for the ends.
     The solver's centerlines come back as they are (voxels), so the caller
