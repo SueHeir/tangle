@@ -103,6 +103,11 @@ scanner=...)` goes through these steps:
    spaced over 180°, one detector row per z slice (Joseph's method). The
    row spans the slice's diagonal plus 4 pixels, so every ray through the
    sample is recorded.
+   With `beam_hardening` (off by default), the line integral `p` is read
+   as `p / (1 + beam_hardening × p)`: a polychromatic beam hardens on its
+   way through the sample, so long and dense paths absorb less than their
+   attenuation says. It reconstructs with a darker middle (cupping) and
+   dark streaks between dense objects.
 7. **Propagation** (`delta_beta`, `propagation`). Each projection becomes
    the exit wave of the sample: amplitude `exp(−p/2)` and phase
    `−delta_beta × p/2`, where `p` is the projected attenuation. The wave
@@ -124,7 +129,9 @@ scanner=...)` goes through these steps:
     and zero counts read as half a photon. The gain error is not corrected,
     so it reconstructs as rings.
 12. **Reconstruction.** Filtered back-projection, slice by slice, with a
-    Shepp–Logan filter.
+    Shepp–Logan filter. With `slice_drift` (off by default), each slice's
+    gain and offset then wander along z, a smooth random walk with, half the
+    time, one step (as where a scan is stitched from two heights).
 13. **Grey levels.** The reconstruction is divided by `fiber_attenuation`,
     so a solid fiber of brightness 1 reads 1 and the void
     `void_attenuation / fiber_attenuation`. `synthetic_ct`'s `drift` (a
@@ -152,6 +159,8 @@ scanner=...)` goes through these steps:
 | `fiber_motion` | meters, RMS | 0 | Each fiber moves on its own path during the scan. |
 | `drift` | meters, RMS | 0 | The whole sample moves on one path during the scan. |
 | `motion_steps` | stretches of angles | 8 | How finely the motion is resolved. Used only with motion. |
+| `beam_hardening` | per unit of projected attenuation | 0 | Cupping and streaks between dense objects (step 6). |
+| `slice_drift` | relative gain, RMS (the offset in fiber attenuations) | 0 | Slices brighter or darker than their neighbours (step 12). |
 
 A fiber's projected phase should stay within a few radians (`delta_beta`
 times half its attenuation across it). Far beyond that the fringes ring

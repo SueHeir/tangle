@@ -12,10 +12,16 @@ equivalent radius; ovals also their semi-axes) and type, so the training
 targets (axis heatmap, offset to the axis, direction, type) are gathers at
 load time.
 
-usage: python make_data.py OUT FIRST COUNT [--scanned-share 0.2] [--varied]
+usage: python make_data.py OUT FIRST COUNT [--scanned-share 0.2] [--varied | --pairs | --hard-pairs | --mixed]
 
 ``--varied`` draws every structure from ``varied_settings``: 1-4 fiber types of any size, shape and brightness,
 any orientation, and a wide range of scanner settings (see there).
+
+``--mixed`` makes ``mixed_<index>`` scans (``mixed.py``): every kind of variety at random inside each scan
+(fiber shapes, packings, sections, binder, dust, broken pieces, voids, sample edges, scanner artifacts). Their
+volumes also hold ``type_info`` (per fiber type: equal-area diameter, thickness / width, hollow), ``hint_flags``
+(broken pieces, dust, voids present) and ``debris_mask`` (dust voxels), for the network's hints.
+Indices: training from 100001, validation 99001-99032, test 99501-99548.
 """
 
 import argparse
@@ -79,6 +85,9 @@ STIFF_FIRST = 9001  # ... and from here on stiff, nearly straight fibers, bonded
 WEB_FIRST = 11001  # ... and from here on big binder webs and fillets (no coatings), some flat fibers, milder noise
 EASY_FIRST = 12001  # ... and from here on the same, made clean (an easy start for training on webs)
 EASY_MAX_BINDER = 0.04  # easy scans with more binder than this share of the volume are skipped
+MIXED_MAX_BINDER = 0.15  # ... and mixed scans with more than this (dense, nearly all crossings bonded with big bonds)
+PAIRS_FIRST = 20001  # pairs_<index> (--pairs): dense_hard scans whose fine fibers lie in touching pairs
+HARD_PAIRS_FIRST = 21001  # hardpairs_<index> (--hard-pairs): the same made hard to split (see hard_pairs_settings)
 # The true structure must not have fibers passing through each other (overlaps.py): while a pair still shares more
 # than a quarter of the thinner fiber's thickness, relax further (steps, in turn), then try a new placement.
 RELAX_MORE = (3000, 9000, 15000)
@@ -211,6 +220,27 @@ def varied_settings(index: int, focus: bool | None = None) -> dict:
                                      probability=round(float(re_.uniform(0.4, 0.8)), 2),
                                      gap=round(float(re_.uniform(0.3, 1.5)), 2))
     return settings
+
+
+def pairs_settings(index: int) -> dict:
+    """``pairs_<index>``: ``dense_hard_settings`` with the fine fibers in touching side-by-side pairs (bundles of
+    two, a hair apart, in the fibers' plane) in place of bundles of 7 or 19."""
+    import ct_examples as ex
+
+    return {**ex.dense_hard_settings(index), "per_bundle": 2}
+
+
+def hard_pairs_settings(index: int) -> dict:
+    """``hardpairs_<index>``: ``pairs_settings`` made hard to split: fine fibers 3.5-6 voxels across (so more of
+    them), a scanner blur from half to all of their diameter, 40-100% of the photons and more fiber motion."""
+    import ct_examples as ex
+
+    rng = np.random.default_rng(210_000 + index)
+    fine = round(float(rng.uniform(3.5, 6.0)), 2)
+    return {**pairs_settings(index), "fine_um": fine,
+            "resolution_um": round(float(rng.uniform(0.5, 1.0) * fine), 2),
+            "photons": round(ex.SCANNER.photons * float(rng.uniform(0.4, 1.0))),
+            "fiber_motion_um": round(float(rng.uniform(0.5, 1.5)), 2)}
 
 
 def _max_curvature(line) -> float:
@@ -418,6 +448,12 @@ def main() -> None:
     parser.add_argument("--fast-relax", action="store_true",
                         help="relax the truth structures for at most 3000 steps with a tighter neighbor skin (about "
                              "8x faster, the same structures to within a few percent); for training sets, not tests")
+    parser.add_argument("--pairs", action="store_true",
+                        help="dense_hard scans with the fine fibers in touching pairs (pairs_<index>, from 20001)")
+    parser.add_argument("--hard-pairs", action="store_true",
+                        help="pairs made hard to split: thinner fibers, more blur, fewer photons (hardpairs_<index>)")
+    parser.add_argument("--mixed", action="store_true",
+                        help="every kind of variety at random inside each scan (mixed_<index>; see mixed.py)")
     parser.add_argument("--no-overlap-check", action="store_true",
                         help="keep structures whose fibers pass through each other (as every set made before had them)")
     args = parser.parse_args()
@@ -431,8 +467,9 @@ def main() -> None:
     cache = args.out / ".cache"
     for index in range(args.first, args.first + args.count):
         # Which settings family is a fixed function of the index, so reruns agree.
-        family = "varied" if args.varied else (
-            "scanned" if np.random.default_rng(index).random() < args.scanned_share else "dense_hard")
+        family = ("varied" if args.varied else "pairs" if args.pairs else "hardpairs" if args.hard_pairs
+                  else "mixed" if args.mixed
+                  else "scanned" if np.random.default_rng(index).random() < args.scanned_share else "dense_hard")
         name = f"{family}_{index}"
         target = args.out / f"{name}.npz"
         if target.exists():
@@ -441,24 +478,46 @@ def main() -> None:
         try:
             if family == "varied":
                 scan, varied = varied_scan(index, cache, check=not args.no_overlap_check)
+            elif family == "mixed":
+                import mixed
+
+                scan, varied = mixed.mixed_scan(index, cache, check_overlaps=not args.no_overlap_check)
             else:
-                settings = ex.dense_hard_settings if family == "dense_hard" else ex.scanned_settings
+                settings = {"dense_hard": ex.dense_hard_settings, "pairs": pairs_settings,
+                            "hardpairs": hard_pairs_settings}.get(family, ex.scanned_settings)
                 example = ex.scanned(index, settings)(cache / f"{name}.json")
                 scan, varied = example.scan, None
-        except Exception as error:  # a structure that fails to relax or render: skip it
+                if not args.no_overlap_check:  # no relaxing further here: a structure that fails is left out
+                    import overlaps
+
+                    fibers = overlaps.from_scan(scan)
+                    report = overlaps.summary(fibers, overlaps.overlapping_pairs(fibers))
+                    if report["quarter"]:
+                        raise FibersOverlap(f"{report['quarter']} fiber pairs past a quarter")
+                    varied = {"family": family, "truth_check": report}
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as error:  # a structure that fails to relax or render (a Tangle panic too): skip it
             print(f"{name}: failed ({error})", flush=True)
             continue
-        if (family == "varied" and index >= EASY_FIRST and scan.binder_occupancy is not None
-                and float((scan.binder_occupancy > 0.5).mean()) > EASY_MAX_BINDER):
-            print(f"{name}: skipped (binder {float((scan.binder_occupancy > 0.5).mean()):.1%} > {EASY_MAX_BINDER:.0%})",
-                  flush=True)
+        most = EASY_MAX_BINDER if family == "varied" and index >= EASY_FIRST else (
+            MIXED_MAX_BINDER if family == "mixed" else None)
+        if most is not None and scan.binder_occupancy is not None and float((scan.binder_occupancy > 0.5).mean()) > most:
+            print(f"{name}: skipped (binder {float((scan.binder_occupancy > 0.5).mean()):.1%} > {most:.0%})", flush=True)
             continue
-        table = point_table(scan)
+        table = scan.table if family == "mixed" else point_table(scan)  # mixed: thinning fibers' radii per point
+        if not len(table["pos"]):  # e.g. a sparse scan whose fibers all lie past a cut face: nothing to learn from
+            print(f"{name}: skipped (no fibers in the volume)", flush=True)
+            continue
         near = nearest_points(scan.volume.shape, table["pos"])
         extra = {}
+        if family == "mixed":
+            extra.update(type_info=scan.type_info, hint_flags=scan.flags, debris_mask=scan.debris)
         if scan.bond_labels is not None:
             extra["bond_labels"] = scan.bond_labels.astype(np.uint16)
-            extra["bond_ratio"] = np.float32(varied["bonds"]["radius_ratio"])
+            ratio = scan.extra.get("bond_ratio") if family == "mixed" else varied["bonds"]["radius_ratio"]
+            if ratio:
+                extra["bond_ratio"] = np.float32(ratio)
             if scan.binder_occupancy is not None:
                 extra["binder_mask"] = scan.binder_occupancy > 0.5
             extra["bond_pairs"] = np.array([b["fibers"] + [0] * (2 - len(b["fibers"])) for b in scan.bonds]

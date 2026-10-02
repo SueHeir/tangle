@@ -29,6 +29,16 @@ and adding noise to it:
 4. The log of flat-field-corrected intensity is reconstructed slice by
    slice by filtered back-projection with a Shepp-Logan filter.
 
+Two common flaws of real scans are optional (off by default).
+``beam_hardening``: a polychromatic beam hardens on its way through the
+sample, so long or dense paths absorb less than their attenuation says;
+the measured log is ``p / (1 + beam_hardening * p)`` for a path of
+attenuation ``p``, which reconstructs with a darker middle (cupping) and
+dark streaks between dense objects. ``slice_drift``: each slice's
+brightness and offset wander along z (RMS ``slice_drift`` of the fiber
+attenuation), as in scans stitched from several heights or with a drifting
+source. Fewer ``angles`` than the slice width leaves streaks too.
+
 The sample may move while it turns. ``fiber_motion`` (meters, root mean
 square) moves each fiber on its own smooth random path, as loose fibers
 settle or sway; ``drift`` (meters, root mean square) moves the whole
@@ -73,6 +83,8 @@ class Scanner:
     fiber_motion: float = 0.0  # meters, RMS displacement of each fiber over the scan
     drift: float = 0.0  # meters, RMS displacement of the whole sample over the scan
     motion_steps: int = 8
+    beam_hardening: float = 0.0  # per unit of path attenuation (see the module notes)
+    slice_drift: float = 0.0  # RMS of the slice-to-slice gain and offset (offset in fiber attenuations)
 
 
 def acquire(
@@ -114,6 +126,8 @@ def acquire(
             moved = phase if warp is None else warp(step, phase)
             phase_line[block] = _native.project(moved, angles[block], width)
 
+    if scanner.beam_hardening > 0:
+        line = line / (1.0 + scanner.beam_hardening * line)
     intensity = np.exp(-line)
     if phase_line is None and np.ndim(scanner.delta_beta) == 0 and scanner.delta_beta > 0:
         phase_line = float(scanner.delta_beta) * line
@@ -136,6 +150,16 @@ def acquire(
     # Filtered back-projection, the inverse of the projector above.
     volume = _native.back_project(_filter(measured), angles, attenuation.shape)
     volume *= np.pi / count
+    if scanner.slice_drift > 0:
+        # A smooth random walk along z for the gain and the offset, and half the time one step (a stitch).
+        walk = np.cumsum(rng.standard_normal((2, nz)), axis=1)
+        walk = np.stack([np.convolve(w, np.ones(5) / 5, mode="same") for w in walk])
+        if rng.random() < 0.5:
+            walk[:, int(rng.integers(1, nz)):] += rng.normal(0.0, 2.0, (2, 1))
+        walk -= walk.mean(axis=1, keepdims=True)
+        walk *= scanner.slice_drift / np.maximum(walk.std(axis=1, keepdims=True), 1e-12)
+        volume = (volume * (1.0 + walk[0, :, None, None])
+                  + scanner.fiber_attenuation * walk[1, :, None, None]).astype(volume.dtype)
     return volume
 
 

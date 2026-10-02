@@ -16,6 +16,8 @@ the per-fiber typing (``fiber_types.py``) work for any mix of sizes. The first n
 fine / coarse logits in place of 10-11) still load; ``predict`` turns their output into this layout.
 """
 
+import math
+
 import numpy as np
 import torch
 from torch import nn
@@ -27,28 +29,108 @@ BONDPT = slice(13, 14)  # bond-point heatmap logit: a peak at each bond's center
 BOND_SIGMA = 1.5  # voxels: width of the bond-point peaks
 BINDER_POSITIVE = 9.0  # extra loss weight on true binder voxels (binder is ~1% of the voxels)
 SIZE_BINS = np.linspace(np.log(3.0), np.log(32.0), 16)  # log-diameter bins (voxels) of the size code
-SIZE_CODE = len(SIZE_BINS) + 1 + 3  # the bins, 1 = sizes known, then the bond hint (known, present, size)
+SIZE_CODE = len(SIZE_BINS) + 1 + 3  # the first hints: the bins, 1 = sizes known, then binder (known, present, size)
+TYPE_SLOTS = 4  # fiber types described one by one, thinnest first
+SLOT = 6  # per type: given, log diameter, shape known, flatness, hollow known, hollow
+EXTRAS = ("broken", "dust", "voids")  # things besides fibers and binder, each yes / no / not said
+HINT_CODE = SIZE_CODE + TYPE_SLOTS * SLOT + 2 * len(EXTRAS)  # every hint (networks from before take the first 20)
 
 
-def size_code(diameters=None, bonds: bool | None = None, bond_ratio: float | None = None) -> np.ndarray:
-    """What is known about the scan, as the network's conditioning vector.
+def size_code(diameters=None, bonds: bool | None = None, bond_ratio: float | None = None, *, ratios=None,
+              hollow=None, broken: bool | None = None, dust: bool | None = None,
+              voids: bool | None = None) -> np.ndarray:
+    """What is known about the scan, as the network's conditioning vector. Every part is optional: None (or an
+    empty list) means "not said", and all zeros (nothing said) is a case the network trains on too.
 
-    ``diameters``: the fiber types' diameters (voxels; any number), a soft histogram over log diameter (each a
-    Gaussian bump 0.1 wide in log) plus a "known" flag; None or [] = unknown. ``bonds``: True (the fibers are
-    bonded), False (no binder) or None (unknown); ``bond_ratio``: the rough bond radius over the thinner
-    fiber's radius, if known. All zeros = nothing known, which a conditioned network also handles."""
-    code = np.zeros(SIZE_CODE, np.float32)
+    ``diameters``: the fiber types' diameters (voxels; equal-area for ovals), as a soft histogram over log
+    diameter (each a Gaussian bump 0.1 wide in log) plus a "known" flag, and (the thinnest four) one by one.
+    ``ratios``: per type, the thickness over the width of its section (1 = round, 0.5 = twice as wide as thick),
+    and ``hollow``: per type, True for fibers with an empty core; both in the order of ``diameters``, with None
+    for a type nobody says. ``bonds``: True (there is binder: bonds, webs or blobs), False (no binder) or None;
+    ``bond_ratio``: the rough bond radius over the thinner fiber's radius, if known. ``broken``, ``dust``,
+    ``voids``: True (the sample has short broken fiber pieces / dust particles / voids), False or None.
+
+    The first SIZE_CODE entries are the hints of the first conditioned networks, unchanged, so those networks
+    (which read only that much) see exactly what they were trained with."""
+    code = np.zeros(HINT_CODE, np.float32)
     n = len(SIZE_BINS)
     if diameters is not None and len(diameters):
         for d in diameters:
             code[:n] = np.maximum(code[:n], np.exp(-0.5 * ((SIZE_BINS - np.log(d)) / 0.1) ** 2))
         code[n] = 1.0
+        order = np.argsort(diameters, kind="stable")[:TYPE_SLOTS]
+        for slot, t in enumerate(order):
+            k = SIZE_CODE + slot * SLOT
+            code[k] = 1.0
+            code[k + 1] = (np.log(diameters[t]) - SIZE_BINS[0]) / (SIZE_BINS[-1] - SIZE_BINS[0])
+            if ratios is not None and ratios[t] is not None:
+                code[k + 2], code[k + 3] = 1.0, 1.0 - float(ratios[t])
+            if hollow is not None and hollow[t] is not None:
+                code[k + 4], code[k + 5] = 1.0, float(bool(hollow[t]))
     if bonds is not None:
         code[n + 1] = 1.0
         code[n + 2] = 1.0 if bonds else 0.0
         if bonds and bond_ratio:
             code[n + 3] = float(bond_ratio)
+    for e, said in enumerate((broken, dust, voids)):
+        if said is not None:
+            k = SIZE_CODE + TYPE_SLOTS * SLOT + 2 * e
+            code[k], code[k + 1] = 1.0, float(bool(said))
     return code
+
+
+def scan_hints(data) -> dict:
+    """Everything a user could truthfully say about a make_data scan (``size_code``'s arguments, with the
+    diameters as each type's median equal-area diameter). Scans from before the hints were stored carry no
+    hollow fibers, broken pieces, dust or voids, which is what they say."""
+    files = data.files
+    typ, rad, fid = data["p_typ"], data["p_rad"], data["p_fid"]
+    if "type_info" in files:  # per type: diameter, thickness / width, hollow
+        info = np.asarray(data["type_info"], np.float64).reshape(-1, 3)
+        diameters, ratios, hollow = info[:, 0].tolist(), info[:, 1].tolist(), (info[:, 2] > 0.5).tolist()
+    else:
+        kinds = np.unique(typ)
+        diameters = [2.0 * float(np.median(rad[typ == t])) for t in kinds]
+        ratios, hollow = [1.0] * len(kinds), [False] * len(kinds)
+        if "semi_axes" in files:  # one row per fiber (one-based ids, as p_fid)
+            semi = np.asarray(data["semi_axes"], np.float64).reshape(-1, 2)
+            ids, first = np.unique(fid, return_index=True)
+            if len(ids) and ids.max() <= len(semi):
+                ratio = semi[ids - 1].min(1) / np.maximum(semi[ids - 1].max(1), 1e-9)
+                ratios = [round(float(np.median(ratio[typ[first] == t])), 3) for t in kinds]
+    bonded = "bond_labels" in files and bool(data["bond_labels"].any())
+    binder = bool(data["binder_mask"].any()) if "binder_mask" in files else bonded
+    flags = np.asarray(data["hint_flags"]).astype(bool).tolist() if "hint_flags" in files else [False] * 3
+    return {"diameters": diameters, "ratios": ratios, "hollow": hollow, "bonds": binder,
+            "bond_ratio": float(data["bond_ratio"]) if bonded and "bond_ratio" in files else None,
+            **dict(zip(EXTRAS, flags))}
+
+
+def draw_hints(truth: dict, rng: np.random.Generator, blank: float = 0.35, sizes: float = 0.6,
+               binder: float = 0.5, extra: float = 0.5) -> dict:
+    """``size_code`` arguments for one training crop: what a user might say about the scan, never wrong but
+    often incomplete. With chance ``blank`` nothing at all; otherwise each part on its own: the diameters
+    (``sizes``; each off by ~10%, as a user's estimate is), and with them the section shapes and hollowness
+    (``extra`` each), the binder (``binder``; with the bond size half the time when bonded), and each of
+    broken pieces, dust and voids (``extra``)."""
+    if rng.random() < blank:
+        return {}
+    said = {}
+    if rng.random() < sizes:
+        said["diameters"] = [d * float(np.exp(rng.normal(0.0, 0.1))) for d in truth["diameters"]]
+        if rng.random() < extra:
+            said["ratios"] = [float(np.clip(r + rng.normal(0.0, 0.05), 0.1, 1.0)) if r < 0.97 else 1.0
+                              for r in truth["ratios"]]
+        if rng.random() < extra:
+            said["hollow"] = list(truth["hollow"])
+    if rng.random() < binder:
+        said["bonds"] = truth["bonds"]
+        if truth["bonds"] and truth["bond_ratio"] and rng.random() < 0.5:
+            said["bond_ratio"] = truth["bond_ratio"] * float(np.exp(rng.normal(0.0, 0.15)))
+    for key in EXTRAS:
+        if rng.random() < extra:
+            said[key] = truth[key]
+    return said
 CHANNELS = 14
 _OLD_TYPE = slice(10, 13)  # the first networks' void / fine / coarse logits
 _OLD_RADIUS = (2.75, 6.75)  # voxels: what "fine" and "coarse" meant for them
@@ -168,7 +250,7 @@ def block(cin, cout, groups=None):
 
 class UNet3D(nn.Module):
     def __init__(self, base: int = 16, levels: int = 4, channels: int = CHANNELS, group_sizes=None,
-                 condition: bool = False, code_size: int = SIZE_CODE):
+                 condition: bool = False, code_size: int = HINT_CODE):
         """``group_sizes``: channels per norm group at each level (default: 8 groups, at least 4 channels each);
         a widened network keeps its source's group sizes, so the old channels stay in groups of their own."""
         super().__init__()
@@ -180,9 +262,9 @@ class UNet3D(nn.Module):
         self.up = nn.ModuleList([nn.ConvTranspose3d(widths[k + 1], widths[k], 2, stride=2) for k in range(levels)])
         self.merge = nn.ModuleList([block(2 * widths[k], widths[k], g[k]) for k in range(levels)])
         self.head = nn.Conv3d(widths[0], channels, 1)
-        # Optional conditioning on the known fiber sizes (``size_code``): a small network turns the code into a
-        # per-channel scale and shift after every block (FiLM). Its last layer starts at zero, so a conditioned
-        # network starts out computing exactly what the network it was made from computes.
+        # Optional conditioning on what the user says about the scan (``size_code``): a small network turns the
+        # code into a per-channel scale and shift after every block (FiLM). Its last layer starts at zero, so a
+        # conditioned network starts out computing exactly what the network it was made from computes.
         self.condition = condition
         if condition:
             self.film_widths = [widths[k] for k in range(levels + 1)] + [widths[k] for k in range(levels)]
@@ -248,14 +330,16 @@ def load(path, device: str) -> nn.Module:
 
 @torch.no_grad()
 def predict(model: nn.Module, volume: np.ndarray, device: str, grey: tuple[float, float] | None = None,
-            diameters=None, bonds: bool | None = None, bond_ratio: float | None = None) -> np.ndarray:
+            diameters=None, bonds: bool | None = None, bond_ratio: float | None = None, **hints) -> np.ndarray:
     """The network's maps for a whole scan (sides divisible by 16), float32 (CHANNELS, z, y, x): heatmap, fiber
     and binder as probabilities (binder 0 for networks without it), offsets in voxels, the direction tensor as
-    predicted, the radius in voxels. ``diameters``, ``bonds`` and ``bond_ratio`` are the optional hints."""
+    predicted, the radius in voxels. ``diameters``, ``bonds``, ``bond_ratio`` and ``hints`` (``ratios``,
+    ``hollow``, ``broken``, ``dust``, ``voids``) are the optional hints of ``size_code``; a network trained
+    before a hint existed does not read it."""
     model.eval()
     x = torch.from_numpy(normalize(volume, grey))[None, None].to(device)
     if getattr(model, "condition", False):
-        code = size_code(diameters, bonds, bond_ratio)[: model.film[0].in_features]
+        code = size_code(diameters, bonds, bond_ratio, **hints)[: model.film[0].in_features]
         out = model(x, torch.from_numpy(code)[None].to(device))[0]
     else:
         out = model(x)[0]
@@ -278,17 +362,29 @@ def predict(model: nn.Module, volume: np.ndarray, device: str, grey: tuple[float
 
 
 def widen(small: nn.Module, base: int) -> nn.Module:
-    """A wider copy of ``small`` (Net2Net style) that starts out computing nearly the same maps.
+    """A wider copy of ``small`` (Net2Net style) that starts out computing the same maps.
 
     Every layer's trained channels are copied into the first channels of the wider layer; the new channels get
     fresh weights for their own outputs but zero weight wherever they feed an old channel, so on the first step
-    they change nothing downstream. Group norm regroups some layers' channels, so the start is close to, not
-    exactly, the small network.
+    they change nothing downstream. Each level keeps its norm groups' size, so the old channels stay in groups of
+    their own; ``base`` must keep every level a whole number of groups (a ValueError names widths that do). A
+    hint-conditioned network stays conditioned: its hint network is copied and every old channel keeps its scale
+    and shift, while the new channels start with none. It keeps ``small``'s outputs and hint inputs: grow those
+    first (train.py --init does) to widen a network from before the newer outputs or hints.
     """
-    old_w = [small.down[0][0].out_channels * 2**k for k in range(len(small.down))]
+    levels = len(small.down)
+    old_w = [small.down[0][0].out_channels * 2**k for k in range(levels)]
     sizes = [w // small.down[k][1].num_groups for k, w in enumerate(old_w)]
-    wide = UNet3D(base=base, channels=small.head.out_channels, group_sizes=sizes)
-    new_w = [base * 2**k for k in range(len(small.down))]
+    new_w = [base * 2**k for k in range(levels)]
+    if base <= old_w[0] or any(n % size for n, size in zip(new_w, sizes)):
+        step = math.lcm(*(size // math.gcd(size, 2**k) for k, size in enumerate(sizes)))
+        fits = [(old_w[0] // step + 1 + i) * step for i in range(3)]
+        raise ValueError(f"can't widen base {old_w[0]} to {base}: its norm groups ({', '.join(map(str, sizes))} "
+                         f"channels, level by level) need a wider base that is a multiple of {step}, e.g. "
+                         f"{', '.join(map(str, fits))}")
+    condition = getattr(small, "condition", False)
+    wide = UNet3D(base=base, channels=small.head.out_channels, group_sizes=sizes, condition=condition,
+                  code_size=small.film[0].in_features if condition else HINT_CODE)
     small_state, wide_state = small.state_dict(), wide.state_dict()
     for name, target in wide_state.items():
         source = small_state[name]
@@ -296,7 +392,16 @@ def widen(small: nn.Module, base: int) -> nn.Module:
             wide_state[name] = source.clone()
             continue
         target = target.clone()
-        if target.ndim > 1:
+        if name.startswith("film."):
+            # the hint network's last layer: per block, a scale row for each channel, then a shift row for each;
+            # the old channels keep theirs, the new ones start at zero (left as they are)
+            target.zero_()
+            old_at = new_at = 0
+            for o, n in zip(small.film_widths, wide.film_widths):
+                target[new_at:new_at + o] = source[old_at:old_at + o]
+                target[new_at + n:new_at + n + o] = source[old_at + o:old_at + 2 * o]
+                old_at, new_at = old_at + 2 * o, new_at + 2 * n
+        elif target.ndim > 1:
             target[:, source.shape[1]:] = 0.0  # new inputs feed nothing yet
             if name.startswith("merge.") and name.endswith(".0.weight"):
                 # the first conv of a merge block reads [upsampled, skip]: both halves move

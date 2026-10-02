@@ -627,7 +627,10 @@ pub fn find_segment_corrections(
                             } else {
                                 shared_z
                             };
-                            if (dominant < 0.0) != (segment_index > other) {
+                            // XOR spelled out: CUDA's code generator can't compare two bools
+                            let negative = dominant < 0.0;
+                            let later = segment_index > other;
+                            if (negative && !later) || (!negative && later) {
                                 shared_length = -shared_length;
                             }
                         }
