@@ -340,6 +340,34 @@ overlaps of a few nanometers. From an assembly, everything else in Tangle
 applies: analysis, OVITO and PuMA export (see the
 [PuMA guide](puma_interoperability.md)).
 
+## From Python, in one call
+
+With Tangle built (and PyTorch in the same environment), steps 4 to 7 are one
+call: `tangle.ct.find_fibers` takes the scan's file name and the settings, runs
+`find_fibers.py`'s whole pipeline, writes all of the same results and returns
+the fibers as a Tangle fit.
+
+```python
+import tangle.ct as ct
+
+settings = ct.NetworkSettings(
+    network="best.pt",               # the trained network
+    diameters=[12e-6, 30e-6],        # meters, one per fiber type (optional)
+    bonded=False,                    # optional
+    center_crop=256,                 # or crop="x=100:612,y=0:512,z=200:456"
+)
+fit = ct.find_fibers("my_scan.tif", settings)  # writes my_scan_fibers/, as find_fibers.py does
+print(len(fit.centerlines), "fibers and", len(fit.bonds), "bonds; everything else is in", fit.folder)
+relaxed, run = fit.relax()
+```
+
+Every option in the table below is a field of `NetworkSettings` with the same
+name (`--diameter-profile` is `diameter_profile`), with lengths in meters as in
+the rest of `tangle.ct`. The result is the same `FitResult` that `ct.load_fit`
+reads from `fit.json`, plus `fit.folder`, where everything was written, and
+`fit.bonds`. It runs the same code as the scripts: the scripts in `ct_unet/` are
+where it is changed, and their `sync_package.py` copies them into the package.
+
 ## Options at a glance
 
 `find_fibers.py SCAN --weights NETWORK.pt [options]`:
