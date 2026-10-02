@@ -5,7 +5,15 @@ noise washes out and any number of types works without retraining:
 
 * ``log_radius``: log of the fiber's median predicted radius (voxels);
 * ``grey``: the median scan grey along its axis, scaled so the void is 0 and bright fibers ~1;
-* ``curvature`` (optional): its median curvature over ~5 voxels, in 1/radius units.
+* ``bend``: how far it strays from straight: over stretches 10 diameters long, the largest distance from the
+  straight line joining a stretch's ends, as a share of the stretch's length (the median over the stretches, as
+  a log). A long stretch keeps the tracer's jitter of a few tenths of a voxel far below a real bend, so straight
+  and bendable fibers of one material and size still separate (``make_data --bends``);
+* ``curvature`` (optional): its median curvature over ~5 voxels, in 1/radius units (noisier than ``bend``).
+
+Types that differ in size or grey separate as before with bend added (typing accuracy unchanged within noise on
+the varied and mixed test sets), and types that differ only in bending now separate where the tracer follows
+the fibers cleanly.
 
 ``assign_types(features, k)`` clusters them with a Gaussian mixture (k-means++ start, a few EM rounds) and numbers
 the types by size (0 = thinnest). With ``k=None`` it picks k in 1-4 by BIC: a guess, where giving k is reliable.
@@ -14,7 +22,7 @@ the types by size (0 = thinnest). With ``k=None`` it picks k in 1-4 by BIC: a gu
 import numpy as np
 from scipy.ndimage import map_coordinates
 
-FEATURES = ("log_radius", "grey")
+FEATURES = ("log_radius", "grey", "bend")
 
 
 def _dense(line: np.ndarray, spacing: float = 1.0) -> np.ndarray:
@@ -25,8 +33,28 @@ def _dense(line: np.ndarray, spacing: float = 1.0) -> np.ndarray:
     return np.stack([np.interp(t, s, line[:, k]) for k in range(3)], axis=1)
 
 
-def features(lines, radii, volume=None, grey=None, curvature: bool = False) -> np.ndarray:
-    """(fibers, n) features; ``volume`` (z, y, x) and ``grey`` = (void, bright) levels give the grey feature."""
+def bend(line, radius: float) -> float:
+    """How far a fiber strays from straight (see the module notes): 0 for a straight one, ~0.1 for one bending
+    round about ten diameters."""
+    p = _dense(np.asarray(line, float))  # 1 voxel apart
+    w = max(int(round(20.0 * radius)), 8)  # 10 diameters
+    stretches = [(0, len(p) - 1)] if len(p) <= w + 1 else [(a, a + w) for a in range(0, len(p) - w, max(w // 2, 1))]
+    shares = []
+    for a, b in stretches:
+        chord = p[b] - p[a]
+        length = float(np.linalg.norm(chord))
+        if length < 1e-6:
+            continue
+        u = chord / length
+        off = p[a:b + 1] - p[a]
+        off -= (off @ u)[:, None] * u
+        shares.append(float(np.linalg.norm(off, axis=1).max()) / length)
+    return float(np.median(shares)) if shares else 0.0
+
+
+def features(lines, radii, volume=None, grey=None, curvature: bool = False, bends: bool = True) -> np.ndarray:
+    """(fibers, n) features: log radius, grey (with ``volume`` (z, y, x) and ``grey`` = (void, bright) levels),
+    curvature (``curvature``), bend (``bends``, on by default)."""
     cols = [np.log(np.maximum(np.asarray(radii, float), 0.3))]
     if volume is not None:
         low, high = grey
@@ -48,6 +76,8 @@ def features(lines, radii, volume=None, grey=None, curvature: bool = False) -> n
             turn = np.arccos(np.clip((t[1:] * t[:-1]).sum(1), -1, 1)) / 2.5
             c.append(float(np.median(turn)) * r)
         cols.append(np.asarray(c))
+    if bends:
+        cols.append(np.log(np.asarray([bend(line, r) for line, r in zip(lines, radii)]) + 0.005))
     return np.stack(cols, axis=1)
 
 

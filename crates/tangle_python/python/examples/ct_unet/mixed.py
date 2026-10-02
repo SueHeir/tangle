@@ -43,6 +43,9 @@ SIDE = 160  # voxels (1 um): the volume; training crops are 128
 FIRST = 100_001  # training scans from here up
 VAL = range(99_001, 99_033)
 TEST = range(99_501, 99_549)
+BENDS_FIRST = 200_001  # bends_<index> (bends_settings): training from here up
+BENDS_VAL = range(199_001, 199_033)
+BENDS_TEST = range(199_501, 199_549)
 SEED = 1_000_000  # each scan's random stream is default_rng(SEED + index): no other family's seeds are met
 MAX_FIBERS = 900  # a cap on fibers per scan (broken pieces included), for the relaxation's sake
 RELAX_MORE = (3000, 9000)  # more relaxation steps, in turn, while fibers still pass through each other
@@ -146,6 +149,37 @@ def mixed_settings(index: int) -> dict:
             "tilt": round(float(rng.uniform(0.05, 0.5)), 2), "aligned_axis": int(rng.integers(0, 3)),
             "types": types, "pockets": pockets, "binder": binder, "dust": dust, "edge": edge, "fov": fov,
             "scanner": scanner, "brightness_spread": round(float(rng.uniform(0.0, 0.4)), 2), "seed": SEED + index}
+
+
+def bends_settings(index: int) -> dict:
+    """``bends_<index>``: two fiber types of one material and one size in equal amounts, one really straight and
+    one bendable, so only bending tells them apart. The bendable one bends round a few diameters at its tightest
+    (half the time), is crimped (a third) or curled; fibers are 4-12 voxels across, so they run at least about 13
+    diameters through the volume and a bend has room to show. Section, core and scanner vary as in
+    ``mixed_settings``; no binder, dust, voids or edges."""
+    s = mixed_settings(index)
+    rng = np.random.default_rng([SEED + index, 5])  # its own stream: the mixed draws above stay as they are
+    d = _log_uniform(rng, 4.0, 12.0)
+    base = _type_settings(rng, d, 0.5, 1.0)
+    base.update(packing="single", loops=0.0, broken=0.0, length=[round(float(rng.uniform(0.45, 0.7)), 2),
+                                                                  round(float(rng.uniform(0.8, 1.1)), 2)])
+    straight = {**base, "shape": "straight", "bend": round(_log_uniform(rng, 40.0, 400.0), 1),
+                "bow": round(float(rng.uniform(0.0, 0.01)), 4)}
+    kind = str(rng.choice(["bent", "wavy", "curled"], p=[0.5, 0.35, 0.15]))
+    if kind == "bent":
+        bendy = {**base, "shape": "bent", "bend": round(float(rng.uniform(2.5, 5.0)), 1),
+                 "curvature": round(float(rng.uniform(0.7, 0.95)), 2)}
+    elif kind == "wavy":
+        bendy = {**base, "shape": "wavy", "wave": str(rng.choice(["sine", "zigzag"])), "helical": bool(rng.random() < 0.3),
+                 "amplitude": round(min(float(rng.uniform(0.5, 1.5)), 10.0 / d), 3),
+                 "wavelength": round(float(rng.uniform(6.0, 16.0)), 2), "corner": round(float(rng.uniform(1.0, 3.0)), 2)}
+    else:
+        bendy = {**base, "shape": "curled", "coil": round(max(min(float(rng.uniform(1.0, 3.0)), 12.0 / d), 0.8), 3),
+                 "pitch": round(float(rng.uniform(2.5, 8.0)), 2)}
+    fill = str(rng.choice(["sparse", "medium", "dense"], p=[0.3, 0.45, 0.25]))
+    total = float(rng.uniform(*{"sparse": (0.02, 0.06), "medium": (0.06, 0.15), "dense": (0.15, 0.25)}[fill]))
+    return {**s, "fill": fill, "total": round(total, 4), "types": [straight, bendy], "pockets": [], "binder": None,
+            "dust": None, "edge": None, "fov": None}
 
 
 def _type_settings(rng, d: float, share: float, brightness: float) -> dict:
@@ -1016,9 +1050,10 @@ def check(truth) -> dict:
     return report
 
 
-def mixed_scan(index: int, cache: Path, check_overlaps: bool = True):
-    """Relax (cached), check and scan ``mixed_<index>``; returns (MixedScan, settings with the check's report)."""
-    s = mixed_settings(index)
+def mixed_scan(index: int, cache: Path, check_overlaps: bool = True, settings=mixed_settings):
+    """Relax (cached), check and scan ``mixed_<index>`` (or, with ``settings=bends_settings``, ``bends_<index>``);
+    returns (MixedScan, settings with the check's report)."""
+    s = settings(index)
     for placement in range(PLACEMENTS if check_overlaps else 1):
         for crowd in (1.0, 0.6, 0.35):
             fibers = build_fibers(s, crowd, placement)

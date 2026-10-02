@@ -22,6 +22,10 @@ any orientation, and a wide range of scanner settings (see there).
 volumes also hold ``type_info`` (per fiber type: equal-area diameter, thickness / width, hollow), ``hint_flags``
 (broken pieces, dust, voids present) and ``debris_mask`` (dust voxels), for the network's hints.
 Indices: training from 100001, validation 99001-99032, test 99501-99548.
+
+``--bends`` makes ``bends_<index>`` scans (``mixed.bends_settings``): two fiber types of one material and size,
+one straight and one bendable, so only bending tells them apart. Indices: training from 200001, validation
+199001-199032, test 199501-199548.
 """
 
 import argparse
@@ -454,6 +458,8 @@ def main() -> None:
                         help="pairs made hard to split: thinner fibers, more blur, fewer photons (hardpairs_<index>)")
     parser.add_argument("--mixed", action="store_true",
                         help="every kind of variety at random inside each scan (mixed_<index>; see mixed.py)")
+    parser.add_argument("--bends", action="store_true",
+                        help="two types of one material and size, one straight, one bendable (bends_<index>)")
     parser.add_argument("--no-overlap-check", action="store_true",
                         help="keep structures whose fibers pass through each other (as every set made before had them)")
     args = parser.parse_args()
@@ -468,7 +474,7 @@ def main() -> None:
     for index in range(args.first, args.first + args.count):
         # Which settings family is a fixed function of the index, so reruns agree.
         family = ("varied" if args.varied else "pairs" if args.pairs else "hardpairs" if args.hard_pairs
-                  else "mixed" if args.mixed
+                  else "mixed" if args.mixed else "bends" if args.bends
                   else "scanned" if np.random.default_rng(index).random() < args.scanned_share else "dense_hard")
         name = f"{family}_{index}"
         target = args.out / f"{name}.npz"
@@ -478,10 +484,12 @@ def main() -> None:
         try:
             if family == "varied":
                 scan, varied = varied_scan(index, cache, check=not args.no_overlap_check)
-            elif family == "mixed":
+            elif family in ("mixed", "bends"):
                 import mixed
 
-                scan, varied = mixed.mixed_scan(index, cache, check_overlaps=not args.no_overlap_check)
+                scan, varied = mixed.mixed_scan(index, cache, check_overlaps=not args.no_overlap_check,
+                                                settings=mixed.bends_settings if family == "bends" else
+                                                mixed.mixed_settings)
             else:
                 settings = {"dense_hard": ex.dense_hard_settings, "pairs": pairs_settings,
                             "hardpairs": hard_pairs_settings}.get(family, ex.scanned_settings)
@@ -501,21 +509,22 @@ def main() -> None:
             print(f"{name}: failed ({error})", flush=True)
             continue
         most = EASY_MAX_BINDER if family == "varied" and index >= EASY_FIRST else (
-            MIXED_MAX_BINDER if family == "mixed" else None)
+            MIXED_MAX_BINDER if family in ("mixed", "bends") else None)
         if most is not None and scan.binder_occupancy is not None and float((scan.binder_occupancy > 0.5).mean()) > most:
             print(f"{name}: skipped (binder {float((scan.binder_occupancy > 0.5).mean()):.1%} > {most:.0%})", flush=True)
             continue
-        table = scan.table if family == "mixed" else point_table(scan)  # mixed: thinning fibers' radii per point
+        made_here = family in ("mixed", "bends")  # rendered by mixed.py: its own point table (thinning fibers' radii)
+        table = scan.table if made_here else point_table(scan)
         if not len(table["pos"]):  # e.g. a sparse scan whose fibers all lie past a cut face: nothing to learn from
             print(f"{name}: skipped (no fibers in the volume)", flush=True)
             continue
         near = nearest_points(scan.volume.shape, table["pos"])
         extra = {}
-        if family == "mixed":
+        if made_here:
             extra.update(type_info=scan.type_info, hint_flags=scan.flags, debris_mask=scan.debris)
         if scan.bond_labels is not None:
             extra["bond_labels"] = scan.bond_labels.astype(np.uint16)
-            ratio = scan.extra.get("bond_ratio") if family == "mixed" else varied["bonds"]["radius_ratio"]
+            ratio = scan.extra.get("bond_ratio") if made_here else varied["bonds"]["radius_ratio"]
             if ratio:
                 extra["bond_ratio"] = np.float32(ratio)
             if scan.binder_occupancy is not None:
