@@ -19,6 +19,7 @@ import numpy as np
 
 STACK_LIMIT = 600_000_000  # voxels: bigger regions skip the overlay and label stacks unless asked for
 SPECK = 20  # voxels: binder pieces smaller than this are dropped as noise
+BINDER_PARTICLES = 1_500_000  # at most this many binder spheres in fibers.dump (bigger blocks past it)
 BEND_DIAMETERS = 5.0  # Tangle's default bend limit (tangle.ct.FiberSpec.min_bend_radius), in fiber diameters
 OUTPUTS = ("summary.txt", "run.json", "fit.json", "fibers.csv", "centerlines.csv", "bonds.csv", "diameters.csv",
            "fibers.vtk", "bonds.vtk", "fibers.dump", "view_in_ovito.py", "overlay.png", "overlay.tif", "labels.tif",
@@ -335,7 +336,8 @@ def _z_to(direction: np.ndarray) -> np.ndarray:
 OVITO_SCRIPT = '''\
 # Open the fibers in OVITO: run "ovitos view_in_ovito.py", then open fibers.ovito in OVITO.
 # (Or load fibers.dump in OVITO directly and set the particle shape to Spherocylinder.)
-# Each fiber is a chain of capsules (type 1); bonds are type 3. Lengths are micrometers.
+# Each fiber is a chain of capsules (type 1); the binder is spheres of type 2 (orange; OVITO's Construct surface
+# mesh on type 2 turns it into a surface) and bonds are type 3 (yellow). Lengths are micrometers.
 from pathlib import Path
 
 import ovito
@@ -347,13 +349,18 @@ HERE = Path(__file__).resolve().parent
 pipeline = import_file(str(HERE / "fibers.dump"), sort_particles=True)
 pipeline.modifiers.append(ColorCodingModifier(property="Molecule Identifier"))  # one color per fiber
 # pipeline.modifiers.append(ColorCodingModifier(property="fiber_type"))  # or one color per fiber type
-{bonds}pipeline.add_to_scene()
+{extras}pipeline.add_to_scene()
 data = pipeline.compute()
 data.particles.vis.shape = ParticlesVis.Shape.Spherocylinder
 data.cell.vis.enabled = True
 session = HERE / "fibers.ovito"
 ovito.scene.save(str(session))
 print(f"Saved {{session}}: open it in OVITO")
+'''
+
+OVITO_BINDER = '''\
+pipeline.modifiers.append(ExpressionSelectionModifier(expression="ParticleType == 2"))  # binder in orange
+pipeline.modifiers.append(AssignColorModifier(color=(1.0, 0.55, 0.0)))
 '''
 
 OVITO_BONDS = '''\
@@ -363,7 +370,9 @@ pipeline.modifiers.append(AssignColorModifier(color=(1.0, 0.85, 0.1)))
 
 
 def write_ovito(fibers: Fibers, out: Path) -> list[Path]:
-    """fibers.dump (LAMMPS dump of capsules, one per centerline segment, and bond spheres) and view_in_ovito.py."""
+    """fibers.dump (LAMMPS dump of capsules, one per centerline segment, binder spheres and bond spheres) and
+    view_in_ovito.py. Each binder voxel is a sphere as big as its voxel; past ``BINDER_PARTICLES`` of them, one
+    sphere stands for each k x k x k block holding binder, with the smallest k that keeps under it."""
     h = fibers.voxel_um
     rows = []
     for k, line in enumerate(fibers.lines):
@@ -377,6 +386,14 @@ def write_ovito(fibers: Fibers, out: Path) -> list[Path]:
         n = len(a)
         rows.append(np.column_stack([np.full(n, k + 1), np.ones(n), np.full(n, r), np.full(n, r), length, _z_to(unit),
                                      0.5 * (a + b), np.full(n, int(fibers.types[k]) + 1)]))
+    if fibers.binder is not None and len(fibers.binder):
+        cells, k = np.asarray(fibers.binder, np.int64), 1
+        while len(cells) > BINDER_PARTICLES:
+            k += 1
+            cells = np.unique(np.asarray(fibers.binder, np.int64) // k, axis=0)
+        m, r = len(cells), 0.62 * k * h  # a sphere with the volume of the k-voxel cube it stands for
+        rows.append(np.column_stack([np.zeros(m), np.full(m, 2), np.full(m, r), np.full(m, r), np.zeros((m, 4)),
+                                     np.ones(m), (cells + 0.5) * k * h, np.zeros(m)]))
     if fibers.bonds:
         radii = np.asarray(fibers.radii, float)
         for b in fibers.bonds:
@@ -395,7 +412,8 @@ def write_ovito(fibers: Fibers, out: Path) -> list[Path]:
         np.savetxt(f, np.column_stack([ids, table]),
                    fmt=["%d", "%d", "%d"] + ["%.5g"] * 3 + ["%.6f"] * 4 + ["%.5f"] * 3 + ["%d"])
     script = out / "view_in_ovito.py"
-    script.write_text(OVITO_SCRIPT.format(bonds=OVITO_BONDS if fibers.bonds else ""))
+    binder = fibers.binder is not None and len(fibers.binder) > 0
+    script.write_text(OVITO_SCRIPT.format(extras=(OVITO_BINDER if binder else "") + (OVITO_BONDS if fibers.bonds else "")))
     return [path, script]
 
 

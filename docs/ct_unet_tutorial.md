@@ -266,7 +266,7 @@ CPU. On a big scan this takes a while; meanwhile:
 | `bonds.csv` | every bond: its number, the two fibers it joins, where it is, how strong the network's bond-point signal was, and how many binder voxels join the pair there | Excel, Python |
 | `diameters.csv` | with `--diameter-profile`: the diameter at every voxel along every fiber, and an oval's long and short widths | Excel, Python |
 | `fibers.vtk`, `bonds.vtk` | the centerlines and bonds | ParaView |
-| `fibers.dump`, `view_in_ovito.py` | the fibers as chains of capsules, and bonds | OVITO |
+| `fibers.dump`, `view_in_ovito.py` | the fibers as chains of capsules, the binder as spheres, and bonds | OVITO |
 | `fit.json` | the fibers in Tangle's format, smoothed to its bend limit | Tangle (step 7) |
 | `run.json` | every setting of the run | a text editor |
 
@@ -298,7 +298,10 @@ or `type`.
 **In OVITO:** run `view_in_ovito.py` with OVITO's Python (`ovitos
 view_in_ovito.py`, or `python view_in_ovito.py` where the `ovito` package is
 installed) and open the `fibers.ovito` it saves; or load `fibers.dump` in
-OVITO directly and set the particle shape to Spherocylinder.
+OVITO directly and set the particle shape to Spherocylinder. The fibers are
+particle type 1, the binder type 2 (a sphere per binder voxel, orange in the
+saved session; Construct surface mesh on type 2 turns it into a surface) and
+the bonds type 3.
 
 **Binder and bonds.** Unless told `--bonded no`, the network also marks binder:
 the voxels it calls binder outside every traced fiber (the fibers always win;
