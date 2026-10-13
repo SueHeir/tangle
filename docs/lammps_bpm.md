@@ -128,7 +128,8 @@ start of a run. It is written to restart files but not to data files, so a
 simulation that reads the relaxed file defines it again from the relaxed
 positions: the bonds start unstressed, at the fibers' relaxed lengths and
 bends. A bond between two fibers that the relaxation moved apart rests at its
-new length.
+new length; if it is now longer than the input script's communication cutoff
+(`comm_modify cutoff`), LAMMPS warns, and the cutoff needs to grow.
 
 ## Limits
 
