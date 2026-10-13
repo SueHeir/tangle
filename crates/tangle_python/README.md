@@ -386,6 +386,25 @@ currently takes one density for all materials. Constitutive laws and contact
 exclusions belong to the downstream model. Intentional intra-fiber sphere
 overlap must not be confused with unwanted inter-fiber penetration.
 
+## LAMMPS BPM files in and out
+
+`tangle.lammps` relaxes the fibers of a LAMMPS bonded-particle data file and
+writes the file back with only the moved spheres' positions changed:
+
+```python
+from tangle import lammps
+
+data = lammps.read_data("fibers.data", periodic="p p f")  # the input script's boundary
+run = data.relax()
+data.write_data("fibers_relaxed.data", run)
+```
+
+A fiber is a chain of bonded spheres in one molecule, in `bpm/sphere`, `bond`
+or another atom style. Atoms in no chain stay where they are, and `data.notes`
+says which. The [LAMMPS BPM guide](../../docs/lammps_bpm.md) covers how the
+fibers are found, the walls on axes that aren't periodic, and the bonds' rest
+state.
+
 ## Native analysis and PuMA export
 
 `Assembly.characterize()` and `RunResult.characterize()` dispatch to the Rust
