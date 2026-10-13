@@ -62,7 +62,8 @@ def write(directory, rows, bonds=(), *, style="bpm/sphere", header=(), sections=
         lines += [*section, ""]
     lines += [f"Atoms # {style}" if style else "Atoms", "", *rows, ""]
     if velocities:
-        lines += ["Velocities", "", *[f"{row.split()[0]} 0 0 0" for row in rows], ""]
+        # bpm/sphere Velocities rows: id, velocity, angular velocity
+        lines += ["Velocities", "", *[f"{row.split()[0]} 0 0 0 0 0 0" for row in rows], ""]
     if bonds:
         lines += ["Bonds", "", *[f"{index} {kind} {a} {b}" for index, (kind, a, b) in enumerate(bonds, 1)]]
     path = Path(directory) / name
