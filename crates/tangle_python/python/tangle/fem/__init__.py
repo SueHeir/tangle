@@ -7,7 +7,8 @@ Two meshers return the same :class:`FemMesh`:
     grid. Fibers that touch share nodes. ``binder=`` adds binder voxels.
 ``tet_mesh(assembly, element_size)``
     Tetrahedra that follow each fiber's round or oval surface, meshed with
-    gmsh (``pip install gmsh``). Each fiber is its own body.
+    gmsh (``pip install gmsh``). Each fiber is its own body. ``binder=``
+    adds binder voxels as tetrahedra, tied to the fibers by a :class:`Tie`.
 
 Write a mesh with ``mesh.write_nastran("fibers.bdf")`` (bulk data: ``GRID``,
 ``CHEXA`` or ``CTETRA``, ``PSOLID``, ``MAT1``) or
@@ -18,7 +19,7 @@ See ``docs/fem_export.md``.
 """
 
 from ._hex import hex_mesh
-from ._mesh import ElasticMaterial, FemMesh
+from ._mesh import ElasticMaterial, FemMesh, Tie
 from ._tet import tet_mesh
 
-__all__ = ["ElasticMaterial", "FemMesh", "hex_mesh", "tet_mesh"]
+__all__ = ["ElasticMaterial", "FemMesh", "Tie", "hex_mesh", "tet_mesh"]

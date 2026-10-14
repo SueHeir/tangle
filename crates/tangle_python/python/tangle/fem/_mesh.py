@@ -20,6 +20,8 @@ MAX_NASTRAN_ID = 99_999_999
 HEX_TETRAHEDRA = np.array(
     [[0, 1, 2, 6], [0, 2, 3, 6], [0, 3, 7, 6], [0, 7, 4, 6], [0, 4, 5, 6], [0, 5, 1, 6]]
 )
+# The corners of a tetrahedron's faces S1 to S4, as Abaqus numbers them.
+TET_FACES = np.array([[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]])
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,28 @@ MaterialChoice = Union[ElasticMaterial, Mapping[str, ElasticMaterial], None]
 
 
 @dataclass(frozen=True, eq=False)
+class Tie:
+    """Faces of one body glued to the faces of others that it shares no
+    nodes with, such as a tetrahedral mesh's binder and the fibers it
+    touches. :meth:`FemMesh.write_abaqus` writes it as a ``*TIE``.
+
+    Attributes:
+        name: the tie's name in the files.
+        secondary: ``(k, 2)`` element index and face (0 to 3 for S1 to S4)
+            of each face whose nodes are tied.
+        main: ``(m, 2)`` element index and face of each face they are tied
+            to.
+        tolerance: meters. A node of ``secondary`` farther than this from
+            every face of ``main`` stays free.
+    """
+
+    name: str
+    secondary: np.ndarray
+    main: np.ndarray
+    tolerance: float
+
+
+@dataclass(frozen=True, eq=False)
 class FemMesh:
     """A solid mesh of the fibers in a cell, ready to write for Nastran or
     Abaqus. Build one with :func:`tangle.fem.hex_mesh` or
@@ -70,6 +94,8 @@ class FemMesh:
         cell_origin: the cell's corner.
         cell_lengths: the cell's edge lengths. Nodes on its six faces form
             the ``XMIN`` to ``ZMAX`` node sets.
+        ties: the :class:`Tie` constraints of a tetrahedral mesh with binder:
+            the binder shares no nodes with the fibers and is tied to them.
     """
 
     nodes: np.ndarray
@@ -80,6 +106,7 @@ class FemMesh:
     materials: tuple[str, ...]
     cell_origin: tuple[float, float, float]
     cell_lengths: tuple[float, float, float]
+    ties: tuple[Tie, ...] = ()
 
     def __post_init__(self) -> None:
         if self.element_type not in ELEMENT_NODE_COUNTS:
@@ -95,6 +122,19 @@ class FemMesh:
             raise ValueError("elements refer to nodes that do not exist")
         if count and (self.element_materials.min() < 0 or self.element_materials.max() >= len(self.materials)):
             raise ValueError("element_materials refer to materials that do not exist")
+        for tie in self.ties:
+            if self.element_type == "hex8":
+                raise ValueError("ties join tetrahedral meshes only")
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", tie.name):
+                raise ValueError("a tie's name must be letters, digits and underscores, starting with a letter")
+            for faces in (tie.secondary, tie.main):
+                if faces.ndim != 2 or faces.shape[1] != 2:
+                    raise ValueError("a tie's faces must have shape (k, 2): element index and face")
+                if len(faces) and (faces[:, 0].min() < 0 or faces[:, 0].max() >= count
+                                   or faces[:, 1].min() < 0 or faces[:, 1].max() > 3):
+                    raise ValueError("a tie refers to faces that do not exist")
+            if not (math.isfinite(tie.tolerance) and tie.tolerance > 0.0):
+                raise ValueError("a tie's tolerance must be finite and positive")
 
     @property
     def node_count(self) -> int:
@@ -181,6 +221,11 @@ class FemMesh:
             "$ PSOLID ids are TANGLE fiber ids"
             + (f"; binder is PSOLID {binder_pid}." if binder_pid else "."),
         ]
+        if self.ties:
+            lines += [
+                f"$ The binder (PSOLID {binder_pid}) shares no nodes with the fibers: glue it to",
+                "$ them (glued contact) before solving. The Abaqus file ties them with *TIE.",
+            ]
         for index, (material_name, elastic) in enumerate(zip(self.materials, properties), start=1):
             if elastic is None:
                 lines.append(f"$ MAT1 {index} = {material_name}: not defined. Add a MAT1 {index} before solving.")
@@ -231,8 +276,10 @@ class FemMesh:
     ) -> Path:
         """Write the mesh as an Abaqus input file: ``*NODE``, ``*ELEMENT`` with
         one element set per fiber (``FIBER_<id>``, and ``BINDER``), one
-        ``*SOLID SECTION`` per material, the materials, and one ``*NSET`` of
-        nodes per cell face (``XMIN`` to ``ZMAX``).
+        ``*SOLID SECTION`` per material, the materials, one ``*NSET`` of
+        nodes per cell face (``XMIN`` to ``ZMAX``), and a ``*TIE`` for each
+        of :attr:`ties` between two ``*SURFACE`` definitions,
+        ``<name>_SECONDARY`` and ``<name>_MAIN``.
 
         Args:
             path: the file to write, usually ``.inp``.
@@ -297,6 +344,28 @@ class FemMesh:
                 if len(indices):
                     handle.write(f"*NSET, NSET={set_name}\n")
                     _write_list(handle, (indices + 1).tolist())
+            for tie in self.ties:
+                if not (len(tie.secondary) and len(tie.main)):
+                    continue
+                handle.write(
+                    f"** {tie.name} ties the faces of {tie.name}_SECONDARY to those of {tie.name}_MAIN,\n"
+                    "** which share no nodes with them: each node within the position tolerance\n"
+                    f"** of {tie.name}_MAIN moves with it.\n"
+                )
+                for role, faces in (("SECONDARY", tie.secondary), ("MAIN", tie.main)):
+                    surface = f"{tie.name}_{role}"
+                    rows = []
+                    for face in range(4):
+                        members = faces[faces[:, 1] == face, 0]
+                        if len(members):
+                            handle.write(f"*ELSET, ELSET={surface}_S{face + 1}\n")
+                            _write_list(handle, (np.sort(members) + 1).tolist())
+                            rows.append(f"{surface}_S{face + 1}, S{face + 1}\n")
+                    handle.write(f"*SURFACE, TYPE=ELEMENT, NAME={surface}\n" + "".join(rows))
+                handle.write(
+                    f"*TIE, NAME={tie.name}, POSITION TOLERANCE={tie.tolerance * scale:.6e}, ADJUST=NO\n"
+                    f"{tie.name}_SECONDARY, {tie.name}_MAIN\n"
+                )
         return path
 
     def write_vtu(self, path: str | Path, *, scale: float = 1.0) -> Path:

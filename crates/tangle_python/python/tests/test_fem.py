@@ -1,10 +1,14 @@
 """tangle.fem: hexahedral and tetrahedral fiber meshes and their Nastran and
 Abaqus files."""
 
+import contextlib
+import dataclasses
+import io
 import math
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from xml.etree import ElementTree
 
 import tangle
@@ -12,6 +16,7 @@ import tangle
 try:
     import numpy as np
     import tangle.fem as fem
+    import tangle.fem._tet as tet_module
 except ImportError:  # tangle.fem needs NumPy
     fem = None
 
@@ -33,13 +38,49 @@ def one_fiber():
     return assembly_of([1.0, 1.0, 1.0], [[[0.2, 0.5, 0.5], [0.8, 0.5, 0.5]]], tangle.Material("fiber", diameter=0.2))
 
 
+# The centerlines of touching_cross(): fiber 1 along x, fiber 2 along y.
+CROSS_AXES = (((0.2, 0.5, 0.4), (0.8, 0.5, 0.4)), ((0.5, 0.2, 0.6), (0.5, 0.8, 0.6)))
+# The corners of a tetrahedron's faces S1 to S4, as Abaqus numbers them.
+ABAQUS_FACES = [[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]]
+
+
 def touching_cross():
     """Two round fibers of radius 0.1 crossing at right angles and touching."""
     return assembly_of(
         [1.0, 1.0, 1.0],
-        [[[0.2, 0.5, 0.4], [0.8, 0.5, 0.4]], [[0.5, 0.2, 0.6], [0.5, 0.8, 0.6]]],
+        [[list(start), list(end)] for start, end in CROSS_AXES],
         tangle.Material("fiber", diameter=0.2),
     )
+
+
+def crossing_binder():
+    """Binder voxels for touching_cross() on its 20 x 20 x 20 grid of 0.05
+    voxels: a box around the crossing, partly inside both fibers."""
+    binder = np.zeros((20, 20, 20), dtype=bool)  # (z, y, x)
+    binder[9:11, 6:14, 8:12] = True
+    return binder
+
+
+def voxels_of(mesh, chosen, size):
+    """(z, y, x) of the voxels of a hexahedral mesh's chosen bricks: node 0
+    is a brick's low corner."""
+    low = np.round((mesh.nodes[mesh.elements[chosen, 0]] - mesh.cell_origin) / size).astype(int)
+    return {(z, y, x) for x, y, z in low.tolist()}
+
+
+def face_nodes(mesh, faces):
+    """The corner nodes of each ``(element, face)`` of a tetrahedral mesh."""
+    return mesh.elements[faces[:, :1], np.array(ABAQUS_FACES)[faces[:, 1]]]
+
+
+def axis_distances(points):
+    """Each point's distance from each centerline of touching_cross()."""
+    distances = []
+    for start, end in CROSS_AXES:
+        start, step = np.array(start), np.subtract(end, start)
+        along = np.clip((points - start) @ step / (step @ step), 0.0, 1.0)
+        distances.append(np.linalg.norm(points - (start + along[:, None] * step), axis=1))
+    return distances
 
 
 def read_nastran(path):
@@ -133,20 +174,13 @@ class HexMeshTests(unittest.TestCase):
     def test_a_binder_mask_adds_binder_bricks_that_bond_the_fibers(self):
         assembly = touching_cross()
         fibers = fem.hex_mesh(assembly, 0.05)  # a 20 x 20 x 20 voxel grid
-        binder = np.zeros((20, 20, 20), dtype=bool)  # (z, y, x)
-        binder[9:11, 6:14, 8:12] = True  # a box around the crossing, partly inside both fibers
+        binder = crossing_binder()
         mesh = fem.hex_mesh(assembly, 0.05, binder=binder)
-
-        def voxels(mesh, chosen):
-            """(z, y, x) of the chosen elements' voxels: node 0 is a brick's low corner."""
-            low = np.round((mesh.nodes[mesh.elements[chosen, 0]] - mesh.cell_origin) / 0.05).astype(int)
-            return {(z, y, x) for x, y, z in low.tolist()}
-
-        filled = voxels(fibers, slice(None))
+        filled = voxels_of(fibers, slice(None), 0.05)
         expected = {voxel for voxel in zip(*np.nonzero(binder)) if voxel not in filled}  # the fibers win
         is_binder = mesh.element_fibers == 0
         self.assertTrue(expected and len(expected) < binder.sum())
-        self.assertEqual(voxels(mesh, is_binder), {tuple(int(i) for i in voxel) for voxel in expected})
+        self.assertEqual(voxels_of(mesh, is_binder, 0.05), {tuple(int(i) for i in voxel) for voxel in expected})
         self.assertEqual(mesh.element_count, fibers.element_count + len(expected))
         self.assertEqual(mesh.materials, ("fiber", "binder"))
         self.assertTrue((mesh.element_materials[is_binder] == 1).all())
@@ -237,6 +271,28 @@ class WriterTests(unittest.TestCase):
         np.testing.assert_array_equal(arrays["fiber_id"], self.mesh.element_fibers)
         np.testing.assert_array_equal(arrays["material"], self.mesh.element_materials)
 
+    def test_a_tie_glues_faces_that_share_no_nodes(self):
+        # Two tetrahedra that share no nodes, with face S1 of each on the plane z = 0.
+        nodes = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, 0], [0, 1, 0], [1, 0, 0], [0, 0, -1]],
+                         dtype=float)
+        tie = fem.Tie("GLUE", secondary=np.array([[1, 0]]), main=np.array([[0, 0]]), tolerance=1e-3)
+        mesh = fem.FemMesh(
+            nodes=nodes, elements=np.arange(8).reshape(2, 4), element_type="tet4",
+            element_fibers=np.array([1, 0]), element_materials=np.array([0, 1]), materials=("fiber", "binder"),
+            cell_origin=(0.0, 0.0, -1.0), cell_lengths=(1.0, 1.0, 2.0), ties=(tie,),
+        )
+        keywords = dict(read_abaqus(mesh.write_abaqus(self.path / "tie.inp", scale=1e3)))
+        self.assertEqual(keywords["*ELSET, ELSET=GLUE_SECONDARY_S1"], [["2"]])
+        self.assertEqual(keywords["*ELSET, ELSET=GLUE_MAIN_S1"], [["1"]])
+        self.assertEqual(keywords["*SURFACE, TYPE=ELEMENT, NAME=GLUE_SECONDARY"], [["GLUE_SECONDARY_S1", "S1"]])
+        self.assertEqual(keywords["*SURFACE, TYPE=ELEMENT, NAME=GLUE_MAIN"], [["GLUE_MAIN_S1", "S1"]])
+        self.assertEqual(keywords["*TIE, NAME=GLUE, POSITION TOLERANCE=1.000000e+00, ADJUST=NO"],
+                         [["GLUE_SECONDARY", "GLUE_MAIN"]])
+        with self.assertRaisesRegex(ValueError, "faces that do not exist"):
+            dataclasses.replace(mesh, ties=(fem.Tie("GLUE", np.array([[2, 0]]), np.array([[0, 0]]), 1e-3),))
+        with self.assertRaisesRegex(ValueError, "tetrahedral meshes only"):
+            dataclasses.replace(self.mesh, ties=(tie,))
+
     def test_material_values_must_be_physical(self):
         with self.assertRaises(ValueError):
             fem.ElasticMaterial(2.5e9, 0.5)
@@ -311,6 +367,157 @@ class TetMeshTests(unittest.TestCase):
         self.assertTrue(any(line.startswith("*ELEMENT, TYPE=C3D10") for line, _ in blocks))
         np.testing.assert_array_equal(arrays["types"], 24)  # VTK_QUADRATIC_TETRA, in the same node order
         np.testing.assert_array_equal(arrays["connectivity"].reshape(-1, 10), mesh.elements)
+
+    def test_a_bent_fiber_runs_straight_from_vertex_to_vertex(self):
+        radius, turn = 10e-6, math.radians(30)
+        line = np.array([[20e-6, 50e-6, 50e-6], [100e-6, 50e-6, 50e-6],
+                         [100e-6 + 80e-6 * math.cos(turn), 50e-6 + 80e-6 * math.sin(turn), 50e-6]])
+        mesh = fem.tet_mesh(assembly_of([200e-6, 150e-6, 100e-6], [line.tolist()],
+                                        tangle.Material("fiber", diameter=2 * radius)))
+        # Every node lies within the radius of the centerline's two straight stretches.
+        start, step = line[:-1], np.diff(line, axis=0)
+        along = np.clip(np.einsum("nsk,sk->ns", mesh.nodes[:, None] - start, step) / (step**2).sum(axis=1), 0.0, 1.0)
+        distance = np.linalg.norm(mesh.nodes[:, None] - (start + along[..., None] * step), axis=2).min(axis=1)
+        self.assertLessEqual(distance.max(), radius * (1 + 1e-6))
+        self.assertGreater(distance.max(), radius * (1 - 1e-6))
+        # Square sections at the ends and a section halving the turn: about the volume of the two stretches.
+        self.assertAlmostEqual(mesh.volume / (math.pi * radius**2 * 160e-6), 1.0, delta=0.05)
+
+    def test_processes_mesh_exactly_as_this_process_does(self):
+        here = fem.tet_mesh(touching_cross(), 0.1, workers=1)
+        apart = fem.tet_mesh(touching_cross(), 0.1, workers=2)
+        np.testing.assert_array_equal(apart.nodes, here.nodes)
+        np.testing.assert_array_equal(apart.elements, here.elements)
+        np.testing.assert_array_equal(apart.element_fibers, here.element_fibers)
+
+    def test_a_fiber_over_the_time_limit_stops_the_mesh_and_is_named(self):
+        with self.assertRaisesRegex(RuntimeError, r"longer than 0\.001 s on fiber 1\b"):
+            fem.tet_mesh(one_fiber(), fiber_time_limit=0.001)
+
+    def test_ten_node_binder_tetrahedra_put_mid_edge_nodes_in_nastran_order(self):
+        mesh = fem.tet_mesh(touching_cross(), 0.1, order=2, voxel_size=0.05, binder=crossing_binder())
+        is_binder = mesh.element_fibers == 0
+        points = mesh.nodes[mesh.elements[is_binder]]
+        for middle, (first, second) in zip(range(4, 10), [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)]):
+            np.testing.assert_allclose(points[:, middle], (points[:, first] + points[:, second]) / 2, atol=1e-12)
+        self.assertTrue((mesh.element_volumes() > 0).all())
+        # Neighboring binder tetrahedra share their nodes: one node at each point.
+        used = np.unique(mesh.elements[is_binder])
+        self.assertEqual(len(np.unique(np.round(mesh.nodes[used] / 0.025).astype(int), axis=0)), len(used))
+        self.assertEqual([tie.name for tie in mesh.ties], ["BINDER_TIE"])
+
+    def test_binder_needs_its_voxel_size_and_the_whole_cell(self):
+        binder = crossing_binder()
+        with self.assertRaisesRegex(ValueError, "binder needs voxel_size"):
+            fem.tet_mesh(touching_cross(), 0.1, binder=binder)
+        with self.assertRaisesRegex(ValueError, "voxel_size only sets"):
+            fem.tet_mesh(touching_cross(), 0.1, voxel_size=0.05)
+        with self.assertRaisesRegex(ValueError, "needs clip_to_cell=True"):
+            fem.tet_mesh(touching_cross(), 0.1, voxel_size=0.05, binder=binder, clip_to_cell=False)
+        with self.assertRaisesRegex(ValueError, "binder must be a"):
+            fem.tet_mesh(touching_cross(), 0.1, voxel_size=0.05, binder=binder[:, :, :19])
+        plain = fem.tet_mesh(touching_cross(), 0.1, voxel_size=0.05, binder=np.zeros_like(binder))
+        self.assertEqual((plain.materials, plain.ties), (("fiber",), ()))
+
+    def test_a_long_mesh_reports_its_progress(self):
+        with mock.patch.object(tet_module._Progress, "FIRST", 0.0), contextlib.redirect_stdout(io.StringIO()) as out:
+            fem.tet_mesh(touching_cross(), 0.1)
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines[0].startswith("tet_mesh: 0 of 2 fibers meshed, 0 tetrahedra"))
+        self.assertTrue(lines[-1].startswith("tet_mesh: all 2 fibers meshed"))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            fem.tet_mesh(touching_cross(), 0.1)
+        self.assertEqual(out.getvalue(), "")
+
+
+@unittest.skipIf(fem is None or gmsh is None, "tangle.fem.tet_mesh needs NumPy and gmsh")
+class TetBinderTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        assembly = touching_cross()
+        cls.fibers = fem.tet_mesh(assembly, 0.1)
+        cls.mesh = fem.tet_mesh(assembly, 0.1, voxel_size=0.05, binder=crossing_binder())
+        hexes = fem.hex_mesh(assembly, 0.05, binder=crossing_binder())
+        cls.is_binder = cls.mesh.element_fibers == 0
+        cls.binder_voxels = voxels_of(hexes, hexes.element_fibers == 0, 0.05)
+        cls.fiber_voxels = voxels_of(hexes, hexes.element_fibers != 0, 0.05)
+        (cls.tie,) = cls.mesh.ties
+
+    def test_six_tetrahedra_fill_each_binder_voxel_of_the_hex_mesh(self):
+        mesh = self.mesh
+        self.assertEqual(self.is_binder.sum(), 6 * len(self.binder_voxels))
+        volumes = mesh.element_volumes()
+        self.assertTrue((volumes > 0).all())
+        np.testing.assert_allclose(volumes[self.is_binder], 0.05**3 / 6)
+        centers = mesh.nodes[mesh.elements[self.is_binder]].mean(axis=1)
+        x, y, z = np.floor((centers - mesh.cell_origin) / 0.05).astype(int).T.tolist()
+        self.assertEqual(set(zip(z, y, x)), self.binder_voxels)
+        self.assertEqual(mesh.materials, ("fiber", "binder"))
+        self.assertTrue((mesh.element_materials[self.is_binder] == 1).all())
+
+    def test_the_binder_tetrahedra_fit_together(self):
+        # The faces that only one binder tetrahedron has make up the surface of the binder's voxels.
+        faces = np.sort(self.mesh.elements[self.is_binder][:, np.array(ABAQUS_FACES)].reshape(-1, 3), axis=1)
+        unique, counts = np.unique(faces, axis=0, return_counts=True)
+        self.assertLessEqual(counts.max(), 2)
+        outer = self.mesh.nodes[unique[counts == 1]]
+        area = 0.5 * np.linalg.norm(np.cross(outer[:, 1] - outer[:, 0], outer[:, 2] - outer[:, 0]), axis=1).sum()
+        steps = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+        sides = sum((z + dz, y + dy, x + dx) not in self.binder_voxels
+                    for z, y, x in self.binder_voxels for dz, dy, dx in steps)
+        self.assertAlmostEqual(area, sides * 0.05**2)
+
+    def test_the_fibers_are_meshed_as_without_binder_and_share_no_nodes_with_it(self):
+        count = self.fibers.node_count
+        np.testing.assert_array_equal(self.mesh.nodes[:count], self.fibers.nodes)
+        np.testing.assert_array_equal(self.mesh.elements[~self.is_binder], self.fibers.elements)
+        self.assertTrue((self.mesh.elements[self.is_binder] >= count).all())
+
+    def test_the_tie_joins_binder_faces_next_to_fibers_to_the_fiber_surfaces(self):
+        mesh, tie = self.mesh, self.tie
+        self.assertEqual(tie.name, "BINDER_TIE")
+        self.assertTrue(self.is_binder[tie.secondary[:, 0]].all())
+        self.assertFalse(self.is_binder[tie.main[:, 0]].any())
+        for element, corners in zip(tie.secondary[:, 0].tolist(), face_nodes(mesh, tie.secondary)):
+            # A voxel face, square to one axis, with a voxel a fiber fills beyond it.
+            points = mesh.nodes[corners]
+            (axis,) = np.flatnonzero(np.ptp(points, axis=0) < 1e-12)
+            beyond = points.mean(axis=0)
+            beyond[axis] += 0.025 * np.sign(beyond[axis] - mesh.nodes[mesh.elements[element]].mean(axis=0)[axis])
+            x, y, z = np.floor((beyond - mesh.cell_origin) / 0.05).astype(int).tolist()
+            self.assertIn((z, y, x), self.fiber_voxels)
+        # Their nodes lie within 1.25 voxels of a fiber's surface, well inside the tolerance.
+        tied = mesh.nodes[np.unique(face_nodes(mesh, tie.secondary))]
+        gaps = np.min([np.abs(distance - 0.1) for distance in axis_distances(tied)], axis=0)
+        self.assertLessEqual(gaps.max(), 1.25 * 0.05)
+        self.assertGreater(tie.tolerance, 1.25 * 0.05)
+        # The main faces are each fiber's whole surface: round, or a flat end.
+        for fiber, (start, end) in zip((1, 2), CROSS_AXES):
+            faces = tie.main[mesh.element_fibers[tie.main[:, 0]] == fiber]
+            corners = face_nodes(mesh, faces)
+            points = mesh.nodes[corners] - start
+            along = int(np.argmax(np.abs(np.subtract(end, start))))
+            radial = np.linalg.norm(np.delete(points, along, axis=-1), axis=-1)
+            at_end = np.isclose(points[..., along], 0.0) | np.isclose(points[..., along], end[along] - start[along])
+            self.assertTrue((np.isclose(radial, 0.1, rtol=1e-6) | at_end).all())
+            # A closed surface of triangles has two faces for every corner, less four.
+            self.assertEqual(len(faces), 2 * len(np.unique(corners)) - 4)
+
+    def test_abaqus_writes_the_tie_and_nastran_says_to_glue_the_binder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            blocks = read_abaqus(self.mesh.write_abaqus(Path(directory) / "mesh.inp", scale=1e6))
+            deck = self.mesh.write_nastran(Path(directory) / "mesh.bdf").read_text()
+        keywords = dict(blocks)
+        for role, faces in (("SECONDARY", self.tie.secondary), ("MAIN", self.tie.main)):
+            written = set()
+            for element_set, side in keywords[f"*SURFACE, TYPE=ELEMENT, NAME=BINDER_TIE_{role}"]:
+                written |= {(int(element) - 1, int(side[1:]) - 1)
+                            for row in keywords[f"*ELSET, ELSET={element_set}"] for element in row}
+            self.assertEqual(written, set(map(tuple, faces.tolist())))
+        tolerance = f"{self.tie.tolerance * 1e6:.6e}"
+        self.assertEqual(keywords[f"*TIE, NAME=BINDER_TIE, POSITION TOLERANCE={tolerance}, ADJUST=NO"],
+                         [["BINDER_TIE_SECONDARY", "BINDER_TIE_MAIN"]])
+        self.assertIn("The binder (PSOLID 3) shares no nodes with the fibers", deck)
 
 
 if __name__ == "__main__":
