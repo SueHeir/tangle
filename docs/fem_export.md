@@ -71,10 +71,13 @@ does.
 ## Tetrahedra from gmsh
 
 `tet_mesh(assembly, element_size=None, *, order=1, elements_around=16,
-clip_to_cell=True, verbose=False)` builds each fiber as a smooth solid swept
-through a cross-section at every centerline vertex, then lets gmsh fill it
-with tetrahedra. Oval fibers keep their long axis where TANGLE puts it. Fiber
-ends are flat.
+clip_to_cell=True, workers=None, fiber_time_limit=None, progress=True,
+verbose=False)` builds each fiber as a solid through a round or oval
+cross-section at every centerline vertex, straight from one vertex to the
+next as TANGLE's fibers are, then lets gmsh fill it with tetrahedra. At a
+bend the section halves the angle between the two stretches, so they meet as
+mitered pipes do. Oval fibers keep their long axis where TANGLE puts it.
+Fiber ends are flat.
 
 - Every fiber is its own body. Fibers that touch, or overlap by TANGLE's small
   allowed penetration, do not share nodes. Connect them in the solver: contact
@@ -99,8 +102,17 @@ ends are flat.
   more elements.
 - A fiber that bends tighter than its own radius can make the solid fail; the
   error names the fiber.
-- `tet_mesh` starts and stops its own gmsh session, so call it while gmsh is
-  not initialized.
+- The fibers are meshed side by side, each in one of `workers` gmsh
+  processes (by default one per CPU core), and put together in fiber order,
+  so the mesh is the same however many there are. The processes are plain
+  Python processes that `tet_mesh` starts itself, so a script that calls it
+  needs no `if __name__ == "__main__":` guard. With `workers=1` the fibers
+  are meshed one after another in your own process, in a gmsh session
+  `tet_mesh` starts and stops, so call it while gmsh is not initialized.
+- Once a mesh has taken 10 s, `tet_mesh` prints how far it has got every
+  30 s, with the fiber that has taken longest so far; `progress=False` keeps
+  it quiet. `fiber_time_limit` stops the mesh with an error naming any fiber
+  that takes longer than that many seconds.
 
 ## Writing the files
 

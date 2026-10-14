@@ -1,10 +1,13 @@
 """tangle.fem: hexahedral and tetrahedral fiber meshes and their Nastran and
 Abaqus files."""
 
+import contextlib
+import io
 import math
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from xml.etree import ElementTree
 
 import tangle
@@ -12,6 +15,7 @@ import tangle
 try:
     import numpy as np
     import tangle.fem as fem
+    import tangle.fem._tet as tet_module
 except ImportError:  # tangle.fem needs NumPy
     fem = None
 
@@ -311,6 +315,42 @@ class TetMeshTests(unittest.TestCase):
         self.assertTrue(any(line.startswith("*ELEMENT, TYPE=C3D10") for line, _ in blocks))
         np.testing.assert_array_equal(arrays["types"], 24)  # VTK_QUADRATIC_TETRA, in the same node order
         np.testing.assert_array_equal(arrays["connectivity"].reshape(-1, 10), mesh.elements)
+
+    def test_a_bent_fiber_runs_straight_from_vertex_to_vertex(self):
+        radius, turn = 10e-6, math.radians(30)
+        line = np.array([[20e-6, 50e-6, 50e-6], [100e-6, 50e-6, 50e-6],
+                         [100e-6 + 80e-6 * math.cos(turn), 50e-6 + 80e-6 * math.sin(turn), 50e-6]])
+        mesh = fem.tet_mesh(assembly_of([200e-6, 150e-6, 100e-6], [line.tolist()],
+                                        tangle.Material("fiber", diameter=2 * radius)))
+        # Every node lies within the radius of the centerline's two straight stretches.
+        start, step = line[:-1], np.diff(line, axis=0)
+        along = np.clip(np.einsum("nsk,sk->ns", mesh.nodes[:, None] - start, step) / (step**2).sum(axis=1), 0.0, 1.0)
+        distance = np.linalg.norm(mesh.nodes[:, None] - (start + along[..., None] * step), axis=2).min(axis=1)
+        self.assertLessEqual(distance.max(), radius * (1 + 1e-6))
+        self.assertGreater(distance.max(), radius * (1 - 1e-6))
+        # Square sections at the ends and a section halving the turn: about the volume of the two stretches.
+        self.assertAlmostEqual(mesh.volume / (math.pi * radius**2 * 160e-6), 1.0, delta=0.05)
+
+    def test_processes_mesh_exactly_as_this_process_does(self):
+        here = fem.tet_mesh(touching_cross(), 0.1, workers=1)
+        apart = fem.tet_mesh(touching_cross(), 0.1, workers=2)
+        np.testing.assert_array_equal(apart.nodes, here.nodes)
+        np.testing.assert_array_equal(apart.elements, here.elements)
+        np.testing.assert_array_equal(apart.element_fibers, here.element_fibers)
+
+    def test_a_fiber_over_the_time_limit_stops_the_mesh_and_is_named(self):
+        with self.assertRaisesRegex(RuntimeError, r"longer than 0\.001 s on fiber 1\b"):
+            fem.tet_mesh(one_fiber(), fiber_time_limit=0.001)
+
+    def test_a_long_mesh_reports_its_progress(self):
+        with mock.patch.object(tet_module._Progress, "FIRST", 0.0), contextlib.redirect_stdout(io.StringIO()) as out:
+            fem.tet_mesh(touching_cross(), 0.1)
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines[0].startswith("tet_mesh: 0 of 2 fibers meshed, 0 tetrahedra"))
+        self.assertTrue(lines[-1].startswith("tet_mesh: all 2 fibers meshed"))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            fem.tet_mesh(touching_cross(), 0.1)
+        self.assertEqual(out.getvalue(), "")
 
 
 if __name__ == "__main__":

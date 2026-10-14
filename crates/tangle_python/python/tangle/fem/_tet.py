@@ -2,8 +2,17 @@
 
 from __future__ import annotations
 
+import collections
 import itertools
+import json
 import math
+import os
+import pickle
+import queue
+import subprocess
+import sys
+import threading
+import time
 
 import numpy as np
 
@@ -27,19 +36,28 @@ def tet_mesh(
     order: int = 1,
     elements_around: int = 16,
     clip_to_cell: bool = True,
+    workers: int | None = None,
+    fiber_time_limit: float | None = None,
+    progress: bool = True,
     verbose: bool = False,
 ) -> FemMesh:
     """Mesh the fibers with tetrahedra that follow each fiber's surface.
 
-    Each fiber becomes a solid swept through round or oval cross-sections at
-    its centerline vertices, with the oval's long axis where TANGLE puts it,
-    and gmsh fills the solid with tetrahedra. Every fiber is its own body:
+    Each fiber becomes a solid through a round or oval cross-section at
+    every centerline vertex, straight from one vertex to the next as
+    TANGLE's fibers are, with the oval's long axis where TANGLE puts it, and
+    gmsh fills the solid with tetrahedra. Every fiber is its own body:
     fibers that touch or slightly overlap do not share nodes, so connect
     them in the solver (contact, or glued contact for bonded fibers). Fiber
     ends are flat. Where a cell wall slices a fiber lengthwise, gmsh may
     need finer elements in that fiber to mesh the thin edge of the cut, so
-    such fibers get more elements. ``tet_mesh`` starts and stops its own
-    gmsh session, so call it while gmsh is not initialized.
+    such fibers get more elements.
+
+    The fibers are meshed side by side in separate gmsh processes, one per
+    CPU core by default, so a script that calls ``tet_mesh`` needs no
+    ``if __name__ == "__main__":`` guard. With ``workers=1`` they are meshed
+    one after another in this process, in its own gmsh session, so call it
+    while gmsh is not initialized.
 
     Args:
         assembly: an ``Assembly`` or a recipe's ``RunResult``.
@@ -57,7 +75,14 @@ def tet_mesh(
             resting on the floor, is left whole, so it can stick out by up
             to 5% of its thickness. With ``False``, every fiber is meshed
             whole along its unwrapped centerline.
-        verbose: let gmsh print its progress.
+        workers: how many gmsh processes mesh fibers at once; by default one
+            per CPU core. With 1 the fibers are meshed in this process.
+        fiber_time_limit: seconds one fiber may take; a fiber that takes
+            longer stops the mesh with an error that names it. By default
+            there is no limit.
+        progress: once a mesh has taken 10 s, print how far it has got every
+            30 s, and the slowest fiber still being meshed.
+        verbose: let gmsh print its own progress.
 
     Returns:
         A :class:`FemMesh` of ``"tet4"`` or ``"tet10"`` elements.
@@ -68,6 +93,10 @@ def tet_mesh(
         raise ImportError("tangle.fem.tet_mesh needs gmsh: pip install gmsh") from error
     if order not in (1, 2):
         raise ValueError("order must be 1 or 2")
+    if workers is not None and workers < 1:
+        raise ValueError("workers must be at least 1")
+    if fiber_time_limit is not None and not (math.isfinite(fiber_time_limit) and fiber_time_limit > 0.0):
+        raise ValueError("fiber_time_limit must be finite and positive")
     assembly = as_assembly(assembly)
     centerlines = [np.asarray(line, dtype=float) for line in assembly.centerlines()]
     if not centerlines:
@@ -93,31 +122,34 @@ def tet_mesh(
     if element_size is not None:
         fiber_sizes = [min(fiber_size, element_size / unit) for fiber_size in fiber_sizes]
 
-    if gmsh.isInitialized():
-        raise RuntimeError("tet_mesh runs its own gmsh session; call gmsh.finalize() first")
-    _start_gmsh(gmsh, verbose)
+    jobs = []  # (fiber index, the arguments of _mesh_fiber after gmsh)
+    for fiber, (points, axes, (long, short)) in enumerate(zip(centerlines, long_axes, semi_axes)):
+        points, axes = _without_repeated_vertices(points / unit, axes)
+        pieces = list(_pieces(points, long / unit, low, size, periodic, clip_to_cell))
+        if pieces:
+            box = (low, size) if clip_to_cell else None
+            jobs.append((fiber, (fiber_ids[fiber], points, axes, long / unit, short / unit, pieces, box,
+                                 fiber_sizes[fiber], order, elements_around, verbose)))
+    if not jobs:
+        raise ValueError("no fiber reaches into the cell")
+    processes = min(workers or _cpu_count(), len(jobs))
+    report = _Progress(len(jobs), progress)
+    if processes > 1 or fiber_time_limit is not None:
+        meshes = _mesh_in_processes(jobs, processes, fiber_time_limit, verbose, report)
+    else:
+        meshes = _mesh_here(gmsh, jobs, verbose, report)
+    report.done()
+
     node_blocks, element_blocks, block_fibers = [], [], []
     offset = 0
-    try:
-        for fiber, (points, axes, (long, short)) in enumerate(zip(centerlines, long_axes, semi_axes)):
-            points, axes = _without_repeated_vertices(points / unit, axes)
-            pieces = list(_pieces(points, long / unit, low, size, periodic, clip_to_cell))
-            if not pieces:
-                continue
-            mesh = _mesh_fiber(
-                gmsh, fiber_ids[fiber], points, axes, long / unit, short / unit,
-                pieces, (low, size) if clip_to_cell else None, fiber_sizes[fiber], order, elements_around, verbose,
-            )
-            if mesh is None:
-                continue
-            nodes, elements = mesh
-            node_blocks.append(nodes)
-            element_blocks.append(elements + offset)
-            block_fibers.append(np.full(len(elements), fiber, dtype=np.int64))
-            offset += len(nodes)
-    finally:
-        if gmsh.isInitialized():
-            gmsh.finalize()
+    for fiber, _ in jobs:
+        if meshes[fiber] is None:  # nothing of it is left inside the cell
+            continue
+        nodes, elements = meshes[fiber]
+        node_blocks.append(nodes)
+        element_blocks.append(elements + offset)
+        block_fibers.append(np.full(len(elements), fiber, dtype=np.int64))
+        offset += len(nodes)
     if not element_blocks:
         raise ValueError("no fiber reaches into the cell")
 
@@ -147,6 +179,189 @@ def tet_mesh(
         cell_origin=tuple(origin.tolist()),
         cell_lengths=tuple(lengths.tolist()),
     )
+
+
+def _mesh_here(gmsh, jobs, verbose: bool, report: _Progress) -> dict:
+    """Every job's mesh, one fiber after another in this process's own gmsh
+    session."""
+    if gmsh.isInitialized():
+        raise RuntimeError("tet_mesh runs its own gmsh session; call gmsh.finalize() first, or pass workers > 1")
+    _start_gmsh(gmsh, verbose)
+    meshes = {}
+    try:
+        for fiber, job in jobs:
+            meshes[fiber] = _mesh_fiber(gmsh, *job)
+            report.finished(meshes[fiber])
+            report.update()
+    finally:
+        if gmsh.isInitialized():
+            gmsh.finalize()
+    return meshes
+
+
+def _mesh_in_processes(jobs, processes: int, limit: float | None, verbose: bool, report: _Progress) -> dict:
+    """Every job's mesh, from ``processes`` gmsh processes working at once.
+
+    Each process takes the next fiber as soon as it is done with one. A
+    fiber that gmsh cannot mesh, or that takes longer than ``limit``
+    seconds, stops them all."""
+    waiting = collections.deque(jobs)
+    answers: queue.Queue = queue.Queue()
+    pool: list[_Worker] = []
+    meshes = {}
+    complete = False
+    try:
+        for _ in range(processes):
+            pool.append(_Worker(answers, verbose))
+            pool[-1].send(*waiting.popleft())
+        while len(meshes) < len(jobs):
+            now = time.monotonic()
+            busy = [worker for worker in pool if worker.fiber is not None]
+            for worker in busy:
+                if limit is not None and now - worker.since >= limit:
+                    raise RuntimeError(
+                        f"gmsh took longer than {limit:g} s on fiber {worker.fiber_id}; "
+                        "raise fiber_time_limit, or mesh it with fewer elements_around"
+                    )
+            report.update([(worker.fiber_id, now - worker.since) for worker in busy])
+            due = report.due
+            if limit is not None and busy:
+                due = min(due, min(worker.since for worker in busy) + limit)
+            try:
+                worker, answer = answers.get(timeout=None if due == math.inf else max(due - now, 0.0))
+            except queue.Empty:
+                continue
+            if worker.fiber is None:  # an idle process stopped; it had nothing left to do
+                continue
+            if answer is None:
+                raise RuntimeError(
+                    f"the gmsh process meshing fiber {worker.fiber_id} stopped (exit code {worker.process.poll()}); "
+                    "with workers=1, tet_mesh meshes in this process instead"
+                )
+            kind, value = answer
+            if kind == "error":
+                raise RuntimeError(value)
+            meshes[worker.fiber] = value
+            worker.fiber = None
+            report.finished(value)
+            if waiting:
+                worker.send(*waiting.popleft())
+        complete = True
+    finally:
+        for worker in pool:
+            worker.close(kill=not complete)
+    return meshes
+
+
+# Run with ``python -c``: the process takes this one's module path, so it
+# imports the same tangle and gmsh.
+_WORKER_START = (
+    "import json, sys; sys.path[:] = json.loads(sys.argv[1]); "
+    "from tangle.fem._gmsh_worker import main; main(sys.argv[2] == 'verbose')"
+)
+
+
+class _Worker:
+    """A gmsh process for :func:`_mesh_in_processes` (see ``_gmsh_worker``),
+    and a thread that reads its answers into ``answers``."""
+
+    def __init__(self, answers: queue.Queue, verbose: bool) -> None:
+        command = [sys.executable, "-c", _WORKER_START, json.dumps(sys.path), "verbose" if verbose else "quiet"]
+        self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.fiber: int | None = None  # the index of the fiber being meshed
+        self.fiber_id = 0  # its TANGLE id
+        self.since = 0.0  # when it was sent
+        self._reader = threading.Thread(target=self._read, args=(answers,), daemon=True)
+        self._reader.start()
+
+    def _read(self, answers: queue.Queue) -> None:
+        while True:
+            try:
+                answer = pickle.load(self.process.stdout)
+            except Exception:  # the stream ended: the process stopped
+                answers.put((self, None))
+                return
+            answers.put((self, answer))
+
+    def send(self, fiber: int, job: tuple) -> None:
+        self.fiber, self.fiber_id, self.since = fiber, job[0], time.monotonic()
+        try:
+            pickle.dump(job, self.process.stdin, protocol=pickle.HIGHEST_PROTOCOL)
+            self.process.stdin.flush()
+        except OSError:  # the process has stopped, which its reader reports
+            pass
+
+    def close(self, kill: bool) -> None:
+        if kill:
+            self.process.kill()
+        try:
+            self.process.stdin.close()  # the end of the jobs: the process finishes
+        except OSError:
+            pass
+        try:
+            self.process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+        self._reader.join()
+        self.process.stdout.close()
+
+
+class _Progress:
+    """Prints how far ``tet_mesh`` has got: first after 10 s, then every 30 s,
+    and a last line when it is done if it printed any."""
+
+    FIRST, EVERY = 10.0, 30.0
+
+    def __init__(self, fibers: int, enabled: bool) -> None:
+        self.fibers, self.meshed, self.elements = fibers, 0, 0
+        self.started = time.monotonic()
+        self.due = self.started + self.FIRST if enabled else math.inf
+        self.printed = False
+
+    def finished(self, mesh) -> None:
+        self.meshed += 1
+        if mesh is not None:
+            self.elements += len(mesh[1])
+
+    def update(self, running: list[tuple[int, float]] = ()) -> None:
+        """Print a line if one is due, naming the slowest of the fibers being
+        meshed (``running``: their TANGLE ids and seconds so far)."""
+        now = time.monotonic()
+        if now < self.due:
+            return
+        line = (f"tet_mesh: {self.meshed:,} of {self.fibers:,} fibers meshed, "
+                f"{self.elements:,} tetrahedra, {_duration(now - self.started)}")
+        slowest = max(running, key=lambda item: item[1], default=None)
+        if slowest is not None and slowest[1] >= self.EVERY:
+            line += f"; fiber {slowest[0]} has taken {_duration(slowest[1])} so far"
+        print(line, flush=True)
+        self.printed = True
+        self.due = now + self.EVERY
+
+    def done(self) -> None:
+        if self.printed:
+            print(f"tet_mesh: all {self.fibers:,} fibers meshed, {self.elements:,} tetrahedra, "
+                  f"in {_duration(time.monotonic() - self.started)}", flush=True)
+
+
+def _cpu_count() -> int:
+    """The CPU cores this process may use (all of them, unless a scheduler
+    such as Slurm limits it)."""
+    if hasattr(os, "process_cpu_count"):  # Python 3.13
+        return os.process_cpu_count() or 1
+    if hasattr(os, "sched_getaffinity"):  # Linux
+        return len(os.sched_getaffinity(0)) or 1
+    return os.cpu_count() or 1
+
+
+def _duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 90:
+        return f"{seconds} s"
+    if seconds < 5400:
+        return f"{round(seconds / 60)} min"
+    return f"{seconds // 3600} h {round(seconds % 3600 / 60):02d} min"
 
 
 def _start_gmsh(gmsh, verbose: bool) -> None:
@@ -300,13 +515,23 @@ def _runs(mask: np.ndarray):
 
 
 def _loft(occ, points: np.ndarray, long_axes: np.ndarray, long: float, short: float) -> list[tuple[int, int]]:
-    """A solid through a cross-section at every vertex: an ellipse with its
-    long semi-axis along TANGLE's long axis, or a circle."""
+    """A solid through a cross-section at every vertex, an ellipse with its
+    long semi-axis along TANGLE's long axis or a circle, and straight from
+    one to the next, as TANGLE's fiber is.
+
+    An inner section halves the angle between its two stretches, so they
+    meet there as mitered pipes do. (One smooth surface through all the
+    sections would follow the fiber no better, and over a long fiber gmsh
+    can fail to mesh it in hours.)"""
+    steps = np.diff(points, axis=0)
+    steps /= np.linalg.norm(steps, axis=1)[:, None]
     tangents = np.empty_like(points)
-    tangents[1:-1] = points[2:] - points[:-2]
-    tangents[0] = points[1] - points[0]
-    tangents[-1] = points[-1] - points[-2]
-    tangents /= np.linalg.norm(tangents, axis=1)[:, None]
+    tangents[0], tangents[-1] = steps[0], steps[-1]
+    tangents[1:-1] = steps[:-1] + steps[1:]
+    norms = np.linalg.norm(tangents, axis=1)
+    folded = norms < 1.0e-9  # a stretch that turns straight back: square to the one before
+    tangents[folded], norms[folded] = steps[np.flatnonzero(folded) - 1], 1.0
+    tangents /= norms[:, None]
     oval = long > short * (1.0 + 1.0e-9)
     directions = _section_directions(tangents, long_axes if oval else None)
     wires = []
@@ -316,7 +541,7 @@ def _loft(occ, points: np.ndarray, long_axes: np.ndarray, long: float, short: fl
         else:
             curve = occ.addCircle(*point, long, zAxis=tangent.tolist(), xAxis=direction.tolist())
         wires.append(occ.addWire([curve]))
-    solid = occ.addThruSections(wires, makeSolid=True, makeRuled=False)
+    solid = occ.addThruSections(wires, makeSolid=True, makeRuled=True)
     occ.remove([(1, wire) for wire in wires], recursive=True)
     return [(dim, tag) for dim, tag in solid if dim == 3]
 
