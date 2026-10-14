@@ -137,6 +137,10 @@ See [solver and architecture notes](docs/architecture.md) for details.
   `spherocylinders-constant`. TANGLE writes geometry and bonds, not DIRT runtime
   configuration files. Check downstream atom-style compatibility and overlap
   tolerances before running a dynamic solver.
+- **LAMMPS BPM files:** `tangle.lammps` reads the fibers of a LAMMPS
+  bonded-particle data file, relaxes them so that none overlap, and writes the
+  file back with only the moved spheres' positions changed; see the
+  [LAMMPS BPM guide](docs/lammps_bpm.md).
 - **Native analysis:** lengths, nominal volume fractions, per-material and
   per-fiber summaries, curvature, and length-/volume-weighted orientation.
 - **Contacts and neighbors:** contact counts against a random-placement
