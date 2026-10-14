@@ -44,18 +44,8 @@ def hex_mesh(assembly, voxel_size: float, *, bond_radius_ratio: float | None = N
         A :class:`FemMesh` of ``"hex8"`` elements.
     """
     assembly = as_assembly(assembly)
-    counts, phase, owner, bond = _tangle.fem_voxel_labels(assembly, voxel_size, bond_radius_ratio)
+    counts, phase, owner = voxel_labels(assembly, voxel_size, bond_radius_ratio, binder)
     nx, ny, nz = counts
-    phase = np.frombuffer(phase, dtype="<u2")
-    owner = np.frombuffer(owner, dtype="<u4")
-    if binder is not None:
-        mask = np.asarray(binder, dtype=bool)
-        if mask.shape != (nz, ny, nx):
-            raise ValueError(f"binder must be a (z, y, x) mask of the {nz} x {ny} x {nx} voxel grid; got {mask.shape}")
-        extra = mask.ravel() & (phase == 0)  # the fibers win: only voxels no fiber fills
-        if extra.any():
-            phase, owner = phase.copy(), owner.copy()
-            phase[extra], owner[extra] = 1, 0  # filled, and owned by no fiber: binder
     filled = np.flatnonzero(phase)
     if filled.size == 0:
         raise ValueError("no fiber fills a voxel of the cell; check the voxel size and the fibers")
@@ -102,3 +92,24 @@ def hex_mesh(assembly, voxel_size: float, *, bond_radius_ratio: float | None = N
         cell_origin=tuple(origin.tolist()),
         cell_lengths=tuple(lengths.tolist()),
     )
+
+
+def voxel_labels(assembly, voxel_size: float, bond_radius_ratio: float | None, binder):
+    """The ``export_puma`` voxels of the cell, with binder: the voxel counts
+    ``(nx, ny, nz)``, then for every voxel (x fastest) whether it is filled
+    (``phase``, nonzero) and by what (``owner``: a fiber's index plus 1, or 0
+    for binder). Binder is the junction bridges of ``bond_radius_ratio`` and
+    the voxels of the ``binder`` mask that no fiber fills."""
+    counts, phase, owner, _ = _tangle.fem_voxel_labels(assembly, voxel_size, bond_radius_ratio)
+    nx, ny, nz = counts
+    phase = np.frombuffer(phase, dtype="<u2")
+    owner = np.frombuffer(owner, dtype="<u4")
+    if binder is not None:
+        mask = np.asarray(binder, dtype=bool)
+        if mask.shape != (nz, ny, nx):
+            raise ValueError(f"binder must be a (z, y, x) mask of the {nz} x {ny} x {nx} voxel grid; got {mask.shape}")
+        extra = mask.ravel() & (phase == 0)  # the fibers win: only voxels no fiber fills
+        if extra.any():
+            phase, owner = phase.copy(), owner.copy()
+            phase[extra], owner[extra] = 1, 0  # filled, and owned by no fiber: binder
+    return counts, phase, owner

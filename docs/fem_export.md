@@ -9,7 +9,7 @@ two meshers, and both return the same `FemMesh`:
 | Elements | 8-node hexahedra (`CHEXA`, `C3D8`) | 4- or 10-node tetrahedra (`CTETRA`, `C3D4` or `C3D10`) |
 | Fiber surface | voxel steps, like a CT scan | follows the round or oval surface |
 | Fibers that touch | share nodes, so they are bonded | separate bodies, so the solver needs contact or glue |
-| Binder | yes: bridges at junctions (`bond_radius_ratio`), or any voxels you give it (`binder`) | no |
+| Binder | yes: bridges at junctions (`bond_radius_ratio`), or any voxels you give it (`binder`) | yes, from the same voxels, as tetrahedra tied to the fibers |
 | Needs | NumPy | NumPy and [gmsh](https://gmsh.info) |
 
 Install the extras with `pip install numpy gmsh`, or `pip install "tangle[fem]"`.
@@ -71,8 +71,8 @@ does.
 ## Tetrahedra from gmsh
 
 `tet_mesh(assembly, element_size=None, *, order=1, elements_around=16,
-clip_to_cell=True, workers=None, fiber_time_limit=None, progress=True,
-verbose=False)` builds each fiber as a solid through a round or oval
+clip_to_cell=True, voxel_size=None, bond_radius_ratio=None, binder=None,
+workers=None, fiber_time_limit=None, progress=True, verbose=False)` builds each fiber as a solid through a round or oval
 cross-section at every centerline vertex, straight from one vertex to the
 next as TANGLE's fibers are, then lets gmsh fill it with tetrahedra. At a
 bend the section halves the angle between the two stretches, so they meet as
@@ -111,8 +111,34 @@ Fiber ends are flat.
   `tet_mesh` starts and stops, so call it while gmsh is not initialized.
 - Once a mesh has taken 10 s, `tet_mesh` prints how far it has got, and
   again every 30 s, naming the slowest fiber still being meshed once that
-  fiber has taken 30 s; `progress=False` keeps it quiet. `fiber_time_limit` stops the mesh with an error naming any fiber
-  that takes longer than that many seconds.
+  fiber has taken 30 s; `progress=False` keeps it quiet. `fiber_time_limit`
+  stops the mesh with an error naming any fiber that takes longer than that
+  many seconds.
+
+### Binder in a tetrahedral mesh
+
+`binder`, `bond_radius_ratio` and `voxel_size` work as in `hex_mesh`: the
+binder is the same voxels, those of the mask or of the junction bridges that
+no fiber fills, on the grid of `voxel_size`. Each binder voxel becomes six
+tetrahedra (10-node ones with `order=2`) with fiber id 0 and the material
+`"binder"`, so the binder's surface steps from voxel to voxel while the
+fibers stay round.
+
+- The binder is one body of its own: its tetrahedra share nodes with each
+  other but not with the fibers. `mesh.ties` holds one `Tie`, `BINDER_TIE`,
+  from the binder's faces next to a voxel a fiber fills to the faces of the
+  fibers' surfaces, and `write_abaqus` writes it as a `*TIE` that glues them.
+  Its position tolerance is twice the voxel size plus twice the depth of the
+  fibers' flat facets, since a binder face next to a fiber lies within about
+  1.2 voxels of the fiber's round surface. Binder nodes farther away stay
+  free.
+- The Nastran file has no tie: glue the binder's `PSOLID` to the fibers in
+  your pre-processor, as for fibers that touch.
+- The voxels a fiber fills are those of `hex_mesh`, whose fibers end in half
+  spheres. `tet_mesh` ends them flat, so binder next to a fiber's end can
+  stop short of it and stay free there.
+- `voxel_size` must divide every cell length, and binder needs
+  `clip_to_cell=True`, since it fills the cell.
 
 ## Writing the files
 
@@ -160,7 +186,11 @@ Abaqus/CAE imports as an orphan mesh:
 - `MATERIAL_<NAME>` element sets, each with a `*SOLID SECTION`, and the
   `*MATERIAL` definitions;
 - `*NSET` node sets `XMIN`, `XMAX`, `YMIN`, `YMAX`, `ZMIN` and `ZMAX` for the
-  nodes on each cell face, ready for boundary conditions.
+  nodes on each cell face, ready for boundary conditions;
+- for a tetrahedral mesh with binder, the surfaces `BINDER_TIE_SECONDARY` (the
+  binder's faces next to fibers) and `BINDER_TIE_MAIN` (the fibers' surfaces)
+  and a `*TIE` named `BINDER_TIE` that glues the first to the second, with
+  `ADJUST=NO` so no node moves.
 
 The elements are `C3D8`, `C3D4` or `C3D10`. For bending of hexahedral fibers
 `element_type="C3D8I"` is usually better than `C3D8`.
@@ -196,6 +226,7 @@ mesh, write it with `write_vtu` and open it in ParaView.
 ## Limits
 
 - Orthorhombic cells only, as for `export_puma`.
-- `tet_mesh` does not mesh binder bridges.
+- In a tetrahedral mesh the binder is tied to the fibers only in the Abaqus
+  file; in Nastran, glue it in a pre-processor.
 - Element and node ids must fit Nastran's 8-column fields, so a mesh can have
   at most 99,999,999 of each.

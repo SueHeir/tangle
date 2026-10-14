@@ -500,7 +500,8 @@ tets.write_abaqus("output/felt_tet.inp", pet)
 
 `hex_mesh` uses the `export_puma` voxels, and fibers that touch share nodes;
 `binder=` adds binder voxels, such as a CT scan's. `tet_mesh` meshes every
-fiber as its own body, cut at the cell walls. `write_vtu` writes a copy of
+fiber as its own body, cut at the cell walls, and meshes the same binder
+voxels as tetrahedra tied to the fibers. `write_vtu` writes a copy of
 either mesh to look at in ParaView. The
 [FEM export guide](../../docs/fem_export.md) covers element types, units,
 materials and the [`fem_mesh` example](python/examples/fem_mesh.py).

@@ -16,8 +16,9 @@ import time
 
 import numpy as np
 
-from ._mesh import FemMesh
-from ._source import as_assembly, material_table
+from ._hex import CORNERS, voxel_labels
+from ._mesh import HEX_TETRAHEDRA, TET_FACES, FemMesh, Tie
+from ._source import as_assembly, binder_name, material_table
 
 # gmsh element types for 4- and 10-node tetrahedra.
 GMSH_TET4, GMSH_TET10 = 4, 11
@@ -27,6 +28,9 @@ GMSH_TO_NASTRAN_TET10 = [0, 1, 2, 3, 4, 5, 6, 7, 9, 8]
 # Swapping corners 1 and 2 turns a tetrahedron inside out, and back.
 FLIP_TET4 = [0, 2, 1, 3]
 FLIP_TET10 = [0, 2, 1, 3, 6, 5, 4, 7, 9, 8]
+# The corners at the ends of the edges whose middles are nodes 4 to 9 of a
+# 10-node tetrahedron, in Nastran and Abaqus order.
+TET10_EDGES = [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)]
 
 
 def tet_mesh(
@@ -36,6 +40,9 @@ def tet_mesh(
     order: int = 1,
     elements_around: int = 16,
     clip_to_cell: bool = True,
+    voxel_size: float | None = None,
+    bond_radius_ratio: float | None = None,
+    binder=None,
     workers: int | None = None,
     fiber_time_limit: float | None = None,
     progress: bool = True,
@@ -52,6 +59,13 @@ def tet_mesh(
     ends are flat. Where a cell wall slices a fiber lengthwise, gmsh may
     need finer elements in that fiber to mesh the thin edge of the cut, so
     such fibers get more elements.
+
+    Binder, when asked for, comes from the same voxels as in
+    :func:`hex_mesh`, and each binder voxel becomes six tetrahedra with
+    fiber id 0 and the material ``"binder"``. The binder shares no nodes
+    with the fibers. Instead the mesh's :class:`Tie` ties the binder's faces
+    next to fibers to the fibers' surfaces, which the Abaqus file writes as
+    a ``*TIE``.
 
     The fibers are meshed side by side in separate gmsh processes, one per
     CPU core by default, so a script that calls ``tet_mesh`` needs no
@@ -75,6 +89,14 @@ def tet_mesh(
             resting on the floor, is left whole, so it can stick out by up
             to 5% of its thickness. With ``False``, every fiber is meshed
             whole along its unwrapped centerline.
+        voxel_size: the voxel edge in meters for binder, which must divide
+            every cell length as in :func:`hex_mesh`. Binder needs it.
+        bond_radius_ratio: also mesh binder bridges at persistent junctions,
+            with this radius as a fraction of the thinner fiber's radius, as
+            :func:`hex_mesh` does.
+        binder: also mesh these voxels as binder: a boolean ``(z, y, x)``
+            array over the grid of ``voxel_size`` voxels across the cell, as
+            for :func:`hex_mesh`. Voxels a fiber fills stay fiber.
         workers: how many gmsh processes mesh fibers at once; by default one
             per CPU core. With 1 the fibers are meshed in this process.
         fiber_time_limit: seconds one fiber may take; a fiber that takes
@@ -98,6 +120,13 @@ def tet_mesh(
         raise ValueError("workers must be at least 1")
     if fiber_time_limit is not None and not (math.isfinite(fiber_time_limit) and fiber_time_limit > 0.0):
         raise ValueError("fiber_time_limit must be finite and positive")
+    with_binder = binder is not None or bond_radius_ratio is not None
+    if with_binder and voxel_size is None:
+        raise ValueError("binder needs voxel_size: the edge of the voxels it is meshed from")
+    if voxel_size is not None and not with_binder:
+        raise ValueError("voxel_size only sets the binder's voxels; pass binder or bond_radius_ratio with it")
+    if with_binder and not clip_to_cell:
+        raise ValueError("binder fills the cell's voxels, so it needs clip_to_cell=True")
     assembly = as_assembly(assembly)
     centerlines = [np.asarray(line, dtype=float) for line in assembly.centerlines()]
     if not centerlines:
@@ -133,6 +162,8 @@ def tet_mesh(
                                  fiber_sizes[fiber], order, elements_around, verbose)))
     if not jobs:
         raise ValueError("no fiber reaches into the cell")
+    # Before the fibers, so a binder mask that does not fit fails at once.
+    binder_mesh = _binder_mesh(assembly, voxel_size, bond_radius_ratio, binder, order) if with_binder else None
     processes = min(workers or _cpu_count(), len(jobs))
     report = _Progress(len(jobs), progress)
     if processes > 1 or fiber_time_limit is not None:
@@ -141,7 +172,7 @@ def tet_mesh(
         meshes = _mesh_here(gmsh, jobs, verbose, report)
     report.done()
 
-    node_blocks, element_blocks, block_fibers = [], [], []
+    node_blocks, element_blocks, block_fibers = [], [], []  # one block per fiber
     offset = 0
     for fiber, _ in jobs:
         if meshes[fiber] is None:  # nothing of it is left inside the cell
@@ -169,7 +200,31 @@ def tet_mesh(
 
     element_fibers = np.asarray(fiber_ids, dtype=np.int64)[fibers]
     element_materials = fiber_material[fibers]
-    sequence = np.lexsort((np.arange(len(fibers)), element_fibers, element_materials))
+    tie = None
+    if binder_mesh is not None:
+        binder_nodes, binder_elements, next_to_fibers = binder_mesh
+        if len(next_to_fibers):
+            # A binder node next to a fiber lies within about 1.2 voxels of the
+            # fiber's round surface, and the flat facets of the fiber's mesh
+            # lie up to a facet's sagitta inside that surface.
+            sagitta = max((edge * unit) ** 2 * long / (8.0 * short * short)
+                          for edge, (long, short) in zip(fiber_sizes, semi_axes))
+            surfaces = _outer_faces(elements, [len(block) for block in element_blocks])
+            tie = (next_to_fibers + [len(elements), 0], surfaces, 2.0 * voxel_size + 2.0 * sagitta)
+        materials = (*materials, binder_name(materials))
+        elements = np.concatenate([elements, binder_elements + len(nodes)])
+        nodes = np.concatenate([nodes, binder_nodes])
+        element_fibers = np.concatenate([element_fibers, np.zeros(len(binder_elements), dtype=np.int64)])
+        element_materials = np.concatenate(
+            [element_materials, np.full(len(binder_elements), len(materials) - 1, dtype=np.int64)]
+        )
+    sequence = np.lexsort((np.arange(len(elements)), element_fibers, element_materials))
+    ties = ()
+    if tie is not None:
+        position = np.empty_like(sequence)
+        position[sequence] = np.arange(len(sequence))
+        secondary, main, tolerance = tie
+        ties = (Tie("BINDER_TIE", _moved(secondary, position), _moved(main, position), tolerance),)
     return FemMesh(
         nodes=nodes,
         elements=elements[sequence],
@@ -179,7 +234,106 @@ def tet_mesh(
         materials=materials,
         cell_origin=tuple(origin.tolist()),
         cell_lengths=tuple(lengths.tolist()),
+        ties=ties,
     )
+
+
+def _binder_mesh(assembly, voxel_size: float, bond_radius_ratio: float | None, binder, order: int):
+    """The binder's tetrahedra, six to each binder voxel of :func:`hex_mesh`,
+    on nodes of their own: the nodes in meters, the elements, and the
+    ``(element, face)`` pairs of the faces next to a voxel that a fiber
+    fills. None when no voxel is binder."""
+    counts, phase, owner = voxel_labels(assembly, voxel_size, bond_radius_ratio, binder)
+    nx, ny, nz = counts
+    chosen = np.flatnonzero((phase != 0) & (owner == 0))
+    if chosen.size == 0:
+        return None
+    voxels = np.stack([chosen % nx, (chosen // nx) % ny, chosen // (nx * ny)], axis=1)
+
+    # Points are numbered on a grid of half voxels: corner a of the voxel grid
+    # is point 2a, and the middle of the edge from a to b is point a + b. A
+    # point's number is linear in its place, so the node of corner pair (p, q)
+    # in the voxel whose low corner is v, point 2v + CORNERS[p] + CORNERS[q],
+    # is numbered twice v's number plus that of CORNERS[p] + CORNERS[q].
+    width = np.array([1, 2 * nx + 1, (2 * nx + 1) * (2 * ny + 1)], dtype=np.int64)
+    pairs, tetrahedra = _voxel_tetrahedra(order)
+    keys = 2 * (voxels @ width)[:, None] + ((CORNERS[pairs[:, 0]] + CORNERS[pairs[:, 1]]) @ width)[None, :]
+    used, inverse = np.unique(keys, return_inverse=True)
+    elements = inverse.reshape(keys.shape)[:, tetrahedra].reshape(-1, tetrahedra.shape[1])
+    points = np.stack([used % width[1], (used // width[1]) % (2 * ny + 1), used // width[2]], axis=1)
+    spacing = np.asarray(assembly.cell.lengths, dtype=float) / np.asarray(counts, dtype=float)
+    nodes = np.asarray(assembly.cell.origin, dtype=float) + points * (spacing / 2.0)
+
+    filled_by_fiber = (phase != 0) & (owner != 0)
+    stride = (1, nx, nx * ny)
+    next_to_fibers = []
+    for (axis, high), faces in _voxel_sides().items():
+        step = 1 if high else -1
+        beside = voxels[:, axis] + step
+        rows = np.flatnonzero((beside >= 0) & (beside < counts[axis]))
+        rows = rows[filled_by_fiber[chosen[rows] + step * stride[axis]]]
+        for tetrahedron, face in faces:
+            next_to_fibers.append(np.stack([6 * rows + tetrahedron, np.full(len(rows), face)], axis=1))
+    return nodes, elements, np.concatenate(next_to_fibers)
+
+
+def _voxel_tetrahedra(order: int) -> tuple[np.ndarray, np.ndarray]:
+    """One voxel's nodes as pairs of its corners, ``(c, c)`` for corner c
+    and ``(a, b)`` for the middle of the edge from a to b, and its six
+    tetrahedra (:data:`HEX_TETRAHEDRA`) as indices into those pairs."""
+    pairs = [(corner, corner) for corner in range(8)]
+    tetrahedra = []
+    for corners in HEX_TETRAHEDRA.tolist():
+        nodes = list(corners)
+        if order == 2:
+            for first, second in TET10_EDGES:
+                pair = tuple(sorted((corners[first], corners[second])))
+                if pair not in pairs:
+                    pairs.append(pair)
+                nodes.append(pairs.index(pair))
+        tetrahedra.append(nodes)
+    return np.array(pairs), np.array(tetrahedra)
+
+
+def _voxel_sides() -> dict[tuple[int, int], list[tuple[int, int]]]:
+    """For each side of a voxel, ``(axis, 0)`` for its low side and
+    ``(axis, 1)`` for its high side, the ``(tetrahedron, face)`` pairs of
+    its six tetrahedra (:data:`HEX_TETRAHEDRA`) that lie on it."""
+    return {
+        (axis, high): [
+            (tetrahedron, face)
+            for tetrahedron, corners in enumerate(HEX_TETRAHEDRA)
+            for face, on_face in enumerate(TET_FACES)
+            if (CORNERS[corners[on_face], axis] == high).all()
+        ]
+        for axis in range(3)
+        for high in (0, 1)
+    }
+
+
+def _outer_faces(elements: np.ndarray, block_sizes: list[int]) -> np.ndarray:
+    """``(element, face)`` of every face that belongs to one tetrahedron
+    only: the surfaces of the fibers. The elements come in one block per
+    fiber, and as fibers share no nodes, each block is done on its own."""
+    found, start = [], 0
+    for size in block_sizes:
+        faces = np.sort(elements[start : start + size, :4][:, TET_FACES].reshape(-1, 3), axis=1)
+        order = np.lexsort(faces.T)
+        same = (faces[order[1:]] == faces[order[:-1]]).all(axis=1)
+        alone = np.ones(len(order), dtype=bool)
+        alone[1:] &= ~same
+        alone[:-1] &= ~same
+        which = order[alone]
+        found.append(np.stack([start + which // 4, which % 4], axis=1))
+        start += size
+    return np.concatenate(found)
+
+
+def _moved(faces: np.ndarray, position: np.ndarray) -> np.ndarray:
+    """``(element, face)`` pairs after element ``e`` has moved to
+    ``position[e]``, in element order."""
+    faces = np.stack([position[faces[:, 0]], faces[:, 1]], axis=1)
+    return faces[np.lexsort((faces[:, 1], faces[:, 0]))]
 
 
 def _mesh_here(gmsh, jobs, verbose: bool, report: _Progress) -> dict:
