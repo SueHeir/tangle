@@ -249,7 +249,8 @@ pub fn exclusive_scan_cell_blocks(
         }
         output[index] = exclusive;
     }
-    if UNIT_POS as usize == block_size - 1 {
+    // A launch spread over rows has a few cubes past the last block.
+    if UNIT_POS as usize == block_size - 1 && CUBE_POS < block_sums.len() {
         block_sums[CUBE_POS] = shared[lane];
     }
 }

@@ -8,6 +8,7 @@ use tangle_contact::device::{
 };
 
 use super::DeviceFiberWorld;
+use crate::device::cube_grid;
 
 impl<R: Runtime> DeviceFiberWorld<R> {
     fn scan_cell_counts(
@@ -49,7 +50,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         unsafe {
             exclusive_scan_cell_blocks::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(blocks as u32, 1, 1),
+                cube_grid(blocks),
                 CubeDim::new_1d(self.cell_scan_block_size as u32),
                 BufferArg::from_raw_parts(input, length),
                 BufferArg::from_raw_parts(output.clone(), length),
@@ -76,7 +77,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         unsafe {
             add_cell_block_offsets::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(blocks as u32, 1, 1),
+                cube_grid(blocks),
                 CubeDim::new_1d(self.cell_scan_block_size as u32),
                 BufferArg::from_raw_parts(output, length),
                 BufferArg::from_raw_parts(block_offsets[level].clone(), blocks),
@@ -101,8 +102,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         use_proxies: bool,
     ) {
         let cube_dim = CubeDim::new_1d(64);
-        let cell_cubes = CubeCount::Static(cell_count.div_ceil(64) as u32, 1, 1);
-        let segment_cubes = CubeCount::Static(self.active_segment_count.div_ceil(64) as u32, 1, 1);
+        let cell_cubes = cube_grid(cell_count.div_ceil(64));
+        let segment_cubes = cube_grid(self.active_segment_count.div_ceil(64));
         unsafe {
             clear_cell_list::launch_unchecked::<R>(
                 &self.client,
@@ -189,7 +190,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             // One thread per possible slot; the kernel stops at the filled count.
             rank_cell_segments::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(self.proxy_capacity.div_ceil(64) as u32, 1, 1),
+                cube_grid(self.proxy_capacity.div_ceil(64)),
                 cube_dim,
                 BufferArg::from_raw_parts(self.cell_counts.clone(), cell_count),
                 BufferArg::from_raw_parts(self.cell_offsets.clone(), cell_count),

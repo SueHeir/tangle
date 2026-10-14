@@ -4,6 +4,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use super::DeviceFiberWorld;
+use crate::device::cube_grid;
 use crate::device::image_force::{
     apply_image_corrections, find_image_corrections, RING_TABLE_STRIDE,
 };
@@ -208,7 +209,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         unsafe {
             apply_image_corrections::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1),
+                cube_grid(self.active_vertex_count.div_ceil(64)),
                 CubeDim::new_1d(64),
                 BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                 BufferArg::from_raw_parts(
@@ -254,7 +255,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         unsafe {
             find_image_corrections::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1),
+                cube_grid(self.active_vertex_count.div_ceil(64)),
                 CubeDim::new_1d(64),
                 BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                 BufferArg::from_raw_parts(

@@ -8,6 +8,7 @@ use tangle_contact::device::{
 };
 
 use super::DeviceFiberWorld;
+use crate::device::cube_grid;
 use crate::device::kernels::request_neighbor_list_rebuild_after_adaptation;
 
 impl<R: Runtime> DeviceFiberWorld<R> {
@@ -28,7 +29,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         let cube_dim = CubeDim::new_1d(64);
         // One thread per possible cell-list slot; the kernels stop at the
         // number of slots the scatter actually filled.
-        let slot_cubes = CubeCount::Static(self.proxy_capacity.div_ceil(64) as u32, 1, 1);
+        let slot_cubes = cube_grid(self.proxy_capacity.div_ceil(64));
         let segments = self.packed.segment_count();
         let slots = self.proxy_capacity;
         unsafe {
@@ -81,7 +82,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             );
             sort_neighbor_lists::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(self.active_segment_count.div_ceil(64) as u32, 1, 1),
+                cube_grid(self.active_segment_count.div_ceil(64)),
                 cube_dim.clone(),
                 BufferArg::from_raw_parts(self.active_segment_indices.clone(), segments),
                 BufferArg::from_raw_parts(self.active_index_counts.clone(), 2),
@@ -94,7 +95,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             );
             snapshot_neighbor_reference_positions::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(self.packed.positions.len().div_ceil(64) as u32, 1, 1),
+                cube_grid(self.packed.positions.len().div_ceil(64)),
                 cube_dim,
                 BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                 BufferArg::from_raw_parts(
@@ -145,7 +146,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         unsafe {
             flag_neighbor_list_displacement::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1),
+                cube_grid(self.active_vertex_count.div_ceil(64)),
                 CubeDim::new_1d(64),
                 BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                 BufferArg::from_raw_parts(

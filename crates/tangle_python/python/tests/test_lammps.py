@@ -314,6 +314,18 @@ class RoundTripTests(unittest.TestCase):
             self.assertTrue(run.converged)
             self.assertEqual(data.write_data(Path(directory) / "relaxed.data", run), 0)
 
+    def test_a_box_of_millions_of_cells_relaxes(self):
+        # Millions of contact cells: more cubes in one launch than WebGPU allows along an axis.
+        fibers = tangle.FiberCollection("crossing")
+        material = tangle.Material("type 1", 1.0)
+        fibers.add_fiber([[x, 400.0, 400.0] for x in range(396, 405)], material)
+        fibers.add_fiber([[400.0, y, 400.5] for y in range(396, 405)], material)
+        recipe = tangle.Recipe(tangle.Cell([800.0] * 3, "xyz"))
+        recipe.insert(fibers)
+        run = recipe.run(tangle.RelaxationSettings(backend=BACKEND))
+        self.assertTrue(run.converged)
+        self.assertLess(run.max_penetration, 0.011)
+
 
 if __name__ == "__main__":
     unittest.main()
