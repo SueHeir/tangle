@@ -28,7 +28,8 @@ const MAX_CUBES_PER_AXIS: usize = 65_535;
 /// nothing.
 pub(crate) fn cube_grid(cubes: usize) -> cubecl::prelude::CubeCount {
     let rows = cubes.div_ceil(MAX_CUBES_PER_AXIS).max(1);
-    let row = cubes.div_ceil(rows).max(1);
+    // An empty launch stays empty: zero cubes in one row.
+    let row = cubes.div_ceil(rows);
     let rows = u32::try_from(rows).expect("too many cubes for one launch");
     cubecl::prelude::CubeCount::Static(row as u32, rows, 1)
 }
