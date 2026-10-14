@@ -136,9 +136,21 @@ fibers stay round.
   your pre-processor, as for fibers that touch.
 - The voxels a fiber fills are those of `hex_mesh`, whose fibers end in half
   spheres. `tet_mesh` ends them flat, so binder next to a fiber's end can
-  stop short of it and stay free there.
+  stop short of it: within the tolerance it is tied across the gap, and
+  beyond it stays free.
 - `voxel_size` must divide every cell length, and binder needs
   `clip_to_cell=True`, since it fills the cell.
+- Six tetrahedra to a voxel add up: binder at a CT scan's voxel size can
+  have as many elements as the fibers, or more. The fibers do not depend on
+  `voxel_size`, so the binder alone can be made coarser, for example from
+  blocks of 2 x 2 x 2 voxels that are at least half binder, which gives
+  about an eighth of the binder's elements:
+
+  ```python
+  nz, ny, nx = fit.binder.shape  # each even
+  coarse = fit.binder.reshape(nz // 2, 2, ny // 2, 2, nx // 2, 2).mean(axis=(1, 3, 5)) >= 0.5
+  tets = fem.tet_mesh(fit.to_assembly(), order=2, voxel_size=2 * fit.voxel_size, binder=coarse)
+  ```
 
 ## Writing the files
 
