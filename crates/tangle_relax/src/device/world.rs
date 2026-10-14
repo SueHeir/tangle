@@ -23,6 +23,7 @@ use super::kernels::{
     update_fiber_directors,
 };
 use super::{
+    cube_grid,
     AdaptiveSegmentationConfig, FiberMotion, PackedAssembly, PackingError, RelaxationConfig,
 };
 use crate::CellListConfig;
@@ -825,7 +826,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             );
             compact_active_indices::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(capacity.div_ceil(64) as u32, 1, 1),
+                cube_grid(capacity.div_ceil(64)),
                 cube_dim.clone(),
                 BufferArg::from_raw_parts(
                     self.segment_active.clone(),
@@ -864,7 +865,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
     /// Every caller that changes the active set also requests a list rebuild.
     fn update_neighbor_list_layout(&mut self) {
         let segments = self.packed.segment_count();
-        let segment_cubes = CubeCount::Static(segments.div_ceil(64) as u32, 1, 1);
+        let segment_cubes = cube_grid(segments.div_ceil(64));
         unsafe {
             mask_active_list_weights::launch_unchecked::<R>(
                 &self.client,
@@ -917,7 +918,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         unsafe {
             project_fiber_curvature_in_place::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(self.packed.fiber_count().div_ceil(64) as u32, 1, 1),
+                cube_grid(self.packed.fiber_count().div_ceil(64)),
                 CubeDim::new_1d(64),
                 BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                 BufferArg::from_raw_parts(
@@ -962,7 +963,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         unsafe {
             update_fiber_directors::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(self.packed.fiber_count().div_ceil(64) as u32, 1, 1),
+                cube_grid(self.packed.fiber_count().div_ceil(64)),
                 CubeDim::new_1d(64),
                 BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                 BufferArg::from_raw_parts(self.directors.clone(), self.packed.positions.len()),
@@ -1006,7 +1007,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
     pub fn run_batch(&mut self, config: &RelaxationConfig, iterations: usize) -> BatchStatus {
         assert!(iterations > 0);
         let cube_dim = CubeDim::new_1d(64);
-        let vertex_cubes = CubeCount::Static(self.packed.vertex_count().div_ceil(64) as u32, 1, 1);
+        let vertex_cubes = cube_grid(self.packed.vertex_count().div_ceil(64));
         unsafe {
             begin_relaxation_batch::launch_unchecked::<R>(
                 &self.client,
@@ -1026,7 +1027,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             unsafe {
                 find_segment_corrections::launch_unchecked::<R>(
                     &self.client,
-                    CubeCount::Static(self.active_segment_count.div_ceil(64) as u32, 1, 1),
+                    cube_grid(self.active_segment_count.div_ceil(64)),
                     cube_dim.clone(),
                     BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                     BufferArg::from_raw_parts(
@@ -1105,7 +1106,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 );
                 measure_curvature_ratio::launch_unchecked::<R>(
                     &self.client,
-                    CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1),
+                    cube_grid(self.active_vertex_count.div_ceil(64)),
                     cube_dim.clone(),
                     BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                     BufferArg::from_raw_parts(
@@ -1143,7 +1144,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 );
                 reduce_active_segment_penetration::launch_unchecked::<R>(
                     &self.client,
-                    CubeCount::Static(self.active_segment_count.div_ceil(64) as u32, 1, 1),
+                    cube_grid(self.active_segment_count.div_ceil(64)),
                     cube_dim.clone(),
                     BufferArg::from_raw_parts(
                         self.active_segment_indices.clone(),
@@ -1158,7 +1159,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 );
                 reduce_active_vertex_metrics::launch_unchecked::<R>(
                     &self.client,
-                    CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1),
+                    cube_grid(self.active_vertex_count.div_ceil(64)),
                     cube_dim.clone(),
                     BufferArg::from_raw_parts(
                         self.active_vertex_indices.clone(),
@@ -1219,7 +1220,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     for _ in 0..config.constraint_iterations {
                         find_internal_corrections::launch_unchecked::<R>(
                             &self.client,
-                            CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1),
+                            cube_grid(self.active_vertex_count.div_ceil(64)),
                             cube_dim.clone(),
                             BufferArg::from_raw_parts(
                                 self.positions.clone(),
@@ -1264,7 +1265,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                         );
                         apply_internal_corrections::launch_unchecked::<R>(
                             &self.client,
-                            CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1),
+                            cube_grid(self.active_vertex_count.div_ceil(64)),
                             cube_dim.clone(),
                             BufferArg::from_raw_parts(
                                 self.positions.clone(),
@@ -1306,7 +1307,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     FiberMotion::Flexible => {
                         apply_contact_corrections::launch_unchecked::<R>(
                             &self.client,
-                            CubeCount::Static(self.active_vertex_count.div_ceil(64) as u32, 1, 1),
+                            cube_grid(self.active_vertex_count.div_ceil(64)),
                             cube_dim.clone(),
                             BufferArg::from_raw_parts(
                                 self.positions.clone(),
@@ -1355,7 +1356,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     FiberMotion::RigidTranslation => {
                         apply_rigid_contact_corrections::launch_unchecked::<R>(
                             &self.client,
-                            CubeCount::Static(self.packed.fiber_count().div_ceil(64) as u32, 1, 1),
+                            cube_grid(self.packed.fiber_count().div_ceil(64)),
                             cube_dim.clone(),
                             BufferArg::from_raw_parts(
                                 self.positions.clone(),
@@ -1411,7 +1412,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     if let Some(targets) = &self.active_layer_targets {
                         apply_formation_layer_targets::launch_unchecked::<R>(
                             &self.client,
-                            CubeCount::Static(self.packed.fiber_count().div_ceil(64) as u32, 1, 1),
+                            cube_grid(self.packed.fiber_count().div_ceil(64)),
                             cube_dim.clone(),
                             BufferArg::from_raw_parts(
                                 self.positions.clone(),
@@ -1444,7 +1445,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     if let Some(targets) = &self.active_vertex_targets {
                         apply_vertex_targets::launch_unchecked::<R>(
                             &self.client,
-                            CubeCount::Static(targets.count.div_ceil(64) as u32, 1, 1),
+                            cube_grid(targets.count.div_ceil(64)),
                             cube_dim.clone(),
                             BufferArg::from_raw_parts(
                                 self.positions.clone(),
@@ -1500,7 +1501,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             // sibling's split from the same epoch.
             mark_refinement_candidates::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(self.packed.segment_count().div_ceil(64) as u32, 1, 1),
+                cube_grid(self.packed.segment_count().div_ceil(64)),
                 CubeDim::new_1d(64),
                 BufferArg::from_raw_parts(
                     self.segment_radii.clone(),
@@ -1540,7 +1541,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             );
             apply_refinement_candidates::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(self.packed.segment_count().div_ceil(64) as u32, 1, 1),
+                cube_grid(self.packed.segment_count().div_ceil(64)),
                 CubeDim::new_1d(64),
                 BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                 BufferArg::from_raw_parts(
@@ -1590,7 +1591,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             {
                 mark_coarsening_candidates::launch_unchecked::<R>(
                     &self.client,
-                    CubeCount::Static(self.packed.segment_count().div_ceil(64) as u32, 1, 1),
+                    cube_grid(self.packed.segment_count().div_ceil(64)),
                     CubeDim::new_1d(64),
                     BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                     BufferArg::from_raw_parts(
@@ -1641,7 +1642,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 );
                 apply_coarsening_candidates::launch_unchecked::<R>(
                     &self.client,
-                    CubeCount::Static(self.packed.segment_count().div_ceil(64) as u32, 1, 1),
+                    cube_grid(self.packed.segment_count().div_ceil(64)),
                     CubeDim::new_1d(64),
                     BufferArg::from_raw_parts(
                         self.segment_vertices.clone(),
@@ -1745,7 +1746,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         unsafe {
             apply_formation_layer_targets::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(self.packed.fiber_count().div_ceil(64) as u32, 1, 1),
+                cube_grid(self.packed.fiber_count().div_ceil(64)),
                 CubeDim::new_1d(64),
                 BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                 BufferArg::from_raw_parts(
@@ -1812,7 +1813,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         unsafe {
             initialize_vertex_displacement_targets::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(vertex_indices.len().div_ceil(64) as u32, 1, 1),
+                cube_grid(vertex_indices.len().div_ceil(64)),
                 CubeDim::new_1d(64),
                 BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                 BufferArg::from_raw_parts(indices.clone(), vertex_indices.len()),
@@ -1929,7 +1930,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 CompactionKinematics::RigidFiberCenters => {
                     compact_rigid_fiber_centers::launch_unchecked::<R>(
                         &self.client,
-                        CubeCount::Static(self.packed.fiber_count().div_ceil(64) as u32, 1, 1),
+                        cube_grid(self.packed.fiber_count().div_ceil(64)),
                         CubeDim::new_1d(64),
                         BufferArg::from_raw_parts(
                             self.positions.clone(),
@@ -1956,7 +1957,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 CompactionKinematics::MovingWalls => {
                     compact_moving_walls::launch_unchecked::<R>(
                         &self.client,
-                        CubeCount::Static(self.packed.vertex_count().div_ceil(64) as u32, 1, 1),
+                        cube_grid(self.packed.vertex_count().div_ceil(64)),
                         CubeDim::new_1d(64),
                         BufferArg::from_raw_parts(
                             self.positions.clone(),
@@ -1982,7 +1983,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 CompactionKinematics::AffineVertices => {
                     compact_affine_vertices::launch_unchecked::<R>(
                         &self.client,
-                        CubeCount::Static(self.packed.vertex_count().div_ceil(64) as u32, 1, 1),
+                        cube_grid(self.packed.vertex_count().div_ceil(64)),
                         CubeDim::new_1d(64),
                         BufferArg::from_raw_parts(
                             self.positions.clone(),
@@ -2116,7 +2117,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         unsafe {
             activate_formation_step::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(self.packed.fiber_count().div_ceil(64) as u32, 1, 1),
+                cube_grid(self.packed.fiber_count().div_ceil(64)),
                 CubeDim::new_1d(64),
                 BufferArg::from_raw_parts(
                     self.fiber_formation_steps.clone(),
@@ -2218,7 +2219,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         unsafe {
             capture_segment_contacts::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(self.active_segment_count.div_ceil(64) as u32, 1, 1),
+                cube_grid(self.active_segment_count.div_ceil(64)),
                 cube_dim,
                 BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                 BufferArg::from_raw_parts(
@@ -2493,7 +2494,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         unsafe {
             refine_vertex_paths::launch_unchecked::<R>(
                 &self.client,
-                CubeCount::Static(target_count.div_ceil(64) as u32, 1, 1),
+                cube_grid(target_count.div_ceil(64)),
                 CubeDim::new_1d(64),
                 BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                 BufferArg::from_raw_parts(
