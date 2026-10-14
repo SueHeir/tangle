@@ -80,8 +80,9 @@ def tet_mesh(
         fiber_time_limit: seconds one fiber may take; a fiber that takes
             longer stops the mesh with an error that names it. By default
             there is no limit.
-        progress: once a mesh has taken 10 s, print how far it has got every
-            30 s, and the slowest fiber still being meshed.
+        progress: print how far the mesh has got once it has taken 10 s and
+            every 30 s after that, naming the slowest fiber still being
+            meshed once it has taken 30 s.
         verbose: let gmsh print its own progress.
 
     Returns:

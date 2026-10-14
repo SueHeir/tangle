@@ -109,9 +109,9 @@ Fiber ends are flat.
   needs no `if __name__ == "__main__":` guard. With `workers=1` the fibers
   are meshed one after another in your own process, in a gmsh session
   `tet_mesh` starts and stops, so call it while gmsh is not initialized.
-- Once a mesh has taken 10 s, `tet_mesh` prints how far it has got every
-  30 s, with the fiber that has taken longest so far; `progress=False` keeps
-  it quiet. `fiber_time_limit` stops the mesh with an error naming any fiber
+- Once a mesh has taken 10 s, `tet_mesh` prints how far it has got, and
+  again every 30 s, naming the slowest fiber still being meshed once that
+  fiber has taken 30 s; `progress=False` keeps it quiet. `fiber_time_limit` stops the mesh with an error naming any fiber
   that takes longer than that many seconds.
 
 ## Writing the files
