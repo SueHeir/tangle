@@ -29,9 +29,11 @@ GMSH_TO_NASTRAN_TET10 = [0, 1, 2, 3, 4, 5, 6, 7, 9, 8]
 FLIP_TET4 = [0, 2, 1, 3]
 FLIP_TET10 = [0, 2, 1, 3, 6, 5, 4, 7, 9, 8]
 # A 10-node tetrahedron curved to a fiber's surface whose Jacobian falls
-# anywhere below this fraction of its straight-sided self's is straightened
-# (gmsh's own threshold for curved elements).
+# anywhere below this fraction of its straight-sided self's is too distorted
+# (gmsh's own threshold for curved elements): its edges bow half as far, up to
+# STRAIGHTENING_STEPS times, and then not at all.
 DISTORTION_LIMIT = 0.1
+STRAIGHTENING_STEPS = 3
 
 
 def tet_mesh(
@@ -82,7 +84,7 @@ def tet_mesh(
             tetrahedra (``CTETRA``/``C3D10``). The mid-edge nodes of a 10-node
             tetrahedron that lie on a fiber's surface are put on it, so the
             element's faces there curve with the fiber; an element that
-            curving would fold over keeps straight edges.
+            curving would fold over bows less, or keeps straight edges.
         elements_around: element edges around each fiber's cross-section,
             which also sets the element size along that fiber. By default 16
             for 4-node tetrahedra, whose flat faces then keep a round fiber's
@@ -602,27 +604,30 @@ def _upright(nodes: np.ndarray, elements: np.ndarray) -> np.ndarray:
 
 def _straighten_distorted(nodes: np.ndarray, elements: np.ndarray) -> int:
     """Straighten the edges of every 10-node tetrahedron that curving to
-    the fiber's surface has distorted, moving their mid-edge nodes in
-    ``nodes``, and return how many there were.
+    the fiber's surface has distorted as far as it needs, moving their
+    mid-edge nodes in ``nodes``, and return how many there were.
 
     Where the surface curves across a thin element, mid-edge nodes on the
     surface can fold it: somewhere inside, its Jacobian drops below
     DISTORTION_LIMIT of its straight-sided self's, or below zero, which
-    solvers reject. Back in the middles of its edges, they make it its
-    straight self again. That moves nodes its neighbors share, so they are
-    checked again."""
+    solvers reject. Its mid-edge nodes then move halfway back to the middles
+    of its edges, which keeps half of each bow, up to STRAIGHTENING_STEPS
+    times, and then all the way, which makes it its straight self again.
+    That moves nodes its neighbors share, so they are checked again."""
+    corners = nodes[elements[:, :4]]
+    edges = corners[:, 1:] - corners[:, :1]
+    straight = np.einsum("ij,ij->i", edges[:, 0], np.cross(edges[:, 1], edges[:, 2]))
+    middles = nodes[elements[:, TET10_EDGES]].mean(axis=2)  # the middles of the edges, which never move
     straightened = np.zeros(len(elements), dtype=bool)
-    while True:
-        corners = nodes[elements[:, :4]]
-        edges = corners[:, 1:] - corners[:, :1]
-        straight = np.einsum("ij,ij->i", edges[:, 0], np.cross(edges[:, 1], edges[:, 2]))
+    for step in itertools.count(1):
         lowest, _ = tet10_jacobians(nodes, elements)
-        distorted = (lowest < DISTORTION_LIMIT * straight) & ~straightened
+        distorted = lowest < DISTORTION_LIMIT * straight
         if not distorted.any():
             return int(straightened.sum())
         straightened |= distorted
-        chosen = elements[distorted]
-        nodes[chosen[:, 4:]] = nodes[chosen[:, TET10_EDGES]].mean(axis=2)
+        bow = 0.5 if step <= STRAIGHTENING_STEPS else 0.0
+        chosen = elements[distorted, 4:]
+        nodes[chosen] = middles[distorted] + bow * (nodes[chosen] - middles[distorted])
 
 
 def _fiber_solid(occ, fiber_id, points, axes, long, short, pieces, box):

@@ -91,16 +91,16 @@ Fiber ends are flat.
   cross-section divided by this many edges, so thin and flat fibers get
   smaller elements than thick ones. The default is 16 for 4-node tetrahedra,
   whose flat faces then keep a round fiber's volume within about 2%, and 8 for
-  10-node tetrahedra. Halving it gives about an eighth of the elements.
+  10-node tetrahedra. Halving it gives about a seventh of the elements.
   `element_size`, when given, caps the element edge in every fiber.
 - `order=2` writes 10-node tetrahedra. They avoid the stiffness of 4-node
   tetrahedra in bending, which matters for thin fibers. Their mid-edge nodes
   on a fiber's surface sit on that surface, so their faces there curve with
   the fiber: 8 around keep a round fiber's volume within about 0.5% and its
-  surface where TANGLE puts it, closer than 16 flat faces do, with about an
-  eighth of the elements. Where curving would fold an element (its Jacobian
-  dropping anywhere below a tenth of its straight-sided self's), that element
-  keeps straight edges, so every element is valid for the solver.
+  surface where TANGLE puts it, closer than 16 flat faces do, with about a
+  seventh of the elements. Where curving would fold an element (its Jacobian
+  dropping anywhere below a tenth of its straight-sided self's), its edges
+  bow less, or not at all, so every element is valid for the solver.
 - With `clip_to_cell=True` the fibers are cut at the cell walls, with their
   periodic images on periodic axes, so the mesh fills the same box as
   `hex_mesh`. A fiber that only touches a wall, such as one resting on the
@@ -162,10 +162,11 @@ fibers stay round.
   tets = fem.tet_mesh(fit.to_assembly(), order=2, voxel_size=2 * fit.voxel_size, binder=fit.binder)
   ```
 
-  Each doubling of `voxel_size` gives up to eight times fewer binder
-  elements, fewer for thin films, and films thinner than about half a voxel
-  can drop out. Compare `mesh.element_volumes()` of the binder (fiber id 0)
-  at two sizes to see what a coarser one loses.
+  Each doubling of `voxel_size` gives about an eighth of the binder
+  elements. Binder thinner than about half a voxel can drop out, and binder
+  beside a fiber fills whole voxels, so it can reach a little into the
+  fiber. Compare `mesh.element_volumes()` of the binder (fiber id 0) at two
+  sizes to see what a coarser one changes.
 
 ## Writing the files
 

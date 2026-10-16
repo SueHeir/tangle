@@ -410,16 +410,18 @@ class TetMeshTests(unittest.TestCase):
         self.assertTrue((lowest > 0).all())
         self.assertTrue((mesh.element_volumes() > 0).all())
 
-    def test_a_ten_node_tetrahedron_that_curving_folds_is_straightened(self):
+    def test_a_ten_node_tetrahedron_that_curving_folds_is_straightened_as_far_as_it_needs(self):
         corners = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
         straight, elements = ten_node_tetrahedron(corners)
-        # Bowing edge 1-2 out a little keeps it; pulling it in toward corner 0 folds the element.
-        for pull, folds in ((-0.05, False), (0.4, True)):
+        # Pulling the middle of edge 1-2 toward corner 0 by p makes the Jacobian 1 - 4 p (barycentric 1 + 2)
+        # times its straight value, lowest along that edge: a pull of 0.4 needs half of it gone, 2 all of it.
+        for pull, kept in ((-0.05, 1.0), (0.4, 0.5), (1.0, 0.125), (2.0, 0.0)):
             nodes = straight.copy()
             nodes[5] -= pull
-            bowed = nodes.copy()
-            self.assertEqual(tet_module._straighten_distorted(nodes, elements), int(folds))
-            np.testing.assert_array_equal(nodes, straight if folds else bowed)
+            self.assertEqual(tet_module._straighten_distorted(nodes, elements), int(kept < 1.0))
+            expected = straight.copy()
+            expected[5] -= kept * pull
+            np.testing.assert_allclose(nodes, expected, atol=1e-12)
 
     def test_fibers_are_separate_bodies(self):
         mesh = fem.tet_mesh(touching_cross(), 0.1)
