@@ -153,7 +153,8 @@ pub enum BpmExportMode {
     #[default]
     SpherocylindersExact,
     /// Tile every source segment with the shortest active segment length,
-    /// followed by one shorter end remainder when necessary.
+    /// followed by one shorter end remainder when necessary (one at least
+    /// the minimum capsule length; a shorter one joins the piece before it).
     SpherocylindersConstant,
 }
 
@@ -189,6 +190,10 @@ pub struct BpmExportConfig {
     /// Fiber types to export with their own atom and bond types. `None`: one
     /// fiber type per TANGLE material.
     pub fiber_types: Option<BpmFiberTypes>,
+    /// Shortest spherocylinder, in fiber diameters (default 1). Shorter
+    /// segments are merged with the next ones, so a capsule doesn't overlap
+    /// the unbonded capsule two along its fiber. Zero keeps every segment.
+    pub min_capsule_length_over_diameter: f64,
 }
 
 impl BpmExportConfig {
@@ -202,7 +207,15 @@ impl BpmExportConfig {
             atom_type: 1,
             bond_type: 1,
             fiber_types: None,
+            min_capsule_length_over_diameter: 1.0,
         }
+    }
+
+    /// Sets the shortest spherocylinder, in fiber diameters (zero: keep every
+    /// segment).
+    pub fn with_min_capsule_length_over_diameter(mut self, ratio: f64) -> Self {
+        self.min_capsule_length_over_diameter = ratio;
+        self
     }
 
     /// Gives each fiber a zero-based type (`of_fiber`, in assembly order) and
@@ -317,6 +330,8 @@ pub enum ExportError {
     InvalidSpacingRatio(f64),
     /// Radius-based sphere spacing was outside the supported interval.
     InvalidSphereSpacingOverRadius(f64),
+    /// Shortest-capsule ratio was negative or not finite.
+    InvalidCapsuleLengthRatio(f64),
     /// Caller-defined fiber types did not match the assembly's fibers.
     InvalidFiberTypes(String),
     /// First atom type was zero; LAMMPS types are one-based.
@@ -353,6 +368,10 @@ impl fmt::Display for ExportError {
             Self::InvalidSphereSpacingOverRadius(value) => write!(
                 f,
                 "sphere_spacing_over_radius must be in [1/3, 1], got {value}"
+            ),
+            Self::InvalidCapsuleLengthRatio(value) => write!(
+                f,
+                "min_capsule_length_over_diameter must be zero or more, got {value}"
             ),
             Self::InvalidFiberTypes(reason) => write!(f, "invalid fiber types: {reason}"),
             Self::InvalidAtomType(value) => {

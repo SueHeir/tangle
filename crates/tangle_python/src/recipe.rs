@@ -1027,7 +1027,7 @@ impl PyRunResult {
         Ok(())
     }
 
-    #[pyo3(signature = (data_path, *, mode="spherocylinders_exact", sphere_spacing_over_radius=1.0 / 3.0, density=1.0, atom_type=1, bond_type=1, fiber_types=None, type_names=None))]
+    #[pyo3(signature = (data_path, *, mode="spherocylinders_exact", sphere_spacing_over_radius=1.0 / 3.0, density=1.0, atom_type=1, bond_type=1, fiber_types=None, type_names=None, min_capsule_length_over_diameter=1.0))]
     #[allow(clippy::too_many_arguments)]
     fn export_bpm(
         &self,
@@ -1039,6 +1039,7 @@ impl PyRunResult {
         bond_type: u32,
         fiber_types: Option<Vec<u32>>,
         type_names: Option<Vec<String>>,
+        min_capsule_length_over_diameter: f64,
     ) -> PyResult<(usize, usize)> {
         // Hyphenated spellings from earlier releases are still accepted.
         let mode = mode.to_ascii_lowercase().replace('-', "_");
@@ -1063,6 +1064,7 @@ impl PyRunResult {
             atom_type,
             bond_type,
             fiber_types,
+            min_capsule_length_over_diameter,
         };
         let model = build_bpm_model(&self.model().assembly, &config)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;

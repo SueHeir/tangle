@@ -1091,6 +1091,7 @@ class RunResult:
         bond_type: int = ...,
         fiber_types: Sequence[int] | None = ...,
         type_names: Sequence[str] | None = ...,
+        min_capsule_length_over_diameter: float = ...,
     ) -> tuple[int, int]:
         """Write a LAMMPS data file of bonded spheres or spherocylinders for a DEM
         bonded-particle model. Returns ``(atom_count, bond_count)``.
@@ -1105,7 +1106,12 @@ class RunResult:
         ``atom_type`` and ``bond_type``; junction bonds take the bond types
         after them. A fiber type is a material unless ``fiber_types`` gives
         each fiber's zero-based type (in fiber order), with optional
-        ``type_names``."""
+        ``type_names``.
+
+        Each spherocylinder is at least ``min_capsule_length_over_diameter``
+        fiber diameters long (default 1): shorter segments merge with the
+        next, so a capsule doesn't overlap the unbonded capsule two along its
+        fiber. ``0`` keeps every segment."""
     def export_puma(
         self,
         output_directory: Path,
