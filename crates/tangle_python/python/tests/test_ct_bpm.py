@@ -212,6 +212,38 @@ def test_binder_bonds_go_into_a_bacillus_file(tmp_path):
     assert rows[0, 5] == pytest.approx(40.0 * 1e6)  # AsphericalShape.Z, micrometers: 40 long
 
 
+def test_a_bacillus_file_gets_lammps_inputs_for_its_fiber_types(tmp_path):
+    path = write_bacillus(tmp_path)
+    atom_types, tensile = ct.write_bpm_lammps_inputs(path)
+    assert (atom_types.name, tensile.name) == ("in.atom_types", "in.tensile") and atom_types.parent == tmp_path
+    script = atom_types.read_text().splitlines()
+    assert "fibers_bacillus.data" in script[0]
+    for line in ("special_bonds   lj 0.0 1.0 1.0 coul 1.0 1.0 1.0", "labelmap        atom 1 fiber",
+                 "labelmap        bond 1 fiber", "group           fiber type 1", "variable        E_1 index 1.0e9",
+                 "pair_style      granular/bacillus", "bond_style      bpm/guo"):
+        assert line in script
+    # ghosts reach across the longest capsule (40 long, 6 across) and bond (30)
+    assert "comm_modify     vel yes cutoff 57.5" in script
+    assert any(line.startswith("pair_coeff      1 1 hooke ${kn_1} 0.0 tangential linear_history") for line in script)
+    assert any(line.startswith("bond_coeff      1 ${E_1} $(v_E_1/(2*(1+v_nu_1))) ${E_1}") for line in script)
+    assert not any(line.startswith("bond_coeff      2") for line in script)
+    pull = tensile.read_text().splitlines()
+    assert "read_data       fibers_bacillus.data" in pull and "include         in.atom_types" in pull
+    assert "fix             integrate free nve/bacillus" in pull
+    # the binder bond type a later add_bpm_binder_bonds adds gets its own coefficients
+    bonds = [{"fibers": (0, 1), "position": np.array([37.0, 30.0, 32.0])}]
+    assert ct.add_bpm_binder_bonds(path, bonds, voxel_size=1.0) == 1
+    script = atom_types.read_text().splitlines()
+    assert any(line.startswith("# bond type 2 = binder") for line in script)
+    assert "variable        E_bond_2 index $(v_E_1)" in script
+    assert any(line.startswith("bond_coeff      2 ${E_bond_2}") for line in script)
+
+
+def test_lammps_inputs_are_for_capsule_files(tmp_path):
+    with pytest.raises(ValueError, match="bacillus"):
+        ct.write_bpm_lammps_inputs(write_bpm(tmp_path, capsules=False))
+
+
 def test_binder_spheres_wait_for_bacillus_support(tmp_path):
     with pytest.raises(ValueError, match="bacillus"):
         ct.add_bpm_binder_spheres(write_bacillus(tmp_path), binder_film(), voxel_size=1.0)
@@ -353,3 +385,28 @@ def test_two_fiber_types_get_their_own_atom_and_bond_types(tmp_path):
         a, b = atoms[int(row[2])], atoms[int(row[3])]
         assert a[1] == b[1] and int(row[1]) == int(a[2])
     assert len(sections["Bonds"]) == counts["atoms"] - 3  # one chain per fiber
+    script = (tmp_path / "in.atom_types").read_text().splitlines()
+    assert "group           fine type 1" in script and "group           coarse type 2" in script
+    assert "labelmap        bond 2 coarse" in script and "bond_style      bpm/guo" in script
+    assert (tmp_path / "in.tensile").exists()
+
+
+@pytest.mark.skipif(not GPU, reason="Tangle's solve runs on the GPU")
+def test_fibers_go_back_to_their_defined_diameters_and_relax_again(tmp_path):
+    s = np.arange(4.0, 61.0)
+    # Two fine fibers fitted a little thin and thick, 3.95 apart: at their defined 4 um they overlap.
+    lines = [np.stack([s, np.full_like(s, 30.0), np.full_like(s, 30.0)], 1),
+             np.stack([s, np.full_like(s, 33.95), np.full_like(s, 30.0)], 1)]
+    spec = ct.FiberSpec(diameter=4 * UM, name="fine")
+    fit = ct.FitResult(shape=(64, 64, 64), voxel_size=1 * UM, spec=spec, centerlines=lines,
+                       radii=np.array([1.8, 2.1]), support=np.ones(2), levels=ct.Levels(0.0, 1.0, 0.5))
+    exact = fit.with_defined_radii()
+    assert exact.radii.tolist() == [2.0, 2.0] and fit.radii.tolist() == [1.8, 2.1]
+    relaxed, run = fit.relax(defined_radii=True)
+    assert relaxed.radii.tolist() == [2.0, 2.0] and run.max_penetration <= 0.02 * spec.diameter
+    gap = np.linalg.norm(relaxed.centerlines[1] - relaxed.centerlines[0], axis=1).min()
+    assert gap >= 4.0 - 0.08
+    relaxed.export_bpm(run, tmp_path / "exact.data", lammps_inputs=False)
+    _, sections, _ = read_bpm(tmp_path / "exact.data")
+    assert {row[10] for row in sections["Bacilli"]} == {pytest.approx(4 * UM)}
+    assert not (tmp_path / "in.atom_types").exists()
