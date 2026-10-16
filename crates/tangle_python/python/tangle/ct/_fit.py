@@ -727,7 +727,19 @@ class FitResult:
                                      "tolerance_m": tolerance, "max_segment_m": max_segment}],
         )
 
-    def relax(self, settings: Any | None = None, adaptive: bool = False) -> tuple["FitResult", Any]:
+    def with_defined_radii(self) -> "FitResult":
+        """The same fibers, each at the diameter its type defines (``FiberSpec.diameter``, or ``thickness`` for an
+        oval fiber's short width) instead of the diameter fitted to the scan. Fibers that grow can overlap again,
+        so relax the result: ``fit.with_defined_radii().relax()``, or ``fit.relax(defined_radii=True)``."""
+        radii = np.empty(self.fiber_count)
+        for index in range(self.fiber_count):
+            spec = self.spec_of(index)
+            oval = self.long_axes is not None and self.long_axes[index] is not None and spec.ratio > 1.0
+            radii[index] = 0.5 * (spec.diameter / spec.ratio if oval else spec.diameter) / self.voxel_size
+        return replace(self, radii=radii, history=self.history + [{"stage": "defined radii"}])
+
+    def relax(self, settings: Any | None = None, adaptive: bool = False,
+              defined_radii: bool = False) -> tuple["FitResult", Any]:
         """Remove remaining overlaps with Tangle's own contact relaxation.
 
         Returns the relaxed fit and the ``RunResult`` (which reports
@@ -737,10 +749,13 @@ class FitResult:
         where no GPU is available. ``adaptive=True`` turns on Tangle's
         adaptive segmentation (unless ``settings`` already set it): segments
         split where fibers touch and merge again where they run free, which
-        pairs with :meth:`coarse_grained`.
+        pairs with :meth:`coarse_grained`. ``defined_radii=True`` first sets every fiber to the diameter its type
+        defines (see :meth:`with_defined_radii`), so the relaxation separates the fibers at those diameters.
         """
         import tangle
 
+        if defined_radii:
+            return self.with_defined_radii().relax(settings, adaptive)
         recipe = tangle.Recipe(self.to_assembly())
         if settings is None:
             settings = tangle.RelaxationSettings(
