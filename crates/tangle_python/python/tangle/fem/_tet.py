@@ -552,11 +552,15 @@ def _mesh_fiber(gmsh, fiber_id, points, axes, long, short, pieces, box, size, or
             gmsh.option.setNumber("Mesh.MeshSizeMax", size)
             gmsh.option.setNumber("Mesh.MeshSizeMin", 0.0)
             gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", curvature)
-            gmsh.option.setNumber("Mesh.ElementOrder", order)
-            # Mid-edge nodes on the fiber's surface go onto it, not onto the chord.
-            gmsh.option.setNumber("Mesh.SecondOrderLinear", 0)
+            gmsh.option.setNumber("Mesh.ElementOrder", 1)
             try:
                 gmsh.model.mesh.generate(3)
+                if order == 2:
+                    # Mid-edge nodes on the fiber's surface go onto it, not onto the chord. They only do when
+                    # the mesh becomes second order after it is made: made second order at once, they stay
+                    # on the chord.
+                    gmsh.option.setNumber("Mesh.SecondOrderLinear", 0)
+                    gmsh.model.mesh.setOrder(2)
                 node_tags, coordinates, _ = gmsh.model.mesh.getNodes()
                 if len(node_tags) == 0:
                     raise RuntimeError("gmsh made no nodes")
