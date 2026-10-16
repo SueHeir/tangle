@@ -94,6 +94,10 @@ fn validate_common(config: &BpmExportConfig) -> Result<(), ExportError> {
     if config.atom_type == 0 {
         return Err(ExportError::InvalidAtomType(config.atom_type));
     }
+    let ratio = config.min_capsule_length_over_diameter;
+    if !ratio.is_finite() || ratio < 0.0 {
+        return Err(ExportError::InvalidCapsuleLengthRatio(ratio));
+    }
     if config.bond_type == 0 {
         return Err(ExportError::InvalidFiberTypes(
             "the first bond type must be positive".to_string(),
@@ -309,7 +313,8 @@ fn dynamic_sphere_samples(
 }
 
 /// One capsule per active segment, or with `target_length`, each segment
-/// tiled with capsules of that length and one shorter end remainder.
+/// tiled with capsules of that length and one shorter end remainder; segments
+/// and remainders shorter than the minimum capsule length are merged first.
 fn build_spherocylinder_model(
     assembly: &FiberAssembly,
     config: &BpmExportConfig,
@@ -329,7 +334,13 @@ fn build_spherocylinder_model(
         let kind = type_of_fiber[fiber_index];
         let atom_type = model.atom_types[kind].atom_type;
         let radius = circular_radius(assembly, fiber.section.0 as usize, fiber.id.0)?;
+        // A capsule shorter than its diameter overlaps the capsule two along
+        // the chain, which it isn't bonded to, and LAMMPS's BPM bond styles
+        // keep pair forces on between those two.
+        let min_length = config.min_capsule_length_over_diameter * 2.0 * radius;
         let points = fiber_points(assembly, fiber_index)?;
+        let points = merged_vertices(points, min_length);
+        let target_length = target_length.map(|target| target.max(min_length));
         let first_capsule = model.capsules.len();
         for pair in points.windows(2) {
             append_constant_capsules(
@@ -337,6 +348,7 @@ fn build_spherocylinder_model(
                 pair[0],
                 pair[1],
                 target_length,
+                min_length,
                 fiber_index,
                 atom_type,
                 radius,
@@ -367,12 +379,35 @@ fn build_spherocylinder_model(
     Ok(model)
 }
 
+/// The fiber's vertices with the ones closer than `min_length` to the last
+/// kept vertex dropped, so each segment between kept vertices is at least that
+/// long. The fiber's two ends are always kept; a short remainder at the end
+/// joins the last segment, and a fiber shorter than `min_length` is one
+/// segment.
+fn merged_vertices(points: &[Vec3], min_length: f64) -> Vec<Vec3> {
+    let threshold = min_length * (1.0 - 1.0e-12);
+    let mut kept = vec![points[0]];
+    for &point in &points[1..] {
+        if distance(*kept.last().expect("kept is never empty"), point) >= threshold {
+            kept.push(point);
+        }
+    }
+    let end = *points.last().expect("a fiber has at least two vertices");
+    if kept.len() == 1 {
+        kept.push(end);
+    } else if *kept.last().expect("kept is never empty") != end {
+        *kept.last_mut().expect("kept is never empty") = end;
+    }
+    kept
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_constant_capsules(
     capsules: &mut Vec<DemCapsule>,
     start: Vec3,
     end: Vec3,
     target_length: Option<f64>,
+    min_length: f64,
     fiber_index: usize,
     atom_type: u32,
     radius: f64,
@@ -389,7 +424,11 @@ fn append_constant_capsules(
     let mut consumed = 0.0;
     while segment_length - consumed > tolerance {
         let remaining = segment_length - consumed;
-        let piece_length = remaining.min(target_length);
+        let mut piece_length = remaining.min(target_length);
+        // A remainder shorter than `min_length` joins this piece instead.
+        if remaining - piece_length > tolerance && remaining - piece_length < min_length {
+            piece_length = remaining;
+        }
         let center_distance = consumed + 0.5 * piece_length;
         let id = u32::try_from(capsules.len() + 1).map_err(|_| ExportError::IndexOverflow)?;
         capsules.push(DemCapsule {
@@ -713,11 +752,12 @@ mod tests {
             .iter()
             .map(|capsule| 2.0 * capsule.half_length)
             .collect::<Vec<_>>();
-        assert_eq!(lengths.len(), 4);
+        // The 0.05 end remainder is shorter than the 0.1 diameter, so it joins
+        // the last full piece.
+        assert_eq!(lengths.len(), 3);
         assert!((lengths[0] - 0.2).abs() < 1.0e-12);
         assert!((lengths[1] - 0.2).abs() < 1.0e-12);
-        assert!((lengths[2] - 0.2).abs() < 1.0e-12);
-        assert!((lengths[3] - 0.05).abs() < 1.0e-12);
+        assert!((lengths[2] - 0.25).abs() < 1.0e-12);
         let final_capsule = model.capsules.last().unwrap();
         assert!((final_capsule.position[0] + final_capsule.half_length - 0.65).abs() < 1.0e-12);
     }
@@ -1069,5 +1109,52 @@ mod tests {
         assert!((position[0] - 0.0).abs() < 1.0e-12, "{position:?}");
         assert!((position[1] - 0.25).abs() < 1.0e-12, "{position:?}");
         assert!((position[2] - 1.0).abs() < 1.0e-12, "{position:?}");
+    }
+
+    #[test]
+    fn capsules_are_at_least_a_diameter_long() {
+        // Diameter 0.2: segments of 0.05 merge until they reach it, and the
+        // short end remainder joins the last capsule.
+        let points = [
+            [0.0, 1.0, 1.0],
+            [0.05, 1.0, 1.0],
+            [0.1, 1.0, 1.0],
+            [0.3, 1.0, 1.0],
+            [0.32, 1.0, 1.0],
+            [0.6, 1.0, 1.0],
+            [0.65, 1.0, 1.0],
+        ];
+        let assembly = one_fiber(&points, 0.1);
+        let lengths = |config: &BpmExportConfig| {
+            let BpmModel::Spherocylinders(model) = build_bpm_model(&assembly, config).unwrap()
+            else {
+                panic!("expected spherocylinders");
+            };
+            let total = model.capsules.iter().map(|c| 2.0 * c.half_length).sum::<f64>();
+            assert!((total - 0.65).abs() < 1.0e-12);
+            model
+                .capsules
+                .iter()
+                .map(|capsule| 2.0 * capsule.half_length)
+                .collect::<Vec<_>>()
+        };
+        let merged = lengths(&BpmExportConfig::new(""));
+        assert_eq!(merged.len(), 2);
+        assert!((merged[0] - 0.3).abs() < 1.0e-12 && (merged[1] - 0.35).abs() < 1.0e-12);
+        // Constant mode tiles with at least a diameter too.
+        let constant = lengths(&config(BpmExportMode::SpherocylindersConstant));
+        assert!(constant.iter().all(|length| *length >= 0.2 - 1.0e-12), "{constant:?}");
+        // Off: every active segment.
+        let every = lengths(&BpmExportConfig::new("").with_min_capsule_length_over_diameter(0.0));
+        assert_eq!(every.len(), 6);
+        // A fiber shorter than its diameter is one capsule.
+        let short = one_fiber(&[[0.0, 1.0, 1.0], [0.05, 1.0, 1.0], [0.1, 1.0, 1.0]], 0.1);
+        let BpmModel::Spherocylinders(model) =
+            build_bpm_model(&short, &BpmExportConfig::new("")).unwrap()
+        else {
+            panic!("expected spherocylinders");
+        };
+        assert_eq!(model.capsules.len(), 1);
+        assert!(model.bonds.is_empty());
     }
 }

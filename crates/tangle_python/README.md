@@ -377,7 +377,11 @@ LAMMPS): one capsule atom per segment at its center of mass, an `N bacilli`
 header line, `Atoms` rows `id molecule type 1 density x y z`, and a `Bacilli`
 section with each capsule's inertia tensor, pole (half its axis) and diameter
 in the box frame. The bonds join the centers of neighbouring capsules along
-each fiber, for `bond_style bpm/guo`; contacts are `pair_style
+each fiber, for `bond_style bpm/guo`. Every capsule is at least one fiber
+diameter long (`min_capsule_length_over_diameter=1.0`; `0` keeps every
+segment): shorter segments merge with the next, since a shorter capsule would
+overlap the capsule two along its fiber, which it isn't bonded to, and the BPM
+bond styles keep pair forces on between those two; contacts are `pair_style
 granular/bacillus` and walls `fix wall/gran/bacillus` in the input script,
 which TANGLE does not write. The sphere modes write `atom_style bpm/sphere`.
 The column names of each section are in the comments at the top of the file.
