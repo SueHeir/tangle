@@ -312,7 +312,6 @@ def _tensile_script(path: Path, directory: Path) -> str:
         "fix             pull grip_hi move linear 0.0 0.0 0.0",
         "compute         kinetic free ke",
         "thermo_style    custom step time c_kinetic bonds",
-        "thermo_modify   norm no",
         "thermo          ${every}",
         "",
         "# Settle with both grips held",
