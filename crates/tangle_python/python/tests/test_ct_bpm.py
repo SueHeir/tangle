@@ -35,7 +35,14 @@ def read_bpm(path) -> tuple[dict, dict, list[str]]:
 
 
 def particles(sections) -> dict:
-    """id: (molecule, type, radius, density, center, half-length, axis), from the Atoms and Capsules rows."""
+    """id: (molecule, type, radius, density, center, half-length, axis), from the Atoms rows and the Capsules or
+    (atom_style bacillus) Bacilli rows."""
+    if "Bacilli" in sections:
+        bacilli = {row[0]: (0.5 * row[10], np.array(row[7:10])) for row in sections["Bacilli"]}
+        return {row[0]: (row[1], row[2], bacilli[row[0]][0], row[4], np.array(row[5:8]),
+                         float(np.linalg.norm(bacilli[row[0]][1])),
+                         bacilli[row[0]][1] / max(float(np.linalg.norm(bacilli[row[0]][1])), 1e-300))
+                for row in sections["Atoms"]}
     capsules = {row[0]: (row[1], np.array(row[2:5])) for row in sections.get("Capsules", [])}
     return {row[0]: (row[1], row[2], 0.5 * row[3], row[4], np.array(row[5:8]), *capsules.get(row[0], (0.0, np.zeros(3))))
             for row in sections["Atoms"]}
@@ -118,6 +125,48 @@ Bonds
 """
 
 
+# The same two fibers as export_bpm writes them now, for LAMMPS's atom_style bacillus (inertia left out: these
+# functions don't read it).
+BACILLUS = """TANGLE spherocylinder DEM-BPM fiber export (LAMMPS atom_style bacillus)
+# atom type 1 and bond type 1 = fiber type "fiber" (4 capsules)
+
+4 atoms
+4 bacilli
+2 bonds
+1 atom types
+1 bond types
+
+0.0 64.0 xlo xhi
+0.0 64.0 ylo yhi
+0.0 64.0 zlo zhi
+
+Atoms # bacillus
+
+1 1 1 1 1000.0 20.0 32.0 28.0
+2 1 1 1 1000.0 50.0 32.0 28.0
+3 2 1 1 1000.0 32.0 16.0 36.0
+4 2 1 1 1000.0 32.0 48.0 36.0
+
+Bacilli
+
+1 1 1 1 0 0 0 20.0 0.0 0.0 6.0
+2 1 1 1 0 0 0 10.0 0.0 0.0 6.0
+3 1 1 1 0 0 0 0.0 16.0 0.0 6.0
+4 1 1 1 0 0 0 0.0 16.0 0.0 6.0
+
+Bonds
+
+1 1 1 2
+2 1 3 4
+"""
+
+
+def write_bacillus(tmp_path):
+    path = tmp_path / "fibers_bacillus.data"
+    path.write_text(BACILLUS)
+    return path
+
+
 def write_bpm(tmp_path, capsules=True):
     path = tmp_path / "fibers_bpm.data"
     path.write_text(BPM if capsules else BPM[: BPM.index("Capsules")] + BPM[BPM.index("Bonds\n"):])
@@ -147,6 +196,25 @@ def test_binder_bonds_bond_each_pair_once_at_its_nearest_particles(tmp_path, cap
     assert sections["Bonds"][2] == ([3, 2, 1, 3] if capsules else [3, 2, 2, 3])
     assert not any(line.startswith("#") for line in body)  # the old layout's legends are gone: LAMMPS reads rows
     assert ct.add_bpm_binder_bonds(path, [], voxel_size=1.0) == 0 and read_bpm(path)[0]["bonds"] == 3
+
+
+def test_binder_bonds_go_into_a_bacillus_file(tmp_path):
+    path = write_bacillus(tmp_path)
+    bonds = [{"fibers": (0, 1), "position": np.array([37.0, 30.0, 32.0])}]
+    assert ct.add_bpm_binder_bonds(path, bonds, voxel_size=1.0) == 1
+    counts, sections, body = read_bpm(path)
+    assert counts == {"atoms": 4, "bacilli": 4, "bonds": 3, "atom types": 1, "bond types": 2}
+    assert sections["Bonds"][2] == [3, 2, 1, 3]  # nearest the axis of capsule 1 (x 0-40), as in the old layout
+    assert len(sections["Bacilli"]) == 4 and body[0] == "Atoms # bacillus"
+    dump = ct.write_bpm_ovito(path)
+    rows = np.array([[float(value) for value in line.split()] for line in dump.read_text().splitlines()[9:]])
+    assert (rows[:, 2] == 1).sum() == 4 and (rows[:, 2] == 3).sum() == 1
+    assert rows[0, 5] == pytest.approx(40.0 * 1e6)  # AsphericalShape.Z, micrometers: 40 long
+
+
+def test_binder_spheres_wait_for_bacillus_support(tmp_path):
+    with pytest.raises(ValueError, match="bacillus"):
+        ct.add_bpm_binder_spheres(write_bacillus(tmp_path), binder_film(), voxel_size=1.0)
 
 
 def test_binder_spheres_fill_the_binder_bonded_to_the_fibers_and_each_other(tmp_path):
@@ -238,6 +306,10 @@ def test_tangles_own_export_takes_both_binder_styles(tmp_path, mode):
     _, along = run.export_bpm(bonds_file, mode=mode)
     assert ct.add_bpm_binder_bonds(bonds_file, [{"fibers": (0, 1), "position": np.full(3, 32.0)}], fit.voxel_size) == 1
     run.export_bpm(spheres_file, mode=mode)
+    if mode != "spheres_exact":  # binder spheres don't go into a bacillus file yet
+        with pytest.raises(ValueError, match="bacillus"):
+            ct.add_bpm_binder_spheres(spheres_file, binder, fit.voxel_size)
+        return
     added = ct.add_bpm_binder_spheres(spheres_file, binder, fit.voxel_size)
     assert added.spheres > 0 and added.fiber_bonds > 0
     for path in (bonds_file, spheres_file):
@@ -249,3 +321,35 @@ def test_tangles_own_export_takes_both_binder_styles(tmp_path, mode):
             assert body[title + 1] == ""
         assert len(sections["Atoms"]) == counts["atoms"] and len(sections["Bonds"]) == counts["bonds"]
     assert unbonded_overlaps(spheres_file, binder_type=2) == []
+
+
+@pytest.mark.skipif(not GPU, reason="Tangle's solve runs on the GPU")
+def test_two_fiber_types_get_their_own_atom_and_bond_types(tmp_path):
+    s = np.arange(4.0, 61.0)
+    lines = [np.stack([s, np.full_like(s, 20.0), np.full_like(s, 30.0)], 1),   # coarse
+             np.stack([np.full_like(s, 32.0), s, np.full_like(s, 44.0)], 1),   # fine
+             np.stack([s, np.full_like(s, 50.0), np.full_like(s, 30.0)], 1)]   # fine, a hair thicker
+    specs = [ct.FiberSpec(diameter=10 * UM, name="coarse"), ct.FiberSpec(diameter=4 * UM, name="fine")]
+    fit = ct.FitResult(shape=(64, 64, 64), voxel_size=1 * UM, spec=specs[0], centerlines=lines,
+                       radii=np.array([5.0, 2.0, 2.1]), support=np.ones(3), levels=ct.Levels(0.0, 1.0, 0.5),
+                       specs=specs, types=np.array([0, 1, 1]))
+    relaxed, run = fit.relax()
+    path = tmp_path / "two_types.data"
+    relaxed.export_bpm(run, path, density=1500.0)
+    counts, sections, body = read_bpm(path)
+    assert counts["atom types"] == 2 and counts["bond types"] == 2 and counts["bacilli"] == counts["atoms"]
+    assert body[0] == "Atoms # bacillus"
+    header = path.read_text().splitlines()
+    assert any(line.startswith('# atom type 1 and bond type 1 = fiber type "fine"') for line in header)
+    assert any(line.startswith('# atom type 2 and bond type 2 = fiber type "coarse"') for line in header)
+    # The thinner type is type 1, for its capsules and the bonds along them.
+    atoms = {int(row[0]): row for row in sections["Atoms"]}
+    diameters = {int(row[0]): row[10] for row in sections["Bacilli"]}
+    for atom, row in atoms.items():
+        assert row[3] == 1 and row[4] == 1500.0
+        assert int(row[2]) == (2 if row[1] == 1 else 1)
+        assert diameters[atom] == pytest.approx(10 * UM if row[1] == 1 else (4 * UM if row[1] == 2 else 4.2 * UM))
+    for row in sections["Bonds"]:
+        a, b = atoms[int(row[2])], atoms[int(row[3])]
+        assert a[1] == b[1] and int(row[1]) == int(a[2])
+    assert len(sections["Bonds"]) == counts["atoms"] - 3  # one chain per fiber
