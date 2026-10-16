@@ -230,8 +230,7 @@ def test_a_bacillus_file_gets_lammps_inputs_for_its_fiber_types(tmp_path):
     pull = tensile.read_text().splitlines()
     assert "read_data       fibers_bacillus.data" in pull and "include         in.atom_types" in pull
     assert "fix             integrate free nve/bacillus" in pull
-    assert "variable        capsule_density atom 1000.0" in script
-    assert "variable        capsule_length atom (mass/v_capsule_density-4/3*PI*radius^3)/(PI*radius^2)" in script
+    assert "compute         capsule all property/atom length quatw quati quatj quatk" in pull
     assert any(line.startswith("dump            capsules all custom ${dump_every} tensile.dump") for line in pull)
     assert any(line.startswith("dump            bonds all local ${dump_every} tensile_bonds.dump") for line in pull)
     # the binder bond type a later add_bpm_binder_bonds adds gets its own coefficients
@@ -392,7 +391,6 @@ def test_two_fiber_types_get_their_own_atom_and_bond_types(tmp_path):
     script = (tmp_path / "in.atom_types").read_text().splitlines()
     assert "group           fine type 1" in script and "group           coarse type 2" in script
     assert "labelmap        bond 2 coarse" in script and "bond_style      bpm/guo" in script
-    assert "variable        capsule_density atom ternary(type==1,1500.0,1500.0)" in script
     assert (tmp_path / "in.tensile").exists()
 
 
