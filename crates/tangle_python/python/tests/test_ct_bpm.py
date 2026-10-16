@@ -408,5 +408,6 @@ def test_fibers_go_back_to_their_defined_diameters_and_relax_again(tmp_path):
     assert gap >= 4.0 - 0.08
     relaxed.export_bpm(run, tmp_path / "exact.data", lammps_inputs=False)
     _, sections, _ = read_bpm(tmp_path / "exact.data")
-    assert {row[10] for row in sections["Bacilli"]} == {pytest.approx(4 * UM)}
+    diameters = [row[10] for row in sections["Bacilli"]]
+    assert diameters == pytest.approx([4 * UM] * len(diameters))
     assert not (tmp_path / "in.atom_types").exists()

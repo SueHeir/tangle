@@ -112,6 +112,11 @@ def _g(value: float) -> str:
     return f"{value:.6g}"
 
 
+def _min(a: str, b: str) -> str:
+    """The smaller of two LAMMPS formulas (min() in a formula reduces a compute or fix, not two numbers)."""
+    return f"ternary(({a})<({b}),{a},{b})"
+
+
 def _atom_types_script(path: Path, data: _DataFile, particles: _Particles, types: list[_FiberType]) -> str:
     atom_count, bond_count = max(data.count("atom types"), 1), data.count("bond types")
     index_of = {atom: index for index, atom in enumerate(particles.ids.tolist())}
@@ -176,18 +181,18 @@ def _atom_types_script(path: Path, data: _DataFile, particles: _Particles, types
     for fiber in types:
         k = fiber.atom_type
         mass = fiber.density * np.pi * (0.25 * fiber.diameter ** 2 * fiber.shortest + fiber.diameter ** 3 / 6.0)
-        out.append(f"variable        dt_{k} equal min(0.02*{_g(min(fiber.shortest, fiber.diameter))}"
-                   f"/sqrt(v_E_{k}/{_g(fiber.density)}),0.1*sqrt({_g(mass)}/v_kn_{k}))")
+        wave = f"0.02*{_g(min(fiber.shortest, fiber.diameter))}/sqrt(v_E_{k}/{_g(fiber.density)})"
+        out.append(f"variable        dt_{k} equal {_min(wave, f'0.1*sqrt({_g(mass)}/v_kn_{k})')}")
         limits.append(f"v_dt_{k}")
     dt = limits[-1]
     for limit in reversed(limits[:-1]):
-        dt = f"min({limit},{dt})"
+        dt = _min(limit, dt)
     out.append(f"variable        dt equal {dt}")
     out.append("# the slowest sound speed, for scripts that time things by wave crossings")
     speeds = [f"sqrt(v_E_{fiber.atom_type}/{_g(fiber.density)})" for fiber in types]
     slowest = speeds[-1]
     for speed in reversed(speeds[:-1]):
-        slowest = f"min({speed},{slowest})"
+        slowest = _min(speed, slowest)
     out += [f"variable        sound_speed equal {slowest}", ""]
 
     out += ["pair_style      granular/bacillus"]
@@ -236,15 +241,17 @@ def _tensile_script(path: Path, directory: Path) -> str:
         "# The capsules whose centers are within grip of either end of the fibers' extent along the axis are the",
         "# grips: they don't rotate, the low one stays put and the high one moves away at a constant speed. The rest",
         "# move freely, with a little viscous damping. Every `every` steps, tensile.txt gets the strain (grip",
-        "# separation over the free length between them), the stress (the mean of the two grip forces over the box's",
-        "# cross-section), both grip forces and the number of bonds left. The material values are in",
-        f"# {ATOM_TYPES}: set them there, or with -var.",
+        "# separation over the length between the innermost held capsules' centers), the stress (the mean of the",
+        "# two grip forces over the box's cross-section), both grip forces and the number of bonds left. First the",
+        "# fibers settle for `settle` sound crossings with both grips held, so leftover overlaps relax before the",
+        f"# pull. The material values are in {ATOM_TYPES}: set them there, or with -var.",
         "",
         "variable        axis index x          # x, y or z",
         "variable        max_strain index 0.02",
         "variable        grip index 0.1        # share of the fibers' extent held at each end",
         "variable        transits index 30     # pull speed: sound crossings of the sample per 0.5% strain; more is",
         "                                      # slower, closer to quasi-static",
+        "variable        settle index 5        # sound crossings of the sample to settle before the pull",
         "variable        every index 1000      # steps between output lines",
         "",
         "units           si",
@@ -267,19 +274,12 @@ def _tensile_script(path: Path, directory: Path) -> str:
         "if \"$(is_defined(variable,low)) == 0\" then \"print 'axis must be x, y or z'\" \"quit 1\"",
         "variable        grip_lo equal $(v_low+v_grip*(v_high-v_low))",
         "variable        grip_hi equal $(v_high-v_grip*(v_high-v_low))",
-        "variable        free_length equal $(v_grip_hi-v_grip_lo)",
-        "",
-        "# Pull speed and damping, from the time a sound wave takes to cross the sample",
-        "variable        transit equal $((v_high-v_low)/v_sound_speed)",
-        "variable        steps equal $(ceil(v_transits*v_transit*v_max_strain/0.005/dt))",
-        "variable        speed equal $(v_max_strain*v_free_length/(v_steps*dt))",
-        "variable        gamma equal $(mass(all)/count(all)/v_transit)",
         "",
         "# The grips",
     ]
     for axis, (_, component, low, high) in axes.items():
         velocity = ["0.0", "0.0", "0.0"]
-        velocity[int(component)] = "${speed}"
+        velocity[int(component)] = "v_speed"  # set below, once the grips are known
         out.append(f"if \"${{axis}} == {axis}\" then &\n"
                    f"  \"region          rlo block {low}\" &\n"
                    f"  \"region          rhi block {high}\" &\n"
@@ -293,6 +293,12 @@ def _tensile_script(path: Path, directory: Path) -> str:
         "group           free subtract all grips",
         "if \"$(count(grip_lo)) == 0 || $(count(grip_hi)) == 0\" then &\n"
         "  \"print 'A grip holds no capsules: raise grip.'\" \"quit 1\"",
+        "# The free length is between the innermost held capsules' centers, where the bonds that stretch start",
+    ]
+    for axis in axes:  # one line per axis: ${axis} isn't substituted inside $()
+        out.append(f"if \"${{axis}} == {axis}\" then &\n"
+                   f"  \"variable        free_length equal $(bound(grip_hi,{axis}min)-bound(grip_lo,{axis}max))\"")
+    out += [
         "",
         "# Pull speed and damping, from the time a sound wave takes to cross the sample",
         "variable        transit equal $((v_high-v_low)/v_sound_speed)",
@@ -303,11 +309,20 @@ def _tensile_script(path: Path, directory: Path) -> str:
         "fix             integrate free nve/bacillus",
         "fix             damp free viscous ${gamma}",
         "fix             hold grip_lo move linear 0.0 0.0 0.0",
-        "fix             pull grip_hi move linear ${vx} ${vy} ${vz}",
+        "fix             pull grip_hi move linear 0.0 0.0 0.0",
+        "compute         kinetic free ke",
+        "thermo_style    custom step time c_kinetic bonds",
+        "thermo_modify   norm no",
+        "thermo          ${every}",
         "",
+        "# Settle with both grips held",
+        "run             $(ceil(v_settle*v_transit/dt))",
+        "",
+        "# Pull",
+        "unfix           pull",
+        "fix             pull grip_hi move linear ${vx} ${vy} ${vz}",
         "compute         force_lo grip_lo reduce sum f${axis}",
         "compute         force_hi grip_hi reduce sum f${axis}",
-        "compute         kinetic free ke",
         "variable        separation equal xcm(grip_hi,${axis})-xcm(grip_lo,${axis})",
         "variable        separation0 equal $(v_separation)",
         "variable        strain equal (v_separation-v_separation0)/v_free_length",
@@ -320,8 +335,6 @@ def _tensile_script(path: Path, directory: Path) -> str:
         "                file tensile.txt screen no title \"# step strain stress_Pa force_low_N force_high_N bonds\"",
         "",
         "thermo_style    custom step time v_strain v_stress c_force_lo c_force_hi c_kinetic bonds",
-        "thermo_modify   norm no",
-        "thermo          ${every}",
         "print           \"Pulling along ${axis} to strain ${max_strain} in ${steps} steps of ${dt} s at ${speed} m/s\"",
         "run             ${steps}",
         "write_data      tensile_end.data",
