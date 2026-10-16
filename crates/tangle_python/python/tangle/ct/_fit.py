@@ -727,7 +727,19 @@ class FitResult:
                                      "tolerance_m": tolerance, "max_segment_m": max_segment}],
         )
 
-    def relax(self, settings: Any | None = None, adaptive: bool = False) -> tuple["FitResult", Any]:
+    def with_defined_radii(self) -> "FitResult":
+        """The same fibers, each at the diameter its type defines (``FiberSpec.diameter``, or ``thickness`` for an
+        oval fiber's short width) instead of the diameter fitted to the scan. Fibers that grow can overlap again,
+        so relax the result: ``fit.with_defined_radii().relax()``, or ``fit.relax(defined_radii=True)``."""
+        radii = np.empty(self.fiber_count)
+        for index in range(self.fiber_count):
+            spec = self.spec_of(index)
+            oval = self.long_axes is not None and self.long_axes[index] is not None and spec.ratio > 1.0
+            radii[index] = 0.5 * (spec.diameter / spec.ratio if oval else spec.diameter) / self.voxel_size
+        return replace(self, radii=radii, history=self.history + [{"stage": "defined radii"}])
+
+    def relax(self, settings: Any | None = None, adaptive: bool = False,
+              defined_radii: bool = False) -> tuple["FitResult", Any]:
         """Remove remaining overlaps with Tangle's own contact relaxation.
 
         Returns the relaxed fit and the ``RunResult`` (which reports
@@ -737,10 +749,13 @@ class FitResult:
         where no GPU is available. ``adaptive=True`` turns on Tangle's
         adaptive segmentation (unless ``settings`` already set it): segments
         split where fibers touch and merge again where they run free, which
-        pairs with :meth:`coarse_grained`.
+        pairs with :meth:`coarse_grained`. ``defined_radii=True`` first sets every fiber to the diameter its type
+        defines (see :meth:`with_defined_radii`), so the relaxation separates the fibers at those diameters.
         """
         import tangle
 
+        if defined_radii:
+            return self.with_defined_radii().relax(settings, adaptive)
         recipe = tangle.Recipe(self.to_assembly())
         if settings is None:
             settings = tangle.RelaxationSettings(
@@ -769,12 +784,17 @@ class FitResult:
                          for axes, old, new in zip(long_axes, self.centerlines, relaxed)]
         return replace(self, centerlines=relaxed, confidence=None, long_axes=long_axes, history=self.history + [{"stage": "tangle relax", "max_penetration_m": run.max_penetration, "adaptive": bool(settings.adaptive_segmentation is not None), "smoothed_to_bend_limit": smoothed}]), run
 
-    def export_bpm(self, run: Any, data_path: str | os.PathLike, **options: Any) -> tuple[int, int]:
+    def export_bpm(self, run: Any, data_path: str | os.PathLike, *, lammps_inputs: bool = True,
+                   **options: Any) -> tuple[int, int]:
         """Write ``run``'s relaxed fibers (the ``RunResult`` that :meth:`relax` returned with this fit) as a LAMMPS
         bonded-particle data file, with one atom type and one bond type per fiber type of this fit: with two fiber
         diameters, the thinner type's capsules are atom type 1 and the bonds along them bond type 1, the other
         type's are atom type 2 and bond type 2. ``options`` go to ``RunResult.export_bpm`` (``mode``, ``density``,
         ...). Returns ``(atom_count, bond_count)``.
+
+        A file of capsules (the default mode) also gets ``in.atom_types``, the LAMMPS set-up of its fiber types, and
+        ``in.tensile``, an example tensile pull, in its folder (see :func:`write_bpm_lammps_inputs`), unless
+        ``lammps_inputs=False``.
 
             >>> relaxed, run = fit.coarse_grained().relax(adaptive=True)
             >>> relaxed.export_bpm(run, "fibers_bpm.data")
@@ -787,8 +807,13 @@ class FitResult:
         # Thinnest type first, whatever order the types were given in.
         order = sorted(range(len(specs)), key=lambda kind: specs[kind].diameter)
         rank = {kind: index for index, kind in enumerate(order)}
-        return run.export_bpm(data_path, fiber_types=[rank[int(kind)] for kind in types],
-                              type_names=[specs[kind].name for kind in order], **options)
+        counts = run.export_bpm(data_path, fiber_types=[rank[int(kind)] for kind in types],
+                                type_names=[specs[kind].name for kind in order], **options)
+        if lammps_inputs and not str(options.get("mode", "")).lower().startswith("spheres"):
+            from ._lammps_inputs import write_bpm_lammps_inputs
+
+            write_bpm_lammps_inputs(data_path)
+        return counts
 
     # -- statistics for a generator config ------------------------------------
     def population_summary(self) -> dict[str, Any]:

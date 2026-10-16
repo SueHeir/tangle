@@ -32,6 +32,7 @@ matplotlib``.
 """
 
 from ._bpm import BinderSpheres, add_bpm_binder_bonds, add_bpm_binder_spheres, write_bpm_ovito
+from ._lammps_inputs import write_bpm_lammps_inputs
 from ._evaluate import geometry_report, score
 from ._find import NetworkSettings, find_fibers
 from ._fit import FiberSpec, FitResult, FitSettings, fit_fibers, load_fit
@@ -69,5 +70,6 @@ __all__ = [
     "save_overlay_figure",
     "score",
     "synthetic_ct",
+    "write_bpm_lammps_inputs",
     "write_bpm_ovito",
 ]

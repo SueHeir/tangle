@@ -382,8 +382,8 @@ diameter long (`min_capsule_length_over_diameter=1.0`; `0` keeps every
 segment): shorter segments merge with the next, since a shorter capsule would
 overlap the capsule two along its fiber, which it isn't bonded to, and the BPM
 bond styles keep pair forces on between those two; contacts are `pair_style
-granular/bacillus` and walls `fix wall/gran/bacillus` in the input script,
-which TANGLE does not write. The sphere modes write `atom_style bpm/sphere`.
+granular/bacillus` and walls `fix wall/gran/bacillus` in the input script.
+The sphere modes write `atom_style bpm/sphere`.
 The column names of each section are in the comments at the top of the file.
 
 Each fiber type gets its own atom type and its own bond type for the bonds
@@ -394,6 +394,26 @@ fiber order) and `type_names=` group the fibers yourself; a CT fit does this
 for its own fiber types with `relaxed.export_bpm(run, path)`, so two fiber
 diameters give atom types 1 and 2 and bond types 1 and 2, thinnest first. The
 Python export takes one density for all types.
+
+A CT fit's capsule export also writes two LAMMPS inputs next to the data file
+(`tangle.ct.write_bpm_lammps_inputs` writes them for any capsule file):
+`in.atom_types`, to `include` after `read_data`, which sets
+`special_bonds`, `comm_modify` and `neighbor` for the model, a group and type
+label per fiber type, each type's `granular/bacillus` contacts and `bpm/guo`
+bonds from placeholder material values (index variables such as `E_1`, set
+before the include or with `-var`), and `dt`, a stable timestep; and
+`in.tensile`, an example that settles the fibers, holds the capsules near both
+ends of the sample along `axis` and pulls one end at constant speed to
+`max_strain`, writing strain, stress and both grip forces to `tensile.txt`:
+
+```bash
+lmp -in in.tensile -var axis x -var max_strain 0.02 -var E_1 3.0e9
+```
+
+`relaxed.export_bpm(run, path, lammps_inputs=False)` skips them. Before the
+export, `fit.relax(defined_radii=True)` puts every fiber back at its type's
+defined diameter (`FiberSpec.diameter`) instead of the fitted one and relaxes
+the overlaps that makes.
 
 For fibers found in a CT scan, `tangle.ct.add_bpm_binder_bonds` and
 `tangle.ct.add_bpm_binder_spheres` add the binder the scan shows, as bonds

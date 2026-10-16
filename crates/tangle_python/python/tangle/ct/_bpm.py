@@ -199,6 +199,9 @@ def add_bpm_binder_bonds(path: str | os.PathLike, bonds, voxel_size: float, *, b
     data.set_count("bond types", max(data.count("bond types"), kind))
     data.note(f"bond type {kind} = binder: fiber to fiber where the CT network found them bonded ({len(new)} bonds)")
     data.write()
+    from ._lammps_inputs import _refresh
+
+    _refresh(data.path)  # in.atom_types gets the new bond type
     return len(new)
 
 
