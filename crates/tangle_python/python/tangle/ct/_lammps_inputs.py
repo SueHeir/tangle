@@ -194,6 +194,17 @@ def _atom_types_script(path: Path, data: _DataFile, particles: _Particles, types
     for speed in reversed(speeds[:-1]):
         slowest = _min(speed, slowest)
     out += [f"variable        sound_speed equal {slowest}", ""]
+    # Each capsule's cylinder length from its mass, which read_data sets to density * (4/3 pi r^3 + pi r^2 L): no
+    # dump keyword gives it on every bacillus build. OVITO draws a spherocylinder from it (see in.tensile's dump).
+    density = repr(types[-1].density)
+    for fiber in reversed(types[:-1]):
+        density = f"ternary(type=={fiber.atom_type},{fiber.density!r},{density})"
+    out += [
+        "# each capsule's cylinder length (pole to pole), from its mass and the export's density, for dumps",
+        f"variable        capsule_density atom {density}",
+        "variable        capsule_length atom (mass/v_capsule_density-4/3*PI*radius^3)/(PI*radius^2)",
+        "",
+    ]
 
     out += ["pair_style      granular/bacillus"]
     for kind in range(1, atom_count + 1):
@@ -253,6 +264,7 @@ def _tensile_script(path: Path, directory: Path) -> str:
         "                                      # slower, closer to quasi-static",
         "variable        settle index 5        # sound crossings of the sample to settle before the pull",
         "variable        every index 1000      # steps between output lines",
+        "variable        dump_every index ${every}  # steps between OVITO frames",
         "",
         "units           si",
         "atom_style      bacillus",
@@ -313,6 +325,20 @@ def _tensile_script(path: Path, directory: Path) -> str:
         "compute         kinetic free ke",
         "thermo_style    custom step time c_kinetic bonds",
         "thermo          ${every}",
+        "",
+        "# OVITO: the capsules to tensile.dump (open it and set the particle shape to Spherocylinder) and the bonds to",
+        "# tensile_bonds.dump (add a Load trajectory modifier: batom1 and batom2 to Particle Identifiers.1 and .2,",
+        "# btype to Bond Type), every `dump_every` steps",
+        "compute         orientation all property/atom quatw quati quatj quatk",
+        "dump            capsules all custom ${dump_every} tensile.dump id mol type x y z radius v_capsule_length &\n"
+        "                c_orientation[1] c_orientation[2] c_orientation[3] c_orientation[4]",
+        "dump_modify     capsules colname radius AsphericalShape.X colname v_capsule_length AsphericalShape.Z &\n"
+        "                colname c_orientation[1] quatw colname c_orientation[2] quati &\n"
+        "                colname c_orientation[3] quatj colname c_orientation[4] quatk",
+        "compute         bond_ends all property/local batom1 batom2 btype",
+        "dump            bonds all local ${dump_every} tensile_bonds.dump index c_bond_ends[1] c_bond_ends[2] &\n"
+        "                c_bond_ends[3]",
+        "dump_modify     bonds colname c_bond_ends[1] batom1 colname c_bond_ends[2] batom2 colname c_bond_ends[3] btype",
         "",
         "# Settle with both grips held",
         "run             $(v_every*ceil(v_settle*v_transit/dt/v_every))  # whole outputs, so the pull's line up",
