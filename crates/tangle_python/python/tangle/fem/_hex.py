@@ -36,8 +36,12 @@ def hex_mesh(assembly, voxel_size: float, *, bond_radius_ratio: float | None = N
         binder: also mesh these voxels as binder: a boolean ``(z, y, x)``
             array over the same voxel grid (``nz, ny, nx`` voxels of
             ``voxel_size`` across the cell), such as a CT scan's binder
-            segmented on that grid. Voxels a fiber fills stay fiber; the
-            rest become binder elements that share nodes with their
+            segmented on that grid. It can also be over a grid a whole number
+            of times finer, such as the scan's own when ``voxel_size`` is a
+            few scan voxels: then a voxel is binder when binder fills at
+            least as much of it as is left empty, leaving out what the
+            fibers fill (on the finer grid). Voxels a fiber fills stay fiber;
+            the rest become binder elements that share nodes with their
             neighbors, so they bond the fibers they touch.
 
     Returns:
@@ -99,17 +103,48 @@ def voxel_labels(assembly, voxel_size: float, bond_radius_ratio: float | None, b
     ``(nx, ny, nz)``, then for every voxel (x fastest) whether it is filled
     (``phase``, nonzero) and by what (``owner``: a fiber's index plus 1, or 0
     for binder). Binder is the junction bridges of ``bond_radius_ratio`` and
-    the voxels of the ``binder`` mask that no fiber fills."""
-    counts, phase, owner, _ = _tangle.fem_voxel_labels(assembly, voxel_size, bond_radius_ratio)
+    the voxels of the ``binder`` mask that no fiber fills, with a mask over a
+    finer grid first brought to this one."""
+    counts, phase, owner = _labels(assembly, voxel_size, bond_radius_ratio)
     nx, ny, nz = counts
-    phase = np.frombuffer(phase, dtype="<u2")
-    owner = np.frombuffer(owner, dtype="<u4")
     if binder is not None:
         mask = np.asarray(binder, dtype=bool)
-        if mask.shape != (nz, ny, nx):
-            raise ValueError(f"binder must be a (z, y, x) mask of the {nz} x {ny} x {nx} voxel grid; got {mask.shape}")
+        factor = mask.shape[0] // nz if mask.ndim == 3 else 0
+        if factor < 1 or mask.shape != (factor * nz, factor * ny, factor * nx):
+            raise ValueError(
+                f"binder must be a (z, y, x) mask of the {nz} x {ny} x {nx} voxel grid, or of a grid a whole "
+                f"number of times finer; got {mask.shape}"
+            )
+        if factor > 1:
+            mask = _coarsened(assembly, voxel_size / factor, bond_radius_ratio, mask, factor)
         extra = mask.ravel() & (phase == 0)  # the fibers win: only voxels no fiber fills
         if extra.any():
             phase, owner = phase.copy(), owner.copy()
             phase[extra], owner[extra] = 1, 0  # filled, and owned by no fiber: binder
     return counts, phase, owner
+
+
+def _labels(assembly, voxel_size: float, bond_radius_ratio: float | None):
+    """TANGLE's own labels of the voxels of :func:`voxel_labels`, before
+    any mask."""
+    counts, phase, owner, _ = _tangle.fem_voxel_labels(assembly, voxel_size, bond_radius_ratio)
+    return counts, np.frombuffer(phase, dtype="<u2"), np.frombuffer(owner, dtype="<u4")
+
+
+def _coarsened(assembly, fine_size: float, bond_radius_ratio: float | None, mask: np.ndarray, factor: int) -> np.ndarray:
+    """A binder ``mask`` over voxels of ``fine_size`` on the grid ``factor``
+    times coarser: a coarse voxel is binder when its fine binder voxels are
+    at least as many as its empty ones, leaving out those a fiber fills (so
+    binder that fills the gap beside a fiber stays binder), and there is
+    some."""
+    _, phase, owner = _labels(assembly, fine_size, bond_radius_ratio)
+    fiber = ((phase != 0) & (owner != 0)).reshape(mask.shape)
+    binder = (mask | (phase != 0).reshape(mask.shape)) & ~fiber  # with any junction bridges
+    empty = ~(binder | fiber)
+    nz, ny, nx = (count // factor for count in mask.shape)
+
+    def per_voxel(fine: np.ndarray) -> np.ndarray:
+        return fine.reshape(nz, factor, ny, factor, nx, factor).sum(axis=(1, 3, 5))
+
+    filled, left = per_voxel(binder), per_voxel(empty)
+    return (filled > 0) & (filled >= left)

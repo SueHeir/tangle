@@ -7,7 +7,7 @@ two meshers, and both return the same `FemMesh`:
 | | `hex_mesh` | `tet_mesh` |
 |---|---|---|
 | Elements | 8-node hexahedra (`CHEXA`, `C3D8`) | 4- or 10-node tetrahedra (`CTETRA`, `C3D4` or `C3D10`) |
-| Fiber surface | voxel steps, like a CT scan | follows the round or oval surface |
+| Fiber surface | voxel steps, like a CT scan | follows the round or oval surface (10-node elements curve with it) |
 | Fibers that touch | share nodes, so they are bonded | separate bodies, so the solver needs contact or glue |
 | Binder | yes: bridges at junctions (`bond_radius_ratio`), or any voxels you give it (`binder`) | yes, from the same voxels, as tetrahedra tied to the fibers |
 | Needs | NumPy | NumPy and [gmsh](https://gmsh.info) |
@@ -67,10 +67,15 @@ does.
   `fit.to_assembly()` and `voxel_size=fit.voxel_size`). Voxels a fiber fills
   stay fiber; the others become binder bricks, which share nodes with the
   fibers they touch and so bond them.
+- The mask can also be over a grid a whole number of times finer than the
+  mesh's, such as the scan's own with `voxel_size=2 * fit.voxel_size`. A
+  mesh voxel is then binder when, of its finer voxels that no fiber fills, at
+  least as many are binder as are empty. Leaving out what the fibers fill
+  keeps the binder that fills the gaps beside them.
 
 ## Tetrahedra from gmsh
 
-`tet_mesh(assembly, element_size=None, *, order=1, elements_around=16,
+`tet_mesh(assembly, element_size=None, *, order=1, elements_around=None,
 clip_to_cell=True, voxel_size=None, bond_radius_ratio=None, binder=None,
 workers=None, fiber_time_limit=None, progress=True, verbose=False)` builds each fiber as a solid through a round or oval
 cross-section at every centerline vertex, straight from one vertex to the
@@ -84,11 +89,18 @@ Fiber ends are flat.
   for loose fibers, glued contact for bonded ones.
 - `elements_around` sets each fiber's element size: the perimeter of its
   cross-section divided by this many edges, so thin and flat fibers get
-  smaller elements than thick ones. The default of 16 keeps a round fiber's
-  volume within about 2%. `element_size`, when given, caps the element edge in
-  every fiber.
-- `order=2` writes 10-node tetrahedra with straight edges. They avoid the
-  stiffness of 4-node tetrahedra in bending, which matters for thin fibers.
+  smaller elements than thick ones. The default is 16 for 4-node tetrahedra,
+  whose flat faces then keep a round fiber's volume within about 2%, and 8 for
+  10-node tetrahedra. Halving it gives about an eighth of the elements.
+  `element_size`, when given, caps the element edge in every fiber.
+- `order=2` writes 10-node tetrahedra. They avoid the stiffness of 4-node
+  tetrahedra in bending, which matters for thin fibers. Their mid-edge nodes
+  on a fiber's surface sit on that surface, so their faces there curve with
+  the fiber: 8 around keep a round fiber's volume within about 0.5% and its
+  surface where TANGLE puts it, closer than 16 flat faces do, with about an
+  eighth of the elements. Where curving would fold an element (its Jacobian
+  dropping anywhere below a tenth of its straight-sided self's), that element
+  keeps straight edges, so every element is valid for the solver.
 - With `clip_to_cell=True` the fibers are cut at the cell walls, with their
   periodic images on periodic axes, so the mesh fills the same box as
   `hex_mesh`. A fiber that only touches a wall, such as one resting on the
@@ -128,10 +140,10 @@ fibers stay round.
   other but not with the fibers. `mesh.ties` holds one `Tie`, `BINDER_TIE`,
   from the binder's faces next to a voxel a fiber fills to the faces of the
   fibers' surfaces, and `write_abaqus` writes it as a `*TIE` that glues them.
-  Its position tolerance is twice the voxel size plus twice the depth of the
-  fibers' flat facets, since a binder face next to a fiber lies within about
-  1.2 voxels of the fiber's round surface. Binder nodes farther away stay
-  free.
+  Its position tolerance is twice the voxel size plus twice the depth a flat
+  element face on a fiber's surface can have, since a binder face next to a
+  fiber lies within about 1.2 voxels of the fiber's round surface. Binder
+  nodes farther away stay free.
 - The Nastran file has no tie: glue the binder's `PSOLID` to the fibers in
   your pre-processor, as for fibers that touch.
 - The voxels a fiber fills are those of `hex_mesh`, whose fibers end in half
@@ -140,17 +152,20 @@ fibers stay round.
   beyond it stays free.
 - `voxel_size` must divide every cell length, and binder needs
   `clip_to_cell=True`, since it fills the cell.
-- Six tetrahedra to a voxel add up: binder at a CT scan's voxel size can
-  have as many elements as the fibers, or more. The fibers do not depend on
-  `voxel_size`, so the binder alone can be made coarser, for example from
-  blocks of 2 x 2 x 2 voxels that are at least half binder, which gives
-  about an eighth of the binder's elements:
+- Six tetrahedra to a voxel add up: with `order=2`, binder has about eight
+  nodes per voxel, so binder at a CT scan's voxel size can have more nodes
+  than all the fibers. The fibers do not depend on `voxel_size`, so give the
+  binder voxels of a few scan voxels and pass the scan's mask as it is, as
+  for `hex_mesh`:
 
   ```python
-  nz, ny, nx = fit.binder.shape  # each even
-  coarse = fit.binder.reshape(nz // 2, 2, ny // 2, 2, nx // 2, 2).mean(axis=(1, 3, 5)) >= 0.5
-  tets = fem.tet_mesh(fit.to_assembly(), order=2, voxel_size=2 * fit.voxel_size, binder=coarse)
+  tets = fem.tet_mesh(fit.to_assembly(), order=2, voxel_size=2 * fit.voxel_size, binder=fit.binder)
   ```
+
+  Each doubling of `voxel_size` gives up to eight times fewer binder
+  elements, fewer for thin films, and films thinner than about half a voxel
+  can drop out. Compare `mesh.element_volumes()` of the binder (fiber id 0)
+  at two sizes to see what a coarser one loses.
 
 ## Writing the files
 
@@ -229,8 +244,8 @@ written in:
 
 ## Checking a mesh
 
-`mesh.volume` and `mesh.element_volumes()` give element volumes, and
-`mesh.node_sets()` the face node sets. Dividing `mesh.volume` by the cell
+`mesh.volume` and `mesh.element_volumes()` give element volumes, following the
+curved faces of 10-node tetrahedra, and `mesh.node_sets()` the face node sets. Dividing `mesh.volume` by the cell
 volume gives the solid fraction, which should be close to the
 `voxel_volume_fraction` of `export_puma` at a fine voxel size. To look at a
 mesh, write it with `write_vtu` and open it in ParaView.

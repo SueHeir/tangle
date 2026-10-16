@@ -4,6 +4,7 @@ Abaqus files."""
 import contextlib
 import dataclasses
 import io
+import itertools
 import math
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ import tangle
 try:
     import numpy as np
     import tangle.fem as fem
+    import tangle.fem._mesh as mesh_module
     import tangle.fem._tet as tet_module
 except ImportError:  # tangle.fem needs NumPy
     fem = None
@@ -42,6 +44,8 @@ def one_fiber():
 CROSS_AXES = (((0.2, 0.5, 0.4), (0.8, 0.5, 0.4)), ((0.5, 0.2, 0.6), (0.5, 0.8, 0.6)))
 # The corners of a tetrahedron's faces S1 to S4, as Abaqus numbers them.
 ABAQUS_FACES = [[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]]
+# The ends of the edges whose middles are nodes 4 to 9 of a 10-node tetrahedron.
+TET10_EDGES = [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)]
 
 
 def touching_cross():
@@ -59,6 +63,14 @@ def crossing_binder():
     binder = np.zeros((20, 20, 20), dtype=bool)  # (z, y, x)
     binder[9:11, 6:14, 8:12] = True
     return binder
+
+
+def ten_node_tetrahedron(corners, shape=lambda points: points):
+    """The nodes of one 10-node tetrahedron with these corners and its
+    mid-edge nodes in the middles of its edges, all moved by ``shape``."""
+    corners = np.asarray(corners, dtype=float)
+    middles = [(corners[first] + corners[second]) / 2 for first, second in TET10_EDGES]
+    return shape(np.concatenate([corners, middles])), np.arange(10)[None, :]
 
 
 def voxels_of(mesh, chosen, size):
@@ -190,8 +202,38 @@ class HexMeshTests(unittest.TestCase):
             self.assertTrue(binder_nodes & set(mesh.elements[mesh.element_fibers == fiber].ravel().tolist()))
 
     def test_a_binder_mask_must_match_the_grid(self):
-        with self.assertRaisesRegex(ValueError, "binder must be a"):
-            fem.hex_mesh(touching_cross(), 0.05, binder=np.zeros((20, 20, 19), dtype=bool))
+        for shape in ((20, 20, 19), (40, 40, 60), (30, 30, 30)):
+            with self.assertRaisesRegex(ValueError, "binder must be a"):
+                fem.hex_mesh(touching_cross(), 0.05, binder=np.zeros(shape, dtype=bool))
+
+    def test_a_binder_mask_twice_as_fine_comes_to_the_same_voxels(self):
+        assembly = touching_cross()
+        fine = crossing_binder().repeat(2, axis=0).repeat(2, axis=1).repeat(2, axis=2)  # 40 x 40 x 40
+        mesh = fem.hex_mesh(assembly, 0.05, binder=fine)
+        same = fem.hex_mesh(assembly, 0.05, binder=crossing_binder())
+        np.testing.assert_array_equal(mesh.elements, same.elements)
+        np.testing.assert_array_equal(mesh.element_fibers, same.element_fibers)
+
+    def test_a_finer_mask_is_binder_where_it_fills_half_of_what_the_fibers_leave(self):
+        assembly = touching_cross()
+        fine_fibers = voxels_of(fem.hex_mesh(assembly, 0.025), slice(None), 0.025)
+        coarse_fibers = voxels_of(fem.hex_mesh(assembly, 0.05), slice(None), 0.05)
+        # A voxel no fiber fills, though fibers fill some of its eight finer voxels.
+        for voxel in itertools.product(range(20), repeat=3):
+            free = [tuple(2 * at + step for at, step in zip(voxel, steps))
+                    for steps in itertools.product((0, 1), repeat=3)]
+            free = [fine for fine in free if fine not in fine_fibers]
+            if voxel not in coarse_fibers and 2 <= len(free) <= 6:
+                break
+        else:
+            self.fail("no voxel beside a fiber")
+        least = (len(free) + 1) // 2  # less than half the voxel, but half of what the fibers leave
+        for count, binder in ((least, {voxel}), (least - 1, set())):
+            mask = np.zeros((40, 40, 40), dtype=bool)
+            for fine in free[:count]:
+                mask[fine] = True
+            mesh = fem.hex_mesh(assembly, 0.05, binder=mask)
+            self.assertEqual(voxels_of(mesh, mesh.element_fibers == 0, 0.05), binder)
 
     def test_a_run_result_works_like_its_assembly(self):
         class Result:
@@ -293,6 +335,20 @@ class WriterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "tetrahedral meshes only"):
             dataclasses.replace(self.mesh, ties=(tie,))
 
+    def test_a_curved_ten_node_tetrahedron_has_the_volume_of_its_shape(self):
+        # (x, y, z + c x z) is quadratic, so ten nodes follow it exactly; it scales volume by 1 + c x.
+        corners = [[0, 0, 0], [2, 0, 0], [0, 1, 0], [0, 0, 3]]  # volume 1, centroid at x = 0.5
+        bent = lambda points: points + 0.4 * points[:, :1] * points[:, 2:] * [0, 0, 1]
+        nodes, elements = ten_node_tetrahedron(corners, bent)
+        mesh = fem.FemMesh(
+            nodes=nodes, elements=elements, element_type="tet10", element_fibers=np.array([1]),
+            element_materials=np.array([0]), materials=("fiber",), cell_origin=(0.0, 0.0, 0.0),
+            cell_lengths=(2.0, 1.0, 3.0),
+        )
+        np.testing.assert_allclose(mesh.element_volumes(), [1.2], rtol=1e-12)
+        lowest, mean = mesh_module.tet10_jacobians(nodes, elements)
+        np.testing.assert_allclose([lowest[0], mean[0]], [6.0, 7.2], rtol=1e-12)  # 6 (1 + 0.4 x) at x = 0, and its mean
+
     def test_material_values_must_be_physical(self):
         with self.assertRaises(ValueError):
             fem.ElasticMaterial(2.5e9, 0.5)
@@ -315,6 +371,11 @@ class TetMeshTests(unittest.TestCase):
         self.assertTrue((mesh.element_volumes() > 0).all())
         self.assertAlmostEqual(mesh.volume / (math.pi * radius**2 * length), 1.0, delta=0.03)
         self.assertEqual(mesh.fiber_ids, [1])
+        # Ten-node tetrahedra curve with the surface, so 8 around do better than 16 flat ones.
+        curved = fem.tet_mesh(assembly, order=2)
+        self.assertEqual(curved.element_type, "tet10")
+        self.assertAlmostEqual(curved.volume / (math.pi * radius**2 * length), 1.0, delta=0.005)
+        self.assertLess(3 * curved.element_count, mesh.element_count)
 
     def test_oval_fiber_keeps_its_long_axis(self):
         # A fiber along x puts its long axis along y by default.
@@ -328,13 +389,37 @@ class TetMeshTests(unittest.TestCase):
         np.testing.assert_allclose(extent, [160e-6, 30e-6, 12e-6], rtol=0.01)
         self.assertAlmostEqual(mesh.volume / (math.pi * 15e-6 * 6e-6 * 160e-6), 1.0, delta=0.03)
 
-    def test_ten_node_tetrahedra_put_mid_edge_nodes_in_nastran_order(self):
+    def test_ten_node_tetrahedra_curve_onto_the_fiber_surface(self):
         mesh = fem.tet_mesh(touching_cross(), 0.1, order=2)
         self.assertEqual(mesh.element_type, "tet10")
         points = mesh.nodes[mesh.elements]
-        for middle, (first, second) in zip(range(4, 10), [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)]):
-            np.testing.assert_allclose(points[:, middle], (points[:, first] + points[:, second]) / 2, atol=1e-12)
+        gaps = np.min([np.abs(distance - 0.1) for distance in axis_distances(mesh.nodes)], axis=0)
+        on_surface = (gaps < 1e-9)[mesh.elements]
+        curved = np.zeros(len(mesh.elements), dtype=bool)
+        for middle, (first, second) in zip(range(4, 10), TET10_EDGES):
+            offset = np.linalg.norm(points[:, middle] - (points[:, first] + points[:, second]) / 2, axis=1)
+            length = np.linalg.norm(points[:, second] - points[:, first], axis=1)
+            bowed = offset > 1e-12
+            # A middle node is its edge's middle, or that pushed out onto the round surface the edge lies on,
+            # by less than a quarter of the edge: in Nastran order, it is no other edge's middle.
+            self.assertTrue((on_surface[bowed][:, [first, second, middle]]).all())
+            self.assertTrue((offset < 0.25 * length).all())
+            curved |= bowed
+        self.assertTrue(curved.any())
+        lowest, _ = mesh_module.tet10_jacobians(mesh.nodes, mesh.elements)
+        self.assertTrue((lowest > 0).all())
         self.assertTrue((mesh.element_volumes() > 0).all())
+
+    def test_a_ten_node_tetrahedron_that_curving_folds_is_straightened(self):
+        corners = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
+        straight, elements = ten_node_tetrahedron(corners)
+        # Bowing edge 1-2 out a little keeps it; pulling it in toward corner 0 folds the element.
+        for pull, folds in ((-0.05, False), (0.4, True)):
+            nodes = straight.copy()
+            nodes[5] -= pull
+            bowed = nodes.copy()
+            self.assertEqual(tet_module._straighten_distorted(nodes, elements), int(folds))
+            np.testing.assert_array_equal(nodes, straight if folds else bowed)
 
     def test_fibers_are_separate_bodies(self):
         mesh = fem.tet_mesh(touching_cross(), 0.1)
@@ -382,6 +467,13 @@ class TetMeshTests(unittest.TestCase):
         self.assertGreater(distance.max(), radius * (1 - 1e-6))
         # Square sections at the ends and a section halving the turn: about the volume of the two stretches.
         self.assertAlmostEqual(mesh.volume / (math.pi * radius**2 * 160e-6), 1.0, delta=0.05)
+        # Ten-node tetrahedra curve onto the same surface, mid-edge nodes and all.
+        curved = fem.tet_mesh(assembly_of([200e-6, 150e-6, 100e-6], [line.tolist()],
+                                          tangle.Material("fiber", diameter=2 * radius)), order=2)
+        along = np.clip(np.einsum("nsk,sk->ns", curved.nodes[:, None] - start, step) / (step**2).sum(axis=1), 0.0, 1.0)
+        distance = np.linalg.norm(curved.nodes[:, None] - (start + along[..., None] * step), axis=2).min(axis=1)
+        self.assertLessEqual(distance.max(), radius * (1 + 1e-6))
+        self.assertAlmostEqual(curved.volume / (math.pi * radius**2 * 160e-6), 1.0, delta=0.05)
 
     def test_processes_mesh_exactly_as_this_process_does(self):
         here = fem.tet_mesh(touching_cross(), 0.1, workers=1)
@@ -502,6 +594,13 @@ class TetBinderTests(unittest.TestCase):
             self.assertTrue((np.isclose(radial, 0.1, rtol=1e-6) | at_end).all())
             # A closed surface of triangles has two faces for every corner, less four.
             self.assertEqual(len(faces), 2 * len(np.unique(corners)) - 4)
+
+    def test_a_binder_mask_twice_as_fine_meshes_the_same_binder(self):
+        fine = crossing_binder().repeat(2, axis=0).repeat(2, axis=1).repeat(2, axis=2)
+        mesh = fem.tet_mesh(touching_cross(), 0.1, voxel_size=0.05, binder=fine)
+        np.testing.assert_array_equal(mesh.nodes, self.mesh.nodes)
+        np.testing.assert_array_equal(mesh.elements, self.mesh.elements)
+        self.assertEqual(mesh.ties[0].tolerance, self.tie.tolerance)
 
     def test_abaqus_writes_the_tie_and_nastran_says_to_glue_the_binder(self):
         with tempfile.TemporaryDirectory() as directory:

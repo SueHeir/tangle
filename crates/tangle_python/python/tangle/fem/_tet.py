@@ -17,7 +17,7 @@ import time
 import numpy as np
 
 from ._hex import CORNERS, voxel_labels
-from ._mesh import HEX_TETRAHEDRA, TET_FACES, FemMesh, Tie
+from ._mesh import HEX_TETRAHEDRA, TET10_EDGES, TET_FACES, FemMesh, Tie, tet10_jacobians
 from ._source import as_assembly, binder_name, material_table
 
 # gmsh element types for 4- and 10-node tetrahedra.
@@ -28,9 +28,10 @@ GMSH_TO_NASTRAN_TET10 = [0, 1, 2, 3, 4, 5, 6, 7, 9, 8]
 # Swapping corners 1 and 2 turns a tetrahedron inside out, and back.
 FLIP_TET4 = [0, 2, 1, 3]
 FLIP_TET10 = [0, 2, 1, 3, 6, 5, 4, 7, 9, 8]
-# The corners at the ends of the edges whose middles are nodes 4 to 9 of a
-# 10-node tetrahedron, in Nastran and Abaqus order.
-TET10_EDGES = [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)]
+# A 10-node tetrahedron curved to a fiber's surface whose Jacobian falls
+# anywhere below this fraction of its straight-sided self's is straightened
+# (gmsh's own threshold for curved elements).
+DISTORTION_LIMIT = 0.1
 
 
 def tet_mesh(
@@ -38,7 +39,7 @@ def tet_mesh(
     element_size: float | None = None,
     *,
     order: int = 1,
-    elements_around: int = 16,
+    elements_around: int | None = None,
     clip_to_cell: bool = True,
     voxel_size: float | None = None,
     bond_radius_ratio: float | None = None,
@@ -78,10 +79,15 @@ def tet_mesh(
         element_size: largest element edge in meters. By default
             ``elements_around`` alone sets the size.
         order: 1 for 4-node tetrahedra (``CTETRA``/``C3D4``), 2 for 10-node
-            tetrahedra (``CTETRA``/``C3D10``) with straight edges.
+            tetrahedra (``CTETRA``/``C3D10``). The mid-edge nodes of a 10-node
+            tetrahedron that lie on a fiber's surface are put on it, so the
+            element's faces there curve with the fiber; an element that
+            curving would fold over keeps straight edges.
         elements_around: element edges around each fiber's cross-section,
-            which also sets the element size along that fiber. 16 keeps a
-            round fiber's volume within about 2%; more follows the surface
+            which also sets the element size along that fiber. By default 16
+            for 4-node tetrahedra, whose flat faces then keep a round fiber's
+            volume within about 2%, and 8 for 10-node tetrahedra, whose
+            curved faces keep it within about 0.5%. More follows the surface
             more closely, and fewer makes a lighter mesh.
         clip_to_cell: cut the fibers at the cell walls, with their periodic
             images on periodic axes, so the mesh fills the same box as
@@ -89,14 +95,18 @@ def tet_mesh(
             resting on the floor, is left whole, so it can stick out by up
             to 5% of its thickness. With ``False``, every fiber is meshed
             whole along its unwrapped centerline.
-        voxel_size: the voxel edge in meters for binder, which must divide
-            every cell length as in :func:`hex_mesh`. Binder needs it.
+        voxel_size: the edge in meters of the binder's voxels, which must
+            divide every cell length as in :func:`hex_mesh`. Binder needs it.
+            Each binder voxel adds six tetrahedra, so binder from a CT scan
+            is far lighter on voxels of a few scan voxels than on the scan's
+            own.
         bond_radius_ratio: also mesh binder bridges at persistent junctions,
             with this radius as a fraction of the thinner fiber's radius, as
             :func:`hex_mesh` does.
         binder: also mesh these voxels as binder: a boolean ``(z, y, x)``
-            array over the grid of ``voxel_size`` voxels across the cell, as
-            for :func:`hex_mesh`. Voxels a fiber fills stay fiber.
+            array over the grid of ``voxel_size`` voxels across the cell, or
+            over a grid a whole number of times finer such as a scan's own,
+            as for :func:`hex_mesh`. Voxels a fiber fills stay fiber.
         workers: how many gmsh processes mesh fibers at once; by default one
             per CPU core. With 1 the fibers are meshed in this process.
         fiber_time_limit: seconds one fiber may take; a fiber that takes
@@ -141,6 +151,8 @@ def tet_mesh(
     periodic = list(cell.periodic)
     if element_size is not None and not (math.isfinite(element_size) and element_size > 0.0):
         raise ValueError("element_size must be finite and positive")
+    if elements_around is None:
+        elements_around = 16 if order == 1 else 8
     if elements_around < 3:
         raise ValueError("elements_around must be at least 3")
     # OpenCASCADE's tolerances suit lengths near 1, not micrometers written in
@@ -187,16 +199,10 @@ def tet_mesh(
 
     elements = np.concatenate(element_blocks)
     fibers = np.concatenate(block_fibers)
-    if order == 2:
-        elements = elements[:, GMSH_TO_NASTRAN_TET10]
     # Keep only the nodes the tetrahedra use, numbered in order.
     used, elements = np.unique(elements, return_inverse=True)
     elements = elements.reshape(len(fibers), -1)
     nodes = np.concatenate(node_blocks)[used] * unit
-    corners = nodes[elements[:, :4]]
-    edges = corners[:, 1:] - corners[:, :1]
-    inverted = np.einsum("ij,ij->i", edges[:, 0], np.cross(edges[:, 1], edges[:, 2])) < 0.0
-    elements[inverted] = elements[inverted][:, FLIP_TET4 if order == 1 else FLIP_TET10]
 
     element_fibers = np.asarray(fiber_ids, dtype=np.int64)[fibers]
     element_materials = fiber_material[fibers]
@@ -525,8 +531,8 @@ def _start_gmsh(gmsh, verbose: bool) -> None:
 
 
 def _mesh_fiber(gmsh, fiber_id, points, axes, long, short, pieces, box, size, order, around, verbose):
-    """Nodes and gmsh-ordered tetrahedra of one fiber, in the scaled units, or
-    None when nothing of it is left inside the cell.
+    """Nodes and tetrahedra (in Nastran node order) of one fiber, in the
+    scaled units, or None when nothing of it is left inside the cell.
 
     The fiber gets its own gmsh model. Where a wall cuts a fiber lengthwise
     at a grazing angle, the cut face meets the fiber's surface in a thin
@@ -547,7 +553,8 @@ def _mesh_fiber(gmsh, fiber_id, points, axes, long, short, pieces, box, size, or
             gmsh.option.setNumber("Mesh.MeshSizeMin", 0.0)
             gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", curvature)
             gmsh.option.setNumber("Mesh.ElementOrder", order)
-            gmsh.option.setNumber("Mesh.SecondOrderLinear", 1)
+            # Mid-edge nodes on the fiber's surface go onto it, not onto the chord.
+            gmsh.option.setNumber("Mesh.SecondOrderLinear", 0)
             try:
                 gmsh.model.mesh.generate(3)
                 node_tags, coordinates, _ = gmsh.model.mesh.getNodes()
@@ -564,13 +571,54 @@ def _mesh_fiber(gmsh, fiber_id, points, axes, long, short, pieces, box, size, or
             blocks = []
             for tag in volumes:
                 types, _, element_nodes = gmsh.model.mesh.getElements(3, tag)
-                for element_type, nodes in zip(types, element_nodes):
+                for element_type, members in zip(types, element_nodes):
                     if element_type != wanted:
                         raise RuntimeError(f"gmsh made element type {element_type} instead of tetrahedra")
-                    blocks.append(node_index[np.asarray(nodes, dtype=np.int64)].reshape(-1, 4 if order == 1 else 10))
-            return np.asarray(coordinates, dtype=float).reshape(-1, 3), np.concatenate(blocks)
+                    blocks.append(node_index[np.asarray(members, dtype=np.int64)].reshape(-1, 4 if order == 1 else 10))
+            nodes = np.array(coordinates, dtype=float).reshape(-1, 3)
+            elements = np.concatenate(blocks)
+            if order == 2:
+                elements = elements[:, GMSH_TO_NASTRAN_TET10]
+            elements = _upright(nodes, elements)
+            if order == 2:
+                _straighten_distorted(nodes, elements)
+            return nodes, elements
         finally:
             gmsh.model.remove()
+
+
+def _upright(nodes: np.ndarray, elements: np.ndarray) -> np.ndarray:
+    """The tetrahedra, with any that are inside out turned back."""
+    corners = nodes[elements[:, :4]]
+    edges = corners[:, 1:] - corners[:, :1]
+    inverted = np.einsum("ij,ij->i", edges[:, 0], np.cross(edges[:, 1], edges[:, 2])) < 0.0
+    elements[inverted] = elements[inverted][:, FLIP_TET4 if elements.shape[1] == 4 else FLIP_TET10]
+    return elements
+
+
+def _straighten_distorted(nodes: np.ndarray, elements: np.ndarray) -> int:
+    """Straighten the edges of every 10-node tetrahedron that curving to
+    the fiber's surface has distorted, moving their mid-edge nodes in
+    ``nodes``, and return how many there were.
+
+    Where the surface curves across a thin element, mid-edge nodes on the
+    surface can fold it: somewhere inside, its Jacobian drops below
+    DISTORTION_LIMIT of its straight-sided self's, or below zero, which
+    solvers reject. Back in the middles of its edges, they make it its
+    straight self again. That moves nodes its neighbors share, so they are
+    checked again."""
+    straightened = np.zeros(len(elements), dtype=bool)
+    while True:
+        corners = nodes[elements[:, :4]]
+        edges = corners[:, 1:] - corners[:, :1]
+        straight = np.einsum("ij,ij->i", edges[:, 0], np.cross(edges[:, 1], edges[:, 2]))
+        lowest, _ = tet10_jacobians(nodes, elements)
+        distorted = (lowest < DISTORTION_LIMIT * straight) & ~straightened
+        if not distorted.any():
+            return int(straightened.sum())
+        straightened |= distorted
+        chosen = elements[distorted]
+        nodes[chosen[:, 4:]] = nodes[chosen[:, TET10_EDGES]].mean(axis=2)
 
 
 def _fiber_solid(occ, fiber_id, points, axes, long, short, pieces, box):
