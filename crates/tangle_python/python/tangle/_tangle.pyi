@@ -1089,9 +1089,23 @@ class RunResult:
         density: float = ...,
         atom_type: int = ...,
         bond_type: int = ...,
+        fiber_types: Sequence[int] | None = ...,
+        type_names: Sequence[str] | None = ...,
     ) -> tuple[int, int]:
         """Write a LAMMPS data file of bonded spheres or spherocylinders for a DEM
-        bonded-particle model. Returns ``(atom_count, bond_count)``."""
+        bonded-particle model. Returns ``(atom_count, bond_count)``.
+
+        Spherocylinders (the default) are written for LAMMPS's
+        ``atom_style bacillus``: one capsule per segment at its center of mass,
+        with a ``Bacilli`` section of inertia, pole and diameter, and bonds
+        between neighbouring capsules' centers. Spheres are written for
+        ``atom_style bpm/sphere``.
+
+        Each fiber type gets its own atom type and bond type, numbered from
+        ``atom_type`` and ``bond_type``; junction bonds take the bond types
+        after them. A fiber type is a material unless ``fiber_types`` gives
+        each fiber's zero-based type (in fiber order), with optional
+        ``type_names``."""
     def export_puma(
         self,
         output_directory: Path,

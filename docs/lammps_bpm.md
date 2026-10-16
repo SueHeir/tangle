@@ -135,8 +135,8 @@ new length; if it is now longer than the input script's communication cutoff
 
 - Orthorhombic boxes only, as for TANGLE's cells.
 - Round fibers of spheres. Files with capsules, such as TANGLE's
-  `spherocylinders_*` exports for DIRT, are refused; files from its
-  `spheres_*` exports read back.
+  `spherocylinders_*` exports for `atom_style bacillus`, are refused; files
+  from its `spheres_*` exports read back.
 - The relaxation sees only the fibers. Check the spheres in no fiber, which
   stay where they were, for overlaps with the fibers that moved.
 - To build a BPM model from a TANGLE network instead, see

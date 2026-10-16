@@ -11,9 +11,9 @@ use tangle_checkpoint::{CheckpointConfig, CheckpointPlugin, CheckpointReport};
 use tangle_core::{FiberAssembly, Section, Vec3};
 use tangle_export::{
     build_bpm_model, write_bpm_lammps_data, write_ovito_assembly_frame, write_ovito_view_script,
-    write_puma_bundle, BpmExportConfig, BpmExportMode, OvitoColoring, OvitoRepresentation,
-    OvitoTrajectoryConfig, OvitoTrajectoryPlugin, OvitoTrajectoryReport, PumaVoxelExportConfig,
-    DEFAULT_BOND_RADIUS_RATIO,
+    write_puma_bundle, BpmExportConfig, BpmExportMode, BpmFiberTypes, OvitoColoring,
+    OvitoRepresentation, OvitoTrajectoryConfig, OvitoTrajectoryPlugin, OvitoTrajectoryReport,
+    PumaVoxelExportConfig, DEFAULT_BOND_RADIUS_RATIO,
 };
 use tangle_generate::{
     random_footprint_center, FormationOperation, FormationRecipeConfig, FormationRecipePlugin,
@@ -1027,7 +1027,8 @@ impl PyRunResult {
         Ok(())
     }
 
-    #[pyo3(signature = (data_path, *, mode="spherocylinders_exact", sphere_spacing_over_radius=1.0 / 3.0, density=1.0, atom_type=1, bond_type=1))]
+    #[pyo3(signature = (data_path, *, mode="spherocylinders_exact", sphere_spacing_over_radius=1.0 / 3.0, density=1.0, atom_type=1, bond_type=1, fiber_types=None, type_names=None))]
+    #[allow(clippy::too_many_arguments)]
     fn export_bpm(
         &self,
         data_path: PathBuf,
@@ -1036,9 +1037,24 @@ impl PyRunResult {
         density: f64,
         atom_type: u32,
         bond_type: u32,
+        fiber_types: Option<Vec<u32>>,
+        type_names: Option<Vec<String>>,
     ) -> PyResult<(usize, usize)> {
         // Hyphenated spellings from earlier releases are still accepted.
         let mode = mode.to_ascii_lowercase().replace('-', "_");
+        let fiber_types = match (fiber_types, type_names) {
+            (None, None) => None,
+            (None, Some(_)) => {
+                return Err(PyValueError::new_err("type_names needs fiber_types"));
+            }
+            (Some(of_fiber), names) => {
+                let names = names.unwrap_or_else(|| {
+                    let count = of_fiber.iter().max().map_or(0, |kind| kind + 1);
+                    (0..count).map(|kind| format!("type {kind}")).collect()
+                });
+                Some(BpmFiberTypes { of_fiber, names })
+            }
+        };
         let config = BpmExportConfig {
             data_path: data_path.clone(),
             mode: parse_choice(&mode, "BPM export mode", BPM_MODES)?,
@@ -1046,6 +1062,7 @@ impl PyRunResult {
             density,
             atom_type,
             bond_type,
+            fiber_types,
         };
         let model = build_bpm_model(&self.model().assembly, &config)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;

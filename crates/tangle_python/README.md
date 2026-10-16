@@ -371,20 +371,34 @@ particles, bonds = result.export_bpm(
 )
 ```
 
-The data can be consumed by DIRT or another compatible LAMMPS BPM workflow;
-TANGLE does not generate the downstream runtime configuration. The column
-names of each section are in the comments at the top of the file. For fibers
-found in a CT scan, `tangle.ct.add_bpm_binder_bonds` and
+The spherocylinder modes write a data file for LAMMPS's `atom_style bacillus`
+(the capsule code on the `spherocylinder-nufeb` LAMMPS branch, not stock
+LAMMPS): one capsule atom per segment at its center of mass, an `N bacilli`
+header line, `Atoms` rows `id molecule type 1 density x y z`, and a `Bacilli`
+section with each capsule's inertia tensor, pole (half its axis) and diameter
+in the box frame. The bonds join the centers of neighbouring capsules along
+each fiber, for `bond_style bpm/guo`; contacts are `pair_style
+granular/bacillus` and walls `fix wall/gran/bacillus` in the input script,
+which TANGLE does not write. The sphere modes write `atom_style bpm/sphere`.
+The column names of each section are in the comments at the top of the file.
+
+Each fiber type gets its own atom type and its own bond type for the bonds
+along its fibers, numbered from `atom_type` and `bond_type`; bonds from
+junctions take the bond types after them, one per junction law. By default a
+fiber type is a material. `fiber_types=` (each fiber's zero-based type, in
+fiber order) and `type_names=` group the fibers yourself; a CT fit does this
+for its own fiber types with `relaxed.export_bpm(run, path)`, so two fiber
+diameters give atom types 1 and 2 and bond types 1 and 2, thinnest first. The
+Python export takes one density for all types.
+
+For fibers found in a CT scan, `tangle.ct.add_bpm_binder_bonds` and
 `tangle.ct.add_bpm_binder_spheres` add the binder the scan shows, as bonds
-between fibers or as bonded spheres, and `tangle.ct.write_bpm_ovito` writes a
-file to look at in OVITO (see the
+between fibers or (in a file of spheres, for now) as bonded spheres, and
+`tangle.ct.write_bpm_ovito` writes a file to look at in OVITO (see the
 [CT network tutorial](../../docs/ct_unet_tutorial.md#7-into-tangle)).
-Capsule atom styles require a compatible downstream implementation; they are
-not automatically supported by a stock LAMMPS installation. `atom_type` is the
-starting type, with materials assigned consecutive types; the Python export
-currently takes one density for all materials. Constitutive laws and contact
-exclusions belong to the downstream model. Intentional intra-fiber sphere
-overlap must not be confused with unwanted inter-fiber penetration.
+Constitutive laws and contact exclusions belong to the downstream model.
+Intentional intra-fiber sphere overlap must not be confused with unwanted
+inter-fiber penetration.
 
 ## LAMMPS BPM files in and out
 

@@ -769,6 +769,27 @@ class FitResult:
                          for axes, old, new in zip(long_axes, self.centerlines, relaxed)]
         return replace(self, centerlines=relaxed, confidence=None, long_axes=long_axes, history=self.history + [{"stage": "tangle relax", "max_penetration_m": run.max_penetration, "adaptive": bool(settings.adaptive_segmentation is not None), "smoothed_to_bend_limit": smoothed}]), run
 
+    def export_bpm(self, run: Any, data_path: str | os.PathLike, **options: Any) -> tuple[int, int]:
+        """Write ``run``'s relaxed fibers (the ``RunResult`` that :meth:`relax` returned with this fit) as a LAMMPS
+        bonded-particle data file, with one atom type and one bond type per fiber type of this fit: with two fiber
+        diameters, the thinner type's capsules are atom type 1 and the bonds along them bond type 1, the other
+        type's are atom type 2 and bond type 2. ``options`` go to ``RunResult.export_bpm`` (``mode``, ``density``,
+        ...). Returns ``(atom_count, bond_count)``.
+
+            >>> relaxed, run = fit.coarse_grained().relax(adaptive=True)
+            >>> relaxed.export_bpm(run, "fibers_bpm.data")
+        """
+        if len(run.centerlines()) != self.fiber_count:
+            raise ValueError(f"the run has {len(run.centerlines())} fibers and this fit {self.fiber_count}; "
+                             "export the run with the fit that relax() returned with it")
+        specs = self.specs if self.specs is not None and self.types is not None else [self.spec]
+        types = self.types if self.specs is not None and self.types is not None else np.zeros(self.fiber_count, int)
+        # Thinnest type first, whatever order the types were given in.
+        order = sorted(range(len(specs)), key=lambda kind: specs[kind].diameter)
+        rank = {kind: index for index, kind in enumerate(order)}
+        return run.export_bpm(data_path, fiber_types=[rank[int(kind)] for kind in types],
+                              type_names=[specs[kind].name for kind in order], **options)
+
     # -- statistics for a generator config ------------------------------------
     def population_summary(self) -> dict[str, Any]:
         """Statistics of the fitted fibers, in meters, for building a population."""

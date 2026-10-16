@@ -1,12 +1,13 @@
 """The binder in a bonded-particle (DEM) model of the fibers, two ways, and an OVITO view of the model.
 
 ``RunResult.export_bpm`` writes the relaxed fibers as a LAMMPS data file: particles along each fiber (one capsule
-per relaxed segment by default, or spheres with ``mode="spheres_exact"``), bonded along each fiber. The binder that
-:func:`find_fibers` finds goes into that file in one of two ways:
+per relaxed segment by default, for ``atom_style bacillus``, or spheres for ``atom_style bpm/sphere`` with
+``mode="spheres_exact"``), bonded along each fiber. The binder that :func:`find_fibers` finds goes into that file in
+one of two ways (binder spheres only into a file of spheres, for now):
 
     >>> run.export_bpm("binder_bonds.data")
     >>> ct.add_bpm_binder_bonds("binder_bonds.data", fit.bonds, fit.voxel_size)        # bonds from fiber to fiber
-    >>> run.export_bpm("binder_spheres.data")
+    >>> run.export_bpm("binder_spheres.data", mode="spheres_exact")
     >>> ct.add_bpm_binder_spheres("binder_spheres.data", fit.binder, fit.voxel_size)   # the binder as spheres
     >>> ct.write_bpm_ovito("binder_spheres.data")                                      # binder_spheres.dump
 
@@ -106,8 +107,23 @@ class _Particles:
     @classmethod
     def read(cls, data: _DataFile) -> "_Particles":
         values = np.array([[float(value) for value in row[:8]] for row in data.rows("Atoms")]).reshape(-1, 8)
-        ids = values[:, 0].astype(np.int64)  # columns: id molecule type diameter density x y z
+        ids = values[:, 0].astype(np.int64)
         half, axes = np.zeros(len(ids)), np.zeros((len(ids), 3))
+        if "Bacilli" in data.sections:
+            # atom_style bacillus. Atoms: id molecule type bacillus-flag density x y z; Bacilli: id Ixx Iyy Izz
+            # Ixy Ixz Iyz pole-x pole-y pole-z diameter, the pole being half the axis.
+            row_of = {atom: index for index, atom in enumerate(ids.tolist())}
+            diameters = np.zeros(len(ids))
+            for row in data.rows("Bacilli"):
+                index = row_of[int(row[0])]
+                pole = np.array([float(value) for value in row[7:10]])
+                half[index] = np.linalg.norm(pole)
+                axes[index] = pole / half[index] if half[index] > 0.0 else 0.0
+                diameters[index] = float(row[10])
+            return cls(ids, values[:, 1].astype(np.int64), values[:, 2].astype(np.int64), 0.5 * diameters,
+                       values[:, 4], values[:, 5:8], half, axes)
+        # atom_style bpm/sphere (Atoms: id molecule type diameter density x y z), and the capsule layout Tangle
+        # wrote before it wrote atom_style bacillus
         if "Capsules" in data.sections:  # atom-id half-length axis-x axis-y axis-z
             row_of = {atom: index for index, atom in enumerate(ids.tolist())}
             for row in data.rows("Capsules"):
@@ -220,8 +236,9 @@ def add_bpm_binder_spheres(path: str | os.PathLike, binder, voxel_size: float, d
       (within a voxel), or to that fiber's nearest particle if it overlaps none; and (``bond_types[1]``) to each
       sphere whose binder meets its own.
 
-    Each sphere is a molecule of its own, of ``atom_type``, with no ``Capsules`` row in a capsule file (so it stays
-    a sphere); the types default to the next free ones. Returns what was added, as :class:`BinderSpheres`. Binder
+    Each sphere is a molecule of its own, of ``atom_type``; the types default to the next free ones. The file must
+    hold spheres (``export_bpm(..., mode="spheres_exact")``): a capsule file for ``atom_style bacillus`` is refused
+    for now. Returns what was added, as :class:`BinderSpheres`. Binder
     thinner than the spheres (a film coating a fiber, say) still gets spheres, which then reach past it; give a
     smaller ``diameter`` to follow thin binder more closely.
     """
@@ -229,6 +246,9 @@ def add_bpm_binder_spheres(path: str | os.PathLike, binder, voxel_size: float, d
     from scipy.spatial import cKDTree
 
     data = _DataFile(path)
+    if "Bacilli" in data.sections:
+        raise ValueError(f"{data.path} is a capsule file for atom_style bacillus, which binder spheres can't go into "
+                         "yet; use add_bpm_binder_bonds, or export with mode=\"spheres_exact\"")
     particles = _Particles.read(data)
     mask = np.asarray(binder, dtype=bool)
     low, high = data.box()
@@ -382,8 +402,9 @@ def write_bpm_ovito(path: str | os.PathLike, dump: str | os.PathLike | None = No
     dump = Path(dump) if dump is not None else path.with_suffix(".dump")
     data = _DataFile(path)
     particles = _Particles.read(data)
+    # "# atom type 1 and bond type 1 = fiber type ...", or "# atom type 1 = TANGLE material ..." in older files
     fiber_types = {int(line.split()[3]) for line in data.header if line.startswith("# atom type") and
-                   "TANGLE material" in line and line.split()[3].isdigit()}
+                   ("fiber type" in line or "TANGLE material" in line) and line.split()[3].isdigit()}
     is_fiber = np.isin(particles.types, list(fiber_types)) if fiber_types else np.ones(len(particles.ids), bool)
     um = 1e6
     n = len(particles.ids)

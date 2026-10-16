@@ -11,8 +11,7 @@ use tangle_core::{FiberAssembly, MaterialId, Section, Vec3};
 use crate::{
     add, distance, nearest_anchor_capsule, nearest_anchor_particle, orthorhombic_bounds, scale,
     sub, write_capsule_lammps_data, write_lammps_data, BpmExportConfig, BpmExportMode, BpmModel,
-    DemAtomType, DemBond, DemBpmModel, DemCapsule, DemCapsuleBpmExportConfig, DemCapsuleBpmModel,
-    DemParticle, ExportError,
+    DemAtomType, DemBond, DemBpmModel, DemCapsule, DemCapsuleBpmModel, DemParticle, ExportError,
 };
 
 /// Summary of a completed solver-neutral BPM export.
@@ -69,23 +68,18 @@ pub fn build_bpm_model(
             build_sphere_model(assembly, config).map(BpmModel::Spheres)
         }
         BpmExportMode::SpherocylindersExact => {
-            let legacy = DemCapsuleBpmExportConfig {
-                data_path: config.data_path.clone(),
-                density: config.density,
-                atom_type: config.atom_type,
-                bond_type: config.bond_type,
-                maximum_length_over_diameter: None,
-            };
-            crate::build_dem_capsule_bpm_model(assembly, &legacy).map(BpmModel::Spherocylinders)
+            build_spherocylinder_model(assembly, config, None).map(BpmModel::Spherocylinders)
         }
         BpmExportMode::SpherocylindersConstant => {
-            build_constant_spherocylinder_model(assembly, config).map(BpmModel::Spherocylinders)
+            let target_length = shortest_active_segment(assembly)?;
+            build_spherocylinder_model(assembly, config, Some(target_length))
+                .map(BpmModel::Spherocylinders)
         }
     }
 }
 
-/// Writes a BPM model using the LAMMPS sphere or extended spherocylinder data
-/// representation selected during discretization.
+/// Writes a BPM model as a LAMMPS data file: `atom_style bpm/sphere` for
+/// spheres, `atom_style bacillus` for spherocylinders.
 pub fn write_bpm_lammps_data(model: &BpmModel, path: &Path) -> Result<(), ExportError> {
     match model {
         BpmModel::Spheres(model) => write_lammps_data(model, path),
@@ -100,7 +94,103 @@ fn validate_common(config: &BpmExportConfig) -> Result<(), ExportError> {
     if config.atom_type == 0 {
         return Err(ExportError::InvalidAtomType(config.atom_type));
     }
+    if config.bond_type == 0 {
+        return Err(ExportError::InvalidFiberTypes(
+            "the first bond type must be positive".to_string(),
+        ));
+    }
     Ok(())
+}
+
+/// The export's fiber types (one per material, or the caller's) and each
+/// fiber's index into them.
+fn fiber_typing(
+    assembly: &FiberAssembly,
+    config: &BpmExportConfig,
+) -> Result<(Vec<DemAtomType>, Vec<usize>), ExportError> {
+    let fibers = &assembly.topology.fibers;
+    let (names, materials, of_fiber): (Vec<String>, Vec<MaterialId>, Vec<usize>) =
+        match &config.fiber_types {
+            None => {
+                let mut of_fiber = Vec::with_capacity(fibers.len());
+                for fiber in fibers {
+                    if fiber.material.0 as usize >= assembly.materials.entries.len() {
+                        return Err(ExportError::MissingMaterial(fiber.id.0));
+                    }
+                    of_fiber.push(fiber.material.0 as usize);
+                }
+                let names = assembly
+                    .materials
+                    .entries
+                    .iter()
+                    .map(|descriptor| descriptor.name.clone())
+                    .collect::<Vec<_>>();
+                let materials = (0..names.len())
+                    .map(|index| MaterialId(index as u32))
+                    .collect();
+                (names, materials, of_fiber)
+            }
+            Some(types) => {
+                if types.of_fiber.len() != fibers.len() {
+                    return Err(ExportError::InvalidFiberTypes(format!(
+                        "{} fiber types for {} fibers",
+                        types.of_fiber.len(),
+                        fibers.len()
+                    )));
+                }
+                if let Some(kind) = types
+                    .of_fiber
+                    .iter()
+                    .find(|kind| **kind as usize >= types.names.len())
+                {
+                    return Err(ExportError::InvalidFiberTypes(format!(
+                        "type {kind} of {} named types",
+                        types.names.len()
+                    )));
+                }
+                let of_fiber = types
+                    .of_fiber
+                    .iter()
+                    .map(|kind| *kind as usize)
+                    .collect::<Vec<_>>();
+                let materials = (0..types.names.len())
+                    .map(|kind| {
+                        of_fiber
+                            .iter()
+                            .position(|of| *of == kind)
+                            .map_or(MaterialId(0), |fiber| fibers[fiber].material)
+                    })
+                    .collect();
+                (types.names.clone(), materials, of_fiber)
+            }
+        };
+    let types = names
+        .into_iter()
+        .zip(materials)
+        .enumerate()
+        .map(|(index, (name, material))| {
+            let offset = u32::try_from(index).map_err(|_| ExportError::IndexOverflow)?;
+            Ok(DemAtomType {
+                atom_type: config
+                    .atom_type
+                    .checked_add(offset)
+                    .ok_or(ExportError::IndexOverflow)?,
+                bond_type: config
+                    .bond_type
+                    .checked_add(offset)
+                    .ok_or(ExportError::IndexOverflow)?,
+                material,
+                material_name: name,
+                particles: 0,
+            })
+        })
+        .collect::<Result<Vec<_>, ExportError>>()?;
+    Ok((types, of_fiber))
+}
+
+/// Bond type of junction law zero: the first after the fiber types' bond types.
+fn first_junction_bond_type(config: &BpmExportConfig, types: &[DemAtomType]) -> u32 {
+    config.bond_type.saturating_add(types.len() as u32)
 }
 
 fn validate_sphere_spacing(spacing: f64) -> Result<(), ExportError> {
@@ -115,20 +205,18 @@ fn build_sphere_model(
     config: &BpmExportConfig,
 ) -> Result<DemBpmModel, ExportError> {
     let (box_low, box_high) = orthorhombic_bounds(assembly)?;
+    let (atom_types, type_of_fiber) = fiber_typing(assembly, config)?;
     let mut model = DemBpmModel {
         box_low,
         box_high,
-        atom_types: atom_types(assembly, config.atom_type)?,
+        atom_types,
         ..DemBpmModel::default()
     };
     let mut fiber_particle_ranges = Vec::with_capacity(assembly.topology.fibers.len());
 
     for (fiber_index, fiber) in assembly.topology.fibers.iter().enumerate() {
-        let atom_type = model
-            .atom_types
-            .get(fiber.material.0 as usize)
-            .ok_or(ExportError::MissingMaterial(fiber.id.0))?
-            .atom_type;
+        let kind = type_of_fiber[fiber_index];
+        let atom_type = model.atom_types[kind].atom_type;
         let radius = circular_radius(assembly, fiber.section.0 as usize, fiber.id.0)?;
         let points = fiber_points(assembly, fiber_index)?;
         let spacing = radius * config.sphere_spacing_over_radius;
@@ -150,11 +238,10 @@ fn build_sphere_model(
                 position,
             });
         }
-        model.atom_types[fiber.material.0 as usize].particles +=
-            model.particles.len() - first_particle;
+        model.atom_types[kind].particles += model.particles.len() - first_particle;
         append_consecutive_bonds(
             &mut model.bonds,
-            config.bond_type,
+            model.atom_types[kind].bond_type,
             model.particles[first_particle..]
                 .iter()
                 .map(|particle| particle.id),
@@ -162,7 +249,8 @@ fn build_sphere_model(
         fiber_particle_ranges.push(first_particle..model.particles.len());
     }
 
-    append_sphere_junction_bonds(assembly, &mut model, &fiber_particle_ranges)?;
+    let junction_base = first_junction_bond_type(config, &model.atom_types);
+    append_sphere_junction_bonds(assembly, &mut model, &fiber_particle_ranges, junction_base)?;
     wrap_sphere_centers(assembly, &mut model);
     Ok(model)
 }
@@ -220,26 +308,26 @@ fn dynamic_sphere_samples(
     Ok(samples)
 }
 
-fn build_constant_spherocylinder_model(
+/// One capsule per active segment, or with `target_length`, each segment
+/// tiled with capsules of that length and one shorter end remainder.
+fn build_spherocylinder_model(
     assembly: &FiberAssembly,
     config: &BpmExportConfig,
+    target_length: Option<f64>,
 ) -> Result<DemCapsuleBpmModel, ExportError> {
-    let target_length = shortest_active_segment(assembly)?;
     let (box_low, box_high) = orthorhombic_bounds(assembly)?;
+    let (atom_types, type_of_fiber) = fiber_typing(assembly, config)?;
     let mut model = DemCapsuleBpmModel {
         box_low,
         box_high,
-        atom_types: atom_types(assembly, config.atom_type)?,
+        atom_types,
         ..DemCapsuleBpmModel::default()
     };
     let mut fiber_capsule_ranges = Vec::with_capacity(assembly.topology.fibers.len());
 
     for (fiber_index, fiber) in assembly.topology.fibers.iter().enumerate() {
-        let atom_type = model
-            .atom_types
-            .get(fiber.material.0 as usize)
-            .ok_or(ExportError::MissingMaterial(fiber.id.0))?
-            .atom_type;
+        let kind = type_of_fiber[fiber_index];
+        let atom_type = model.atom_types[kind].atom_type;
         let radius = circular_radius(assembly, fiber.section.0 as usize, fiber.id.0)?;
         let points = fiber_points(assembly, fiber_index)?;
         let first_capsule = model.capsules.len();
@@ -258,11 +346,10 @@ fn build_constant_spherocylinder_model(
         if model.capsules.len() == first_capsule {
             return Err(ExportError::InvalidFiberSpan(fiber.id.0));
         }
-        model.atom_types[fiber.material.0 as usize].particles +=
-            model.capsules.len() - first_capsule;
+        model.atom_types[kind].particles += model.capsules.len() - first_capsule;
         append_consecutive_bonds(
             &mut model.bonds,
-            config.bond_type,
+            model.atom_types[kind].bond_type,
             model.capsules[first_capsule..]
                 .iter()
                 .map(|capsule| capsule.id),
@@ -270,7 +357,12 @@ fn build_constant_spherocylinder_model(
         fiber_capsule_ranges.push(first_capsule..model.capsules.len());
     }
 
-    append_capsule_junction_bonds(assembly, &mut model, &fiber_capsule_ranges)?;
+    let junction_base = first_junction_bond_type(config, &model.atom_types);
+    append_capsule_junction_bonds(assembly, &mut model, &fiber_capsule_ranges, junction_base)?;
+    // TANGLE keeps long periodic fibers unwrapped so their centerlines remain
+    // continuous across many cell traversals; LAMMPS needs the centers in the
+    // box. Wrap only after junction lookup, which compares capsules and
+    // anchors in the same unwrapped frame.
     wrap_capsule_centers(assembly, &mut model);
     Ok(model)
 }
@@ -280,7 +372,7 @@ fn append_constant_capsules(
     capsules: &mut Vec<DemCapsule>,
     start: Vec3,
     end: Vec3,
-    target_length: f64,
+    target_length: Option<f64>,
     fiber_index: usize,
     atom_type: u32,
     radius: f64,
@@ -292,6 +384,7 @@ fn append_constant_capsules(
         return Ok(());
     }
     let axis = scale(delta, 1.0 / segment_length);
+    let target_length = target_length.unwrap_or(segment_length);
     let tolerance = target_length * 1.0e-10;
     let mut consumed = 0.0;
     while segment_length - consumed > tolerance {
@@ -338,29 +431,6 @@ fn shortest_active_segment(assembly: &FiberAssembly) -> Result<f64, ExportError>
     } else {
         Err(ExportError::NoActiveSegments)
     }
-}
-
-fn atom_types(
-    assembly: &FiberAssembly,
-    first_atom_type: u32,
-) -> Result<Vec<DemAtomType>, ExportError> {
-    assembly
-        .materials
-        .entries
-        .iter()
-        .enumerate()
-        .map(|(material, descriptor)| {
-            let material = u32::try_from(material).map_err(|_| ExportError::IndexOverflow)?;
-            Ok(DemAtomType {
-                atom_type: first_atom_type
-                    .checked_add(material)
-                    .ok_or(ExportError::IndexOverflow)?,
-                material: MaterialId(material),
-                material_name: descriptor.name.clone(),
-                particles: 0,
-            })
-        })
-        .collect()
 }
 
 fn circular_radius(
@@ -429,6 +499,7 @@ fn append_sphere_junction_bonds(
     assembly: &FiberAssembly,
     model: &mut DemBpmModel,
     ranges: &[Range<usize>],
+    first_bond_type: u32,
 ) -> Result<(), ExportError> {
     for junction in &assembly.junctions.junctions {
         let start = junction.anchors.start as usize;
@@ -441,7 +512,7 @@ fn append_sphere_junction_bonds(
                 model.bonds.push(DemBond {
                     id: u32::try_from(model.bonds.len() + 1)
                         .map_err(|_| ExportError::IndexOverflow)?,
-                    bond_type: junction.law.0.saturating_add(2),
+                    bond_type: first_bond_type.saturating_add(junction.law.0),
                     particle_a: first,
                     particle_b: other,
                 });
@@ -455,6 +526,7 @@ fn append_capsule_junction_bonds(
     assembly: &FiberAssembly,
     model: &mut DemCapsuleBpmModel,
     ranges: &[Range<usize>],
+    first_bond_type: u32,
 ) -> Result<(), ExportError> {
     for junction in &assembly.junctions.junctions {
         let start = junction.anchors.start as usize;
@@ -467,7 +539,7 @@ fn append_capsule_junction_bonds(
                 model.bonds.push(DemBond {
                     id: u32::try_from(model.bonds.len() + 1)
                         .map_err(|_| ExportError::IndexOverflow)?,
-                    bond_type: junction.law.0.saturating_add(2),
+                    bond_type: first_bond_type.saturating_add(junction.law.0),
                     particle_a: first,
                     particle_b: other,
                 });
@@ -537,7 +609,7 @@ fn export_bpm_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tangle_core::{FiberId, PeriodicCell};
+    use tangle_core::{FiberAnchor, FiberId, JunctionId, JunctionParameterId, PeriodicCell};
 
     fn one_fiber(points: &[Vec3], radius: f64) -> FiberAssembly {
         let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([2.0; 3], [false; 3]));
@@ -648,5 +720,354 @@ mod tests {
         assert!((lengths[3] - 0.05).abs() < 1.0e-12);
         let final_capsule = model.capsules.last().unwrap();
         assert!((final_capsule.position[0] + final_capsule.half_length - 0.65).abs() < 1.0e-12);
+    }
+
+    /// Two straight fibers of different radii, the first along x and the
+    /// second along y, each of two segments; with `materials`, each its own
+    /// material.
+    fn two_fibers(materials: bool) -> FiberAssembly {
+        let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([2.0; 3], [false; 3]));
+        let fine = assembly.materials.add("fine 7.00um");
+        let coarse = if materials {
+            assembly.materials.add("coarse 19.00um")
+        } else {
+            fine
+        };
+        for (id, material, radius, points) in [
+            (
+                1,
+                fine,
+                0.05,
+                [[0.2, 0.5, 1.0], [0.6, 0.5, 1.0], [1.4, 0.5, 1.0]],
+            ),
+            (
+                2,
+                coarse,
+                0.1,
+                [[1.0, 0.2, 1.2], [1.0, 1.0, 1.2], [1.0, 1.8, 1.2]],
+            ),
+        ] {
+            let section = assembly.sections.add(Section::Circular { radius });
+            assembly
+                .add_fiber(FiberId(id), material, section, &points, &points)
+                .unwrap();
+        }
+        assembly
+    }
+
+    fn sections(data: &str) -> std::collections::HashMap<String, Vec<Vec<f64>>> {
+        let mut sections = std::collections::HashMap::new();
+        let mut name = None;
+        for line in data.lines().skip(1) {
+            let words = line
+                .split('#')
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .collect::<Vec<_>>();
+            if words.is_empty() {
+                continue;
+            }
+            if words[0].chars().next().unwrap().is_alphabetic() {
+                name = Some(words[0].to_string());
+                sections.insert(words[0].to_string(), Vec::new());
+            } else if let Some(name) = &name {
+                sections
+                    .get_mut(name)
+                    .unwrap()
+                    .push(words.iter().map(|word| word.parse().unwrap()).collect());
+            }
+        }
+        sections
+    }
+
+    fn header_count(data: &str, what: &str) -> Option<u64> {
+        data.lines().find_map(|line| {
+            let (count, rest) = line.split_once(' ')?;
+            (rest == what).then(|| count.parse().ok())?
+        })
+    }
+
+    fn written(model: &BpmModel, name: &str) -> String {
+        let path = std::env::temp_dir().join(format!("tangle-{name}-{}.data", std::process::id()));
+        write_bpm_lammps_data(model, &path).unwrap();
+        let data = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        data
+    }
+
+    #[test]
+    fn capsules_are_written_for_atom_style_bacillus() {
+        let assembly = two_fibers(false);
+        let config = BpmExportConfig::new("").with_density(1_500.0);
+        let model = build_bpm_model(&assembly, &config).unwrap();
+        let data = written(&model, "bacillus");
+        let lines = data.lines().collect::<Vec<_>>();
+        assert_eq!(header_count(&data, "atoms"), Some(4));
+        assert_eq!(header_count(&data, "bacilli"), Some(4));
+        assert_eq!(header_count(&data, "bonds"), Some(2));
+        assert_eq!(header_count(&data, "atom types"), Some(1));
+        assert_eq!(header_count(&data, "bond types"), Some(1));
+        assert!(lines.contains(&"Atoms # bacillus"));
+        // Nothing but rows after a section's title and blank line: LAMMPS
+        // reads every line there as data.
+        let first = lines
+            .iter()
+            .position(|line| *line == "Atoms # bacillus")
+            .unwrap();
+        assert!(lines[first..].iter().all(|line| !line.starts_with('#')));
+        for title in ["Atoms # bacillus", "Bacilli", "Bonds"] {
+            let at = lines.iter().position(|line| *line == title).unwrap();
+            assert_eq!(lines[at + 1], "");
+        }
+
+        let sections = sections(&data);
+        let atoms = &sections["Atoms"];
+        let bacilli = &sections["Bacilli"];
+        assert_eq!(atoms.len(), 4);
+        assert_eq!(bacilli.len(), 4);
+        let close = |got: &[f64], want: &[f64]| {
+            got.len() == want.len() && got.iter().zip(want).all(|(a, b)| (a - b).abs() < 1.0e-12)
+        };
+        // id molecule type bacillus-flag density x y z
+        assert!(close(
+            &atoms[0],
+            &[1.0, 1.0, 1.0, 1.0, 1_500.0, 0.4, 0.5, 1.0]
+        ));
+        assert!(close(
+            &atoms[3],
+            &[4.0, 2.0, 1.0, 1.0, 1_500.0, 1.0, 1.4, 1.2]
+        ));
+        // id Ixx Iyy Izz Ixy Ixz Iyz pole diameter
+        for (row, (pole, diameter)) in bacilli.iter().zip([
+            ([0.2, 0.0, 0.0], 0.1),
+            ([0.4, 0.0, 0.0], 0.1),
+            ([0.0, 0.4, 0.0], 0.2),
+            ([0.0, 0.4, 0.0], 0.2),
+        ]) {
+            assert!(close(&row[7..10], &pole), "{row:?}");
+            assert_eq!(row[10], diameter);
+            assert!(row[1..4].iter().all(|moment| *moment > 0.0));
+        }
+        assert_eq!(
+            sections["Bonds"],
+            [vec![1.0, 1.0, 1.0, 2.0], vec![2.0, 1.0, 3.0, 4.0]]
+        );
+    }
+
+    #[test]
+    fn capsule_inertia_matches_a_cylinder_and_two_hemispheres() {
+        use std::f64::consts::PI;
+        let (r, length, density) = (0.5, 4.0, 1.0);
+        let axis = [0.6, 0.0, 0.8];
+        let capsule = DemCapsule {
+            id: 1,
+            molecule: 1,
+            atom_type: 1,
+            diameter: 2.0 * r,
+            density,
+            position: [0.0; 3],
+            half_length: 0.5 * length,
+            axis,
+        };
+        let tensor = crate::capsule_inertia(&capsule);
+        // Moments about the axis and across it, from the textbook capsule:
+        // a cylinder plus a sphere split in two and moved to the ends.
+        let cylinder = density * PI * r * r * length;
+        let sphere = density * 4.0 / 3.0 * PI * r * r * r;
+        let axial = 0.5 * cylinder * r * r + 0.4 * sphere * r * r;
+        let transverse = cylinder * (length * length / 12.0 + r * r / 4.0)
+            + sphere * (0.4 * r * r + length * length / 4.0 + 3.0 * length * r / 8.0);
+        let along = (0..3)
+            .map(|a| {
+                (0..3)
+                    .map(|b| axis[a] * tensor[a][b] * axis[b])
+                    .sum::<f64>()
+            })
+            .sum::<f64>();
+        let across_axis = [0.8, 0.0, -0.6];
+        let across = (0..3)
+            .map(|a| {
+                (0..3)
+                    .map(|b| across_axis[a] * tensor[a][b] * across_axis[b])
+                    .sum::<f64>()
+            })
+            .sum::<f64>();
+        assert!((along - axial).abs() < 1.0e-12 * axial);
+        assert!((across - transverse).abs() < 1.0e-12 * transverse);
+        assert!((tensor[1][1] - transverse).abs() < 1.0e-12 * transverse);
+        assert!(tensor[0][1].abs() < 1.0e-15 && tensor[1][2].abs() < 1.0e-15);
+    }
+
+    #[test]
+    fn each_material_is_a_fiber_type_with_its_own_atom_and_bond_type() {
+        let assembly = two_fibers(true);
+        let model = build_bpm_model(&assembly, &BpmExportConfig::new("")).unwrap();
+        let types = model.atom_types();
+        assert_eq!(types.len(), 2);
+        assert_eq!(
+            (types[0].atom_type, types[0].bond_type, types[0].particles),
+            (1, 1, 2)
+        );
+        assert_eq!(
+            (types[1].atom_type, types[1].bond_type, types[1].particles),
+            (2, 2, 2)
+        );
+        let data = written(&model, "two-materials");
+        assert_eq!(header_count(&data, "atom types"), Some(2));
+        assert_eq!(header_count(&data, "bond types"), Some(2));
+        assert!(data.contains(
+            "# atom type 2 and bond type 2 = fiber type \"coarse 19.00um\" (2 capsules)"
+        ));
+        let sections = sections(&data);
+        let atom_types = sections["Atoms"]
+            .iter()
+            .map(|row| row[2])
+            .collect::<Vec<_>>();
+        assert_eq!(atom_types, [1.0, 1.0, 2.0, 2.0]);
+        assert_eq!(
+            sections["Bonds"],
+            [vec![1.0, 1.0, 1.0, 2.0], vec![2.0, 2.0, 3.0, 4.0]]
+        );
+
+        let BpmModel::Spheres(spheres) =
+            build_bpm_model(&assembly, &config(BpmExportMode::SpheresExact)).unwrap()
+        else {
+            panic!("expected spheres");
+        };
+        let fiber_two = spheres
+            .particles
+            .iter()
+            .find(|p| p.molecule == 2)
+            .unwrap()
+            .id;
+        assert!(spheres
+            .bonds
+            .iter()
+            .all(|bond| bond.bond_type == if bond.particle_a >= fiber_two { 2 } else { 1 }));
+    }
+
+    #[test]
+    fn caller_fiber_types_group_fibers_across_materials() {
+        // Three materials (diameters within one type differ), two fiber types.
+        let mut assembly = two_fibers(true);
+        let other = assembly.materials.add("fine 7.10um");
+        let section = assembly.sections.add(Section::Circular { radius: 0.0355 });
+        let points = [[0.2, 1.5, 0.5], [1.4, 1.5, 0.5]];
+        assembly
+            .add_fiber(FiberId(3), other, section, &points, &points)
+            .unwrap();
+        let config = BpmExportConfig::new("").with_fiber_types(
+            vec![0, 1, 0],
+            vec!["fine".to_string(), "coarse".to_string()],
+        );
+        let model = build_bpm_model(&assembly, &config).unwrap();
+        let types = model.atom_types();
+        assert_eq!(types.len(), 2);
+        assert_eq!(types[0].material_name, "fine");
+        assert_eq!(
+            (types[0].atom_type, types[0].bond_type, types[0].particles),
+            (1, 1, 3)
+        );
+        assert_eq!(
+            (types[1].atom_type, types[1].bond_type, types[1].particles),
+            (2, 2, 2)
+        );
+        let BpmModel::Spherocylinders(capsules) = &model else {
+            panic!("expected spherocylinders");
+        };
+        let atom_types = capsules
+            .capsules
+            .iter()
+            .map(|c| c.atom_type)
+            .collect::<Vec<_>>();
+        assert_eq!(atom_types, [1, 1, 2, 2, 1]);
+        let bond_types = capsules
+            .bonds
+            .iter()
+            .map(|b| b.bond_type)
+            .collect::<Vec<_>>();
+        assert_eq!(bond_types, [1, 2]);
+
+        for (of_fiber, names) in [(vec![0, 1], 2), (vec![0, 2, 1], 2)] {
+            let names = (0..names).map(|k| format!("type {k}")).collect();
+            assert!(matches!(
+                build_bpm_model(
+                    &assembly,
+                    &BpmExportConfig::new("").with_fiber_types(of_fiber, names)
+                ),
+                Err(ExportError::InvalidFiberTypes(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn junction_bonds_take_the_bond_types_after_the_fiber_types() {
+        let mut assembly = two_fibers(true);
+        let law = assembly.junction_laws.add("welded");
+        let anchor = |fiber, rest_arc_length| FiberAnchor {
+            fiber: FiberId(fiber),
+            rest_arc_length,
+            section_offset: None,
+        };
+        assembly
+            .add_junction(
+                JunctionId(1),
+                law,
+                JunctionParameterId(0),
+                &[anchor(1, 0.8), anchor(2, 0.7)],
+            )
+            .unwrap();
+        let model = build_bpm_model(&assembly, &BpmExportConfig::new("")).unwrap();
+        let BpmModel::Spherocylinders(capsules) = &model else {
+            panic!("expected spherocylinders");
+        };
+        let junction = capsules.bonds.last().unwrap();
+        assert_eq!(capsules.bonds.len(), 3);
+        assert_eq!(junction.bond_type, 3);
+        assert_eq!((junction.particle_a, junction.particle_b), (2, 3));
+        assert_eq!(
+            header_count(&written(&model, "junction"), "bond types"),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn a_fiber_of_one_segment_writes_no_bonds_section() {
+        let assembly = one_fiber(&[[0.2, 1.0, 1.0], [1.2, 1.0, 1.0]], 0.05);
+        let model = build_bpm_model(&assembly, &BpmExportConfig::new("")).unwrap();
+        let data = written(&model, "no-bonds");
+        assert_eq!(header_count(&data, "bonds"), Some(0));
+        assert!(!data.lines().any(|line| line == "Bonds"));
+        assert_eq!(sections(&data)["Bacilli"].len(), 1);
+    }
+
+    #[test]
+    fn capsule_export_wraps_periodic_centers_into_the_primary_cell() {
+        let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic(
+            [1.0, 2.0, 3.0],
+            [true, true, false],
+        ));
+        let material = assembly.materials.add("fiber");
+        let section = assembly.sections.add(Section::Circular { radius: 0.05 });
+        assembly
+            .add_fiber(
+                FiberId(1),
+                material,
+                section,
+                &[[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]],
+                &[[-2.25, 4.25, 1.0], [-1.75, 4.25, 1.0]],
+            )
+            .unwrap();
+        let BpmModel::Spherocylinders(model) =
+            build_bpm_model(&assembly, &BpmExportConfig::new("")).unwrap()
+        else {
+            panic!("expected spherocylinders");
+        };
+        assert_eq!(model.capsules.len(), 1);
+        let position = model.capsules[0].position;
+        assert!((position[0] - 0.0).abs() < 1.0e-12, "{position:?}");
+        assert!((position[1] - 0.25).abs() < 1.0e-12, "{position:?}");
+        assert!((position[2] - 1.0).abs() < 1.0e-12, "{position:?}");
     }
 }

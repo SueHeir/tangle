@@ -46,8 +46,8 @@ _STYLES = {
 }
 # LAMMPS's other atom styles, so that an "Atoms # ellipsoid" comment is taken as a style this module doesn't read.
 _OTHER_STYLES = {
-    "amoeba", "body", "dielectric", "dipole", "dpd", "edpd", "electron", "ellipsoid", "line", "mdpd", "oxdna",
-    "peri", "rheo", "rheo/thermal", "smd", "sph", "spin", "tdpd", "template", "tri", "wavepacket",
+    "amoeba", "bacillus", "body", "dielectric", "dipole", "dpd", "edpd", "electron", "ellipsoid", "line", "mdpd",
+    "oxdna", "peri", "rheo", "rheo/thermal", "smd", "sph", "spin", "tdpd", "template", "tri", "wavepacket",
 }
 # In a file without bonds, a sphere farther than this many diameters from the next one ends its fiber.
 _UNBONDED_GAP = 1.5
@@ -200,8 +200,8 @@ def read_data(path: str | os.PathLike, *, periodic: str | bool | Sequence[bool] 
     lengths = [high[axis] - low[axis] for axis in range(3)]
     if any(not length > 0.0 for length in lengths):
         raise ValueError(f"{path}: the box has a side of length {min(lengths)}")
-    if _find(lines, "Capsules", first) is not None:
-        raise ValueError(f"{path} holds capsules (Tangle's export for DIRT); tangle.lammps reads sphere files")
+    if _find(lines, "Capsules", first) is not None or _find(lines, "Bacilli", first) is not None:
+        raise ValueError(f"{path} holds capsules (Tangle's spherocylinder export); tangle.lammps reads sphere files")
 
     keyword = _find(lines, "Atoms", first)
     if keyword is None:

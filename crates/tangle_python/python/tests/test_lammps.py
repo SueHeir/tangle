@@ -208,6 +208,9 @@ class ReadDataTests(unittest.TestCase):
         capsules = [["Capsules", "", *[f"{atom[0]} 0.5 1 0 0" for atom in ATOMS]]]
         with self.assertRaisesRegex(ValueError, "capsules"):
             lammps.read_data(write(self.directory, rows, BONDS, sections=capsules))
+        bacilli = [["Bacilli", "", *[f"{atom[0]} 1 1 1 0 0 0 0.5 0 0 1" for atom in ATOMS]]]
+        with self.assertRaisesRegex(ValueError, "capsules"):
+            lammps.read_data(write(self.directory, rows, BONDS, sections=bacilli))
 
     def test_relax_needs_fibers(self):
         data = lammps.read_data(write(self.directory, bpm_rows([ATOMS[-1]])))

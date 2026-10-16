@@ -79,17 +79,35 @@ pub struct DemBond {
     pub particle_b: u32,
 }
 
-/// Mapping from one TANGLE material to one DEM atom type.
+/// One fiber type of a DEM export: its atom type and the bond type joining
+/// consecutive particles along its fibers.
+///
+/// By default every TANGLE material is a fiber type. With
+/// [`BpmExportConfig::with_fiber_types`] the caller groups the fibers instead
+/// (the CT pipeline's fiber types, say); `material` is then the material of
+/// the type's first fiber and `material_name` the type's name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DemAtomType {
     /// One-based atom type written to the LAMMPS data file.
     pub atom_type: u32,
+    /// One-based bond type of the bonds along this type's fibers.
+    pub bond_type: u32,
     /// Solver-neutral TANGLE material identifier.
     pub material: MaterialId,
-    /// Human-readable TANGLE material name.
+    /// Human-readable TANGLE material or fiber-type name.
     pub material_name: String,
     /// Number of particles exported with this type.
     pub particles: usize,
+}
+
+/// Caller-defined fiber types for a BPM export: each fiber's zero-based type
+/// and each type's name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BpmFiberTypes {
+    /// One zero-based type per fiber, in assembly order.
+    pub of_fiber: Vec<u32>,
+    /// One name per type.
+    pub names: Vec<String>,
 }
 
 /// Complete bonded-sphere model derived from a fiber assembly.
@@ -163,10 +181,14 @@ pub struct BpmExportConfig {
     pub sphere_spacing_over_radius: f64,
     /// Particle material density.
     pub density: f64,
-    /// First atom type assigned to TANGLE material zero.
+    /// Atom type of the first fiber type; the others follow consecutively.
     pub atom_type: u32,
-    /// Intra-fiber bond type written to the data file.
+    /// Bond type along the fibers of the first fiber type; the others follow
+    /// consecutively, then one bond type per junction law.
     pub bond_type: u32,
+    /// Fiber types to export with their own atom and bond types. `None`: one
+    /// fiber type per TANGLE material.
+    pub fiber_types: Option<BpmFiberTypes>,
 }
 
 impl BpmExportConfig {
@@ -179,7 +201,15 @@ impl BpmExportConfig {
             density: 1.0,
             atom_type: 1,
             bond_type: 1,
+            fiber_types: None,
         }
+    }
+
+    /// Gives each fiber a zero-based type (`of_fiber`, in assembly order) and
+    /// each type a name. Each type gets its own atom type and bond type.
+    pub fn with_fiber_types(mut self, of_fiber: Vec<u32>, names: Vec<String>) -> Self {
+        self.fiber_types = Some(BpmFiberTypes { of_fiber, names });
+        self
     }
 
     /// Selects the exported geometry representation and sampling policy.
@@ -278,48 +308,6 @@ impl DemBpmExportConfig {
     }
 }
 
-/// Adaptive-segment capsule discretization and output configuration.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct DemCapsuleBpmExportConfig {
-    /// Extended LAMMPS-data output path.
-    pub data_path: PathBuf,
-    /// Capsule material density.
-    pub density: f64,
-    /// First atom type assigned to TANGLE material zero.
-    pub atom_type: u32,
-    /// Intra-fiber bond type written to the data file.
-    pub bond_type: u32,
-    /// Optional export-only maximum centerline length divided by diameter.
-    /// Long adaptive segments are split without changing the TANGLE assembly.
-    pub maximum_length_over_diameter: Option<f64>,
-}
-
-#[cfg(test)]
-impl DemCapsuleBpmExportConfig {
-    /// Creates an adaptive-capsule export configuration.
-    pub fn new(data_path: impl Into<PathBuf>) -> Self {
-        Self {
-            data_path: data_path.into(),
-            density: 1.0,
-            atom_type: 1,
-            bond_type: 1,
-            maximum_length_over_diameter: None,
-        }
-    }
-
-    /// Sets the capsule material density.
-    pub fn with_density(mut self, density: f64) -> Self {
-        self.density = density;
-        self
-    }
-
-    /// Splits exported segments longer than this multiple of their diameter.
-    pub fn with_maximum_length_over_diameter(mut self, ratio: f64) -> Self {
-        self.maximum_length_over_diameter = Some(ratio);
-        self
-    }
-}
-
 /// Failure while discretizing or writing a DEM-BPM model.
 #[derive(Debug)]
 pub enum ExportError {
@@ -329,8 +317,8 @@ pub enum ExportError {
     InvalidSpacingRatio(f64),
     /// Radius-based sphere spacing was outside the supported interval.
     InvalidSphereSpacingOverRadius(f64),
-    /// Capsule export length ratio was not positive and finite.
-    InvalidCapsuleLengthRatio(f64),
+    /// Caller-defined fiber types did not match the assembly's fibers.
+    InvalidFiberTypes(String),
     /// First atom type was zero; LAMMPS types are one-based.
     InvalidAtomType(u32),
     /// DEM sphere export currently requires circular fibers.
@@ -366,10 +354,7 @@ impl fmt::Display for ExportError {
                 f,
                 "sphere_spacing_over_radius must be in [1/3, 1], got {value}"
             ),
-            Self::InvalidCapsuleLengthRatio(value) => write!(
-                f,
-                "maximum_length_over_diameter must be positive, got {value}"
-            ),
+            Self::InvalidFiberTypes(reason) => write!(f, "invalid fiber types: {reason}"),
             Self::InvalidAtomType(value) => {
                 write!(f, "first atom type must be positive, got {value}")
             }
@@ -444,6 +429,7 @@ pub(crate) fn build_dem_bpm_model(
                     .ok_or(ExportError::IndexOverflow)?;
                 Ok(DemAtomType {
                     atom_type,
+                    bond_type: config.bond_type,
                     material: MaterialId(material),
                     material_name: descriptor.name.clone(),
                     particles: 0,
@@ -545,161 +531,6 @@ pub(crate) fn build_dem_bpm_model(
     Ok(model)
 }
 
-/// Converts the active placed polyline segments into rigid capsule particles.
-///
-/// Unlike the bonded-sphere export, this preserves TANGLE's adaptive
-/// segmentation. `maximum_length_over_diameter` can impose a downstream DEM
-/// resolution ceiling without modifying the relaxed assembly.
-pub(crate) fn build_dem_capsule_bpm_model(
-    assembly: &FiberAssembly,
-    config: &DemCapsuleBpmExportConfig,
-) -> Result<DemCapsuleBpmModel, ExportError> {
-    if !config.density.is_finite() || config.density <= 0.0 {
-        return Err(ExportError::InvalidDensity(config.density));
-    }
-    if config.atom_type == 0 {
-        return Err(ExportError::InvalidAtomType(config.atom_type));
-    }
-    if let Some(ratio) = config.maximum_length_over_diameter {
-        if !ratio.is_finite() || ratio <= 0.0 {
-            return Err(ExportError::InvalidCapsuleLengthRatio(ratio));
-        }
-    }
-    let (box_low, box_high) = orthorhombic_bounds(assembly)?;
-    let mut model = DemCapsuleBpmModel {
-        box_low,
-        box_high,
-        atom_types: assembly
-            .materials
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(material, descriptor)| {
-                let material = u32::try_from(material).map_err(|_| ExportError::IndexOverflow)?;
-                Ok(DemAtomType {
-                    atom_type: config
-                        .atom_type
-                        .checked_add(material)
-                        .ok_or(ExportError::IndexOverflow)?,
-                    material: MaterialId(material),
-                    material_name: descriptor.name.clone(),
-                    particles: 0,
-                })
-            })
-            .collect::<Result<Vec<_>, ExportError>>()?,
-        ..DemCapsuleBpmModel::default()
-    };
-    let mut fiber_capsule_ranges = Vec::with_capacity(assembly.topology.fibers.len());
-
-    for (fiber_index, fiber) in assembly.topology.fibers.iter().enumerate() {
-        let atom_type = model
-            .atom_types
-            .get(fiber.material.0 as usize)
-            .ok_or(ExportError::MissingMaterial(fiber.id.0))?
-            .atom_type;
-        let section = assembly
-            .sections
-            .entries
-            .get(fiber.section.0 as usize)
-            .ok_or(ExportError::MissingSection(fiber.id.0))?;
-        let radius = match section {
-            Section::Circular { radius } => *radius,
-            Section::Elliptical { .. } => {
-                return Err(ExportError::NonCircularSection(fiber.id.0));
-            }
-        };
-        let start = fiber.vertices.start as usize;
-        let end = fiber
-            .vertices
-            .checked_end()
-            .ok_or(ExportError::InvalidFiberSpan(fiber.id.0))? as usize;
-        let points = assembly
-            .geometry
-            .placed
-            .positions
-            .get(start..end)
-            .ok_or(ExportError::InvalidFiberSpan(fiber.id.0))?;
-        let first_capsule = model.capsules.len();
-        for pair in points.windows(2) {
-            let delta = sub(pair[1], pair[0]);
-            let segment_length = distance(pair[0], pair[1]);
-            if segment_length <= f64::EPSILON {
-                continue;
-            }
-            let maximum_length = config
-                .maximum_length_over_diameter
-                .map(|ratio| ratio * 2.0 * radius);
-            let pieces = maximum_length
-                .map(|maximum| (segment_length / maximum).ceil().max(1.0) as usize)
-                .unwrap_or(1);
-            let piece_length = segment_length / pieces as f64;
-            let axis = scale(delta, 1.0 / segment_length);
-            for piece in 0..pieces {
-                let coordinate = (piece as f64 + 0.5) / pieces as f64;
-                let id = u32::try_from(model.capsules.len() + 1)
-                    .map_err(|_| ExportError::IndexOverflow)?;
-                model.capsules.push(DemCapsule {
-                    id,
-                    molecule: u32::try_from(fiber_index + 1)
-                        .map_err(|_| ExportError::IndexOverflow)?,
-                    atom_type,
-                    diameter: 2.0 * radius,
-                    density: config.density,
-                    position: add(pair[0], scale(delta, coordinate)),
-                    half_length: 0.5 * piece_length,
-                    axis,
-                });
-            }
-        }
-        model.atom_types[fiber.material.0 as usize].particles +=
-            model.capsules.len() - first_capsule;
-        for index in first_capsule..model.capsules.len().saturating_sub(1) {
-            model.bonds.push(DemBond {
-                id: u32::try_from(model.bonds.len() + 1).map_err(|_| ExportError::IndexOverflow)?,
-                bond_type: config.bond_type,
-                particle_a: model.capsules[index].id,
-                particle_b: model.capsules[index + 1].id,
-            });
-        }
-        fiber_capsule_ranges.push(first_capsule..model.capsules.len());
-    }
-
-    for junction in &assembly.junctions.junctions {
-        let anchor_start = junction.anchors.start as usize;
-        let anchor_end = anchor_start + junction.anchors.len as usize;
-        let anchors = &assembly.junctions.anchors[anchor_start..anchor_end];
-        let first = nearest_anchor_capsule(assembly, &model, &fiber_capsule_ranges, anchors[0])?;
-        for anchor in &anchors[1..] {
-            let other = nearest_anchor_capsule(assembly, &model, &fiber_capsule_ranges, *anchor)?;
-            if first == other {
-                continue;
-            }
-            model.bonds.push(DemBond {
-                id: u32::try_from(model.bonds.len() + 1).map_err(|_| ExportError::IndexOverflow)?,
-                bond_type: junction.law.0.saturating_add(2),
-                particle_a: first,
-                particle_b: other,
-            });
-        }
-    }
-
-    // TANGLE keeps long periodic fibers unwrapped so their centerlines remain
-    // continuous across many cell traversals. BPM consumers generally require
-    // inserted particle centers in the primary cell. Wrap only after junction
-    // lookup so capsules and anchors are compared in the same unwrapped frame.
-    for capsule in &mut model.capsules {
-        for axis in 0..3 {
-            if assembly.cell.periodic[axis] {
-                let length = model.box_high[axis] - model.box_low[axis];
-                debug_assert!(length > 0.0);
-                capsule.position[axis] = model.box_low[axis]
-                    + (capsule.position[axis] - model.box_low[axis]).rem_euclid(length);
-            }
-        }
-    }
-    Ok(model)
-}
-
 /// Writes a LAMMPS data file using the `bpm/sphere` atom style.
 pub(crate) fn write_lammps_data(model: &DemBpmModel, path: &Path) -> Result<(), ExportError> {
     if let Some(parent) = path.parent() {
@@ -711,8 +542,8 @@ pub(crate) fn write_lammps_data(model: &DemBpmModel, path: &Path) -> Result<(), 
         let name = mapping.material_name.replace(['\r', '\n'], " ");
         writeln!(
             writer,
-            "# atom type {} = TANGLE material {} {:?} ({} particles)",
-            mapping.atom_type, mapping.material.0, name, mapping.particles
+            "# atom type {} and bond type {} = fiber type {:?} ({} particles)",
+            mapping.atom_type, mapping.bond_type, name, mapping.particles
         )?;
     }
     // The column legends live in the header: LAMMPS and OVITO read every
@@ -735,9 +566,10 @@ pub(crate) fn write_lammps_data(model: &DemBpmModel, path: &Path) -> Result<(), 
         .unwrap_or(1);
     writeln!(writer, "{atom_types} atom types")?;
     let bond_types = model
-        .bonds
+        .atom_types
         .iter()
-        .map(|bond| bond.bond_type)
+        .map(|mapping| mapping.bond_type)
+        .chain(model.bonds.iter().map(|bond| bond.bond_type))
         .max()
         .unwrap_or(1);
     writeln!(writer, "{bond_types} bond types")?;
@@ -788,7 +620,15 @@ pub(crate) fn write_lammps_data(model: &DemBpmModel, path: &Path) -> Result<(), 
     Ok(())
 }
 
-/// Writes extended BPM data with `Atoms`, `Capsules`, and `Bonds` sections.
+/// Writes bonded capsules as a LAMMPS data file for `atom_style bacillus`.
+///
+/// Each capsule is one atom at its center of mass. Its `Atoms` row is
+/// `id molecule type 1 density x y z` (the `1` marks it as a capsule, and
+/// LAMMPS turns the density into the capsule's mass). Its `Bacilli` row is
+/// `id Ixx Iyy Izz Ixy Ixz Iyz px py pz diameter`: the inertia tensor about
+/// the center and the pole (half the cylinder axis, from the center to one
+/// cap's center), both in the box frame. Bonds join the centers of
+/// consecutive capsules along a fiber.
 pub(crate) fn write_capsule_lammps_data(
     model: &DemCapsuleBpmModel,
     path: &Path,
@@ -797,27 +637,31 @@ pub(crate) fn write_capsule_lammps_data(
         fs::create_dir_all(parent)?;
     }
     let mut writer = BufWriter::new(File::create(path)?);
-    writeln!(writer, "TANGLE adaptive-capsule DEM-BPM fiber export")?;
+    writeln!(
+        writer,
+        "TANGLE spherocylinder DEM-BPM fiber export (LAMMPS atom_style bacillus)"
+    )?;
     for mapping in &model.atom_types {
         let name = mapping.material_name.replace(['\r', '\n'], " ");
         writeln!(
             writer,
-            "# atom type {} = TANGLE material {} {:?} ({} capsules)",
-            mapping.atom_type, mapping.material.0, name, mapping.particles
+            "# atom type {} and bond type {} = fiber type {:?} ({} capsules)",
+            mapping.atom_type, mapping.bond_type, name, mapping.particles
         )?;
     }
     // Legends in the header, as in `write_lammps_data`.
     writeln!(
         writer,
-        "# Atoms columns: id molecule type diameter density x y z"
+        "# Atoms columns: id molecule type bacillus density x y z"
     )?;
     writeln!(
         writer,
-        "# Capsules columns: atom-id half-length axis-x axis-y axis-z"
+        "# Bacilli columns: id Ixx Iyy Izz Ixy Ixz Iyz pole-x pole-y pole-z diameter (box frame; the pole is half the axis)"
     )?;
     writeln!(writer, "# Bonds columns: id type atom1 atom2")?;
     writeln!(writer)?;
     writeln!(writer, "{} atoms", model.capsules.len())?;
+    writeln!(writer, "{} bacilli", model.capsules.len())?;
     writeln!(writer, "{} bonds", model.bonds.len())?;
     let atom_types = model
         .atom_types
@@ -828,9 +672,10 @@ pub(crate) fn write_capsule_lammps_data(
         .unwrap_or(1);
     writeln!(writer, "{atom_types} atom types")?;
     let bond_types = model
-        .bonds
+        .atom_types
         .iter()
-        .map(|bond| bond.bond_type)
+        .map(|mapping| mapping.bond_type)
+        .chain(model.bonds.iter().map(|bond| bond.bond_type))
         .max()
         .unwrap_or(1);
     writeln!(writer, "{bond_types} bond types")?;
@@ -851,16 +696,15 @@ pub(crate) fn write_capsule_lammps_data(
         model.box_low[2], model.box_high[2]
     )?;
     writeln!(writer)?;
-    writeln!(writer, "Atoms # bpm/sphere")?;
+    writeln!(writer, "Atoms # bacillus")?;
     writeln!(writer)?;
     for capsule in &model.capsules {
         writeln!(
             writer,
-            "{} {} {} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e}",
+            "{} {} {} 1 {:.17e} {:.17e} {:.17e} {:.17e}",
             capsule.id,
             capsule.molecule,
             capsule.atom_type,
-            capsule.diameter,
             capsule.density,
             capsule.position[0],
             capsule.position[1],
@@ -868,27 +712,66 @@ pub(crate) fn write_capsule_lammps_data(
         )?;
     }
     writeln!(writer)?;
-    writeln!(writer, "Capsules")?;
+    writeln!(writer, "Bacilli")?;
     writeln!(writer)?;
     for capsule in &model.capsules {
+        let inertia = capsule_inertia(capsule);
+        let pole = scale(capsule.axis, capsule.half_length);
         writeln!(
             writer,
-            "{} {:.17e} {:.17e} {:.17e} {:.17e}",
-            capsule.id, capsule.half_length, capsule.axis[0], capsule.axis[1], capsule.axis[2]
+            "{} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e}",
+            capsule.id,
+            inertia[0][0],
+            inertia[1][1],
+            inertia[2][2],
+            inertia[0][1],
+            inertia[0][2],
+            inertia[1][2],
+            pole[0],
+            pole[1],
+            pole[2],
+            capsule.diameter
         )?;
     }
-    writeln!(writer)?;
-    writeln!(writer, "Bonds")?;
-    writeln!(writer)?;
-    for bond in &model.bonds {
-        writeln!(
-            writer,
-            "{} {} {} {}",
-            bond.id, bond.bond_type, bond.particle_a, bond.particle_b
-        )?;
+    // LAMMPS refuses a Bonds section in a file that declares no bonds.
+    if !model.bonds.is_empty() {
+        writeln!(writer)?;
+        writeln!(writer, "Bonds")?;
+        writeln!(writer)?;
+        for bond in &model.bonds {
+            writeln!(
+                writer,
+                "{} {} {} {}",
+                bond.id, bond.bond_type, bond.particle_a, bond.particle_b
+            )?;
+        }
     }
     writer.flush()?;
     Ok(())
+}
+
+/// Inertia tensor of a capsule about its center of mass, in the box frame.
+pub(crate) fn capsule_inertia(capsule: &DemCapsule) -> [[f64; 3]; 3] {
+    use std::f64::consts::PI;
+    let r = 0.5 * capsule.diameter;
+    let length = 2.0 * capsule.half_length;
+    let cylinder = capsule.density * PI * r * r * length;
+    let cap = capsule.density * 2.0 / 3.0 * PI * r * r * r; // one hemisphere
+    let axial = 0.5 * cylinder * r * r + 2.0 * 0.4 * cap * r * r;
+    // Each cap about its own centroid (3r/8 from its flat face), moved to the
+    // capsule's center.
+    let cap_centroid = 0.5 * length + 3.0 * r / 8.0;
+    let transverse = cylinder * (3.0 * r * r + length * length) / 12.0
+        + 2.0 * (0.4 * cap * r * r - cap * (3.0 * r / 8.0).powi(2) + cap * cap_centroid.powi(2));
+    let u = capsule.axis;
+    let mut tensor = [[0.0; 3]; 3];
+    for (a, row) in tensor.iter_mut().enumerate() {
+        for (b, value) in row.iter_mut().enumerate() {
+            let identity = if a == b { transverse } else { 0.0 };
+            *value = identity + (axial - transverse) * u[a] * u[b];
+        }
+    }
+    tensor
 }
 
 fn orthorhombic_bounds(assembly: &FiberAssembly) -> Result<(Vec3, Vec3), ExportError> {
@@ -1102,8 +985,8 @@ mod tests {
         let data = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
         assert!(data.contains("2 atom types"));
-        assert!(data.contains("# atom type 1 = TANGLE material 0 \"fine_7um\""));
-        assert!(data.contains("# atom type 2 = TANGLE material 1 \"coarse_19um\""));
+        assert!(data.contains("# atom type 1 and bond type 1 = fiber type \"fine_7um\""));
+        assert!(data.contains("# atom type 2 and bond type 1 = fiber type \"coarse_19um\""));
         assert!(data.contains("1 1 1 "));
         assert!(data.contains("7 2 2 "));
         let lines: Vec<&str> = data.lines().collect();
@@ -1163,90 +1046,5 @@ mod tests {
             model.particles[(junction_bond.particle_a - 1) as usize].molecule,
             model.particles[(junction_bond.particle_b - 1) as usize].molecule
         );
-    }
-
-    #[test]
-    fn exports_active_segments_as_end_to_end_capsules() {
-        let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([2.0; 3], [false; 3]));
-        let material = assembly.materials.add("fiber");
-        let section = assembly.sections.add(Section::Circular { radius: 0.1 });
-        assembly
-            .add_fiber(
-                FiberId(1),
-                material,
-                section,
-                &[[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.5, 0.0, 0.0]],
-                &[[0.25, 1.0, 1.0], [0.75, 1.0, 1.0], [1.75, 1.0, 1.0]],
-            )
-            .unwrap();
-        let config = DemCapsuleBpmExportConfig::new(PathBuf::new())
-            .with_density(1_000.0)
-            .with_maximum_length_over_diameter(2.0);
-        let model = build_dem_capsule_bpm_model(&assembly, &config).unwrap();
-
-        // 0.5 m becomes two pieces and 1.0 m becomes three at a 0.4 m ceiling.
-        assert_eq!(model.capsules.len(), 5);
-        assert_eq!(model.bonds.len(), 4);
-        assert!(model
-            .capsules
-            .iter()
-            .all(|capsule| capsule.half_length * 2.0 <= 0.4 + 1.0e-12));
-        assert!(model
-            .capsules
-            .iter()
-            .all(|capsule| capsule.axis == [1.0, 0.0, 0.0]));
-        for pair in model.capsules.windows(2) {
-            let center_distance = distance(pair[0].position, pair[1].position);
-            assert!((center_distance - pair[0].half_length - pair[1].half_length).abs() < 1.0e-12);
-        }
-
-        let path =
-            std::env::temp_dir().join(format!("tangle-capsules-{}.data", std::process::id()));
-        write_capsule_lammps_data(&model, &path).unwrap();
-        let data = std::fs::read_to_string(&path).unwrap();
-        std::fs::remove_file(&path).unwrap();
-        assert!(data.contains("Atoms # bpm/sphere"));
-        assert!(data.contains("\nCapsules\n"));
-        assert!(data.contains("# Capsules columns: atom-id half-length axis-x axis-y axis-z"));
-        // Nothing but data follows a section's blank line: LAMMPS and OVITO
-        // read those lines as rows.
-        let lines: Vec<&str> = data.lines().collect();
-        let first_section = lines
-            .iter()
-            .position(|line| *line == "Atoms # bpm/sphere")
-            .unwrap();
-        assert!(lines[first_section..]
-            .iter()
-            .all(|line| !line.starts_with('#')));
-    }
-
-    #[test]
-    fn capsule_export_wraps_periodic_centers_into_the_primary_cell() {
-        let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic(
-            [1.0, 2.0, 3.0],
-            [true, true, false],
-        ));
-        let material = assembly.materials.add("fiber");
-        let section = assembly.sections.add(Section::Circular { radius: 0.05 });
-        assembly
-            .add_fiber(
-                FiberId(1),
-                material,
-                section,
-                &[[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]],
-                &[[-2.25, 4.25, 1.0], [-1.75, 4.25, 1.0]],
-            )
-            .unwrap();
-        let model = build_dem_capsule_bpm_model(
-            &assembly,
-            &DemCapsuleBpmExportConfig::new(PathBuf::new()).with_density(1_000.0),
-        )
-        .unwrap();
-
-        assert_eq!(model.capsules.len(), 1);
-        let position = model.capsules[0].position;
-        assert!((position[0] - 0.0).abs() < 1.0e-12, "{position:?}");
-        assert!((position[1] - 0.25).abs() < 1.0e-12, "{position:?}");
-        assert!((position[2] - 1.0).abs() < 1.0e-12, "{position:?}");
     }
 }

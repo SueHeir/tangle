@@ -359,7 +359,7 @@ particle and finite-element models:
 from tangle import fem
 
 relaxed, run = fit.coarse_grained().relax(adaptive=True)
-run.export_bpm("fibers_bpm.data")                         # LAMMPS bonded-particle model
+relaxed.export_bpm(run, "fibers_bpm.data")                # LAMMPS bonded-particle model
 hexes = fem.hex_mesh(relaxed.to_assembly(), voxel_size=fit.voxel_size)
 hexes.write_abaqus("fibers_hex.inp")                       # or write_nastran("fibers_hex.bdf")
 hexes.write_vtu("fibers_hex.vtu")                          # to look at in ParaView
@@ -370,8 +370,11 @@ its diameter, so a straight stretch becomes one segment (at most 10 diameters
 long), and `relax(adaptive=True)` turns on Tangle's adaptive segmentation,
 which splits segments again where fibers touch. A relaxed fiber that the
 solve's tolerance leaves a hair past its bend limit is smoothed just inside it,
-so the result is always valid Tangle again. `export_bpm` writes one particle
-per segment, bonded along each fiber. The meshes come from `tangle.fem` (see
+so the result is always valid Tangle again. `export_bpm` writes one capsule
+per segment, bonded along each fiber, for LAMMPS's `atom_style bacillus`. Each
+fiber type has its own atom type and bond type: with two fiber diameters, the
+thinner fibers' capsules are atom type 1 and the bonds along them bond type 1,
+the thicker fibers' type 2. The meshes come from `tangle.fem` (see
 the [FEM export guide](fem_export.md)): bricks from voxels, or with gmsh
 installed, tetrahedra that follow each fiber's surface (`fem.tet_mesh`).
 ParaView can't read the Nastran file's nodes, so `write_vtu` writes a copy it
@@ -385,9 +388,9 @@ one of two ways:
 ```python
 hexes = fem.hex_mesh(relaxed.to_assembly(), voxel_size=fit.voxel_size, binder=fit.binder)
 
-run.export_bpm("binder_bonds.data")
+relaxed.export_bpm(run, "binder_bonds.data")
 ct.add_bpm_binder_bonds("binder_bonds.data", fit.bonds, fit.voxel_size)        # a) bonds from fiber to fiber
-run.export_bpm("binder_spheres.data")
+relaxed.export_bpm(run, "binder_spheres.data", mode="spheres_exact")
 ct.add_bpm_binder_spheres("binder_spheres.data", fit.binder, fit.voxel_size)   # b) the binder as spheres
 ct.write_bpm_ovito("binder_spheres.data")                                      # binder_spheres.dump, for OVITO
 ```
@@ -397,18 +400,19 @@ bricks that share nodes with the fibers they touch, so the binder holds the
 fibers together in the mesh too; they have fiber id 0 and the material
 `"binder"`. In the particle model, `add_bpm_binder_bonds` bonds each pair of
 fibers the network found bonded once, between their two particles nearest the
-bond (bond type 2; the bonds along each fiber are type 1).
+bond (the next bond type after the fibers' own).
 `add_bpm_binder_spheres` fills the binder with spheres about a fiber across
 (`diameter=` changes that), each with the mass of the binder it stands for,
-and bonds each one to the fibers its binder touches (bond type 2) and to the
-spheres whose binder meets its own (bond type 3). A sphere is made smaller
+and bonds each one to the fibers its binder touches and to the spheres whose
+binder meets its own (the next two free bond types). For now this needs a file
+of spheres (`mode="spheres_exact"`, for `atom_style bpm/sphere`); a capsule
+file is refused. A sphere is made smaller
 where it would reach into a fiber its binder doesn't touch, so nothing starts
 out overlapping without a bond. `write_bpm_ovito` writes either file as a dump
 to open in OVITO (set the particle shape to Spherocylinder): the fibers'
 particles are type 1, the binder spheres type 2 and the bonds between particles
-type 3. The default export is one capsule per relaxed segment, which LAMMPS
-doesn't read (see the [Python guide](../crates/tangle_python/README.md#bpm-export));
-for LAMMPS, export with `mode="spheres_exact"` and add the binder the same way.
+type 3. See the [Python guide](../crates/tangle_python/README.md#bpm-export)
+for the file the capsule export writes.
 
 ## From Python, in one call
 
