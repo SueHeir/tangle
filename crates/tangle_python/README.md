@@ -554,3 +554,154 @@ See [`python/tutorials/README.md`](python/tutorials/README.md) for the ordered
 curriculum. These notebooks are deliberately small and concept-oriented; use
 them to understand or customize one part of an application before moving to
 the full manufacturing workflows.
+
+## Inside the package
+
+This section is for people changing the package rather than using it. The
+package has two halves: a Rust extension, `tangle._tangle`, built by Maturin
+from [src](src), and pure Python under [python/tangle](python/tangle). See
+[the architecture](../../docs/architecture.md) for how the Rust crates fit
+together.
+
+### Where it fits
+
+```mermaid
+flowchart LR
+    py["tangle (Python)"] --> ext["tangle_python<br/>_tangle extension"]
+    ext --> app["tangle_app"]
+    ext --> core["tangle_core"]
+    ext --> generate["tangle_generate"]
+    ext --> relax["tangle_relax"]
+    ext --> checkpoint["tangle_checkpoint"]
+    ext --> characterize["tangle_characterize"]
+    ext --> export["tangle_export"]
+    ext --> ct["tangle_ct"]
+    ext --> grass["grass_app"]
+```
+
+- [tangle_core](../tangle_core/README.md) gives it the fiber, cell, material
+  and assembly types behind `Cell`, `Material`, `FiberCollection` and `Assembly`.
+- [tangle_generate](../tangle_generate/README.md) gives it the generators and
+  the formation recipe (`FormationRecipeConfig`, `FormationRecipePlugin`) that
+  `Recipe` fills in.
+- [tangle_relax](../tangle_relax/README.md) gives it the relaxation config and
+  plugin that `Recipe.run` installs, and the `DeviceWorld` behind `ImageRelaxer`.
+- [tangle_app](../tangle_app/README.md) gives it the workflow plugins and
+  stages that a run starts from.
+- [tangle_checkpoint](../tangle_checkpoint/README.md) gives it the checkpoint
+  plugin behind `CheckpointSettings`.
+- [tangle_characterize](../tangle_characterize/README.md) gives it the native
+  analysis behind `AnalysisReport`, `NeighborReport` and `ShapeReport`.
+- [tangle_export](../tangle_export/README.md) gives it the OVITO, BPM and PuMA
+  writers, and the voxel labels behind `tangle.fem.hex_mesh`.
+- [tangle_ct](../tangle_ct/README.md) gives it the volume operations behind
+  `tangle.ct`.
+- `grass_app` (an external crate) is the plugin app that `Recipe.run` builds
+  and starts.
+
+The `cuda` feature turns on `tangle_relax/cuda`, so that
+`RelaxationSettings(backend="cuda")` is accepted.
+
+### The Rust bindings
+
+About 7,300 lines in [src](src). [lib.rs](src/lib.rs) registers every class
+and function below on the `_tangle` module.
+
+| Module | What it defines |
+| --- | --- |
+| [lib.rs](src/lib.rs) | the `_tangle` module and `RecipeError` |
+| [collection.rs](src/collection.rs) | `Cell`, `Material`, `FiberCollection`, `FiberSelection`, `Assembly` |
+| [generators.rs](src/generators.rs) | `FiberPopulation`, the orientation models (`IsotropicOrientation`, `PlanarOrientation`, `LayeredBiaxialOrientation`, `AlignedOrientation`), the position models (`UniformPosition`, `LayeredPosition`, `DensityGradientPosition`), and the `generate_*` functions |
+| [recipe.rs](src/recipe.rs) | `Recipe`, `RunResult`, `HeldTargets`, `CircularFootprint`, `RandomFiberFraction`, and the native run |
+| [settings.rs](src/settings.rs) | `RelaxationSettings`, `AdaptiveSegmentationSettings`, `RelaxationOverrides`, `SolvePolicy` |
+| [compaction.rs](src/compaction.rs) | `CompactionSettings`, its targets (`VolumeFractionTarget`, `CellVolumeTarget`, `CellLengthsTarget`, `MeanPressureTarget`, `DirectionalPressureTarget`, `PenaltyEnergyTarget`) and paths (`AxisWeightsPath`, `EqualPressurePath`, `StressRatioPath`, `MinimumWorkPath`) |
+| [junctions.rs](src/junctions.rs) | `JunctionPolicy` |
+| [checkpoint.rs](src/checkpoint.rs) | `CheckpointSettings` |
+| [analysis.rs](src/analysis.rs) | `AnalysisReport`, `NeighborReport`, `ShapeReport`, `PumaExportReport` |
+| [image.rs](src/image.rs) | `ImageRelaxer`, the relaxation with CT image attraction that `tangle.ct` fits with |
+| [ct.rs](src/ct.rs) | `CtHessian` and the `ct_*` volume functions (filtering, sampling, rasterizing, tracing, topology moves, projection) on NumPy arrays |
+| [fem.rs](src/fem.rs) | `fem_voxel_labels`, the native helper for `tangle.fem.hex_mesh` |
+| [common.rs](src/common.rs) | argument parsing shared by the other modules |
+
+[python/tangle/_tangle.pyi](python/tangle/_tangle.pyi) is the type stub for
+this module; `test_api.py` checks that it matches the native module.
+
+### The Python package
+
+About 17,900 lines under [python/tangle](python/tangle).
+
+| Module | What it does |
+| --- | --- |
+| [\_\_init\_\_.py](python/tangle/__init__.py) | re-exports the `_tangle` classes and `generate_*` functions as `tangle.*`; the `ct_*` and `fem_*` functions stay in `tangle._tangle` |
+| [units.py](python/tangle/units.py) | the `m`, `mm`, `um` and `nm` length multipliers |
+| [lammps.py](python/tangle/lammps.py) | `read_data` and `LammpsData`: read the fibers of a LAMMPS BPM data file, relax them with a `Recipe`, and write the file back |
+| [fem/](python/tangle/fem/__init__.py) | `hex_mesh`, `tet_mesh`, `FemMesh`, `ElasticMaterial`, `Tie`: FEM meshes and their Nastran and Abaqus writers |
+| [ct/](python/tangle/ct/__init__.py) | CT fitting: `fit_fibers`, `FitSettings`, `FitResult`, `synthetic_ct`, `score`, `find_fibers` and the rest of the public names |
+
+#### tangle.fem
+
+| Module | What it does |
+| --- | --- |
+| [\_mesh.py](python/tangle/fem/_mesh.py) | `FemMesh`, shared by both meshers, and its Nastran and Abaqus writers |
+| [\_source.py](python/tangle/fem/_source.py) | reading fibers and materials from an `Assembly` |
+| [\_hex.py](python/tangle/fem/_hex.py) | hexahedral meshes, one brick per filled voxel, from `fem_voxel_labels` |
+| [\_tet.py](python/tangle/fem/_tet.py), [\_gmsh\_worker.py](python/tangle/fem/_gmsh_worker.py) | tetrahedral meshes of each fiber's surface by gmsh, one worker process per fiber |
+
+#### tangle.ct
+
+| Modules | What they do |
+| --- | --- |
+| [\_fit.py](python/tangle/ct/_fit.py) | `FitSettings`, `FitResult` and `fit_fibers`, which run the steps below in order |
+| [\_native.py](python/tangle/ct/_native.py) | thin NumPy wrappers of the `ct_*` functions in [ct.rs](src/ct.rs) |
+| [\_image.py](python/tangle/ct/_image.py), [\_geometry.py](python/tangle/ct/_geometry.py), [\_profile.py](python/tangle/ct/_profile.py) | intensity normalization and Hessian tube direction; polyline helpers and capsule rasterization; cross-section brightness profiles |
+| [\_trace.py](python/tangle/ct/_trace.py), [\_device.py](python/tangle/ct/_device.py), [\_refine.py](python/tangle/ct/_refine.py), [\_ends.py](python/tangle/ct/_ends.py) | the first centerlines; the continuous fit on Tangle's solver through `ImageRelaxer`; the host-side ends, spacing and support steps; the fiber-length prior |
+| [\_moves.py](python/tangle/ct/_moves.py), [\_model.py](python/tangle/ct/_model.py), [\_junctions.py](python/tangle/ct/_junctions.py), [\_regrow.py](python/tangle/ct/_regrow.py) | topology moves (duplicates, unsupported fibers, merges, births); the residual model and its births; joining loose ends in unsure regions; regrowing unsure parts |
+| [\_join.py](python/tangle/ct/_join.py), [\_rescue.py](python/tangle/ct/_rescue.py), [\_ridge.py](python/tangle/ct/_ridge.py) | the optional passes after the last solve: joins and finishes, coarse rescue, ridge finish |
+| [\_grey.py](python/tangle/ct/_grey.py), [\_ranges.py](python/tangle/ct/_ranges.py) | fitting raw grey scans, with a grey profile or a grey range per fiber type |
+| [\_confidence.py](python/tangle/ct/_confidence.py), [\_evaluate.py](python/tangle/ct/_evaluate.py) | how sure the fit is of each node; `score` and the other comparisons with ground truth |
+| [\_synthetic.py](python/tangle/ct/_synthetic.py), [\_scanner.py](python/tangle/ct/_scanner.py) | `synthetic_ct` from any assembly; a simulated CT acquisition (`Scanner`, `acquire`) |
+| [\_tiles.py](python/tangle/ct/_tiles.py) | `fit_tiled`: a large scan fitted tile by tile, with checkpoints and stitching |
+| [\_overlay.py](python/tangle/ct/_overlay.py), [\_snapshots.py](python/tangle/ct/_snapshots.py), [\_bpm.py](python/tangle/ct/_bpm.py) | label overlays on the scan; OVITO snapshots of each fit step; binder bonds and spheres in BPM files |
+| [\_find.py](python/tangle/ct/_find.py) | `find_fibers` and `NetworkSettings`: the CT map network in one call that returns a Tangle fit |
+| [\_network/](python/tangle/ct/_network/__init__.py) | the network's own modules (`maps`, `find_fibers`, `trace_maps`, `diameters`, `fiber_types`, `bonds`, `scan_io`, `fiber_outputs`), copied from [examples/ct_unet](python/examples/ct_unet/README.md) by its `sync_package.py` |
+
+### How a call reaches the GPU
+
+A Python object such as `tangle.Recipe` is the PyO3 class itself, re-exported
+by `tangle/__init__.py`. `Recipe` and the settings objects only collect
+configuration. `Recipe.run` turns it into a `FormationRecipeConfig`
+(`tangle_generate`) and a `RelaxationConfig` (`tangle_relax`), releases the
+GIL, and builds a `grass_app` app with the `tangle_app` workflow plugins, the
+`tangle_relax` relaxation plugin and the `tangle_generate` recipe plugin, plus
+the `tangle_checkpoint` and `tangle_export` OVITO plugins when asked. The
+relaxation runs on the backend that `RelaxationSettings.backend` names
+(`wgpu` by default, `cpu`, or `cuda` with the feature). `ImageRelaxer` skips
+the app and drives a `tangle_relax` `DeviceWorld` directly. The `ct_*`
+functions run `tangle_ct` on the CPU over NumPy buffers, and
+`fem_voxel_labels` runs `tangle_export`'s voxelizer.
+
+### Tests
+
+```console
+python -m unittest discover -s crates/tangle_python/python/tests -v
+```
+
+`test_ct_bpm.py`, `test_ct_network.py` and `test_ct_relax.py` are written as
+pytest functions, so run them with `pytest`. GPU tests are skipped on CI
+unless `TANGLE_BACKEND` names a backend.
+
+| Where | What |
+| --- | --- |
+| [test_api.py](python/tests/test_api.py) | collections, cells, settings, recipes and runs, and the `_tangle.pyi` stub |
+| [test_image_relaxer.py](python/tests/test_image_relaxer.py) | `ImageRelaxer` pulling a fiber onto a bright tube |
+| [test_ct.py](python/tests/test_ct.py) | the `tangle.ct` tools and full fits |
+| [test_ct_finish.py](python/tests/test_ct_finish.py) | the final passes in `_join.py` and their settings |
+| [test_ct_model.py](python/tests/test_ct_model.py) | the grey-model pass in `_model.py` |
+| [test_ct_relax.py](python/tests/test_ct_relax.py) | `FitResult.coarse_grained` and `FitResult.relax` |
+| [test_ct_bpm.py](python/tests/test_ct_bpm.py) | binder bonds and spheres in BPM files, and their OVITO view |
+| [test_ct_network.py](python/tests/test_ct_network.py) | `find_fibers`, and that `ct/_network` matches `examples/ct_unet` |
+| [test_fem.py](python/tests/test_fem.py) | hex and tet meshes and their Nastran and Abaqus files |
+| [test_lammps.py](python/tests/test_lammps.py) | reading, relaxing and writing LAMMPS BPM data files |
+| [test_periodic_domain_sweep.py](python/tests/test_periodic_domain_sweep.py) | the periodic domain sweep example's configuration |
+| [test_documentation.py](python/tests/test_documentation.py) | local Markdown links, and the tutorial and example notebooks |
+| [test_tutorial_notebooks.py](python/tests/test_tutorial_notebooks.py) | that the tutorial set is complete and documents every setting |

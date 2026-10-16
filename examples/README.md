@@ -3,7 +3,8 @@
 Install the extension using the [Python guide](../crates/tangle_python/README.md),
 then begin with [tutorial 01](../crates/tangle_python/python/tutorials/01_high_level_overview.ipynb).
 The [topic notebooks](../crates/tangle_python/python/tutorials/README.md) explain
-individual settings. Each script below has a matching notebook beside it.
+individual settings. Each script below has a matching notebook beside it,
+except `quickstart`, `fem_mesh` and `ct_examples`.
 
 | Concept | Python script | Native notes |
 | --- | --- | --- |
