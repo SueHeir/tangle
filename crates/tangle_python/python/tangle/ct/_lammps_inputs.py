@@ -253,6 +253,7 @@ def _tensile_script(path: Path, directory: Path) -> str:
         "                                      # slower, closer to quasi-static",
         "variable        settle index 5        # sound crossings of the sample to settle before the pull",
         "variable        every index 1000      # steps between output lines",
+        "variable        dump_every index ${every}  # steps between OVITO frames",
         "",
         "units           si",
         "atom_style      bacillus",
@@ -313,6 +314,21 @@ def _tensile_script(path: Path, directory: Path) -> str:
         "compute         kinetic free ke",
         "thermo_style    custom step time c_kinetic bonds",
         "thermo          ${every}",
+        "",
+        "# OVITO: the capsules to tensile.dump (open it and set the particle shape to Spherocylinder) and the bonds to",
+        "# tensile_bonds.dump (add a Load trajectory modifier: batom1 and batom2 to Particle Identifiers.1 and .2,",
+        "# btype to Bond Type), every `dump_every` steps. `length` (pole to pole) needs the bacillus atom style's",
+        "# length output (compute property/atom length).",
+        "compute         capsule all property/atom length quatw quati quatj quatk",
+        "dump            capsules all custom ${dump_every} tensile.dump id mol type x y z radius &\n"
+        "                c_capsule[1] c_capsule[2] c_capsule[3] c_capsule[4] c_capsule[5]",
+        "dump_modify     capsules colname radius AsphericalShape.X colname c_capsule[1] AsphericalShape.Z &\n"
+        "                colname c_capsule[2] quatw colname c_capsule[3] quati colname c_capsule[4] quatj &\n"
+        "                colname c_capsule[5] quatk",
+        "compute         bond_ends all property/local batom1 batom2 btype",
+        "dump            bonds all local ${dump_every} tensile_bonds.dump index c_bond_ends[1] c_bond_ends[2] &\n"
+        "                c_bond_ends[3]",
+        "dump_modify     bonds colname c_bond_ends[1] batom1 colname c_bond_ends[2] batom2 colname c_bond_ends[3] btype",
         "",
         "# Settle with both grips held",
         "run             $(v_every*ceil(v_settle*v_transit/dt/v_every))  # whole outputs, so the pull's line up",

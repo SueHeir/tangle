@@ -230,6 +230,9 @@ def test_a_bacillus_file_gets_lammps_inputs_for_its_fiber_types(tmp_path):
     pull = tensile.read_text().splitlines()
     assert "read_data       fibers_bacillus.data" in pull and "include         in.atom_types" in pull
     assert "fix             integrate free nve/bacillus" in pull
+    assert "compute         capsule all property/atom length quatw quati quatj quatk" in pull
+    assert any(line.startswith("dump            capsules all custom ${dump_every} tensile.dump") for line in pull)
+    assert any(line.startswith("dump            bonds all local ${dump_every} tensile_bonds.dump") for line in pull)
     # the binder bond type a later add_bpm_binder_bonds adds gets its own coefficients
     bonds = [{"fibers": (0, 1), "position": np.array([37.0, 30.0, 32.0])}]
     assert ct.add_bpm_binder_bonds(path, bonds, voxel_size=1.0) == 1

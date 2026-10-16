@@ -404,7 +404,9 @@ bonds from placeholder material values (index variables such as `E_1`, set
 before the include or with `-var`), and `dt`, a stable timestep; and
 `in.tensile`, an example that settles the fibers, holds the capsules near both
 ends of the sample along `axis` and pulls one end at constant speed to
-`max_strain`, writing strain, stress and both grip forces to `tensile.txt`:
+`max_strain`, writing strain, stress and both grip forces to `tensile.txt`, and
+the capsules and bonds to `tensile.dump` and `tensile_bonds.dump` for OVITO
+(particle shape Spherocylinder):
 
 ```bash
 lmp -in in.tensile -var axis x -var max_strain 0.02 -var E_1 3.0e9
