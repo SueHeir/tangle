@@ -374,7 +374,13 @@ so the result is always valid Tangle again. `export_bpm` writes one capsule
 per segment, bonded along each fiber, for LAMMPS's `atom_style bacillus`. Each
 fiber type has its own atom type and bond type: with two fiber diameters, the
 thinner fibers' capsules are atom type 1 and the bonds along them bond type 1,
-the thicker fibers' type 2. The meshes come from `tangle.fem` (see
+the thicker fibers' type 2. Next to the data file it writes `in.atom_types`,
+the LAMMPS set-up of those types (contacts, bonds and placeholder material
+values to `include` after `read_data`), and `in.tensile`, an example tensile
+pull: `lmp -in in.tensile -var axis z -var E_1 3.0e9` writes the stress and
+strain to `tensile.txt`. `fit.coarse_grained().relax(adaptive=True,
+defined_radii=True)` relaxes the fibers at their types' defined diameters
+instead of the fitted ones. The meshes come from `tangle.fem` (see
 the [FEM export guide](fem_export.md)): bricks from voxels, or with gmsh
 installed, tetrahedra that follow each fiber's surface (`fem.tet_mesh`).
 ParaView can't read the Nastran file's nodes, so `write_vtu` writes a copy it
