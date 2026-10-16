@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 import re
 from dataclasses import dataclass
@@ -22,6 +23,9 @@ HEX_TETRAHEDRA = np.array(
 )
 # The corners of a tetrahedron's faces S1 to S4, as Abaqus numbers them.
 TET_FACES = np.array([[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]])
+# The corners at the ends of the edges whose middles are nodes 4 to 9 of a
+# 10-node tetrahedron, in Nastran and Abaqus order.
+TET10_EDGES = [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)]
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,46 @@ class ElasticMaterial:
 
 
 MaterialChoice = Union[ElasticMaterial, Mapping[str, ElasticMaterial], None]
+
+
+def _cubic_jacobian_tables() -> tuple[np.ndarray, np.ndarray]:
+    """What :func:`tet10_jacobians` needs. A 10-node tetrahedron's Jacobian
+    determinant is a cubic in the barycentric coordinates. These are the
+    derivatives of the ten shape functions along the edges from corner 0 at
+    the 20 points of the cubic lattice, and the matrix that turns the
+    determinant's values at those points into its Bernstein coefficients."""
+    lattice = np.array([index for index in itertools.product(range(4), repeat=4) if sum(index) == 3])
+    points = lattice / 3.0
+    slopes = np.zeros((len(points), 10, 4))  # d(shape function) / d(barycentric coordinate)
+    for corner in range(4):
+        slopes[:, corner, corner] = 4.0 * points[:, corner] - 1.0
+    for edge, (first, second) in enumerate(TET10_EDGES):
+        slopes[:, 4 + edge, first] = 4.0 * points[:, second]
+        slopes[:, 4 + edge, second] = 4.0 * points[:, first]
+    weights = np.array([6.0 / math.prod(math.factorial(power) for power in index) for index in lattice])
+    bernstein = weights * np.prod(points[:, None, :] ** lattice[None, :, :], axis=2)  # basis q at point p
+    return slopes[:, :, 1:] - slopes[:, :, :1], np.linalg.inv(bernstein)
+
+
+_TET10_SLOPES, _TO_BERNSTEIN = _cubic_jacobian_tables()
+
+
+def tet10_jacobians(nodes: np.ndarray, elements: np.ndarray, chunk: int = 20_000) -> tuple[np.ndarray, np.ndarray]:
+    """For each 10-node tetrahedron, the smallest Bernstein coefficient of
+    its Jacobian determinant, which the determinant stays above everywhere
+    in the element, and the mean coefficient, which is the determinant's mean
+    over the element and six times the element's volume. (A straight-sided
+    element's determinant is that everywhere.)"""
+    lowest, mean = np.empty(len(elements)), np.empty(len(elements))
+    for start in range(0, len(elements), chunk):
+        points = nodes[elements[start : start + chunk]]
+        # (element, lattice point, edge direction, coordinate)
+        columns = np.tensordot(points, _TET10_SLOPES, axes=(1, 1)).transpose(0, 2, 3, 1)
+        determinants = np.einsum("mpd,mpd->mp", columns[:, :, 0], np.cross(columns[:, :, 1], columns[:, :, 2]))
+        coefficients = determinants @ _TO_BERNSTEIN.T
+        lowest[start : start + chunk] = coefficients.min(axis=1)
+        mean[start : start + chunk] = coefficients.mean(axis=1)
+    return lowest, mean
 
 
 @dataclass(frozen=True, eq=False)
@@ -150,8 +194,10 @@ class FemMesh:
         return [int(fiber) for fiber in np.unique(self.element_fibers) if fiber != 0]
 
     def element_volumes(self) -> np.ndarray:
-        """Volume of every element from its corner nodes (straight edges and
-        flat faces)."""
+        """Volume of every element: a 10-node tetrahedron's follows its
+        curved edges, and the others' are those of their corner nodes."""
+        if self.element_type == "tet10":
+            return tet10_jacobians(self.nodes, self.elements)[1] / 6.0
         if self.element_type == "hex8":
             corners = self.elements[:, HEX_TETRAHEDRA]
         else:
