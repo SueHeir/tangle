@@ -96,11 +96,11 @@ Fiber ends are flat.
 - `order=2` writes 10-node tetrahedra. They avoid the stiffness of 4-node
   tetrahedra in bending, which matters for thin fibers. Their mid-edge nodes
   on a fiber's surface sit on that surface, so their faces there curve with
-  the fiber: 8 around keep a round fiber's volume within about 0.5% and its
-  surface where TANGLE puts it, closer than 16 flat faces do, with about a
-  seventh of the elements. Where curving would fold an element (its Jacobian
-  dropping anywhere below a tenth of its straight-sided self's), its edges
-  bow less, or not at all, so every element is valid for the solver.
+  the fiber: 8 around keep a round fiber's volume within about 0.5%, closer
+  than 16 flat faces do, with about a seventh of the elements. Where curving
+  would fold an element (its Jacobian dropping anywhere below a tenth of its
+  straight-sided self's), its edges bow less, or not at all, so every element
+  is valid for the solver.
 - With `clip_to_cell=True` the fibers are cut at the cell walls, with their
   periodic images on periodic axes, so the mesh fills the same box as
   `hex_mesh`. A fiber that only touches a wall, such as one resting on the
@@ -152,11 +152,11 @@ fibers stay round.
   beyond it stays free.
 - `voxel_size` must divide every cell length, and binder needs
   `clip_to_cell=True`, since it fills the cell.
-- Six tetrahedra to a voxel add up: with `order=2`, binder has about eight
-  nodes per voxel, so binder at a CT scan's voxel size can have more nodes
-  than all the fibers. The fibers do not depend on `voxel_size`, so give the
-  binder voxels of a few scan voxels and pass the scan's mask as it is, as
-  for `hex_mesh`:
+- Six tetrahedra to a voxel add up: with `order=2`, binder has 8 to 12 nodes
+  per voxel, the more the thinner it is, so binder at a CT scan's voxel size
+  can have more nodes than all the fibers. The fibers do not depend on
+  `voxel_size`, so give the binder voxels of a few scan voxels and pass the
+  scan's mask as it is, as for `hex_mesh`:
 
   ```python
   tets = fem.tet_mesh(fit.to_assembly(), order=2, voxel_size=2 * fit.voxel_size, binder=fit.binder)
