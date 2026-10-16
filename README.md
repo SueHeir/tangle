@@ -127,7 +127,7 @@ Usually capture them after the geometry has settled.
 Check `result.converged`, residuals, warnings, and recipe events before using
 an output as a relaxed specimen. A soft intermediate gate is not proof of final
 hard admissibility. Exporting an assembly does not itself certify equilibrium.
-See [solver and architecture notes](docs/architecture.md) for details.
+See the [solver notes](docs/architecture.md#solver-notes) for details.
 
 ## Outputs and analysis
 
@@ -214,12 +214,58 @@ project does **not** guarantee restart compatibility across revisions. Keep the
 generating commit and an independent geometry export. Output folders, local
 environments, and notebooks' generated results are excluded from Git.
 
+## How it is built
+
+```mermaid
+flowchart LR
+    py["Python<br/>Recipe, tangle.ct,<br/>tangle.fem, tangle.lammps"] --> ext["_tangle extension<br/>PyO3"]
+    ext --> host["Host preparation<br/>tangle_core, tangle_generate"]
+    host --> world["Device world<br/>tangle_relax, tangle_contact"]
+    world <--> gpu[("GPU<br/>CubeCL: WGPU or CPU")]
+    world --> out["Analysis and export<br/>tangle_characterize, tangle_export"]
+    ext --> ct["CT kernels<br/>tangle_ct"]
+```
+
+Python builds the recipe; Rust prepares the fibers, uploads them once to the
+GPU, and runs the recipe there as bounded batches of relaxation iterations
+scheduled by [GRASS](https://github.com/SueHeir/grass). Recipe steps change
+targets, wake dormant fibers and move the cell walls between batches without
+uploading the geometry again.
+
+[The architecture](docs/architecture.md) shows the crates, the life of a recipe
+run and of a CT fit, and the solver notes. Each crate has its own README:
+
+| Crate | What it is |
+| --- | --- |
+| [tangle_core](crates/tangle_core/README.md) | The fiber assembly, cell, materials, junctions and validation |
+| [tangle_app](crates/tangle_app/README.md) | The GRASS workflow: stages, phases and plugin contracts |
+| [tangle_generate](crates/tangle_generate/README.md) | Seeded generators and the formation recipe engine |
+| [tangle_contact](crates/tangle_contact/README.md) | Cell list, neighbor list and capsule contact kernels |
+| [tangle_relax](crates/tangle_relax/README.md) | The device world and its relaxation kernels |
+| [tangle_checkpoint](crates/tangle_checkpoint/README.md) | Checkpoints and resume |
+| [tangle_characterize](crates/tangle_characterize/README.md) | Native measurements of an assembly |
+| [tangle_export](crates/tangle_export/README.md) | OVITO, BPM and PuMA outputs, and voxel labels for meshes |
+| [tangle_ct](crates/tangle_ct/README.md) | The volume kernels behind `tangle.ct` |
+| [tangle_python](crates/tangle_python/README.md) | The Python package and its guide |
+
+## Documentation
+
+| For | Read |
+| --- | --- |
+| Using it | [Python guide](crates/tangle_python/README.md) · [Tutorials](crates/tangle_python/python/tutorials/README.md) · [Examples](examples/README.md) · [Migration guide](docs/python_api_migration.md) |
+| How it works | [Architecture](docs/architecture.md) · [Fiber bonds](docs/fiber_bonds.md) · [Oval fibers](docs/oval_fibers.md) |
+| Exports | [PuMA](docs/puma_interoperability.md) · [FEM](docs/fem_export.md) · [LAMMPS BPM](docs/lammps_bpm.md) |
+| CT | [CT fitting](docs/ct_fitting.md) · [Synthetic CT](docs/ct_synthetic.md) · [CT map network](docs/ct_unet.md) · [Network tutorial](docs/ct_unet_tutorial.md) |
+
+[docs/README.md](docs/README.md) lists every guide.
+
 ## Rust and development
 
 Rust is the implementation and plugin-extension path, not a prerequisite for
-writing Python recipes once the extension is installed.
-See [architecture](docs/architecture.md), [native examples](examples/README.md),
-and the [Python guide](crates/tangle_python/README.md).
+writing Python recipes once the extension is installed. Start with
+[the architecture](docs/architecture.md#where-to-start-reading), then the
+README of the crate you are changing; the [native examples](examples/README.md)
+use the crates directly.
 
 ```console
 cargo fmt --all -- --check
