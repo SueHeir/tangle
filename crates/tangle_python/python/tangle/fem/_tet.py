@@ -65,10 +65,11 @@ def tet_mesh(
 
     Binder, when asked for, comes from the same voxels as in
     :func:`hex_mesh`, and each binder voxel becomes six tetrahedra with
-    fiber id 0 and the material ``"binder"``. The binder shares no nodes
-    with the fibers. Instead the mesh's :class:`Tie` ties the binder's faces
-    next to fibers to the fibers' surfaces, which the Abaqus file writes as
-    a ``*TIE``.
+    fiber id 0 and the material ``"binder"``. From a CT scan's binder mask
+    its voxels are by default about as large as the fibers' elements, not
+    the scan's. The binder shares no nodes with the fibers. Instead the
+    mesh's :class:`Tie` ties the binder's faces next to fibers to the
+    fibers' surfaces, which the Abaqus file writes as a ``*TIE``.
 
     The fibers are meshed side by side in separate gmsh processes, one per
     CPU core by default, so a script that calls ``tet_mesh`` needs no
@@ -88,8 +89,8 @@ def tet_mesh(
         elements_around: element edges around each fiber's cross-section,
             which also sets the element size along that fiber. By default 16
             for 4-node tetrahedra, whose flat faces then keep a round fiber's
-            volume within about 2%, and 8 for 10-node tetrahedra, whose
-            curved faces keep it within about 0.5%. More follows the surface
+            volume within about 2%, and 6 for 10-node tetrahedra, whose
+            curved faces keep it within about 1%. More follows the surface
             more closely, and fewer makes a lighter mesh.
         clip_to_cell: cut the fibers at the cell walls, with their periodic
             images on periodic axes, so the mesh fills the same box as
@@ -98,10 +99,11 @@ def tet_mesh(
             to 5% of its thickness. With ``False``, every fiber is meshed
             whole along its unwrapped centerline.
         voxel_size: the edge in meters of the binder's voxels, which must
-            divide every cell length as in :func:`hex_mesh`. Binder needs it.
-            Each binder voxel adds six tetrahedra, so binder from a CT scan
-            is far lighter on voxels of a few scan voxels than on the scan's
-            own.
+            divide every cell length as in :func:`hex_mesh`. Each binder
+            voxel adds six tetrahedra. With a ``binder`` mask it can be left
+            out: the binder's voxels are then a whole number of the mask's,
+            as near as that allows to the fibers' element size (their
+            median). Junction bridges without a mask need it.
         bond_radius_ratio: also mesh binder bridges at persistent junctions,
             with this radius as a fraction of the thinner fiber's radius, as
             :func:`hex_mesh` does.
@@ -133,8 +135,8 @@ def tet_mesh(
     if fiber_time_limit is not None and not (math.isfinite(fiber_time_limit) and fiber_time_limit > 0.0):
         raise ValueError("fiber_time_limit must be finite and positive")
     with_binder = binder is not None or bond_radius_ratio is not None
-    if with_binder and voxel_size is None:
-        raise ValueError("binder needs voxel_size: the edge of the voxels it is meshed from")
+    if with_binder and voxel_size is None and binder is None:
+        raise ValueError("bond_radius_ratio needs voxel_size: the edge of the voxels its binder is meshed from")
     if voxel_size is not None and not with_binder:
         raise ValueError("voxel_size only sets the binder's voxels; pass binder or bond_radius_ratio with it")
     if with_binder and not clip_to_cell:
@@ -154,7 +156,7 @@ def tet_mesh(
     if element_size is not None and not (math.isfinite(element_size) and element_size > 0.0):
         raise ValueError("element_size must be finite and positive")
     if elements_around is None:
-        elements_around = 16 if order == 1 else 8
+        elements_around = 16 if order == 1 else 6
     if elements_around < 3:
         raise ValueError("elements_around must be at least 3")
     # OpenCASCADE's tolerances suit lengths near 1, not micrometers written in
@@ -165,6 +167,8 @@ def tet_mesh(
     fiber_sizes = [_perimeter(long, short) / elements_around / unit for long, short in semi_axes]
     if element_size is not None:
         fiber_sizes = [min(fiber_size, element_size / unit) for fiber_size in fiber_sizes]
+    if binder is not None and voxel_size is None:
+        voxel_size = _binder_voxel_size(np.shape(binder), lengths, float(np.median(fiber_sizes)) * unit)
 
     jobs = []  # (fiber index, the arguments of _mesh_fiber after gmsh)
     for fiber, (points, axes, (long, short)) in enumerate(zip(centerlines, long_axes, semi_axes)):
@@ -212,7 +216,8 @@ def tet_mesh(
     if binder_mesh is not None:
         binder_nodes, binder_elements, next_to_fibers = binder_mesh
         if len(next_to_fibers):
-            # A binder node next to a fiber lies within about 1.2 voxels of the
+            # A binder node next to a voxel a fiber fills, or fills part of,
+            # lies within that voxel's diagonal, about 1.7 voxels, of the
             # fiber's round surface, and the flat facets of the fiber's mesh
             # lie up to a facet's sagitta inside that surface.
             sagitta = max((edge * unit) ** 2 * long / (8.0 * short * short)
@@ -246,14 +251,34 @@ def tet_mesh(
     )
 
 
+def _binder_voxel_size(shape, lengths: np.ndarray, target: float) -> float:
+    """The edge of the binder's voxels from a mask of this ``(z, y, x)``
+    shape over the cell: a whole number of the mask's voxels that tiles the
+    cell, as near as that allows to ``target`` (by ratio)."""
+    if len(shape) != 3 or min(shape) < 1:
+        raise ValueError(f"binder must be a (z, y, x) mask; got {tuple(shape)}")
+    counts = np.array(shape[::-1], dtype=np.int64)  # (nx, ny, nz)
+    sizes = lengths / counts
+    if not np.allclose(sizes, sizes[0], rtol=1.0e-9, atol=0.0):
+        raise ValueError(
+            f"the binder mask's voxels are {sizes[0]:.6e} x {sizes[1]:.6e} x {sizes[2]:.6e} m, not cubes; "
+            "pass voxel_size"
+        )
+    factors = [factor for factor in range(1, int(counts.min()) + 1) if not (counts % factor).any()]
+    factor = min(factors, key=lambda factor: abs(math.log(factor * sizes[0] / target)))
+    return float(lengths[0] / (counts[0] // factor))
+
+
 def _binder_mesh(assembly, voxel_size: float, bond_radius_ratio: float | None, binder, order: int):
     """The binder's tetrahedra, six to each binder voxel of :func:`hex_mesh`,
     on nodes of their own: the nodes in meters, the elements, and the
     ``(element, face)`` pairs of the faces next to a voxel that a fiber
-    fills. None when no voxel is binder."""
-    counts, phase, owner = voxel_labels(assembly, voxel_size, bond_radius_ratio, binder)
+    fills, or fills part of on a finer mask's grid. None when no voxel is
+    binder."""
+    counts, phase, owner, fibrous = voxel_labels(assembly, voxel_size, bond_radius_ratio, binder)
     nx, ny, nz = counts
-    chosen = np.flatnonzero((phase != 0) & (owner == 0))
+    is_binder = (phase != 0) & (owner == 0)
+    chosen = np.flatnonzero(is_binder)
     if chosen.size == 0:
         return None
     voxels = np.stack([chosen % nx, (chosen // nx) % ny, chosen // (nx * ny)], axis=1)
@@ -272,14 +297,14 @@ def _binder_mesh(assembly, voxel_size: float, bond_radius_ratio: float | None, b
     spacing = np.asarray(assembly.cell.lengths, dtype=float) / np.asarray(counts, dtype=float)
     nodes = np.asarray(assembly.cell.origin, dtype=float) + points * (spacing / 2.0)
 
-    filled_by_fiber = (phase != 0) & (owner != 0)
+    beside_fibers = fibrous & ~is_binder  # a fiber fills it, or part of it, and it is not binder
     stride = (1, nx, nx * ny)
     next_to_fibers = []
     for (axis, high), faces in _voxel_sides().items():
         step = 1 if high else -1
         beside = voxels[:, axis] + step
         rows = np.flatnonzero((beside >= 0) & (beside < counts[axis]))
-        rows = rows[filled_by_fiber[chosen[rows] + step * stride[axis]]]
+        rows = rows[beside_fibers[chosen[rows] + step * stride[axis]]]
         for tetrahedron, face in faces:
             next_to_fibers.append(np.stack([6 * rows + tetrahedron, np.full(len(rows), face)], axis=1))
     return nodes, elements, np.concatenate(next_to_fibers)

@@ -214,26 +214,34 @@ class HexMeshTests(unittest.TestCase):
         np.testing.assert_array_equal(mesh.elements, same.elements)
         np.testing.assert_array_equal(mesh.element_fibers, same.element_fibers)
 
-    def test_a_finer_mask_is_binder_where_it_fills_half_of_what_the_fibers_leave(self):
+    def test_thin_binder_in_a_finer_mask_gathers_where_it_is_densest(self):
         assembly = touching_cross()
-        fine_fibers = voxels_of(fem.hex_mesh(assembly, 0.025), slice(None), 0.025)
-        coarse_fibers = voxels_of(fem.hex_mesh(assembly, 0.05), slice(None), 0.05)
-        # A voxel no fiber fills, though fibers fill some of its eight finer voxels.
-        for voxel in itertools.product(range(20), repeat=3):
-            free = [tuple(2 * at + step for at, step in zip(voxel, steps))
-                    for steps in itertools.product((0, 1), repeat=3)]
-            free = [fine for fine in free if fine not in fine_fibers]
-            if voxel not in coarse_fibers and 2 <= len(free) <= 6:
-                break
-        else:
-            self.fail("no voxel beside a fiber")
-        least = (len(free) + 1) // 2  # less than half the voxel, but half of what the fibers leave
-        for count, binder in ((least, {voxel}), (least - 1, set())):
+        # Four voxels far from the fibers, along x in the cell's corner, with eight finer voxels each.
+        voxels = [(0, 0, 0), (0, 0, 2), (0, 0, 4), (0, 0, 6)]
+        # None is half binder; their binder fills one voxel's worth, or two: the fullest take it.
+        for counts, binder in (((3, 2, 2, 1), {voxels[0]}), ((4, 4, 4, 4), set(voxels[:2]))):
             mask = np.zeros((40, 40, 40), dtype=bool)
-            for fine in free[:count]:
-                mask[fine] = True
+            for voxel, count in zip(voxels, counts):
+                fine = [tuple(2 * at + step for at, step in zip(voxel, steps))
+                        for steps in itertools.product((0, 1), repeat=3)]
+                for point in fine[:count]:
+                    mask[point] = True
             mesh = fem.hex_mesh(assembly, 0.05, binder=mask)
             self.assertEqual(voxels_of(mesh, mesh.element_fibers == 0, 0.05), binder)
+
+    def test_a_finer_mask_keeps_its_binder_volume_beside_the_fibers(self):
+        assembly = touching_cross()
+        fine_fibers = voxels_of(fem.hex_mesh(assembly, 0.025), slice(None), 0.025)
+        mask = np.random.default_rng(7).random((40, 40, 40)) < 0.2
+        mesh = fem.hex_mesh(assembly, 0.05, binder=mask)
+        binder = voxels_of(mesh, mesh.element_fibers == 0, 0.05)
+        self.assertTrue(binder)
+        # The room the binder voxels leave beside the fibers, in finer voxels, is the mask's binder there,
+        # to within half a voxel.
+        room = sum(tuple(2 * at + step for at, step in zip(voxel, steps)) not in fine_fibers
+                   for voxel in binder for steps in itertools.product((0, 1), repeat=3))
+        wanted = sum(tuple(point) not in fine_fibers for point in np.argwhere(mask).tolist())
+        self.assertLessEqual(abs(room - wanted), 4)
 
     def test_a_run_result_works_like_its_assembly(self):
         class Result:
@@ -371,11 +379,12 @@ class TetMeshTests(unittest.TestCase):
         self.assertTrue((mesh.element_volumes() > 0).all())
         self.assertAlmostEqual(mesh.volume / (math.pi * radius**2 * length), 1.0, delta=0.03)
         self.assertEqual(mesh.fiber_ids, [1])
-        # Ten-node tetrahedra curve with the surface, so 8 around do better than 16 flat ones.
+        # Ten-node tetrahedra curve with the surface, so 6 around do better than 16 flat ones, with far fewer
+        # elements.
         curved = fem.tet_mesh(assembly, order=2)
         self.assertEqual(curved.element_type, "tet10")
-        self.assertAlmostEqual(curved.volume / (math.pi * radius**2 * length), 1.0, delta=0.005)
-        self.assertLess(3 * curved.element_count, mesh.element_count)
+        self.assertAlmostEqual(curved.volume / (math.pi * radius**2 * length), 1.0, delta=0.01)
+        self.assertLess(5 * curved.element_count, mesh.element_count)
 
     def test_oval_fiber_keeps_its_long_axis(self):
         # A fiber along x puts its long axis along y by default.
@@ -500,10 +509,12 @@ class TetMeshTests(unittest.TestCase):
         self.assertEqual(len(np.unique(np.round(mesh.nodes[used] / 0.025).astype(int), axis=0)), len(used))
         self.assertEqual([tie.name for tie in mesh.ties], ["BINDER_TIE"])
 
-    def test_binder_needs_its_voxel_size_and_the_whole_cell(self):
+    def test_junction_bridges_need_a_voxel_size_and_binder_the_whole_cell(self):
         binder = crossing_binder()
-        with self.assertRaisesRegex(ValueError, "binder needs voxel_size"):
-            fem.tet_mesh(touching_cross(), 0.1, binder=binder)
+        with self.assertRaisesRegex(ValueError, "bond_radius_ratio needs voxel_size"):
+            fem.tet_mesh(touching_cross(), 0.1, bond_radius_ratio=1.0)
+        with self.assertRaisesRegex(ValueError, "not cubes; pass voxel_size"):
+            fem.tet_mesh(touching_cross(), 0.1, binder=np.zeros((20, 20, 40), dtype=bool))
         with self.assertRaisesRegex(ValueError, "voxel_size only sets"):
             fem.tet_mesh(touching_cross(), 0.1, voxel_size=0.05)
         with self.assertRaisesRegex(ValueError, "needs clip_to_cell=True"):
@@ -603,6 +614,53 @@ class TetBinderTests(unittest.TestCase):
         np.testing.assert_array_equal(mesh.nodes, self.mesh.nodes)
         np.testing.assert_array_equal(mesh.elements, self.mesh.elements)
         self.assertEqual(mesh.ties[0].tolerance, self.tie.tolerance)
+
+    def test_a_mask_without_a_voxel_size_meshes_binder_about_as_coarse_as_the_fibers(self):
+        fine = crossing_binder().repeat(2, axis=0).repeat(2, axis=1).repeat(2, axis=2)  # voxels of 0.025
+        # 4-node fibers of radius 0.1 have edges of 2 pi 0.1 / 16 = 0.039, nearer 0.05 than 0.025.
+        mesh = fem.tet_mesh(touching_cross(), 0.1, binder=fine)
+        np.testing.assert_array_equal(mesh.nodes, self.mesh.nodes)
+        np.testing.assert_array_equal(mesh.elements, self.mesh.elements)
+        # 10-node ones, capped by element_size at 0.1, bring binder voxels of 0.1: four of the mask's.
+        curved = fem.tet_mesh(touching_cross(), 0.1, order=2, binder=fine)
+        is_binder = curved.element_fibers == 0
+        self.assertTrue(is_binder.any())
+        np.testing.assert_allclose(curved.element_volumes()[is_binder], 0.1**3 / 6)
+
+    def test_a_binder_face_beside_a_voxel_a_fiber_fills_part_of_is_tied(self):
+        assembly = touching_cross()
+        fine_fibers = voxels_of(fem.hex_mesh(assembly, 0.025), slice(None), 0.025)
+
+        def finer(voxel):
+            return [tuple(2 * at + step for at, step in zip(voxel, steps))
+                    for steps in itertools.product((0, 1), repeat=3)]
+
+        # A voxel no fiber fills, beside one that a fiber fills part of, also no fiber's.
+        for voxel, axis, step in itertools.product(itertools.product(range(1, 19), repeat=3), range(3), (-1, 1)):
+            beside = list(voxel)
+            beside[axis] += step
+            beside = tuple(beside)
+            partly = sum(point in fine_fibers for point in finer(beside))
+            if (voxel not in self.fiber_voxels and beside not in self.fiber_voxels
+                    and not any(point in fine_fibers for point in finer(voxel)) and 0 < partly < 8):
+                break
+        else:
+            self.fail("no voxel beside a fiber's edge")
+        mask = np.zeros((40, 40, 40), dtype=bool)
+        for point in finer(voxel):
+            mask[point] = True
+        coarse = np.zeros((20, 20, 20), dtype=bool)
+        coarse[voxel] = True
+        # The side between them, square to x, y or z: tied when the finer mask shows the fiber in the next voxel.
+        across = 2 - axis
+        for binder, tied in ((mask, True), (coarse, False)):
+            mesh = fem.tet_mesh(assembly, 0.1, voxel_size=0.05, binder=binder)
+            self.assertEqual(voxels_of(fem.hex_mesh(assembly, 0.05, binder=binder),
+                                       slice(None), 0.05) - self.fiber_voxels, {voxel})
+            plane = mesh.cell_origin[across] + (voxel[axis] + (step > 0)) * 0.05
+            corners = mesh.nodes[face_nodes(mesh, mesh.ties[0].secondary)] if mesh.ties else np.zeros((0, 3, 3))
+            on_side = np.isclose(corners[..., across], plane, rtol=0.0, atol=1e-12).all(axis=1)
+            self.assertEqual(on_side.any(), tied)
 
     def test_abaqus_writes_the_tie_and_nastran_says_to_glue_the_binder(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -68,10 +68,12 @@ does.
   stay fiber; the others become binder bricks, which share nodes with the
   fibers they touch and so bond them.
 - The mask can also be over a grid a whole number of times finer than the
-  mesh's, such as the scan's own with `voxel_size=2 * fit.voxel_size`. A
-  mesh voxel is then binder when, of its finer voxels that no fiber fills, at
-  least as many are binder as are empty. Leaving out what the fibers fill
-  keeps the binder that fills the gaps beside them.
+  mesh's, such as the scan's own with `voxel_size=4 * fit.voxel_size`. Of the
+  mesh voxels no fiber fills, those where binder fills the largest share of
+  the room the fibers leave (on the finer grid) then become binder, as many
+  as hold about as much room as the mask's binder fills. The binder so keeps
+  its volume outside the fibers, and binder too thin to fill half a mesh
+  voxel gathers where it is densest instead of dropping out.
 
 ## Tetrahedra from gmsh
 
@@ -90,17 +92,17 @@ Fiber ends are flat.
 - `elements_around` sets each fiber's element size: the perimeter of its
   cross-section divided by this many edges, so thin and flat fibers get
   smaller elements than thick ones. The default is 16 for 4-node tetrahedra,
-  whose flat faces then keep a round fiber's volume within about 2%, and 8 for
+  whose flat faces then keep a round fiber's volume within about 2%, and 6 for
   10-node tetrahedra. Halving it gives about a seventh of the elements.
   `element_size`, when given, caps the element edge in every fiber.
 - `order=2` writes 10-node tetrahedra. They avoid the stiffness of 4-node
   tetrahedra in bending, which matters for thin fibers. Their mid-edge nodes
   on a fiber's surface sit on that surface, so their faces there curve with
-  the fiber: 8 around keep a round fiber's volume within about 0.5%, closer
-  than 16 flat faces do, with about a seventh of the elements. Where curving
-  would fold an element (its Jacobian dropping anywhere below a tenth of its
-  straight-sided self's), its edges bow less, or not at all, so every element
-  is valid for the solver.
+  the fiber: the default of 6 around keeps a round fiber's volume within
+  about 1%, and 8 around within about 0.5%, closer than 16 flat faces do with
+  a small share of their elements. Where curving would fold an element (its
+  Jacobian dropping anywhere below a tenth of its straight-sided self's), its
+  edges bow less, or not at all, so every element is valid for the solver.
 - With `clip_to_cell=True` the fibers are cut at the cell walls, with their
   periodic images on periodic axes, so the mesh fills the same box as
   `hex_mesh`. A fiber that only touches a wall, such as one resting on the
@@ -134,16 +136,20 @@ binder is the same voxels, those of the mask or of the junction bridges that
 no fiber fills, on the grid of `voxel_size`. Each binder voxel becomes six
 tetrahedra (10-node ones with `order=2`) with fiber id 0 and the material
 `"binder"`, so the binder's surface steps from voxel to voxel while the
-fibers stay round.
+fibers stay round. With a mask, `voxel_size` can be left out: the binder's
+voxels are then a whole number of the mask's, as near as that allows to the
+fibers' element size (their median), so the binder is about as coarse as the
+fibers.
 
 - The binder is one body of its own: its tetrahedra share nodes with each
   other but not with the fibers. `mesh.ties` holds one `Tie`, `BINDER_TIE`,
-  from the binder's faces next to a voxel a fiber fills to the faces of the
-  fibers' surfaces, and `write_abaqus` writes it as a `*TIE` that glues them.
-  Its position tolerance is twice the voxel size plus twice the depth a flat
-  element face on a fiber's surface can have, since a binder face next to a
-  fiber lies within about 1.2 voxels of the fiber's round surface. Binder
-  nodes farther away stay free.
+  from the binder's faces next to a voxel a fiber fills (or fills part of, on
+  a finer mask's grid) to the faces of the fibers' surfaces, and
+  `write_abaqus` writes it as a `*TIE` that glues them. Its position
+  tolerance is twice the voxel size plus twice the depth a flat element face
+  on a fiber's surface can have, since a binder face next to such a voxel
+  lies within its diagonal, about 1.7 voxels, of the fiber's round surface.
+  Binder nodes farther away stay free.
 - The Nastran file has no tie: glue the binder's `PSOLID` to the fibers in
   your pre-processor, as for fibers that touch.
 - The voxels a fiber fills are those of `hex_mesh`, whose fibers end in half
@@ -155,18 +161,17 @@ fibers stay round.
 - Six tetrahedra to a voxel add up: with `order=2`, binder has 8 to 12 nodes
   per voxel, the more the thinner it is, so binder at a CT scan's voxel size
   can have more nodes than all the fibers. The fibers do not depend on
-  `voxel_size`, so give the binder voxels of a few scan voxels and pass the
-  scan's mask as it is, as for `hex_mesh`:
+  `voxel_size`, so pass the scan's mask as it is and leave `voxel_size` out:
 
   ```python
-  tets = fem.tet_mesh(fit.to_assembly(), order=2, voxel_size=2 * fit.voxel_size, binder=fit.binder)
+  tets = fem.tet_mesh(fit.to_assembly(), order=2, binder=fit.binder)
   ```
 
-  Each doubling of `voxel_size` gives about an eighth of the binder
-  elements. Binder thinner than about half a voxel can drop out, and binder
-  beside a fiber fills whole voxels, so it can reach a little into the
-  fiber. Compare `mesh.element_volumes()` of the binder (fiber id 0) at two
-  sizes to see what a coarser one changes.
+  A larger `voxel_size`, a whole number of scan voxels, makes the binder
+  coarser still: each doubling gives about an eighth of its elements. Binder
+  beside a fiber fills whole voxels, so coarse binder reaches into the
+  fibers, by up to about half a voxel. Compare `mesh.element_volumes()` of
+  the binder (fiber id 0) at two sizes to see what a coarser one changes.
 
 ## Writing the files
 
