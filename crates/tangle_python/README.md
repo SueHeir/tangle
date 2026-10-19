@@ -419,7 +419,8 @@ the overlaps that makes.
 
 For fibers found in a CT scan, `tangle.ct.add_bpm_binder_bonds` and
 `tangle.ct.add_bpm_binder_spheres` add the binder the scan shows, as bonds
-between fibers or (in a file of spheres, for now) as bonded spheres, and
+between fibers or as spheres bonded to each other and to the fibers (in a
+capsule file, capsules of no length), and
 `tangle.ct.write_bpm_ovito` writes a file to look at in OVITO (see the
 [CT network tutorial](../../docs/ct_unet_tutorial.md#7-into-tangle)).
 Constitutive laws and contact exclusions belong to the downstream model.

@@ -22,6 +22,7 @@ ATOM_TYPES = "in.atom_types"
 TENSILE = "in.tensile"
 _FIBER_TYPE = re.compile(r'^# atom type (\d+) and bond type (\d+) = fiber type "(.*)" \((\d+) capsules\)')
 _BOND_TYPE = re.compile(r"^# bond type (\d+) = (.*)$")
+_ATOM_TYPE = re.compile(r"^# atom type (\d+) = (.*)$")  # not a fiber type: binder spheres, say
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,10 @@ def _atom_types_script(path: Path, data: _DataFile, particles: _Particles, types
     by_atom = {fiber.atom_type: fiber for fiber in types}
     by_bond = {fiber.bond_type: fiber for fiber in types}
     notes = {int(match.group(1)): match.group(2) for match in map(_BOND_TYPE.match, data.header) if match}
+    atom_notes = {int(match.group(1)): match.group(2) for match in map(_ATOM_TYPE.match, data.header) if match}
+    masses = particles.densities * np.pi * (particles.radii ** 2 * 2.0 * particles.half + 4.0 / 3.0 * particles.radii ** 3)
+    others = [kind for kind in range(1, atom_count + 1) if kind not in by_atom and (particles.types == kind).any()]
+    taken = {fiber.label for fiber in types}
 
     out = [
         f"# LAMMPS set-up of the fiber types of {path.name} (atom_style bacillus, SI units), written by Tangle.",
@@ -173,9 +178,36 @@ def _atom_types_script(path: Path, data: _DataFile, particles: _Particles, types
             f"variable        mu_{k} index 0.5",
             "",
         ]
+    for kind in others:
+        note = atom_notes.get(kind, "not a fiber type")
+        mine = particles.types == kind
+        label = _label("binder" if note.startswith("binder") else f"type {kind}", taken)
+        out += [
+            f"# atom type {kind} = {note}: {int(mine.sum())} particles, {_g(2.0 * float(particles.radii[mine].max()))} m "
+            "across at most; contacts like fiber type " + str(first) + "'s unless set",
+            f"labelmap        atom {kind} {label}",
+            f"group           {label} type {kind}",
+            f"variable        kn_{kind} index $(v_kn_{first})",
+            f"variable        mu_{kind} index $(v_mu_{first})",
+            "",
+        ]
+    # The bonds that aren't along a fiber (binder): their stiffest (area over length, at their mean radius) and the
+    # lightest particle at either end set a timestep limit like a fiber's.
+    stiff = {}
+    for row in bonds:
+        kind = int(row[1])
+        if kind in by_bond:
+            continue
+        a, b = index_of[int(row[2])], index_of[int(row[3])]
+        length = float(np.linalg.norm(particles.centers[a] - particles.centers[b]))
+        radius = 0.5 * (particles.radii[a] + particles.radii[b])
+        ratio = np.pi * radius ** 2 / max(length, 1e-3 * radius)
+        mass = min(masses[a], masses[b])
+        old = stiff.get(kind, (0.0, np.inf))
+        stiff[kind] = (max(old[0], ratio), min(old[1], mass))
     out += [
         "# A timestep well inside the fastest bond and contact: a fiftieth of a sound wave's crossing of the",
-        "# shortest capsule (or diameter), and a tenth of the stiffest contact's period over 2 pi.",
+        "# shortest capsule (or diameter), and a tenth of the stiffest contact's or other bond's period over 2 pi.",
     ]
     limits = []
     for fiber in types:
@@ -184,6 +216,13 @@ def _atom_types_script(path: Path, data: _DataFile, particles: _Particles, types
         wave = f"0.02*{_g(min(fiber.shortest, fiber.diameter))}/sqrt(v_E_{k}/{_g(fiber.density)})"
         out.append(f"variable        dt_{k} equal {_min(wave, f'0.1*sqrt({_g(mass)}/v_kn_{k})')}")
         limits.append(f"v_dt_{k}")
+    for kind in others:
+        lightest = float(masses[particles.types == kind].min())
+        out.append(f"variable        dt_{kind} equal 0.1*sqrt({_g(lightest)}/v_kn_{kind})")
+        limits.append(f"v_dt_{kind}")
+    for kind, (ratio, lightest) in sorted(stiff.items()):
+        out.append(f"variable        dt_bond_{kind} equal 0.1*sqrt({_g(lightest)}/(v_E_bond_{kind}*{_g(ratio)}))")
+        limits.append(f"v_dt_bond_{kind}")
     dt = limits[-1]
     for limit in reversed(limits[:-1]):
         dt = _min(limit, dt)
@@ -197,8 +236,8 @@ def _atom_types_script(path: Path, data: _DataFile, particles: _Particles, types
 
     out += ["pair_style      granular/bacillus"]
     for kind in range(1, atom_count + 1):
-        k = by_atom[kind].atom_type if kind in by_atom else first
-        note = "" if kind in by_atom else f"   # not a fiber type: fiber type {first}'s contacts"
+        k = by_atom[kind].atom_type if kind in by_atom else (kind if kind in others else first)
+        note = "" if kind in by_atom or kind in others else f"   # no particles: fiber type {first}'s contacts"
         out.append(f"pair_coeff      {kind} {kind} hooke ${{kn_{k}}} 0.0 tangential linear_history "
                    f"$(v_kn_{k}/2) 0.0 ${{mu_{k}}}{note}")
     out.append("# pairs of types mix their contact values")

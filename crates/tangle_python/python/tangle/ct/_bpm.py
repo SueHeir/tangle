@@ -3,16 +3,17 @@
 ``RunResult.export_bpm`` writes the relaxed fibers as a LAMMPS data file: particles along each fiber (one capsule
 per relaxed segment by default, for ``atom_style bacillus``, or spheres for ``atom_style bpm/sphere`` with
 ``mode="spheres_exact"``), bonded along each fiber. The binder that :func:`find_fibers` finds goes into that file in
-one of two ways (binder spheres only into a file of spheres, for now):
+one of two ways:
 
     >>> run.export_bpm("binder_bonds.data")
     >>> ct.add_bpm_binder_bonds("binder_bonds.data", fit.bonds, fit.voxel_size)        # bonds from fiber to fiber
-    >>> run.export_bpm("binder_spheres.data", mode="spheres_exact")
+    >>> run.export_bpm("binder_spheres.data")
     >>> ct.add_bpm_binder_spheres("binder_spheres.data", fit.binder, fit.voxel_size)   # the binder as spheres
     >>> ct.write_bpm_ovito("binder_spheres.data")                                      # binder_spheres.dump
 
 Both keep the file's particles and bonds and add the binder with the next free atom and bond types, noted in the
-file's header comments.
+file's header comments. In a capsule file the binder spheres are capsules of no length, so one ``atom_style
+bacillus`` file holds the fibers and the binder.
 """
 
 from __future__ import annotations
@@ -239,9 +240,10 @@ def add_bpm_binder_spheres(path: str | os.PathLike, binder, voxel_size: float, d
       (within a voxel), or to that fiber's nearest particle if it overlaps none; and (``bond_types[1]``) to each
       sphere whose binder meets its own.
 
-    Each sphere is a molecule of its own, of ``atom_type``; the types default to the next free ones. The file must
-    hold spheres (``export_bpm(..., mode="spheres_exact")``): a capsule file for ``atom_style bacillus`` is refused
-    for now. Returns what was added, as :class:`BinderSpheres`. Binder
+    Each sphere is a molecule of its own, of ``atom_type``; the types default to the next free ones. In a capsule
+    file for ``atom_style bacillus`` (the default export) each sphere is a capsule of no length, with its own
+    ``Bacilli`` row; in a file of spheres (``mode="spheres_exact"``) it is a ``bpm/sphere`` atom. Returns what was
+    added, as :class:`BinderSpheres`. Binder
     thinner than the spheres (a film coating a fiber, say) still gets spheres, which then reach past it; give a
     smaller ``diameter`` to follow thin binder more closely.
     """
@@ -249,9 +251,6 @@ def add_bpm_binder_spheres(path: str | os.PathLike, binder, voxel_size: float, d
     from scipy.spatial import cKDTree
 
     data = _DataFile(path)
-    if "Bacilli" in data.sections:
-        raise ValueError(f"{data.path} is a capsule file for atom_style bacillus, which binder spheres can't go into "
-                         "yet; use add_bpm_binder_bonds, or export with mode=\"spheres_exact\"")
     particles = _Particles.read(data)
     mask = np.asarray(binder, dtype=bool)
     low, high = data.box()
@@ -364,10 +363,21 @@ def add_bpm_binder_spheres(path: str | os.PathLike, binder, voxel_size: float, d
     first_id, first_molecule = int(particles.ids.max()) + 1, int(particles.molecules.max()) + 1
     ids = first_id + np.arange(n)
     position = low + at * voxel_size
-    data.add_rows("Atoms", [f"{ids[i]} {first_molecule + i} {kind} {2.0 * sphere_radius[i] * voxel_size:.17e} "
-                            f"{sphere_density[i]:.17e} {position[i, 0]:.17e} {position[i, 1]:.17e} "
-                            f"{position[i, 2]:.17e}" for i in range(n)])
-    # No Capsules rows: an atom without one is a sphere (DIRT turns down a capsule of no length).
+    if "Bacilli" in data.sections:
+        # atom_style bacillus: a sphere is a capsule of no length, with a Bacilli row (no pole, and a solid
+        # sphere's inertia 2/5 m r^2), so every particle is a capsule to nve/bacillus and the bonds.
+        r = sphere_radius * voxel_size
+        inertia = 0.4 * sphere_density * sphere_volume * r ** 2
+        data.add_rows("Atoms", [f"{ids[i]} {first_molecule + i} {kind} 1 {sphere_density[i]:.17e} "
+                                f"{position[i, 0]:.17e} {position[i, 1]:.17e} {position[i, 2]:.17e}" for i in range(n)])
+        data.add_rows("Bacilli", [f"{ids[i]} {inertia[i]:.17e} {inertia[i]:.17e} {inertia[i]:.17e} 0 0 0 0 0 0 "
+                                  f"{2.0 * r[i]:.17e}" for i in range(n)])
+        data.set_count("bacilli", len(particles.ids) + n)
+    else:
+        data.add_rows("Atoms", [f"{ids[i]} {first_molecule + i} {kind} {2.0 * sphere_radius[i] * voxel_size:.17e} "
+                                f"{sphere_density[i]:.17e} {position[i, 0]:.17e} {position[i, 1]:.17e} "
+                                f"{position[i, 2]:.17e}" for i in range(n)])
+        # No Capsules rows: an atom without one is a sphere (DIRT turns down a capsule of no length).
     first_bond = max((int(row[0]) for row in existing), default=0) + 1
     bond_rows = [f"{ids[i]} {particles.ids[k]}" for i, k in fiber_bonds]
     bond_rows = [f"{to_fiber} {row}" for row in bond_rows] + [f"{between} {ids[a]} {ids[b]}" for a, b in sphere_pairs]
@@ -381,6 +391,9 @@ def add_bpm_binder_spheres(path: str | os.PathLike, binder, voxel_size: float, d
     data.note(f"bond type {to_fiber} = binder sphere to fiber particle ({len(fiber_bonds)} bonds)")
     data.note(f"bond type {between} = binder sphere to binder sphere ({len(sphere_pairs)} bonds)")
     data.write()
+    from ._lammps_inputs import _refresh
+
+    _refresh(data.path)  # in.atom_types gets the binder's types
     full = int(np.sum(sphere_radius >= 0.5 * size))
     return BinderSpheres(n, len(fiber_bonds), len(sphere_pairs), full, size * voxel_size)
 
