@@ -247,9 +247,35 @@ def test_lammps_inputs_are_for_capsule_files(tmp_path):
         ct.write_bpm_lammps_inputs(write_bpm(tmp_path, capsules=False))
 
 
-def test_binder_spheres_wait_for_bacillus_support(tmp_path):
-    with pytest.raises(ValueError, match="bacillus"):
-        ct.add_bpm_binder_spheres(write_bacillus(tmp_path), binder_film(), voxel_size=1.0)
+def test_binder_spheres_go_into_a_bacillus_file_as_capsules_of_no_length(tmp_path):
+    path = write_bacillus(tmp_path)
+    ct.write_bpm_lammps_inputs(path)
+    added = ct.add_bpm_binder_spheres(path, binder_film(), voxel_size=1.0)
+    assert added.spheres > 0 and added.fiber_bonds > 0
+    counts, sections, body = read_bpm(path)
+    assert counts["atoms"] == counts["bacilli"] == 4 + added.spheres and counts["atom types"] == 2
+    assert counts["bond types"] == 3 and len(sections["Bonds"]) == counts["bonds"]
+    assert len(sections["Atoms"]) == len(sections["Bacilli"]) == counts["atoms"]
+    atoms = {int(row[0]): row for row in sections["Atoms"]}
+    for row in sections["Bacilli"]:
+        atom = atoms[int(row[0])]
+        assert atom[3] == 1  # every particle is a capsule to atom_style bacillus
+        if atom[2] == 2:  # a binder sphere: no pole, a solid sphere's inertia
+            r = 0.5 * row[10]
+            mass = atom[4] * 4.0 / 3.0 * np.pi * r ** 3
+            assert row[7:10] == [0.0, 0.0, 0.0] and row[4:7] == [0.0, 0.0, 0.0]
+            assert row[1] == row[2] == row[3] == pytest.approx(0.4 * mass * r ** 2)
+    assert body[0] == "Atoms # bacillus"
+    assert unbonded_overlaps(path, binder_type=2) == []
+    # in.atom_types gets the binder's atom type and both of its bond types
+    script = (tmp_path / "in.atom_types").read_text().splitlines()
+    assert "labelmap        atom 2 binder" in script and "group           binder type 2" in script
+    assert any(line.startswith("pair_coeff      2 2 hooke ${kn_2}") for line in script)
+    assert any(line.startswith("bond_coeff      2 ${E_bond_2}") for line in script)
+    assert any(line.startswith("bond_coeff      3 ${E_bond_3}") for line in script)
+    assert any(line.startswith("variable        dt_bond_3 equal") for line in script)
+    dt = next(line for line in script if line.startswith("variable        dt equal"))
+    assert "v_dt_2" in dt and "v_dt_bond_2" in dt and "v_dt_bond_3" in dt
 
 
 def test_binder_spheres_fill_the_binder_bonded_to_the_fibers_and_each_other(tmp_path):
@@ -341,10 +367,6 @@ def test_tangles_own_export_takes_both_binder_styles(tmp_path, mode):
     _, along = run.export_bpm(bonds_file, mode=mode)
     assert ct.add_bpm_binder_bonds(bonds_file, [{"fibers": (0, 1), "position": np.full(3, 32.0)}], fit.voxel_size) == 1
     run.export_bpm(spheres_file, mode=mode)
-    if mode != "spheres_exact":  # binder spheres don't go into a bacillus file yet
-        with pytest.raises(ValueError, match="bacillus"):
-            ct.add_bpm_binder_spheres(spheres_file, binder, fit.voxel_size)
-        return
     added = ct.add_bpm_binder_spheres(spheres_file, binder, fit.voxel_size)
     assert added.spheres > 0 and added.fiber_bonds > 0
     for path in (bonds_file, spheres_file):

@@ -396,7 +396,7 @@ hexes = fem.hex_mesh(relaxed.to_assembly(), voxel_size=fit.voxel_size, binder=fi
 
 relaxed.export_bpm(run, "binder_bonds.data")
 ct.add_bpm_binder_bonds("binder_bonds.data", fit.bonds, fit.voxel_size)        # a) bonds from fiber to fiber
-relaxed.export_bpm(run, "binder_spheres.data", mode="spheres_exact")
+relaxed.export_bpm(run, "binder_spheres.data")
 ct.add_bpm_binder_spheres("binder_spheres.data", fit.binder, fit.voxel_size)   # b) the binder as spheres
 ct.write_bpm_ovito("binder_spheres.data")                                      # binder_spheres.dump, for OVITO
 ```
@@ -410,9 +410,10 @@ bond (the next bond type after the fibers' own).
 `add_bpm_binder_spheres` fills the binder with spheres about a fiber across
 (`diameter=` changes that), each with the mass of the binder it stands for,
 and bonds each one to the fibers its binder touches and to the spheres whose
-binder meets its own (the next two free bond types). For now this needs a file
-of spheres (`mode="spheres_exact"`, for `atom_style bpm/sphere`); a capsule
-file is refused. A sphere is made smaller
+binder meets its own (the next two free bond types). In a capsule file (for
+`atom_style bacillus`) each binder sphere is a capsule of no length, so the
+same file and `in.atom_types` hold both; a file of spheres
+(`mode="spheres_exact"`) takes them as `bpm/sphere` atoms. A sphere is made smaller
 where it would reach into a fiber its binder doesn't touch, so nothing starts
 out overlapping without a bond. `write_bpm_ovito` writes either file as a dump
 to open in OVITO (set the particle shape to Spherocylinder): the fibers'
