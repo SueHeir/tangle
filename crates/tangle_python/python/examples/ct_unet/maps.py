@@ -187,6 +187,9 @@ def targets(data, window=None) -> dict:
     near = data["near"] if window is None else data["near"][window]
     labels = data["labels"] if window is None else data["labels"][window]
     pos, tan, fid, rad = (data[f"p_{k}"] for k in ("pos", "tan", "fid", "rad"))
+    if not len(pos):  # a fiber-free scan (empty.py): one placeholder point, which no voxel is near
+        pos, tan, fid, rad = np.zeros((1, 3), np.float32), np.zeros((1, 3), np.float32), np.zeros(1, np.int32), \
+            np.ones(1, np.float32)
     nz, ny, nx = near.shape
     z0, y0, x0 = (0, 0, 0) if window is None else (window[0].start, window[1].start, window[2].start)
     has = near >= 0

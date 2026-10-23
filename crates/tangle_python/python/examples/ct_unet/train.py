@@ -69,7 +69,9 @@ class Crops(Dataset):
         low = [int(rng.integers(0, s - self.crop + 1)) if self.train else (s - self.crop) // 2 for s in shape]
         window = tuple(slice(l, l + self.crop) for l in low)
         sample = targets(data, window)
-        sample["image"] = normalize(data["volume"])[window][None]
+        # Scaled by the scan's own greys, or by the stored ones (fiber-free scans have no fiber grey; see empty.py)
+        grey = tuple(float(g) for g in data["grey"]) if "grey" in data else None
+        sample["image"] = normalize(data["volume"], grey)[window][None]
         # The hints, as a user would give them: in training, a random part of what is true about the scan (often
         # nothing; see draw_hints); in validation, everything for every other scan and nothing for the rest, so
         # the best checkpoint is the best one both ways.

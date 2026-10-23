@@ -498,6 +498,8 @@ def main() -> None:
                         help="every kind of variety at random inside each scan (mixed_<index>; see mixed.py)")
     parser.add_argument("--bends", action="store_true",
                         help="two types of one material and size, one straight, one bendable (bends_<index>)")
+    parser.add_argument("--empty", action="store_true",
+                        help="fiber-free scans: heavy noise, and pure black regions (empty_<index>; see empty.py)")
     parser.add_argument("--no-overlap-check", action="store_true",
                         help="keep structures whose fibers pass through each other (as every set made before had them)")
     parser.add_argument("--blur-cap", type=float, default=None,
@@ -519,7 +521,7 @@ def main() -> None:
     for index in range(args.first, args.first + args.count):
         # Which settings family is a fixed function of the index, so reruns agree.
         family = ("varied" if args.varied else "pairs" if args.pairs else "hardpairs" if args.hard_pairs
-                  else "mixed" if args.mixed else "bends" if args.bends
+                  else "mixed" if args.mixed else "bends" if args.bends else "empty" if args.empty
                   else "scanned" if np.random.default_rng(index).random() < args.scanned_share else "dense_hard")
         name = f"{family}_{index}"
         target = args.out / f"{name}.npz"
@@ -527,7 +529,11 @@ def main() -> None:
             continue
         started = time.perf_counter()
         try:
-            if family == "varied":
+            if family == "empty":
+                import empty
+
+                scan, varied = empty.empty_scan(index)
+            elif family == "varied":
                 scan, varied = varied_scan(index, cache, check=not args.no_overlap_check, blur_cap=args.blur_cap)
             elif family in ("mixed", "bends"):
                 import mixed
@@ -558,15 +564,18 @@ def main() -> None:
         if most is not None and scan.binder_occupancy is not None and float((scan.binder_occupancy > 0.5).mean()) > most:
             print(f"{name}: skipped (binder {float((scan.binder_occupancy > 0.5).mean()):.1%} > {most:.0%})", flush=True)
             continue
-        made_here = family in ("mixed", "bends")  # rendered by mixed.py: its own point table (thinning fibers' radii)
+        made_here = family in ("mixed", "bends", "empty")  # rendered by mixed.py: its own point table (thinning fibers' radii)
         table = scan.table if made_here else point_table(scan)
-        if not len(table["pos"]):  # e.g. a sparse scan whose fibers all lie past a cut face: nothing to learn from
+        if not len(table["pos"]) and family != "empty":  # e.g. a sparse scan whose fibers all lie past a cut face: nothing to learn from
             print(f"{name}: skipped (no fibers in the volume)", flush=True)
             continue
-        near = nearest_points(scan.volume.shape, table["pos"])
+        near = (nearest_points(scan.volume.shape, table["pos"]) if len(table["pos"])
+                else np.full(scan.volume.shape, -1, np.int32))
         extra = {}
         if made_here:
             extra.update(type_info=scan.type_info, hint_flags=scan.flags, debris_mask=scan.debris)
+            if "grey" in scan.extra:  # the greys to scale it by (a fiber-free scan has no fiber grey of its own)
+                extra["grey"] = scan.extra["grey"]
         if scan.bond_labels is not None:
             extra["bond_labels"] = scan.bond_labels.astype(np.uint16)
             ratio = scan.extra.get("bond_ratio") if made_here else varied["bonds"]["radius_ratio"]
