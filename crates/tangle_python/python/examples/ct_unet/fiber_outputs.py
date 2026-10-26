@@ -590,7 +590,7 @@ def write_stacks(fibers: Fibers, out: Path, region, display, overlay: bool = Tru
     solid), binder.tif: the network's binder (``fibers.binder``) outside every traced fiber or, for a network
     without binder, solid voxels outside every traced fiber with a 1-voxel margin so fiber edges don't count;
     either way pieces under ``SPECK`` voxels are dropped (fibers always win). Returns the paths and volume
-    fractions."""
+    fractions: "fibers", "types" (one per fiber type, summing to "fibers") and, with binder, "binder"."""
     nz, ny, nx = (int(n) for n in fibers.shape)
     n = fibers.count
     pieces = segments(fibers.lines, fibers.radii)
@@ -599,6 +599,8 @@ def write_stacks(fibers: Fibers, out: Path, region, display, overlay: bool = Tru
     net = fibers.binder if fibers.binder is not None else None
     if net is not None:
         net = net[np.argsort(net[:, 2], kind="stable")]  # by slice, to pick out each slab's binder quickly
+    type_count = len(fibers.type_names)
+    kind = np.r_[type_count, np.asarray(fibers.types, np.int64)]  # each 1-based fiber number's type; 0 is no fiber
     margin = 1.0 if binder_level is not None and net is None else 0.0
     opened, paths = {}, []
     if overlay:
@@ -612,6 +614,7 @@ def write_stacks(fibers: Fibers, out: Path, region, display, overlay: bool = Tru
         raw = np.lib.format.open_memmap(raw_path, mode="w+", dtype=np.uint8, shape=(nz, ny, nx))
     slab = max(1, int(8_000_000 // max(ny * nx, 1)))
     inside_count, binder_count, last = 0, 0, time.time()
+    type_counts = np.zeros(type_count, np.int64)
     for z0 in range(0, nz, slab):
         z1 = min(z0 + slab, nz)
         box = (z0, z1, 0, ny, 0, nx)
@@ -619,6 +622,7 @@ def write_stacks(fibers: Fibers, out: Path, region, display, overlay: bool = Tru
         inside = depth <= 0
         number = np.where(inside, fiber, 0)
         inside_count += int(inside.sum())
+        type_counts += np.bincount(kind[number[inside]], minlength=type_count + 1)[:type_count]
         if "labels" in opened:
             opened["labels"][0][z0:z1] = number
         glue = None
@@ -635,7 +639,7 @@ def write_stacks(fibers: Fibers, out: Path, region, display, overlay: bool = Tru
         if time.time() - last > 10:
             last = time.time()
             say(f"  drawing the fibers into the stacks: {100 * z1 / nz:.0f}%")
-    fractions = {"fibers": inside_count / float(nz * ny * nx)}
+    fractions = {"fibers": inside_count / float(nz * ny * nx), "types": type_counts / float(nz * ny * nx)}
     if net is not None:
         fractions["binder"] = binder_count / float(nz * ny * nx)
     for name in ("overlay", "labels"):
@@ -779,6 +783,9 @@ def summary(fibers: Fibers, given_um: list | None, fractions: dict | None) -> li
                      f"network's bond points, {len(fibers.bonds) - points:,} where its binder joins two fibers")
     if fractions:
         lines.append(f"Volume fraction of the drawn fibers: {100 * fractions['fibers']:.1f}%")
+        if len(fibers.type_names) > 1:
+            for t, share in enumerate(fractions["types"]):
+                lines.append(f"  type {t + 1} ({fibers.type_names[t]}): {100 * share:.2f}%")
         if "binder" in fractions:
             what = "the network's binder outside the traced fibers" if fibers.binder is not None else \
                 "solid outside the fibers"
