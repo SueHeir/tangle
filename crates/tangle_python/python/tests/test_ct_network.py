@@ -58,6 +58,23 @@ def _scan(folder: Path) -> Path:
     return path
 
 
+def test_bonds_csv_gives_where_each_bond_holds_its_fibers(tmp_path):
+    from tangle.ct._network.fiber_outputs import Fibers, write_tables
+
+    lines = [np.array([[0.0, 0, 5], [10, 0, 5], [20, 0, 5]]), np.array([[12.0, -5, 7], [12, 5, 7]])]
+    fibers = Fibers(lines=lines, radii=np.array([1.0, 1.0]), types=np.array([0, 0]), support=np.ones(2),
+                    bonds=[{"fibers": (0, 1), "center": (12.0, 0.5, 6.0), "strength": 0.9}], voxel_um=2.0,
+                    shape=(10, 10, 30), type_names=["4 um"])
+    write_tables(fibers, tmp_path)
+    import csv
+    with (tmp_path / "bonds.csv").open(newline="") as handle:
+        (row,) = csv.DictReader(handle)
+    a = [float(row[f"a_{k}_um"]) for k in "xyzs"]
+    b = [float(row[f"b_{k}_um"]) for k in "xyzs"]
+    assert a == pytest.approx([24.0, 0.0, 10.0, 24.0])  # micrometers: 2 um voxels
+    assert b == pytest.approx([24.0, 1.0, 14.0, 11.0])
+
+
 @pytest.fixture(scope="module")
 def tiny_network(tmp_path_factory) -> Path:
     torch = pytest.importorskip("torch")

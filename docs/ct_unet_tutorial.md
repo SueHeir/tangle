@@ -263,7 +263,7 @@ CPU. On a big scan this takes a while; meanwhile:
 | `binder.tif` | with `--binder`: the binder outside every traced fiber (255), see below | Fiji |
 | `fibers.csv` | one row per fiber (columns below) | Excel, Python, R |
 | `centerlines.csv` | every centerline point: fiber, point number, x, y, z | Excel, Python |
-| `bonds.csv` | every bond: its number, the two fibers it joins, where it is, how strong the network's bond-point signal was, and how many binder voxels join the pair there | Excel, Python |
+| `bonds.csv` | every bond: its number, the two fibers it joins, where it is, how strong the network's bond-point signal was, how many binder voxels join the pair there, and where it holds each fiber | Excel, Python |
 | `diameters.csv` | with `--diameter-profile`: the diameter at every voxel along every fiber, and an oval's long and short widths | Excel, Python |
 | `fibers.vtk`, `bonds.vtk` | the centerlines and bonds | ParaView |
 | `fibers.dump`, `view_in_ovito.py` | the fibers as chains of capsules, the binder as spheres, and bonds | OVITO |
@@ -312,7 +312,11 @@ share of the region is in `summary.txt`, and `--binder` writes them to
 network marks a bond point, or else where its binder joins two traced fibers
 (at least 4 binder voxels within 2.5 voxels of both surfaces). In `bonds.csv`
 the first kind has the bond point's `strength` and the second the number of
-`binder_voxels`. With a network that predates the binder, `binder.tif` holds
+`binder_voxels`. `a_x_um`, `a_y_um`, `a_z_um` are where the bond holds
+`fiber_a`: the point on its centerline nearest the bond, with `a_s_um` how
+far along the fiber that is from its start (its first point in
+`centerlines.csv`); the `b_` columns give the same for `fiber_b`. With a
+network that predates the binder, `binder.tif` holds
 the voxels brighter than the solid/void split that are not inside a traced
 fiber (with a one-voxel margin so fiber edges don't count): missed fibers turn
 up there as binder.
