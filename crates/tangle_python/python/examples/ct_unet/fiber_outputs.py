@@ -106,6 +106,21 @@ def within_bend_limit(points, bend: float, sweeps: int = 2000) -> tuple[np.ndarr
     return p, False
 
 
+def attachment(line, point) -> np.ndarray:
+    """Where a bond at ``point`` holds a fiber: the nearest point on its centerline ``line``, and how far along
+    the line that is from its first point (x, y, z, s; in the line's units)."""
+    line = np.asarray(line, float).reshape(-1, 3)
+    point = np.asarray(point, float)
+    if len(line) < 2:
+        return np.r_[line[0], 0.0] if len(line) else np.full(4, np.nan)
+    a, d = line[:-1], np.diff(line, axis=0)
+    t = np.clip(((point - a) * d).sum(1) / np.maximum((d * d).sum(1), 1e-12), 0.0, 1.0)
+    near = a + t[:, None] * d
+    k = int(np.argmin(np.linalg.norm(near - point, axis=1)))
+    along = np.linalg.norm(d, axis=1)
+    return np.r_[near[k], along[:k].sum() + t[k] * along[k]]
+
+
 def axis_of(line) -> np.ndarray:
     """A fiber's overall direction: the leading axis of its length-weighted tangent tensor (sign-free)."""
     d = np.diff(np.asarray(line, float), axis=0)
@@ -185,9 +200,11 @@ def write_tables(fibers: Fibers, out: Path) -> list[Path]:
                                [np.asarray(line, float) * h for line in fibers.lines]))
     if fibers.bonds:
         paths.append(write_csv(out / "bonds.csv", ["bond", "fiber_a", "fiber_b", "x_um", "y_um", "z_um", "strength",
-                                                   "binder_voxels"],
+                                                   "binder_voxels", "a_x_um", "a_y_um", "a_z_um", "a_s_um", "b_x_um",
+                                                   "b_y_um", "b_z_um", "b_s_um"],
                                ([n + 1, b["fibers"][0] + 1, b["fibers"][1] + 1, *[_f(v * h) for v in b["center"]],
-                                 _f(b["strength"], 3) if np.isfinite(b["strength"]) else "", b.get("voxels", 0)]
+                                 _f(b["strength"], 3) if np.isfinite(b["strength"]) else "", b.get("voxels", 0),
+                                 *[_f(v * h) for i in b["fibers"] for v in attachment(fibers.lines[i], b["center"])]]
                                 for n, b in enumerate(fibers.bonds))))
     if fibers.profiles is not None:
         paths.append(_write_points(out / "diameters.csv", "fiber,node,x_um,y_um,z_um,diameter_um,long_um,short_um",

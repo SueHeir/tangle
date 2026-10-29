@@ -17,6 +17,28 @@ def polyline_length(points: np.ndarray) -> float:
     return float(np.linalg.norm(np.diff(points, axis=0), axis=1).sum())
 
 
+def nearest_on_line(points: np.ndarray, point) -> tuple[np.ndarray, float]:
+    """The point of the polyline ``points`` nearest ``point``, and how far along the line it is from its first
+    point."""
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    point = np.asarray(point, dtype=np.float64)
+    if len(points) < 2:
+        return points[0].copy(), 0.0
+    start, step = points[:-1], np.diff(points, axis=0)
+    t = np.clip(((point - start) * step).sum(1) / np.maximum((step * step).sum(1), 1e-12), 0.0, 1.0)
+    near = start + t[:, None] * step
+    k = int(np.argmin(np.linalg.norm(near - point, axis=1)))
+    lengths = np.linalg.norm(step, axis=1)
+    return near[k], float(lengths[:k].sum() + t[k] * lengths[k])
+
+
+def point_along(points: np.ndarray, distance: float) -> np.ndarray:
+    """The point ``distance`` along the polyline ``points`` from its first point (clamped to its ends)."""
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))])
+    return np.array([np.interp(distance, arc, points[:, k]) for k in range(3)])
+
+
 def resample(points: np.ndarray, spacing: float) -> np.ndarray:
     """Resample a polyline to (nearly) uniform arc-length spacing; in Rust."""
     from . import _native

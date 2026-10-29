@@ -263,7 +263,7 @@ CPU. On a big scan this takes a while; meanwhile:
 | `binder.tif` | with `--binder`: the binder outside every traced fiber (255), see below | Fiji |
 | `fibers.csv` | one row per fiber (columns below) | Excel, Python, R |
 | `centerlines.csv` | every centerline point: fiber, point number, x, y, z | Excel, Python |
-| `bonds.csv` | every bond: its number, the two fibers it joins, where it is, how strong the network's bond-point signal was, and how many binder voxels join the pair there | Excel, Python |
+| `bonds.csv` | every bond: its number, the two fibers it joins, where it is, how strong the network's bond-point signal was, how many binder voxels join the pair there, and where it holds each fiber | Excel, Python |
 | `diameters.csv` | with `--diameter-profile`: the diameter at every voxel along every fiber, and an oval's long and short widths | Excel, Python |
 | `fibers.vtk`, `bonds.vtk` | the centerlines and bonds | ParaView |
 | `fibers.dump`, `view_in_ovito.py` | the fibers as chains of capsules, the binder as spheres, and bonds | OVITO |
@@ -312,7 +312,11 @@ share of the region is in `summary.txt`, and `--binder` writes them to
 network marks a bond point, or else where its binder joins two traced fibers
 (at least 4 binder voxels within 2.5 voxels of both surfaces). In `bonds.csv`
 the first kind has the bond point's `strength` and the second the number of
-`binder_voxels`. With a network that predates the binder, `binder.tif` holds
+`binder_voxels`. `a_x_um`, `a_y_um`, `a_z_um` are where the bond holds
+`fiber_a`: the point on its centerline nearest the bond, with `a_s_um` how
+far along the fiber that is from its start (its first point in
+`centerlines.csv`); the `b_` columns give the same for `fiber_b`. With a
+network that predates the binder, `binder.tif` holds
 the voxels brighter than the solid/void split that are not inside a traced
 fiber (with a one-voxel margin so fiber edges don't count): missed fibers turn
 up there as binder.
@@ -395,7 +399,7 @@ one of two ways:
 hexes = fem.hex_mesh(relaxed.to_assembly(), voxel_size=fit.voxel_size, binder=fit.binder)
 
 relaxed.export_bpm(run, "binder_bonds.data")
-ct.add_bpm_binder_bonds("binder_bonds.data", fit.bonds, fit.voxel_size)        # a) bonds from fiber to fiber
+ct.add_bpm_binder_bonds("binder_bonds.data", relaxed.bonds, fit.voxel_size)    # a) bonds from fiber to fiber
 relaxed.export_bpm(run, "binder_spheres.data")
 ct.add_bpm_binder_spheres("binder_spheres.data", fit.binder, fit.voxel_size)   # b) the binder as spheres
 ct.write_bpm_ovito("binder_spheres.data")                                      # binder_spheres.dump, for OVITO
@@ -405,8 +409,12 @@ ct.write_bpm_ovito("binder_spheres.data")                                      #
 bricks that share nodes with the fibers they touch, so the binder holds the
 fibers together in the mesh too; they have fiber id 0 and the material
 `"binder"`. In the particle model, `add_bpm_binder_bonds` bonds each pair of
-fibers the network found bonded once, between their two particles nearest the
-bond (the next bond type after the fibers' own).
+fibers the network found bonded once, between each fiber's particle nearest
+where the bond holds it (the next bond type after the fibers' own). Give it
+`relaxed.bonds`: `coarse_grained` and `relax` move each bond with its fibers,
+keeping it at the same share of each fiber's length, and
+`relaxed.write_bonds("bonds_relaxed.csv")` writes them with the columns of
+`bonds.csv`, so the attachment points there are on the relaxed fibers.
 `add_bpm_binder_spheres` fills the binder with spheres about a fiber across
 (`diameter=` changes that), each with the mass of the binder it stands for,
 and bonds each one to the fibers its binder touches and to the spheres whose
