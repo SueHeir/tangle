@@ -130,5 +130,6 @@ fn _tangle(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(ct::ct_project, module)?)?;
     module.add_function(wrap_pyfunction!(ct::ct_back_project, module)?)?;
     module.add_function(wrap_pyfunction!(fem::fem_voxel_labels, module)?)?;
+    module.add_function(wrap_pyfunction!(fem::fem_bond_anchors, module)?)?;
     Ok(())
 }

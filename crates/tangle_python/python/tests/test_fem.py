@@ -18,6 +18,7 @@ try:
     import numpy as np
     import tangle.fem as fem
     import tangle.fem._mesh as mesh_module
+    import tangle.fem._sweep as sweep_module
     import tangle.fem._tet as tet_module
 except ImportError:  # tangle.fem needs NumPy
     fem = None
@@ -96,7 +97,8 @@ def axis_distances(points):
 
 
 def read_nastran(path):
-    """GRID*, CHEXA/CTETRA, PSOLID and MAT1* entries of a written deck."""
+    """GRID*, CHEXA/CTETRA/CPENTA, PSOLID and MAT1* entries of a written
+    deck; :func:`nastran_entries` reads the others."""
     grids, elements, properties, materials = {}, {}, {}, {}
     lines = Path(path).read_text().splitlines()
     index = 0
@@ -108,7 +110,7 @@ def read_nastran(path):
         elif name == "GRID*":
             grids[int(line[8:24])] = (float(line[40:56]), float(line[56:72]), float(lines[index + 1][8:24]))
             index += 2
-        elif name in ("CHEXA", "CTETRA"):
+        elif name in ("CHEXA", "CTETRA", "CPENTA"):
             values = [int(line[start : start + 8]) for start in range(8, len(line), 8)]
             index += 1
             while index < len(lines) and lines[index].startswith(" " * 8):
@@ -124,9 +126,44 @@ def read_nastran(path):
                 density = float(lines[index + 1][8:24])
             materials[int(line[8:24])] = (float(line[24:40]), float(line[56:72]), density)
             index += 2 if density is not None else 1
+        elif name in ("MPC", "CBAR", "RBE3"):
+            index += 1
+            while index < len(lines) and lines[index].startswith(" " * 8):
+                index += 1
+        elif name == "PBAR*":
+            index += 2
         else:
             raise AssertionError(f"unexpected line {line!r}")
     return grids, elements, properties, materials
+
+
+def nastran_entries(path, name):
+    """The fields 2 to 9 of every small-field ``name`` entry of a written
+    deck, with those of its continuations after them."""
+    entries, current = [], None
+    for line in Path(path).read_text().splitlines():
+        fields = [line[start : start + 8].strip() for start in range(8, 72, 8)]
+        if current is not None and line.startswith(" " * 8):
+            current += fields
+            continue
+        current = None
+        if line[:8].strip() == name:
+            current = fields
+            entries.append(current)
+    return entries
+
+
+def mpc_equations(path):
+    """The MPC equations of a written deck, each as its terms
+    ``(node, direction, coefficient)``, the dependent node's first. Only
+    field 9 of a line and field 2 of a continuation are blank."""
+    equations = []
+    for fields in nastran_entries(path, "MPC"):
+        assert fields[0] == "1"  # the set
+        values = [field for field in fields[1:] if field]
+        equations.append([(int(values[at]), int(values[at + 1]), float(values[at + 2]))
+                          for at in range(0, len(values), 3)])
+    return equations
 
 
 def read_abaqus(path):
@@ -340,7 +377,7 @@ class WriterTests(unittest.TestCase):
                          [["GLUE_SECONDARY", "GLUE_MAIN"]])
         with self.assertRaisesRegex(ValueError, "faces that do not exist"):
             dataclasses.replace(mesh, ties=(fem.Tie("GLUE", np.array([[2, 0]]), np.array([[0, 0]]), 1e-3),))
-        with self.assertRaisesRegex(ValueError, "tetrahedral meshes only"):
+        with self.assertRaisesRegex(ValueError, "tetrahedral and wedge meshes only"):
             dataclasses.replace(self.mesh, ties=(tie,))
 
     def test_a_curved_ten_node_tetrahedron_has_the_volume_of_its_shape(self):
@@ -677,6 +714,269 @@ class TetBinderTests(unittest.TestCase):
         self.assertEqual(keywords[f"*TIE, NAME=BINDER_TIE, POSITION TOLERANCE={tolerance}, ADJUST=NO"],
                          [["BINDER_TIE_SECONDARY", "BINDER_TIE_MAIN"]])
         self.assertIn("The binder (PSOLID 3) shares no nodes with the fibers", deck)
+        self.assertIn("MPC = 1", deck)
+
+    def test_nastran_glues_each_tied_binder_node_to_the_closest_fiber_face_with_mpcs(self):
+        mesh, tie = self.mesh, self.tie
+        found, main, weights = mesh.tie_constraints(tie)
+        tied = np.unique(face_nodes(mesh, tie.secondary))
+        self.assertGreater(len(found), 0)
+        self.assertTrue(set(found.tolist()) <= set(tied.tolist()))
+        binder_nodes = set(mesh.elements[self.is_binder].ravel().tolist())
+        self.assertTrue(set(found.tolist()) <= binder_nodes)
+        self.assertFalse(set(main.ravel().tolist()) & binder_nodes)
+        np.testing.assert_allclose(weights.sum(axis=1), 1.0)
+        self.assertTrue((weights >= 0.0).all())
+        # The point each node follows lies on a fiber's surface, within the tolerance of the node.
+        followed = np.einsum("kc,kcd->kd", weights, mesh.nodes[main])
+        self.assertLessEqual(np.linalg.norm(followed - mesh.nodes[found], axis=1).max(), tie.tolerance)
+        gaps = np.min([np.abs(distance - 0.1) for distance in axis_distances(followed)], axis=0)
+        ends = np.min([np.abs(followed[:, int(np.argmax(np.abs(np.subtract(end, start))))] - value)
+                       for start, end in CROSS_AXES for value in (start[int(np.argmax(np.abs(np.subtract(end, start))))],
+                                                                   end[int(np.argmax(np.abs(np.subtract(end, start))))])],
+                      axis=0)
+        self.assertTrue(((gaps < 0.01) | (ends < 1e-9)).all())
+        with tempfile.TemporaryDirectory() as directory:
+            equations = mpc_equations(mesh.write_nastran(Path(directory) / "mesh.bdf"))
+        self.assertEqual(len(equations), 3 * len(found))
+        for terms, node in zip(equations[::3], found.tolist()):
+            self.assertEqual(terms[0], (node + 1, 1, 1.0))
+            self.assertAlmostEqual(sum(value for _, _, value in terms[1:]), -1.0, places=5)
+        for index, terms in enumerate(equations):
+            self.assertEqual({direction for _, direction, _ in terms}, {index % 3 + 1})
+
+
+def straight_fiber(lengths, start, end, diameter=0.2, periodic=None):
+    """One round fiber from ``start`` to ``end`` in a cell of ``lengths``."""
+    return assembly_of(lengths, [[list(start), list(end)]], tangle.Material("fiber", diameter=diameter), periodic)
+
+
+@unittest.skipIf(fem is None, "tangle.fem needs NumPy")
+class SweepMeshTests(unittest.TestCase):
+    def test_a_short_straight_fiber_is_six_wedges_between_two_hexagons_of_its_area(self):
+        mesh = fem.sweep_mesh(one_fiber())
+        self.assertEqual(mesh.element_type, "penta6")
+        self.assertEqual((mesh.node_count, mesh.element_count), (14, 6))
+        self.assertTrue((mesh.element_volumes() > 0).all())
+        self.assertAlmostEqual(mesh.volume, math.pi * 0.1**2 * 0.6)
+        # Each section is its middle node and six around it, as far out as gives the circle's area.
+        ends = mesh.nodes.reshape(2, 7, 3)
+        np.testing.assert_allclose(ends[:, 0], [[0.2, 0.5, 0.5], [0.8, 0.5, 0.5]])
+        radius = 0.1 * math.sqrt(2 * math.pi / (6 * math.sin(math.pi / 3)))
+        np.testing.assert_allclose(np.linalg.norm(ends[:, 1:, 1:] - 0.5, axis=2), radius)
+        self.assertIsNone(mesh.bonds)
+        self.assertEqual(mesh.ties, ())
+
+    def test_sections_are_at_most_max_length_diameters_apart(self):
+        mesh = fem.sweep_mesh(straight_fiber([4.0, 1.0, 1.0], (0.1, 0.5, 0.5), (3.9, 0.5, 0.5)))
+        middles = mesh.nodes[::7, 0]
+        np.testing.assert_allclose(middles, np.linspace(0.1, 3.9, 6))  # 3.8 long, at most 0.8: five wedges
+        self.assertEqual(mesh.element_count, 5 * 6)
+        self.assertAlmostEqual(mesh.volume, math.pi * 0.01 * 3.8)
+        finer = fem.sweep_mesh(straight_fiber([4.0, 1.0, 1.0], (0.1, 0.5, 0.5), (3.9, 0.5, 0.5)), max_length=1.0)
+        self.assertEqual(finer.element_count, 19 * 6)
+        around = fem.sweep_mesh(one_fiber(), nodes_around=8)
+        self.assertEqual((around.node_count, around.element_count), (18, 8))
+        self.assertAlmostEqual(around.volume, math.pi * 0.1**2 * 0.6)
+
+    def test_a_bend_gets_sections_where_the_centerline_strays_from_the_wedges(self):
+        angles = np.linspace(0.0, math.pi / 2, 31)
+        arc = np.stack([0.1 + 0.8 * np.sin(angles), 0.9 - 0.8 * np.cos(angles), np.full(31, 0.5)], axis=1)
+        assembly = assembly_of([1.0, 1.0, 1.0], [arc.tolist()], tangle.Material("fiber", diameter=0.05))
+        loose = fem.sweep_mesh(assembly, bend_tolerance=1.0)
+        tight = fem.sweep_mesh(assembly, bend_tolerance=0.1)
+        self.assertLess(loose.element_count, tight.element_count)
+        for mesh, tolerance in ((loose, 1.0), (tight, 0.1)):
+            middles = mesh.nodes[::7]
+            np.testing.assert_allclose(np.linalg.norm(middles[:, :2] - [0.1, 0.9], axis=1), 0.8, rtol=1e-9)
+            # The arc's sagitta between two sections stays within the tolerance.
+            chords = np.linalg.norm(np.diff(middles, axis=0), axis=1)
+            self.assertLessEqual((0.8 - np.sqrt(0.64 - chords**2 / 4)).max(), tolerance * 0.025 + 0.8 * 0.0035)
+            self.assertLessEqual(chords.max(), 4 * 0.05 + 1e-12)
+            self.assertTrue((mesh.element_volumes() > 0).all())
+
+    def test_fibers_are_cut_flush_with_the_cell_walls(self):
+        assembly = straight_fiber([1.0, 1.0, 1.0], (0.7, 0.5, 0.5), (1.5, 0.5, 0.5), periodic=[True, False, False])
+        mesh = fem.sweep_mesh(assembly)
+        self.assertAlmostEqual(mesh.volume, math.pi * 0.01 * 0.8)
+        sets = mesh.node_sets()
+        self.assertEqual((len(sets["XMIN"]), len(sets["XMAX"])), (7, 7))
+        whole = fem.sweep_mesh(assembly, clip_to_cell=False)
+        self.assertAlmostEqual(whole.volume, math.pi * 0.01 * 0.8)
+        self.assertGreater(whole.nodes[:, 0].max(), 1.4)
+        # A fiber across a wall at an angle ends in the wall too.
+        slanted = fem.sweep_mesh(straight_fiber([1.0, 1.0, 1.0], (0.6, 0.3, 0.5), (1.4, 0.7, 0.5),
+                                                periodic=[True, False, False]))
+        sets = slanted.node_sets()
+        self.assertEqual((len(sets["XMIN"]), len(sets["XMAX"])), (7, 7))
+        self.assertTrue((slanted.element_volumes() > 0).all())
+
+    def test_a_steep_cut_end_keeps_the_next_section_beyond_its_slide(self):
+        # Crossing the x wall at about 65 degrees from its normal, with short wedges: the cut ends slide
+        # about three radii along the fiber, past where the next sections would be.
+        line = np.linspace([0.7, 0.3, 0.5], [1.3, 1.6, 0.5], 30)
+        assembly = assembly_of([1.0, 2.0, 1.0], [line.tolist()], tangle.Material("fiber", diameter=0.2),
+                               periodic=[True, False, False])
+        mesh = fem.sweep_mesh(assembly, max_length=0.5)
+        corners = mesh.nodes[mesh.elements[:, mesh_module.PENTA_TETRAHEDRA]]
+        edges = corners[:, :, 1:] - corners[:, :, :1]
+        volumes = np.einsum("...i,...i", edges[..., 0, :], np.cross(edges[..., 1, :], edges[..., 2, :]))
+        self.assertTrue((volumes > 0).all())
+        sets = mesh.node_sets()
+        self.assertEqual((len(sets["XMIN"]), len(sets["XMAX"])), (7, 7))
+        self.assertAlmostEqual(mesh.volume, math.pi * 0.01 * float(np.linalg.norm([0.6, 1.3])), places=6)
+
+    def test_an_oval_fiber_keeps_its_long_axis(self):
+        oval = tangle.Material("ribbon", diameter=0.2, thickness=0.1)
+        assembly = assembly_of([1.0, 1.0, 1.0], [[[0.2, 0.5, 0.5], [0.8, 0.5, 0.5]]], oval)
+        mesh = fem.sweep_mesh(assembly)
+        self.assertAlmostEqual(mesh.volume, math.pi * 0.1 * 0.05 * 0.6)
+        ((long, short),) = assembly.section_semi_axes()
+        axis = np.asarray(assembly.long_axes()[0][0])
+        offsets = mesh.nodes.reshape(2, 7, 3)[0, 1:] - [0.2, 0.5, 0.5]
+        widths = np.abs(offsets @ axis)
+        self.assertAlmostEqual(widths.max() / np.abs(offsets @ np.cross([1.0, 0.0, 0.0], axis)).max(),
+                               long / short / math.sin(math.pi / 3), places=6)
+
+    def test_a_binder_mask_is_two_wedges_to_a_voxel_glued_to_the_fibers(self):
+        assembly = touching_cross()
+        mesh = fem.sweep_mesh(assembly, binder=crossing_binder(), voxel_size=0.05)
+        is_binder = mesh.element_fibers == 0
+        hexes = fem.hex_mesh(assembly, 0.05, binder=crossing_binder())
+        voxels = voxels_of(hexes, hexes.element_fibers == 0, 0.05)
+        self.assertEqual(is_binder.sum(), 2 * len(voxels))
+        np.testing.assert_allclose(mesh.element_volumes()[is_binder], 0.05**3 / 2)
+        self.assertEqual(mesh.materials, ("fiber", "binder"))
+        (tie,) = mesh.ties
+        self.assertTrue(is_binder[tie.secondary[:, 0]].all())
+        self.assertFalse(is_binder[tie.main[:, 0]].any())
+        found, main, weights = mesh.tie_constraints(tie)
+        self.assertGreater(len(found), 0)
+        binder_nodes = set(mesh.elements[is_binder].ravel().tolist())
+        self.assertTrue(set(found.tolist()) <= binder_nodes)
+        self.assertFalse(set(main.ravel().tolist()) & binder_nodes)
+        np.testing.assert_allclose(weights.sum(axis=1), 1.0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            deck = mesh.write_nastran(path / "mesh.bdf")
+            _, elements, properties, _ = read_nastran(deck)
+            self.assertEqual({name for name, _, _ in elements.values()}, {"CPENTA"})
+            self.assertEqual(properties, {1: 1, 2: 1, 3: 2})
+            self.assertEqual(len(mpc_equations(deck)), 3 * len(found))
+            keywords = dict(read_abaqus(mesh.write_abaqus(path / "mesh.inp")))
+            self.assertIn("*ELEMENT, TYPE=C3D6, ELSET=BINDER", keywords)
+            self.assertTrue(any(line.startswith("*TIE, NAME=BINDER_TIE") for line in keywords))
+            piece, arrays = read_vtu(mesh.write_vtu(path / "mesh.vtu"))
+            np.testing.assert_array_equal(arrays["types"], 13)  # VTK_WEDGE
+
+    def test_bonds_become_beams_that_follow_the_fiber_sections(self):
+        assembly = touching_cross()
+        # One junction between the middles of the two fibers.
+        with mock.patch.object(sweep_module._tangle, "fem_bond_anchors", return_value=[(7, 0, 0, 0.5, 1, 0, 0.5)]):
+            mesh = fem.sweep_mesh(assembly, bond_radius_ratio=0.5)
+        bonds = mesh.bonds
+        self.assertEqual(bonds.count, 1)
+        np.testing.assert_allclose(mesh.nodes[bonds.beams[0]], [[0.5, 0.5, 0.4], [0.5, 0.5, 0.6]], atol=1e-12)
+        np.testing.assert_allclose(bonds.radii, [0.05])
+        self.assertEqual(bonds.junction_ids.tolist(), [7])
+        self.assertEqual(bonds.material, 1)
+        self.assertEqual(mesh.materials, ("fiber", "binder"))
+        self.assertEqual(sorted(bonds.ends.tolist()), sorted(bonds.beams[0].tolist()))
+        # The beam ends are nodes of no wedge, each following a section of its fiber at the anchor.
+        self.assertFalse(set(bonds.ends.tolist()) & set(mesh.elements.ravel().tolist()))
+        for end, section in zip(bonds.ends.tolist(), bonds.sections):
+            self.assertEqual(len(section), 7)
+            np.testing.assert_allclose(mesh.nodes[section].mean(axis=0), mesh.nodes[end], atol=1e-12)
+            self.assertEqual(len(set(mesh.element_fibers[np.isin(mesh.elements, section).any(axis=1)].tolist())), 1)
+        np.testing.assert_allclose(np.abs(bonds.orientations @ [0.0, 0.0, 1.0]), 0.0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            deck = mesh.write_nastran(path / "mesh.bdf", fem.ElasticMaterial(1e9, 0.3))
+            grids, elements, properties, materials = read_nastran(deck)
+            self.assertEqual(len(grids), mesh.node_count)
+            (bar,) = nastran_entries(deck, "CBAR")
+            self.assertEqual([int(value) for value in bar[:4]],
+                             [mesh.element_count + 1, 3, *(bonds.beams[0] + 1).tolist()])
+            self.assertEqual(float(bar[6]) ** 2 + float(bar[4]) ** 2 + float(bar[5]) ** 2, 1.0)
+            rbe3 = nastran_entries(deck, "RBE3")
+            self.assertEqual(len(rbe3), 2)
+            for fields, end, section in zip(rbe3, bonds.ends.tolist(), bonds.sections.tolist()):
+                values = [field for field in fields if field]
+                self.assertEqual(values[1:5], [str(end + 1), "123456", "1.0", "123"])
+                self.assertEqual([int(value) for value in values[5:]], [node + 1 for node in section])
+            text = deck.read_text()
+            self.assertIn("PBAR*", text)
+            pbar = text[text.index("PBAR*"):].splitlines()
+            self.assertEqual(int(pbar[0][8:24]), 3)
+            self.assertEqual(int(pbar[0][24:40]), 2)
+            self.assertAlmostEqual(float(pbar[0][40:56]), math.pi * 0.05**2)
+            self.assertAlmostEqual(float(pbar[1][24:40]), math.pi * 0.05**4 / 2)
+            keywords = dict(read_abaqus(mesh.write_abaqus(path / "mesh.inp", fem.ElasticMaterial(1e9, 0.3))))
+            self.assertEqual(keywords["*ELEMENT, TYPE=B31, ELSET=BONDS_1"],
+                             [[str(mesh.element_count + 1), *map(str, bonds.beams[0] + 1)]])
+            self.assertIn("*BEAM SECTION, ELSET=BONDS_1, MATERIAL=BINDER, SECTION=CIRC", keywords)
+            self.assertIn("*MATERIAL, NAME=BINDER", keywords)
+            couplings = [line for line in keywords if line.startswith("*COUPLING")]
+            self.assertEqual(len(couplings), 2)
+            piece, arrays = read_vtu(mesh.write_vtu(path / "mesh.vtu"))
+            self.assertEqual(int(piece.get("NumberOfCells")), mesh.element_count + 1)
+            self.assertEqual(arrays["types"][-1], 3)  # VTK_LINE
+            np.testing.assert_array_equal(arrays["connectivity"][-2:], bonds.beams[0])
+
+    def test_a_bond_across_a_periodic_wall_stops_at_the_wall_on_both_sides(self):
+        # Fiber 1 along y at x = 0.05 and fiber 2 along z at x = 0.85: 0.2 apart through the x wall.
+        assembly = assembly_of([1.0, 1.0, 1.0], [[[0.05, 0.2, 0.5], [0.05, 0.8, 0.5]], [[0.85, 0.5, 0.2], [0.85, 0.5, 0.8]]],
+                               tangle.Material("fiber", diameter=0.2), periodic=[True, False, False])
+        with mock.patch.object(sweep_module._tangle, "fem_bond_anchors", return_value=[(1, 0, 0, 0.5, 1, 0, 0.5)]):
+            mesh = fem.sweep_mesh(assembly, bond_radius_ratio=1.0)
+            whole = fem.sweep_mesh(assembly, bond_radius_ratio=1.0, clip_to_cell=False)
+        bonds = mesh.bonds
+        self.assertEqual(bonds.count, 2)
+        ends = sorted(mesh.nodes[bonds.beams].tolist())
+        np.testing.assert_allclose(ends, [[[0.05, 0.5, 0.5], [0.0, 0.5, 0.5]], [[0.85, 0.5, 0.5], [1.0, 0.5, 0.5]]],
+                                   atol=1e-12)
+        free = set(bonds.beams.ravel().tolist()) - set(bonds.ends.tolist())
+        sets = mesh.node_sets()
+        self.assertEqual(free, {int(sets["XMIN"][np.isin(sets["XMIN"], list(free))][0]),
+                                int(sets["XMAX"][np.isin(sets["XMAX"], list(free))][0])})
+        # Whole fibers have no images to bond across the wall.
+        self.assertIsNone(whole.bonds)
+        self.assertEqual(whole.materials, ("fiber",))
+
+    def test_bonds_of_a_relaxed_run_sit_on_its_placed_centerlines(self):
+        recipe = tangle.Recipe(tangle.Cell([1.0, 1.0, 1.0]))
+        recipe.insert(tangle.FiberCollection.from_centerlines(
+            [[list(start), list(end)] for start, end in CROSS_AXES], tangle.Material("fiber", diameter=0.2)))
+        recipe.relax_for(5)
+        recipe.capture_junctions(tangle.JunctionPolicy("binder at crossings", "bond", max_surface_gap=0.05))
+        recipe.relax_for(5)
+        result = recipe.run(tangle.RelaxationSettings(backend="cpu"))
+        self.assertEqual(result.junction_count, 1)
+        mesh = fem.sweep_mesh(result, bond_radius_ratio=0.5)
+        self.assertEqual(mesh.bonds.count, 1)
+        centerlines = [np.asarray(line) for line in result.assembly.centerlines()]
+        on = []
+        for end in mesh.bonds.beams[0]:  # each end lies on one fiber's relaxed centerline
+            point = mesh.nodes[end]
+            gaps = []
+            for line in centerlines:
+                steps = np.diff(line, axis=0)
+                along = np.clip(np.einsum("ij,ij->i", point - line[:-1], steps) / (steps * steps).sum(1), 0.0, 1.0)
+                gaps.append(np.linalg.norm(point - (line[:-1] + along[:, None] * steps), axis=1).min())
+            self.assertLess(min(gaps), 1e-9)
+            on.append(int(np.argmin(gaps)))
+        self.assertEqual(sorted(on), [0, 1])
+        self.assertAlmostEqual(float(np.linalg.norm(np.subtract(*mesh.nodes[mesh.bonds.beams[0]]))), 0.2, delta=0.02)
+
+    def test_arguments_are_checked(self):
+        with self.assertRaisesRegex(ValueError, "nodes_around"):
+            fem.sweep_mesh(one_fiber(), nodes_around=2)
+        with self.assertRaisesRegex(ValueError, "max_length"):
+            fem.sweep_mesh(one_fiber(), max_length=0.0)
+        with self.assertRaisesRegex(ValueError, "voxel_size only sets"):
+            fem.sweep_mesh(one_fiber(), voxel_size=0.05)
+        with self.assertRaisesRegex(ValueError, "clip_to_cell=True"):
+            fem.sweep_mesh(touching_cross(), binder=crossing_binder(), clip_to_cell=False)
 
 
 if __name__ == "__main__":

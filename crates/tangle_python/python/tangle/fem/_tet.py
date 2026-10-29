@@ -269,12 +269,17 @@ def _binder_voxel_size(shape, lengths: np.ndarray, target: float) -> float:
     return float(lengths[0] / (counts[0] // factor))
 
 
-def _binder_mesh(assembly, voxel_size: float, bond_radius_ratio: float | None, binder, order: int):
+def _binder_mesh(assembly, voxel_size: float, bond_radius_ratio: float | None, binder, order: int,
+                 split=None):
     """The binder's tetrahedra, six to each binder voxel of :func:`hex_mesh`,
     on nodes of their own: the nodes in meters, the elements, and the
     ``(element, face)`` pairs of the faces next to a voxel that a fiber
     fills, or fills part of on a finer mask's grid. None when no voxel is
-    binder."""
+    binder.
+
+    ``split`` replaces the six tetrahedra: ``(pairs, cells, faces)`` as
+    :func:`_voxel_tetrahedra` gives the first two, and the corners of each
+    cell's faces, such as two wedges to a voxel."""
     counts, phase, owner, fibrous = voxel_labels(assembly, voxel_size, bond_radius_ratio, binder)
     nx, ny, nz = counts
     is_binder = (phase != 0) & (owner == 0)
@@ -289,7 +294,12 @@ def _binder_mesh(assembly, voxel_size: float, bond_radius_ratio: float | None, b
     # in the voxel whose low corner is v, point 2v + CORNERS[p] + CORNERS[q],
     # is numbered twice v's number plus that of CORNERS[p] + CORNERS[q].
     width = np.array([1, 2 * nx + 1, (2 * nx + 1) * (2 * ny + 1)], dtype=np.int64)
-    pairs, tetrahedra = _voxel_tetrahedra(order)
+    if split is None:
+        pairs, tetrahedra = _voxel_tetrahedra(order)
+        faces = TET_FACES.tolist()
+    else:
+        pairs, tetrahedra, faces = split
+    per_voxel = len(tetrahedra)
     keys = 2 * (voxels @ width)[:, None] + ((CORNERS[pairs[:, 0]] + CORNERS[pairs[:, 1]]) @ width)[None, :]
     used, inverse = np.unique(keys, return_inverse=True)
     elements = inverse.reshape(keys.shape)[:, tetrahedra].reshape(-1, tetrahedra.shape[1])
@@ -300,13 +310,13 @@ def _binder_mesh(assembly, voxel_size: float, bond_radius_ratio: float | None, b
     beside_fibers = fibrous & ~is_binder  # a fiber fills it, or part of it, and it is not binder
     stride = (1, nx, nx * ny)
     next_to_fibers = []
-    for (axis, high), faces in _voxel_sides().items():
+    for (axis, high), on_side in _voxel_sides(tetrahedra, faces).items():
         step = 1 if high else -1
         beside = voxels[:, axis] + step
         rows = np.flatnonzero((beside >= 0) & (beside < counts[axis]))
         rows = rows[beside_fibers[chosen[rows] + step * stride[axis]]]
-        for tetrahedron, face in faces:
-            next_to_fibers.append(np.stack([6 * rows + tetrahedron, np.full(len(rows), face)], axis=1))
+        for tetrahedron, face in on_side:
+            next_to_fibers.append(np.stack([per_voxel * rows + tetrahedron, np.full(len(rows), face)], axis=1))
     return nodes, elements, np.concatenate(next_to_fibers)
 
 
@@ -328,15 +338,16 @@ def _voxel_tetrahedra(order: int) -> tuple[np.ndarray, np.ndarray]:
     return np.array(pairs), np.array(tetrahedra)
 
 
-def _voxel_sides() -> dict[tuple[int, int], list[tuple[int, int]]]:
+def _voxel_sides(cells=HEX_TETRAHEDRA, faces=TET_FACES.tolist()) -> dict[tuple[int, int], list[tuple[int, int]]]:
     """For each side of a voxel, ``(axis, 0)`` for its low side and
-    ``(axis, 1)`` for its high side, the ``(tetrahedron, face)`` pairs of
-    its six tetrahedra (:data:`HEX_TETRAHEDRA`) that lie on it."""
+    ``(axis, 1)`` for its high side, the ``(cell, face)`` pairs of the cells
+    that fill it, by default its six tetrahedra (:data:`HEX_TETRAHEDRA`),
+    that lie on it. A cell's corners come first and are voxel corners."""
     return {
         (axis, high): [
-            (tetrahedron, face)
-            for tetrahedron, corners in enumerate(HEX_TETRAHEDRA)
-            for face, on_face in enumerate(TET_FACES)
+            (cell, face)
+            for cell, corners in enumerate(np.asarray(cells))
+            for face, on_face in enumerate(faces)
             if (CORNERS[corners[on_face], axis] == high).all()
         ]
         for axis in range(3)
