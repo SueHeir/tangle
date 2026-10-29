@@ -333,6 +333,8 @@ def _stations(points, arcs, start, end, forced, spacing, tolerance, gap, clear=(
         merged[0] = start
     must = merged
     inner = [float(arc) for arc in arcs if start < arc < end]
+    inner_arcs = np.asarray(sorted(set(inner)))
+    inner_points = np.array([_at(points, arcs, arc) for arc in inner_arcs]).reshape(-1, 3)
     candidates = sorted(set(must) | set(inner))
     must_set = set(must)
     chosen = [candidates[0]]
@@ -345,10 +347,10 @@ def _stations(points, arcs, start, end, forced, spacing, tolerance, gap, clear=(
             there = candidates[next_index]
             if there - here > spacing * (1.0 + 1e-9):  # a hair over from rounding still fits
                 break
-            between = [arc for arc in inner if here < arc < there]
-            if between:
+            low, high = np.searchsorted(inner_arcs, here, side="right"), np.searchsorted(inner_arcs, there)
+            if high > low:  # the vertices between here and there
                 chord = _at(points, arcs, there) - origin
-                offsets = np.array([_at(points, arcs, arc) for arc in between]) - origin
+                offsets = inner_points[low:high] - origin
                 along = np.clip(offsets @ chord / max(chord @ chord, 1e-300), 0.0, 1.0)
                 if np.linalg.norm(offsets - along[:, None] * chord, axis=1).max() > tolerance:
                     break
