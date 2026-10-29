@@ -197,8 +197,11 @@ between one section and the next: 6 wedges and 7 nodes per section.
   bending results.
 - With `clip_to_cell=True` the centerlines are cut at the cell walls, with
   their periodic images on periodic axes, and a cut end lies in the wall, so
-  its nodes are in the `XMIN` to `ZMAX` sets. A fiber that crosses a wall
-  within about 15 degrees of along it ends square to itself instead.
+  its nodes are in the `XMIN` to `ZMAX` sets. The next section stays beyond
+  how far the cut end's outline slides along the fiber, so the end wedge of
+  a steep cut can be longer than `max_length`. A fiber that crosses a wall
+  within about 15 degrees of along it, or whose cut end has a bond's section
+  or the stretch's other end too close, ends square to itself instead.
 - Every fiber is its own body, as in `tet_mesh`.
 
 ### Bonds as beams
@@ -215,7 +218,9 @@ the material `"binder"`.
 The anchors come from the assembly's current fiber shape, so meshing a
 relaxed result puts the bonds where the relaxed fibers are. A bond that
 crosses a cell wall stops at a free node on the wall on each side, as the
-fibers do; with `clip_to_cell=False` such bonds are left out. `mesh.bonds`
+fibers do (unless its anchor is on the wall itself, where the image on the
+other side has the whole beam); with `clip_to_cell=False` such bonds are left
+out. `mesh.bonds`
 (a `Bonds`) has the beams, their radii and the junction of each.
 
 ### Binder voxels

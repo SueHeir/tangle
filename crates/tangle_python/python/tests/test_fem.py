@@ -811,6 +811,21 @@ class SweepMeshTests(unittest.TestCase):
         self.assertEqual((len(sets["XMIN"]), len(sets["XMAX"])), (7, 7))
         self.assertTrue((slanted.element_volumes() > 0).all())
 
+    def test_a_steep_cut_end_keeps_the_next_section_beyond_its_slide(self):
+        # Crossing the x wall at about 65 degrees from its normal, with short wedges: the cut ends slide
+        # about three radii along the fiber, past where the next sections would be.
+        line = np.linspace([0.7, 0.3, 0.5], [1.3, 1.6, 0.5], 30)
+        assembly = assembly_of([1.0, 2.0, 1.0], [line.tolist()], tangle.Material("fiber", diameter=0.2),
+                               periodic=[True, False, False])
+        mesh = fem.sweep_mesh(assembly, max_length=0.5)
+        corners = mesh.nodes[mesh.elements[:, mesh_module.PENTA_TETRAHEDRA]]
+        edges = corners[:, :, 1:] - corners[:, :, :1]
+        volumes = np.einsum("...i,...i", edges[..., 0, :], np.cross(edges[..., 1, :], edges[..., 2, :]))
+        self.assertTrue((volumes > 0).all())
+        sets = mesh.node_sets()
+        self.assertEqual((len(sets["XMIN"]), len(sets["XMAX"])), (7, 7))
+        self.assertAlmostEqual(mesh.volume, math.pi * 0.01 * float(np.linalg.norm([0.6, 1.3])), places=6)
+
     def test_an_oval_fiber_keeps_its_long_axis(self):
         oval = tangle.Material("ribbon", diameter=0.2, thickness=0.1)
         assembly = assembly_of([1.0, 1.0, 1.0], [[[0.2, 0.5, 0.5], [0.8, 0.5, 0.5]]], oval)

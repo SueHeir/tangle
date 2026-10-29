@@ -146,9 +146,19 @@ def sweep_mesh(
             if end - start < gap:
                 continue
             kept = [arc for arc in anchors if start - 1e-12 <= arc <= end + 1e-12]
-            stations = _stations(points, arcs, start, end, kept, spacing, bend_tolerance * short, gap)
+            # A slanted end slides its outline along the fiber into the wall, by up to `reach`: keep the
+            # next section beyond that, or the end stays square when a bond's section or the other end is there.
+            reach = [_wall_reach(points, arcs, arc, wall, long, nodes_around) for arc, wall in
+                     ((start, start_wall), (end, end_wall))]
+            if sum(reach) > end - start - gap:
+                reach = [0.0, 0.0]
+            if any(start < arc < start + reach[0] for arc in kept):
+                reach[0] = 0.0
+            if any(end - reach[1] < arc < end for arc in kept):
+                reach[1] = 0.0
+            stations = _stations(points, arcs, start, end, kept, spacing, bend_tolerance * short, gap, reach)
             nodes, elements, outer = _piece(points + shift, axes, arcs, stations, long, short, nodes_around,
-                                            start_wall, end_wall)
+                                            start_wall if reach[0] else None, end_wall if reach[1] else None)
             node_blocks.append(nodes)
             element_blocks.append(elements + node_count)
             block_fibers.append(np.full(len(elements), fiber, dtype=np.int64))
@@ -279,11 +289,30 @@ def _intervals(points, arcs, origin, lengths, periodic, clip):
             yield (shift, *current)
 
 
-def _stations(points, arcs, start, end, forced, spacing, tolerance, gap):
+def _wall_reach(points, arcs, arc, wall, long, around) -> float:
+    """How far along the fiber the outline of a stretch's end at ``arc``
+    slides to lie in its ``wall`` (with a margin), or 0 when there is no
+    wall there or the fiber runs too nearly along it to slide."""
+    if wall is None:
+        return 0.0
+    segment = int(np.clip(np.searchsorted(arcs, arc, side="right") - 1, 0, len(points) - 2))
+    while segment > 0 and arcs[segment + 1] - arcs[segment] <= 0.0:
+        segment -= 1
+    step = points[segment + 1] - points[segment]
+    cosine = abs(step[wall[0]]) / max(float(np.linalg.norm(step)), 1e-300)
+    if cosine < WALL_COSINE:
+        return 0.0
+    scale = math.sqrt(2.0 * math.pi / (around * math.sin(2.0 * math.pi / around)))
+    return 1.25 * scale * long * math.sqrt(max(1.0 - cosine * cosine, 0.0)) / cosine + 1e-9 * max(arcs[-1], 1e-300)
+
+
+def _stations(points, arcs, start, end, forced, spacing, tolerance, gap, clear=(0.0, 0.0)):
     """Arc lengths of a stretch's sections: its ends and ``forced`` always
-    (or the nearest of them, when they are closer than ``gap``), and as few others, at the polyline's
-    vertices or evenly between them, as keep every wedge within
-    ``spacing`` long and the centerline within ``tolerance`` of its axis."""
+    (or the nearest of them, when they are closer than ``gap``), and as few
+    others, at the polyline's vertices or evenly between them, as keep every
+    wedge within ``spacing`` long and the centerline within ``tolerance`` of
+    its axis. No other section lies within ``clear`` of the start and of the
+    end, so a wedge there can be longer."""
     must = sorted({start, end, *forced})
     merged = [must[0]]
     for arc in must[1:]:  # forced sections closer than gap become one, the ends kept
@@ -335,6 +364,7 @@ def _stations(points, arcs, start, end, forced, spacing, tolerance, gap):
                 stations[-1] = arc
                 continue
         stations.append(arc)
+    stations = [arc for arc in stations if arc in must_set or start + clear[0] <= arc <= end - clear[1]]
     return np.asarray(stations)
 
 
@@ -363,6 +393,7 @@ def _piece(points, axes, arcs, stations, long, short, around, start_wall, end_wa
     outline = scale * np.stack([long * np.cos(angles), short * np.sin(angles)], axis=1)
     rim = (centers[:, None, :] + outline[None, :, :1] * directions[:, None, :]
            + outline[None, :, 1:] * across[:, None, :])
+    square = rim.copy()
     for index, wall, step in ((0, start_wall, steps[0]), (-1, end_wall, steps[-1])):
         if wall is None:
             continue
@@ -371,7 +402,6 @@ def _piece(points, axes, arcs, stations, long, short, around, start_wall, end_wa
             rim[index] += ((value - rim[index][:, axis]) / step[axis])[:, None] * step
             rim[index][:, axis] = value
             centers[index][axis] = value
-    nodes = np.concatenate([centers[:, None, :], rim], axis=1).reshape(-1, 3)
 
     per = around + 1
     segment = np.arange(len(stations) - 1)[:, None]
@@ -382,9 +412,17 @@ def _piece(points, axes, arcs, stations, long, short, around, start_wall, end_wa
          (segment + 1) * per + 0 * k, (segment + 1) * per + first, (segment + 1) * per + second],
         axis=2,
     ).reshape(-1, 6)
-    corners = nodes[elements[:, PENTA_TETRAHEDRA[0]]]
-    edges = corners[:, 1:] - corners[:, :1]
-    inverted = np.einsum("ij,ij->i", edges[:, 0], np.cross(edges[:, 1], edges[:, 2])) < 0.0
+    for _ in range(2):
+        nodes = np.concatenate([centers[:, None, :], rim], axis=1).reshape(-1, 3)
+        corners = nodes[elements[:, PENTA_TETRAHEDRA]]  # (wedge, tetrahedron, corner, xyz)
+        edges = corners[:, :, 1:] - corners[:, :, :1]
+        volumes = np.einsum("...i,...i", edges[..., 0, :], np.cross(edges[..., 1, :], edges[..., 2, :]))
+        folded = (volumes <= 0.0).any(axis=1).reshape(len(stations) - 1, around).any(axis=1)
+        if not (folded[0] or folded[-1]):
+            break
+        for index in ([0] if folded[0] else []) + ([-1] if folded[-1] else []):
+            rim[index] = square[index]  # a slid end that folds its wedges stays square
+    inverted = volumes.sum(axis=1) < 0.0
     elements[inverted] = elements[inverted][:, FLIP_PENTA]
     wedges = np.arange(len(elements))
     outer = [np.stack([wedges, np.full(len(wedges), SIDE_FACE)], axis=1),
@@ -415,8 +453,9 @@ def _bond_beams(nodes, bonds, stations_at, centerlines, semi_axes, ratio, origin
             sections.append(section)
         return end_of[key]
 
-    def wall_node(position, toward):
-        """A free node where the line from ``position`` to ``toward`` leaves the cell."""
+    def wall_point(position, toward):
+        """Where the line from ``position`` to ``toward`` leaves the cell, or
+        None when that is too near ``position`` for a beam."""
         step = toward - position
         exit = 1.0
         for axis in range(3):
@@ -424,7 +463,9 @@ def _bond_beams(nodes, bonds, stations_at, centerlines, semi_axes, ratio, origin
                 exit = min(exit, (origin[axis] + lengths[axis] - position[axis]) / step[axis])
             elif step[axis] < 0.0:
                 exit = min(exit, (origin[axis] - position[axis]) / step[axis])
-        point = position + max(exit, 0.0) * step
+        return position + exit * step if exit >= 0.05 else None  # on a wall itself: its image's beam is whole
+
+    def wall_node(point):
         extra.append(point)
         return len(nodes) + len(extra) - 1
 
@@ -451,11 +492,12 @@ def _bond_beams(nodes, bonds, stations_at, centerlines, semi_axes, ratio, origin
             if match:
                 other_section, other_position = seconds[match[0]]
                 pairs.append((end_node(section, position), end_node(other_section, other_position)))
-            elif clip:
-                pairs.append((end_node(section, position), wall_node(position, position + delta)))
+            elif clip and (point := wall_point(position, position + delta)) is not None:
+                pairs.append((end_node(section, position), wall_node(point)))
         for section, position in seconds:  # ...and from each image of the second whose first is outside
             if clip and not any(np.linalg.norm(other - (position - delta)) <= 1e-9 * scale for _, other in firsts):
-                pairs.append((end_node(section, position), wall_node(position, position - delta)))
+                if (point := wall_point(position, position - delta)) is not None:
+                    pairs.append((end_node(section, position), wall_node(point)))
         for pair in pairs:
             beams.append(pair)
             radii.append(radius)
