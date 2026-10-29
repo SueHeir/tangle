@@ -2,15 +2,17 @@
 
 `tangle.fem` turns an assembly into a solid finite-element mesh and writes it
 as Nastran bulk data (`.bdf`) or as an Abaqus input file (`.inp`). There are
-two meshers, and both return the same `FemMesh`:
+three meshers, and all return the same `FemMesh`:
 
-| | `hex_mesh` | `tet_mesh` |
-|---|---|---|
-| Elements | 8-node hexahedra (`CHEXA`, `C3D8`) | 4- or 10-node tetrahedra (`CTETRA`, `C3D4` or `C3D10`) |
-| Fiber surface | voxel steps, like a CT scan | follows the round or oval surface (10-node elements curve with it) |
-| Fibers that touch | share nodes, so they are bonded | separate bodies, so the solver needs contact or glue |
-| Binder | yes: bridges at junctions (`bond_radius_ratio`), or any voxels you give it (`binder`) | yes, from the same voxels, as tetrahedra tied to the fibers |
-| Needs | NumPy | NumPy and [gmsh](https://gmsh.info) |
+| | `hex_mesh` | `tet_mesh` | `sweep_mesh` |
+|---|---|---|---|
+| Elements | 8-node hexahedra (`CHEXA`, `C3D8`) | 4- or 10-node tetrahedra (`CTETRA`, `C3D4` or `C3D10`) | 6-node wedges (`CPENTA`, `C3D6`) |
+| Fiber surface | voxel steps, like a CT scan | follows the round or oval surface (10-node elements curve with it) | a hexagon of the fiber's area, swept along the centerline |
+| Size | many elements | many elements | 6 wedges every few diameters |
+| Fibers that touch | share nodes, so they are bonded | separate bodies, so the solver needs contact or glue | separate bodies |
+| Bonds at junctions (`bond_radius_ratio`) | binder voxels | binder voxels, tied to the fibers | one beam per bond, tied to the two fibers' cross-sections |
+| Binder voxels (`binder`) | share nodes with the fibers | tetrahedra tied to the fibers | wedges tied to the fibers |
+| Needs | NumPy | NumPy and [gmsh](https://gmsh.info) | NumPy |
 
 Install the extras with `pip install numpy gmsh`, or `pip install "tangle[fem]"`.
 gmsh is GPL software that TANGLE calls but does not ship; `hex_mesh` and the
@@ -150,8 +152,7 @@ fibers.
   on a fiber's surface can have, since a binder face next to such a voxel
   lies within its diagonal, about 1.7 voxels, of the fiber's round surface.
   Binder nodes farther away stay free.
-- The Nastran file has no tie: glue the binder's `PSOLID` to the fibers in
-  your pre-processor, as for fibers that touch.
+- The Nastran file glues the binder with `MPC` equations (see below).
 - The voxels a fiber fills are those of `hex_mesh`, whose fibers end in half
   spheres. `tet_mesh` ends them flat, so binder next to a fiber's end can
   stop short of it: within the tolerance it is tied across the gap, and
@@ -173,6 +174,65 @@ fibers.
   fibers, by up to about half a voxel. Compare `mesh.element_volumes()` of
   the binder (fiber id 0) at two sizes to see what a coarser one changes.
 
+## Swept wedges
+
+`sweep_mesh(assembly, *, nodes_around=6, max_length=4.0, bend_tolerance=0.25,
+clip_to_cell=True, bond_radius_ratio=None, binder=None, voxel_size=None)` is
+the lightest mesh, for large cells in Nastran. Each fiber gets a cross-section
+of `nodes_around` nodes on its outline and one in its middle, 7 by default,
+at both ends and every so often along its centerline, and six-node wedges
+between one section and the next: 6 wedges and 7 nodes per section.
+
+- The section is a polygon on the fiber's round or oval outline, scaled so its
+  area is the fiber's. A hexagon so has a round fiber's bending stiffness
+  within 1%, and a straight fiber's volume is exact.
+- Sections are at most `max_length` fiber diameters apart (the mean of an
+  oval's two widths), and closer only where the fiber bends: between two
+  sections the centerline stays within `bend_tolerance` of a radius of the
+  straight line from one to the other. A straight fiber 40 diameters long is
+  60 wedges.
+- A single linear wedge across the fiber is stiffer in bending than the fiber
+  itself, the more so the longer the wedges. Compare a bending case against
+  a finer `max_length` or against `tet_mesh(order=2)` before trusting
+  bending results.
+- With `clip_to_cell=True` the centerlines are cut at the cell walls, with
+  their periodic images on periodic axes, and a cut end lies in the wall, so
+  its nodes are in the `XMIN` to `ZMAX` sets. A fiber that crosses a wall
+  within about 15 degrees of along it ends square to itself instead.
+- Every fiber is its own body, as in `tet_mesh`.
+
+### Bonds as beams
+
+`bond_radius_ratio` turns each bond of a persistent junction (see
+[fiber bonds](fiber_bonds.md)) into one round beam, with that radius as a
+fraction of the thinner fiber's radius. A section lies at the bond's anchor
+on each fiber, and the beam joins two nodes at the middles of those
+sections. Each end node belongs to no wedge; it follows its section's 7 nodes
+as their mean (Nastran `RBE3`, Abaqus distributing `*COUPLING`), so the beam
+carries force and moment into the fiber without stiffening it. The beams use
+the material `"binder"`.
+
+The anchors come from the assembly's current fiber shape, so meshing a
+relaxed result puts the bonds where the relaxed fibers are. A bond that
+crosses a cell wall stops at a free node on the wall on each side, as the
+fibers do; with `clip_to_cell=False` such bonds are left out. `mesh.bonds`
+(a `Bonds`) has the beams, their radii and the junction of each.
+
+### Binder voxels
+
+`binder` and `voxel_size` work as in `tet_mesh`, except that each binder voxel
+becomes two wedges. Without `voxel_size`, the binder's voxels are a whole
+number of the mask's, as near as that allows to the fibers' smaller radius,
+so a CT scan's binder is meshed about as coarsely as the fibers. The binder
+shares no nodes with the fibers; `mesh.ties` glues it to them, as `MPC`
+equations in Nastran and a `*TIE` in Abaqus.
+
+```python
+fit = ...  # a tangle.ct fit with its binder mask
+mesh = fem.sweep_mesh(fit.to_assembly(), binder=fit.binder)
+mesh.write_nastran("scan.bdf")  # add MAT1 1 (fiber) and 2 (binder), or pass them
+```
+
 ## Writing the files
 
 `write_nastran(path, material=None, *, scale=1.0)` and
@@ -187,10 +247,20 @@ a made-up value. `scale` multiplies the coordinates; `1e3` writes millimeters.
 The `.bdf` holds bulk data only:
 
 - `GRID*` nodes in large-field format (10 significant digits);
-- `CHEXA` or `CTETRA` elements;
+- `CHEXA`, `CTETRA` or `CPENTA` elements;
 - one `PSOLID` per fiber, numbered by its TANGLE fiber id, and the next id for
   binder;
-- one `MAT1` per material, numbered from 1 in the order of `mesh.materials`.
+- one `MAT1` per material, numbered from 1 in the order of `mesh.materials`;
+- with a tie (binder in `tet_mesh` or `sweep_mesh`), `MPC` equations in set 1:
+  each binder node next to a fiber follows the closest point of the closest
+  fiber face, as the weighted mean of that face's corners, in x, y and z.
+  `mesh.tie_constraints(tie)` gives the same equations as arrays. Select them
+  with `MPC = 1` in the case control, and keep `SPC`s off the tied binder
+  nodes, which move with the fibers. Binder nodes beyond the tolerance stay
+  free;
+- with bonds (`sweep_mesh`), a `PBAR` per bond radius (a round bar's area,
+  bending and torsion constants), a `CBAR` per bond, and an `RBE3` per beam
+  end that makes it follow its fiber's cross-section.
 
 Import it into a pre-processor (Femap, Patran, HyperMesh) or include it in a
 deck that has your loads and constraints:
@@ -200,6 +270,7 @@ SOL 101
 CEND
 SUBCASE 1
   SPC = 1
+  MPC = 1
   LOAD = 2
 BEGIN BULK
 INCLUDE 'felt_hex.bdf'
@@ -225,7 +296,10 @@ Abaqus/CAE imports as an orphan mesh:
   and a `*TIE` named `BINDER_TIE` that glues the first to the second, with
   `ADJUST=NO` so no node moves.
 
-The elements are `C3D8`, `C3D4` or `C3D10`. For bending of hexahedral fibers
+The elements are `C3D8`, `C3D4`, `C3D10` or `C3D6`. Bonds of a swept mesh are
+`B31` beams in sets `BONDS_<n>` (all in `BONDS`), each set with a round
+`*BEAM SECTION`, and a distributing `*COUPLING` per beam end ties it to the
+nodes of its fiber's cross-section (node sets `BOND_SECTION_<n>`). For bending of hexahedral fibers
 `element_type="C3D8I"` is usually better than `C3D8`.
 
 ### ParaView
@@ -233,7 +307,7 @@ The elements are `C3D8`, `C3D4` or `C3D10`. For bending of hexahedral fibers
 `write_vtu(path, *, scale=1.0)` writes the mesh as a VTK unstructured grid
 (`.vtu`) that ParaView opens directly, with each element's TANGLE fiber id
 (`fiber_id`, 0 for binder) and material (`material`, an index into
-`mesh.materials`) as cell data. Color by `fiber_id` to see the fibers, or
+`mesh.materials`) as cell data; bond beams are lines with fiber id 0. Color by `fiber_id` to see the fibers, or
 apply a Threshold on it from 0 to 0 to see only the binder. ParaView cannot
 read the `.bdf` itself: its Nastran reader does not read large-field `GRID*`
 nodes.
@@ -259,7 +333,7 @@ mesh, write it with `write_vtu` and open it in ParaView.
 ## Limits
 
 - Orthorhombic cells only, as for `export_puma`.
-- In a tetrahedral mesh the binder is tied to the fibers only in the Abaqus
-  file; in Nastran, glue it in a pre-processor.
+- The `MPC` ties glue a binder node to the flat corner triangle of a 10-node
+  tetrahedron's face, not to its curved face.
 - Element and node ids must fit Nastran's 8-column fields, so a mesh can have
   at most 99,999,999 of each.

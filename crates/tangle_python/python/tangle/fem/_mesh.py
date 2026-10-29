@@ -11,9 +11,9 @@ from typing import Mapping, Union
 
 import numpy as np
 
-ELEMENT_NODE_COUNTS = {"hex8": 8, "tet4": 4, "tet10": 10}
-NASTRAN_ELEMENTS = {"hex8": "CHEXA", "tet4": "CTETRA", "tet10": "CTETRA"}
-ABAQUS_ELEMENTS = {"hex8": "C3D8", "tet4": "C3D4", "tet10": "C3D10"}
+ELEMENT_NODE_COUNTS = {"hex8": 8, "tet4": 4, "tet10": 10, "penta6": 6}
+NASTRAN_ELEMENTS = {"hex8": "CHEXA", "tet4": "CTETRA", "tet10": "CTETRA", "penta6": "CPENTA"}
+ABAQUS_ELEMENTS = {"hex8": "C3D8", "tet4": "C3D4", "tet10": "C3D10", "penta6": "C3D6"}
 # The largest id an 8-column Nastran field holds.
 MAX_NASTRAN_ID = 99_999_999
 # Six tetrahedra around the 0-6 diagonal that fill a hexahedron in Nastran
@@ -26,6 +26,14 @@ TET_FACES = np.array([[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]])
 # The corners at the ends of the edges whose middles are nodes 4 to 9 of a
 # 10-node tetrahedron, in Nastran and Abaqus order.
 TET10_EDGES = [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)]
+# The corners of a 6-node wedge's faces S1 to S5, as Abaqus numbers them: its
+# two triangles, nodes 0 to 2 and 3 to 5, then its three quadrilaterals.
+PENTA_FACES = [[0, 1, 2], [3, 5, 4], [0, 3, 4, 1], [1, 4, 5, 2], [2, 5, 3, 0]]
+# Three tetrahedra that fill a wedge whose triangle 0-1-2 runs
+# counterclockwise seen from triangle 3-5-4, each positively oriented.
+PENTA_TETRAHEDRA = np.array([[0, 1, 2, 5], [0, 1, 5, 4], [0, 4, 5, 3]])
+# The faces a tie can name, for the element types that can have ties.
+ELEMENT_FACES = {"tet4": TET_FACES.tolist(), "tet10": TET_FACES.tolist(), "penta6": PENTA_FACES}
 
 
 @dataclass(frozen=True)
@@ -96,13 +104,16 @@ def tet10_jacobians(nodes: np.ndarray, elements: np.ndarray, chunk: int = 20_000
 @dataclass(frozen=True, eq=False)
 class Tie:
     """Faces of one body glued to the faces of others that it shares no
-    nodes with, such as a tetrahedral mesh's binder and the fibers it
-    touches. :meth:`FemMesh.write_abaqus` writes it as a ``*TIE``.
+    nodes with, such as a tetrahedral or swept mesh's binder and the fibers
+    it touches. :meth:`FemMesh.write_abaqus` writes it as a ``*TIE`` and
+    :meth:`FemMesh.write_nastran` as ``MPC`` equations
+    (:meth:`FemMesh.tie_constraints`).
 
     Attributes:
         name: the tie's name in the files.
-        secondary: ``(k, 2)`` element index and face (0 to 3 for S1 to S4)
-            of each face whose nodes are tied.
+        secondary: ``(k, 2)`` element index and face (0 to 3 for S1 to S4
+            of a tetrahedron, 0 to 4 for S1 to S5 of a wedge) of each face
+            whose nodes are tied.
         main: ``(m, 2)`` element index and face of each face they are tied
             to.
         tolerance: meters. A node of ``secondary`` farther than this from
@@ -113,6 +124,44 @@ class Tie:
     secondary: np.ndarray
     main: np.ndarray
     tolerance: float
+
+
+@dataclass(frozen=True, eq=False)
+class Bonds:
+    """Binder bonds of a swept mesh (:func:`tangle.fem.sweep_mesh`) as
+    beams: one round beam for each bond of a persistent junction, from a
+    node at the middle of the cross-section where it is anchored on one
+    fiber to one at the middle of the cross-section on the other. Each of
+    these end nodes is a node of no solid element; it follows the section's
+    nodes as their mean (Nastran ``RBE3``, Abaqus distributing
+    ``*COUPLING``), so the beam carries force and moment into the fiber
+    without stiffening it. A bond that crosses a cell wall stops at a free
+    node on the wall, as the fibers do.
+
+    Attributes:
+        beams: ``(k, 2)`` the end nodes of each beam.
+        radii: ``(k,)`` each beam's radius, in meters.
+        orientations: ``(k, 3)`` a unit vector across each beam, for the
+            solvers' beam orientation (any one, as the beams are round).
+        junction_ids: ``(k,)`` the TANGLE junction of each beam.
+        material: the beams' material, an index into ``FemMesh.materials``.
+        ends: ``(r,)`` the beams' end nodes that follow a section, each
+            once.
+        sections: ``(r, s)`` the nodes of the cross-section each of
+            ``ends`` follows.
+    """
+
+    beams: np.ndarray
+    radii: np.ndarray
+    orientations: np.ndarray
+    junction_ids: np.ndarray
+    material: int
+    ends: np.ndarray
+    sections: np.ndarray
+
+    @property
+    def count(self) -> int:
+        return len(self.beams)
 
 
 @dataclass(frozen=True, eq=False)
@@ -128,8 +177,8 @@ class FemMesh:
     Attributes:
         nodes: ``(n, 3)`` node coordinates.
         elements: ``(m, k)`` zero-based node indices of each element, in
-            Nastran and Abaqus node order (``k`` is 8, 4 or 10).
-        element_type: ``"hex8"``, ``"tet4"`` or ``"tet10"``.
+            Nastran and Abaqus node order (``k`` is 8, 4, 10 or 6).
+        element_type: ``"hex8"``, ``"tet4"``, ``"tet10"`` or ``"penta6"``.
         element_fibers: ``(m,)`` TANGLE fiber id of each element, or 0 for
             binder.
         element_materials: ``(m,)`` index into ``materials`` of each element.
@@ -138,8 +187,11 @@ class FemMesh:
         cell_origin: the cell's corner.
         cell_lengths: the cell's edge lengths. Nodes on its six faces form
             the ``XMIN`` to ``ZMAX`` node sets.
-        ties: the :class:`Tie` constraints of a tetrahedral mesh with binder:
-            the binder shares no nodes with the fibers and is tied to them.
+        ties: the :class:`Tie` constraints of a tetrahedral or swept mesh
+            with binder: the binder shares no nodes with the fibers and is
+            tied to them.
+        bonds: the :class:`Bonds` of a swept mesh with bonds, written after
+            the solid elements: element ``m + i`` is beam ``i``.
     """
 
     nodes: np.ndarray
@@ -151,6 +203,7 @@ class FemMesh:
     cell_origin: tuple[float, float, float]
     cell_lengths: tuple[float, float, float]
     ties: tuple[Tie, ...] = ()
+    bonds: Bonds | None = None
 
     def __post_init__(self) -> None:
         if self.element_type not in ELEMENT_NODE_COUNTS:
@@ -167,18 +220,34 @@ class FemMesh:
         if count and (self.element_materials.min() < 0 or self.element_materials.max() >= len(self.materials)):
             raise ValueError("element_materials refer to materials that do not exist")
         for tie in self.ties:
-            if self.element_type == "hex8":
-                raise ValueError("ties join tetrahedral meshes only")
+            if self.element_type not in ELEMENT_FACES:
+                raise ValueError("ties join tetrahedral and wedge meshes only")
+            face_count = len(ELEMENT_FACES[self.element_type])
             if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", tie.name):
                 raise ValueError("a tie's name must be letters, digits and underscores, starting with a letter")
             for faces in (tie.secondary, tie.main):
                 if faces.ndim != 2 or faces.shape[1] != 2:
                     raise ValueError("a tie's faces must have shape (k, 2): element index and face")
                 if len(faces) and (faces[:, 0].min() < 0 or faces[:, 0].max() >= count
-                                   or faces[:, 1].min() < 0 or faces[:, 1].max() > 3):
+                                   or faces[:, 1].min() < 0 or faces[:, 1].max() >= face_count):
                     raise ValueError("a tie refers to faces that do not exist")
             if not (math.isfinite(tie.tolerance) and tie.tolerance > 0.0):
                 raise ValueError("a tie's tolerance must be finite and positive")
+        bonds = self.bonds
+        if bonds is not None:
+            k = len(bonds.beams)
+            if bonds.beams.shape != (k, 2) or bonds.radii.shape != (k,) or bonds.orientations.shape != (k, 3) \
+                    or bonds.junction_ids.shape != (k,):
+                raise ValueError("bonds need (k, 2) beams and one radius, orientation and junction id per beam")
+            if bonds.sections.ndim != 2 or bonds.ends.shape != (len(bonds.sections),):
+                raise ValueError("bonds need one section of nodes per end node")
+            for indices in (bonds.beams, bonds.ends, bonds.sections):
+                if indices.size and (indices.min() < 0 or indices.max() >= len(self.nodes)):
+                    raise ValueError("bonds refer to nodes that do not exist")
+            if k and not (np.isfinite(bonds.radii).all() and bonds.radii.min() > 0.0):
+                raise ValueError("bond radii must be finite and positive")
+            if not 0 <= bonds.material < len(self.materials):
+                raise ValueError("the bonds' material does not exist")
 
     @property
     def node_count(self) -> int:
@@ -200,6 +269,8 @@ class FemMesh:
             return tet10_jacobians(self.nodes, self.elements)[1] / 6.0
         if self.element_type == "hex8":
             corners = self.elements[:, HEX_TETRAHEDRA]
+        elif self.element_type == "penta6":
+            corners = self.elements[:, PENTA_TETRAHEDRA]
         else:
             corners = self.elements[:, None, :4]
         points = self.nodes[corners]
@@ -225,20 +296,68 @@ class FemMesh:
         return sets
 
     def __repr__(self) -> str:
+        beams = f", {self.bonds.count} bond beams" if self.bonds is not None else ""
         return (
             f"FemMesh({self.element_type}: {self.node_count} nodes, "
-            f"{self.element_count} elements, {len(self.fiber_ids)} fibers)"
+            f"{self.element_count} elements{beams}, {len(self.fiber_ids)} fibers)"
         )
 
+    def tie_constraints(self, tie: Tie) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """The equations that glue ``tie``'s secondary nodes to its main
+        faces: every node of a secondary face within ``tie.tolerance`` of a
+        main face moves with the closest point of the closest one, as the
+        mean of that face's corners weighted by where the point lies.
+
+        Quadrilateral faces count as two triangles, and a 10-node
+        tetrahedron's face as the triangle of its corners. No secondary node
+        is a node of a main face, and none is constrained twice.
+
+        Returns:
+            The constrained nodes ``(k,)``, and for each the three main
+            nodes ``(k, 3)`` it follows and their weights ``(k, 3)``, which
+            add up to 1. :meth:`write_nastran` writes one ``MPC`` equation
+            for each node and direction.
+        """
+        faces = ELEMENT_FACES[self.element_type]
+        secondary = [np.zeros(0, dtype=np.int64)]
+        for face, corners in enumerate(faces):
+            rows = tie.secondary[tie.secondary[:, 1] == face, 0]
+            secondary.append(self.elements[rows][:, corners])
+            if self.element_type == "tet10":
+                middles = [4 + edge for edge, (first, second) in enumerate(TET10_EDGES)
+                           if first in corners and second in corners]
+                secondary.append(self.elements[rows][:, middles])
+        nodes = np.unique(np.concatenate([block.ravel() for block in secondary]))
+        triangles = []
+        for face, corners in enumerate(faces):
+            rows = tie.main[tie.main[:, 1] == face, 0]
+            for fan in range(1, len(corners) - 1):
+                triangles.append(self.elements[rows][:, [corners[0], corners[fan], corners[fan + 1]]])
+        triangles = np.concatenate(triangles) if triangles else np.zeros((0, 3), dtype=np.int64)
+        if self.bonds is not None and len(triangles):
+            # A beam end follows its section: keep the section's nodes free of other constraints.
+            triangles = triangles[~np.isin(triangles, self.bonds.ends).any(axis=1)]
+        nodes = nodes[~np.isin(nodes, triangles)]
+        if not (len(nodes) and len(triangles)):
+            return np.zeros(0, dtype=np.int64), np.zeros((0, 3), dtype=np.int64), np.zeros((0, 3))
+        found, weights = _closest_triangles(self.nodes[nodes], self.nodes[triangles], tie.tolerance)
+        kept = found >= 0
+        return nodes[kept], triangles[found[kept]], weights[kept]
+
     def write_nastran(self, path: str | Path, material: MaterialChoice = None, *, scale: float = 1.0) -> Path:
-        """Write the mesh as Nastran bulk data: ``GRID``, ``CHEXA`` or
-        ``CTETRA``, ``PSOLID`` and ``MAT1`` entries.
+        """Write the mesh as Nastran bulk data: ``GRID``, ``CHEXA``,
+        ``CTETRA`` or ``CPENTA``, ``PSOLID`` and ``MAT1`` entries, ``MPC``
+        equations for the :attr:`ties`, and for :attr:`bonds` ``CBAR``
+        beams with their ``PBAR`` and the ``RBE3`` that ties each beam end
+        to its fiber's cross-section.
 
         The file holds bulk data only. ``INCLUDE`` it after ``BEGIN BULK`` in
         a deck that has your loads and constraints, or import it into a
         pre-processor such as Femap, Patran or HyperMesh. Each fiber gets its
         own ``PSOLID``, numbered by its TANGLE fiber id; binder gets the next
-        id. ``MAT1`` ids follow ``materials`` from 1.
+        id, and the bonds' ``PBAR`` the ids after it. ``MAT1`` ids follow
+        ``materials`` from 1. The tie equations are ``MPC`` set 1, so a mesh
+        with ties needs ``MPC = 1`` in the case control.
 
         Args:
             path: the file to write, usually ``.bdf``.
@@ -254,13 +373,21 @@ class FemMesh:
         properties = _resolve_materials(self.materials, material)
         nodes = _scaled(self.nodes, scale)
         fibers, binder_pid = self._property_ids()
-        if max(len(nodes), len(self.elements), binder_pid) > MAX_NASTRAN_ID:
+        bonds = self.bonds
+        bond_count = bonds.count if bonds is not None else 0
+        radii, bond_pids = (np.unique(bonds.radii, return_inverse=True) if bond_count
+                            else (np.zeros(0), np.zeros(0, dtype=np.int64)))
+        first_bar_pid = max([pid for pid, _ in fibers], default=0) + 1
+        last_id = len(self.elements) + bond_count + (len(bonds.ends) if bonds is not None else 0)
+        if max(len(nodes), last_id, first_bar_pid + len(radii)) > MAX_NASTRAN_ID:
             raise ValueError(f"Nastran ids are limited to {MAX_NASTRAN_ID:,}; this mesh needs more")
+        constraints = [self.tie_constraints(tie) for tie in self.ties]
         name = NASTRAN_ELEMENTS[self.element_type]
         lines = [
             "$ TANGLE fiber mesh written by tangle.fem: Nastran bulk data.",
             f"$ {len(self.fiber_ids)} fibers, {len(nodes)} nodes, {len(self.elements)} "
-            f"{name} elements ({self.element_type}).",
+            f"{name} elements ({self.element_type})"
+            + (f", {bond_count} CBAR bond beams." if bond_count else "."),
             f"$ Coordinates are meters times {scale:g}; use matching material units.",
             "$ INCLUDE this file after BEGIN BULK in a solution deck, or import it",
             "$ into a pre-processor (Femap, Patran, HyperMesh).",
@@ -268,9 +395,17 @@ class FemMesh:
             + (f"; binder is PSOLID {binder_pid}." if binder_pid else "."),
         ]
         if self.ties:
+            tied = sum(len(found) for found, _, _ in constraints)
             lines += [
-                f"$ The binder (PSOLID {binder_pid}) shares no nodes with the fibers: glue it to",
-                "$ them (glued contact) before solving. The Abaqus file ties them with *TIE.",
+                f"$ The binder (PSOLID {binder_pid}) shares no nodes with the fibers: {tied} of its nodes",
+                "$ are glued to the fibers' surfaces by MPC equations in set 1. Select them",
+                "$ with MPC = 1 in the case control, and keep SPCs off those nodes",
+                "$ (they move with the fibers).",
+            ]
+        if bond_count:
+            lines += [
+                f"$ Each bond is a round CBAR (PBAR {first_bar_pid} on) between two nodes of no solid",
+                "$ element; an RBE3 makes each follow its fiber's cross-section.",
             ]
         for index, (material_name, elastic) in enumerate(zip(self.materials, properties), start=1):
             if elastic is None:
@@ -288,6 +423,15 @@ class FemMesh:
             handle.write("$ Properties: one PSOLID per fiber\n")
             for pid, material_index in fibers:
                 handle.write(f"PSOLID  {pid:8d}{material_index + 1:8d}\n")
+            if bond_count:
+                handle.write("$ Bond beams: one PBAR per radius (area, bending and torsion of a round bar)\n")
+                for offset, radius in enumerate(radii.tolist()):
+                    r = radius * scale
+                    area, inertia = math.pi * r * r, math.pi * r**4 / 4.0
+                    handle.write(
+                        f"PBAR*   {first_bar_pid + offset:16d}{bonds.material + 1:16d}{_e16(area)}{_e16(inertia)}\n"
+                        f"*       {_e16(inertia)}{_e16(2.0 * inertia)}\n"
+                    )
             handle.write("$ Nodes\n")
             _write_rows(
                 handle,
@@ -310,6 +454,37 @@ class FemMesh:
                     *(self.elements + 1).T.tolist(),
                 ),
             )
+            if bond_count:
+                handle.write("$ Bond beams, and the RBE3 that ties each beam end to its fiber's cross-section\n")
+                _write_rows(
+                    handle,
+                    "CBAR    %8d%8d%8d%8d%8s%8s%8s\n",
+                    zip(
+                        range(len(self.elements) + 1, len(self.elements) + bond_count + 1),
+                        (first_bar_pid + bond_pids).tolist(),
+                        *(bonds.beams + 1).T.tolist(),
+                        *([_real8(value) for value in column] for column in bonds.orientations.T.tolist()),
+                    ),
+                )
+                eid = len(self.elements) + bond_count
+                for end, section in zip((bonds.ends + 1).tolist(), (bonds.sections + 1).tolist()):
+                    eid += 1
+                    fields = [f"{eid:8d}", "", f"{end:8d}", "  123456", "     1.0", "     123"]
+                    fields += [f"{node:8d}" for node in section]
+                    handle.write(_small_fields("RBE3", fields))
+            for tie, (found, main, weights) in zip(self.ties, constraints):
+                if not len(found):
+                    continue
+                handle.write(f"$ {tie.name}: each binder node follows the closest point of a fiber face\n")
+                for node, corners, shares in zip((found + 1).tolist(), (main + 1).tolist(), weights.tolist()):
+                    terms = [(corner, share) for corner, share in zip(corners, shares) if share >= 1.0e-6]
+                    for direction in (1, 2, 3):
+                        fields = ["       1", f"{node:8d}", f"{direction:8d}", "     1.0"]
+                        for index, (corner, share) in enumerate(terms):
+                            if index % 2 == 1:
+                                fields += ["", ""]  # field 9 of a line and field 2 of the next stay blank
+                            fields += [f"{corner:8d}", f"{direction:8d}", _real8(-share)]
+                        handle.write(_small_fields("MPC", fields))
         return path
 
     def write_abaqus(
@@ -325,7 +500,10 @@ class FemMesh:
         ``*SOLID SECTION`` per material, the materials, one ``*NSET`` of
         nodes per cell face (``XMIN`` to ``ZMAX``), and a ``*TIE`` for each
         of :attr:`ties` between two ``*SURFACE`` definitions,
-        ``<name>_SECONDARY`` and ``<name>_MAIN``.
+        ``<name>_SECONDARY`` and ``<name>_MAIN``. :attr:`bonds` become
+        ``B31`` beams in element sets ``BONDS_<n>`` (all in ``BONDS``), each
+        with a round ``*BEAM SECTION``, and a distributing ``*COUPLING`` ties
+        each beam end to its fiber's cross-section.
 
         Args:
             path: the file to write, usually ``.inp``.
@@ -333,9 +511,9 @@ class FemMesh:
                 mapping from material name to one. A material left out is
                 referenced but not defined, so Abaqus stops until you add it.
             scale: multiplies every coordinate; ``1e3`` writes millimeters.
-            element_type: the Abaqus element name. The default is ``C3D8``,
-                ``C3D4`` or ``C3D10``; ``C3D8I`` or ``C3D8R`` also suit the
-                hexahedra.
+            element_type: the Abaqus element name of the solids. The default
+                is ``C3D8``, ``C3D4``, ``C3D10`` or ``C3D6``; ``C3D8I`` or
+                ``C3D8R`` also suit the hexahedra.
 
         Returns:
             The path written.
@@ -366,13 +544,34 @@ class FemMesh:
                 rows = order[start:stop]
                 handle.write(f"*ELEMENT, TYPE={abaqus_type}, ELSET={set_name}\n")
                 _write_rows(handle, element_row, zip((rows + 1).tolist(), *(self.elements[rows] + 1).T.tolist()))
+            bonds = self.bonds
+            beam_groups = []
+            if bonds is not None and bonds.count:
+                # One set per radius and orientation, as a *BEAM SECTION has one of each.
+                shapes, group_of = np.unique(np.column_stack([bonds.radii, bonds.orientations]), axis=0,
+                                             return_inverse=True)
+                group_of = group_of.ravel()
+                for group, shape in enumerate(shapes.tolist()):
+                    rows = np.flatnonzero(group_of == group)
+                    beam_groups.append((f"BONDS_{group + 1}", shape))
+                    handle.write(f"*ELEMENT, TYPE=B31, ELSET=BONDS_{group + 1}\n")
+                    _write_rows(handle, "%d, %d, %d\n",
+                                zip((len(self.elements) + rows + 1).tolist(), *(bonds.beams[rows] + 1).T.tolist()))
+                handle.write("*ELSET, ELSET=BONDS\n")
+                _write_list(handle, [set_name for set_name, _ in beam_groups])
             for material_index, set_names in members.items():
                 section_set = f"MATERIAL_{material_names[material_index]}"
                 handle.write(f"*ELSET, ELSET={section_set}\n")
                 _write_list(handle, set_names)
                 handle.write(f"*SOLID SECTION, ELSET={section_set}, MATERIAL={material_names[material_index]}\n,\n")
+            for set_name, (radius, *orientation) in beam_groups:
+                handle.write(
+                    f"*BEAM SECTION, ELSET={set_name}, MATERIAL={material_names[bonds.material]}, SECTION=CIRC\n"
+                    f"{radius * scale:.12e}\n" + ", ".join(f"{value:.12e}" for value in orientation) + "\n"
+                )
+            used = set(members) | ({bonds.material} if beam_groups else set())
             for material_index, elastic in enumerate(properties):
-                if material_index not in members:
+                if material_index not in used:
                     continue
                 if elastic is None:
                     handle.write(
@@ -412,12 +611,24 @@ class FemMesh:
                     f"*TIE, NAME={tie.name}, POSITION TOLERANCE={tie.tolerance * scale:.6e}, ADJUST=NO\n"
                     f"{tie.name}_SECONDARY, {tie.name}_MAIN\n"
                 )
+            if beam_groups:
+                handle.write("** Each bond beam's end follows the mean motion of its fiber's cross-section.\n")
+                for index, (end, section) in enumerate(zip((bonds.ends + 1).tolist(), (bonds.sections + 1).tolist()),
+                                                       start=1):
+                    handle.write(f"*NSET, NSET=BOND_SECTION_{index}\n")
+                    _write_list(handle, section)
+                    handle.write(
+                        f"*SURFACE, TYPE=NODE, NAME=BOND_SECTION_{index}_S\nBOND_SECTION_{index}, 1.\n"
+                        f"*COUPLING, CONSTRAINT NAME=BOND_COUPLING_{index}, REF NODE={end}, "
+                        f"SURFACE=BOND_SECTION_{index}_S\n*DISTRIBUTING, WEIGHTING METHOD=UNIFORM\n1, 6\n"
+                    )
         return path
 
     def write_vtu(self, path: str | Path, *, scale: float = 1.0) -> Path:
         """Write the mesh as a VTK unstructured grid (``.vtu``), to look at in
-        ParaView: the elements with each one's TANGLE fiber id (0 for binder)
-        and material (an index into ``materials``) as cell data. ParaView's
+        ParaView: the elements, and bond beams as lines, with each one's
+        TANGLE fiber id (0 for binder and bonds) and material (an index into
+        ``materials``) as cell data. ParaView's
         own Nastran reader cannot read the long-field nodes that
         :meth:`write_nastran` writes.
 
@@ -429,15 +640,22 @@ class FemMesh:
             The path written.
         """
         path = Path(path)
-        vtk_type = {"hex8": 12, "tet4": 10, "tet10": 24}[self.element_type]  # VTK_HEXAHEDRON, TETRA, QUADRATIC_TETRA
+        # VTK_HEXAHEDRON, TETRA, QUADRATIC_TETRA, WEDGE
+        vtk_type = {"hex8": 12, "tet4": 10, "tet10": 24, "penta6": 13}[self.element_type]
         k = ELEMENT_NODE_COUNTS[self.element_type]
+        beams = self.bonds.beams if self.bonds is not None else np.zeros((0, 2), dtype=np.int64)
+        beam_material = self.bonds.material if self.bonds is not None else 0
+        offsets = np.concatenate([np.arange(k, k * (len(self.elements) + 1), k),
+                                  k * len(self.elements) + np.arange(2, 2 * len(beams) + 1, 2)])
         arrays = [  # (name, VTK type, components, data): written raw, one after another, each after its byte count
             ("Points", "Float64", 3, np.ascontiguousarray(_scaled(self.nodes, scale), dtype="<f8")),
-            ("connectivity", "Int64", 1, np.ascontiguousarray(self.elements, dtype="<i8")),
-            ("offsets", "Int64", 1, np.arange(k, k * (len(self.elements) + 1), k, dtype="<i8")),
-            ("types", "UInt8", 1, np.full(len(self.elements), vtk_type, dtype="u1")),
-            ("fiber_id", "Int64", 1, np.ascontiguousarray(self.element_fibers, dtype="<i8")),
-            ("material", "Int32", 1, np.ascontiguousarray(self.element_materials, dtype="<i4")),
+            ("connectivity", "Int64", 1, np.concatenate([self.elements.ravel(), beams.ravel()]).astype("<i8")),
+            ("offsets", "Int64", 1, offsets.astype("<i8")),
+            ("types", "UInt8", 1, np.concatenate([np.full(len(self.elements), vtk_type),
+                                                  np.full(len(beams), 3)]).astype("u1")),  # VTK_LINE
+            ("fiber_id", "Int64", 1, np.concatenate([self.element_fibers, np.zeros(len(beams))]).astype("<i8")),
+            ("material", "Int32", 1, np.concatenate([self.element_materials,
+                                                     np.full(len(beams), beam_material)]).astype("<i4")),
         ]
         offsets, at = [], 0
         for _, _, _, data in arrays:
@@ -453,7 +671,7 @@ class FemMesh:
             '<?xml version="1.0"?>\n'
             '<VTKFile type="UnstructuredGrid" version="1.0" byte_order="LittleEndian" header_type="UInt64">\n'
             "<UnstructuredGrid>\n"
-            f'<Piece NumberOfPoints="{len(self.nodes)}" NumberOfCells="{len(self.elements)}">\n'
+            f'<Piece NumberOfPoints="{len(self.nodes)}" NumberOfCells="{len(self.elements) + len(beams)}">\n'
             f"<Points>{tag(0)}</Points>\n"
             f"<Cells>{tag(1)}{tag(2)}{tag(3)}</Cells>\n"
             f'<CellData Scalars="fiber_id">{tag(4)}{tag(5)}</CellData>\n'
@@ -503,6 +721,105 @@ def _scaled(nodes: np.ndarray, scale: float) -> np.ndarray:
     # Keep every coordinate inside a 16-column field.
     scaled[np.abs(scaled) < 1.0e-90] = 0.0
     return scaled
+
+
+def _real8(value: float) -> str:
+    """A real in one 8-column small-field Nastran field, to as many digits
+    as fit."""
+    for digits in range(6, 0, -1):
+        text = f"{value:.{digits}f}"
+        text = text.replace("-0.", "-.", 1) if text.startswith("-0.") else text.removeprefix("0") if text.startswith("0.") else text
+        if len(text) <= 8:
+            return f"{text:>8s}"
+    text = f"{value:.1E}".replace("E+0", "+").replace("E-0", "-").replace("E", "")
+    return f"{text:>8s}"
+
+
+def _small_fields(name: str, fields: list[str]) -> str:
+    """A small-field entry: ``name`` and up to eight fields to a line, each
+    continuation with a blank first field."""
+    lines = []
+    for start in range(0, max(len(fields), 1), 8):
+        head = f"{name:<8s}" if start == 0 else " " * 8
+        lines.append(head + "".join(f"{field:>8s}" for field in fields[start : start + 8]))
+    return "\n".join(lines) + "\n"
+
+
+def _closest_triangles(points: np.ndarray, triangles: np.ndarray, tolerance: float,
+                       chunk: int = 20_000) -> tuple[np.ndarray, np.ndarray]:
+    """For each point, the closest of ``triangles`` (``(t, 3, 3)`` corner
+    coordinates) within ``tolerance``, or -1, and the weights of its corners
+    that give the closest point on it."""
+    centers = triangles.mean(axis=1)
+    reach = float(np.linalg.norm(triangles - centers[:, None, :], axis=2).max())
+    cell = tolerance + reach  # a triangle within tolerance of a point has its center within one cell
+    low = np.minimum(points.min(axis=0), centers.min(axis=0)) - cell
+    dims = np.floor((np.maximum(points.max(axis=0), centers.max(axis=0)) - low) / cell).astype(np.int64) + 3
+
+    def key(cells: np.ndarray) -> np.ndarray:
+        return (cells[..., 2] * dims[1] + cells[..., 1]) * dims[0] + cells[..., 0]
+
+    triangle_keys = key(np.floor((centers - low) / cell).astype(np.int64))
+    order = np.argsort(triangle_keys, kind="stable")
+    keys, starts, counts = np.unique(triangle_keys[order], return_index=True, return_counts=True)
+    offsets = np.array(list(itertools.product((-1, 0, 1), repeat=3)))
+    found = np.full(len(points), -1, dtype=np.int64)
+    weights = np.zeros((len(points), 3))
+    for begin in range(0, len(points), chunk):
+        block = points[begin : begin + chunk]
+        cells = np.floor((block - low) / cell).astype(np.int64)
+        near = key(cells[:, None, :] + offsets[None, :, :]).ravel()  # 27 cells for every point
+        at = np.clip(np.searchsorted(keys, near), 0, max(len(keys) - 1, 0))
+        hit = keys[at] == near
+        point_of = np.repeat(np.arange(len(block)), 27)[hit]
+        first, many = starts[at[hit]], counts[at[hit]]
+        pair_points = np.repeat(point_of, many)
+        steps = np.arange(many.sum()) - np.repeat(np.cumsum(many) - many, many)
+        pair_triangles = order[np.repeat(first, many) + steps]
+        distance, shares = _point_triangle(block[pair_points], triangles[pair_triangles])
+        close = distance <= tolerance
+        pair_points, pair_triangles, distance, shares = (
+            pair_points[close], pair_triangles[close], distance[close], shares[close])
+        best = np.lexsort((pair_triangles, distance, pair_points))
+        chosen = best[np.unique(pair_points[best], return_index=True)[1]]
+        found[begin + pair_points[chosen]] = pair_triangles[chosen]
+        weights[begin + pair_points[chosen]] = shares[chosen]
+    return found, weights
+
+
+def _point_triangle(points: np.ndarray, triangles: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The distance from each point to its triangle, and the weights of the
+    triangle's corners that give the closest point on it."""
+    a, b, c = triangles[:, 0], triangles[:, 1], triangles[:, 2]
+    candidates, distances = [], []
+    # Inside the triangle, when the point's projection lands there.
+    v0, v1, v2 = b - a, c - a, points - a
+    d00, d01, d11 = (v0 * v0).sum(1), (v0 * v1).sum(1), (v1 * v1).sum(1)
+    d20, d21 = (v2 * v0).sum(1), (v2 * v1).sum(1)
+    denominator = d00 * d11 - d01 * d01
+    flat = denominator <= 1.0e-12 * np.maximum(d00 * d11, 1.0e-300)
+    safe = np.where(flat, 1.0, denominator)
+    v = (d11 * d20 - d01 * d21) / safe
+    w = (d00 * d21 - d01 * d20) / safe
+    inside = np.stack([1.0 - v - w, v, w], axis=1)
+    distance = np.linalg.norm(points - (inside[:, :1] * a + inside[:, 1:2] * b + inside[:, 2:] * c), axis=1)
+    distance[flat | (inside < 0.0).any(axis=1)] = np.inf
+    candidates.append(inside)
+    distances.append(distance)
+    # On each edge.
+    for first, second in ((0, 1), (1, 2), (2, 0)):
+        start, end = triangles[:, first], triangles[:, second]
+        step = end - start
+        length = np.maximum((step * step).sum(1), 1.0e-300)
+        t = np.clip(((points - start) * step).sum(1) / length, 0.0, 1.0)
+        shares = np.zeros((len(points), 3))
+        shares[:, first], shares[:, second] = 1.0 - t, t
+        candidates.append(shares)
+        distances.append(np.linalg.norm(points - (start + t[:, None] * step), axis=1))
+    distances = np.stack(distances, axis=1)
+    best = distances.argmin(axis=1)
+    rows = np.arange(len(points))
+    return distances[rows, best], np.stack(candidates, axis=1)[rows, best]
 
 
 def _e16(value: float) -> str:
