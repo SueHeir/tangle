@@ -306,7 +306,7 @@ def _stations(points, arcs, start, end, forced, spacing, tolerance, gap):
         best = None
         for next_index in range(index + 1, len(candidates)):
             there = candidates[next_index]
-            if there - here > spacing:
+            if there - here > spacing * (1.0 + 1e-9):  # a hair over from rounding still fits
                 break
             between = [arc for arc in inner if here < arc < there]
             if between:
@@ -320,7 +320,7 @@ def _stations(points, arcs, start, end, forced, spacing, tolerance, gap):
                 break
         if best is None:  # the next candidate is more than spacing away along a straight stretch
             there = candidates[index + 1]
-            parts = math.ceil((there - here) / spacing)
+            parts = math.ceil((there - here) / spacing - 1e-9)
             candidates.insert(index + 1, here + (there - here) / parts)
             best = index + 1
         chosen.append(candidates[best])

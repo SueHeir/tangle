@@ -788,7 +788,7 @@ class SweepMeshTests(unittest.TestCase):
         self.assertLess(loose.element_count, tight.element_count)
         for mesh, tolerance in ((loose, 1.0), (tight, 0.1)):
             middles = mesh.nodes[::7]
-            np.testing.assert_allclose(np.linalg.norm(middles[:, :2] - [0.1, 0.1], axis=1), 0.8, rtol=1e-9)
+            np.testing.assert_allclose(np.linalg.norm(middles[:, :2] - [0.1, 0.9], axis=1), 0.8, rtol=1e-9)
             # The arc's sagitta between two sections stays within the tolerance.
             chords = np.linalg.norm(np.diff(middles, axis=0), axis=1)
             self.assertLessEqual((0.8 - np.sqrt(0.64 - chords**2 / 4)).max(), tolerance * 0.025 + 0.8 * 0.0035)
