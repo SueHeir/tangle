@@ -161,9 +161,12 @@ def add_bpm_binder_bonds(path: str | os.PathLike, bonds, voxel_size: float, *, b
     together too.
 
     ``bonds`` are as :func:`find_fibers` gives them (``fit.bonds``): the two fibers' indices and a position in
-    voxels of ``voxel_size``, measured from the corner of the file's box. Each pair of fibers gets one bond of
-    ``bond_type`` (default: the next free bond type), at its first bond in the list, between the two fibers'
-    particles nearest that position (nearest the axis, for capsules). The fibers keep their order through
+    voxels of ``voxel_size``, measured from the corner of the file's box. Use the bonds of the fit the file was
+    written from (``relaxed.bonds`` after ``relaxed, run = fit.relax()``): :meth:`FitResult.relax` carries each bond
+    along with its fibers and gives it ``attachments``, the points where it holds each of them. Each pair of fibers
+    gets one bond of ``bond_type`` (default: the next free bond type), at its first bond in the list, between each
+    fiber's particle nearest its attachment, or without attachments nearest the position (nearest the axis, for
+    capsules). The fibers keep their order through
     ``coarse_grained``, ``relax`` and ``export_bpm``, so fiber ``k`` is the file's molecule ``k + 1``. Returns how
     many bonds were added.
     """
@@ -181,11 +184,13 @@ def add_bpm_binder_bonds(path: str | os.PathLike, bonds, voxel_size: float, *, b
 
     pairs, new = set(), []
     for bond in bonds:
-        i, j = sorted(int(fiber) for fiber in bond["fibers"])
+        fibers = [int(fiber) for fiber in bond["fibers"]]
+        i, j = sorted(fibers)
         if i == j or (i, j) in pairs:
             continue
-        point = low + np.asarray(bond["position"], dtype=float) * voxel_size
-        a, b = nearest(i + 1, point), nearest(j + 1, point)
+        held = bond.get("attachments")
+        at = dict(zip(fibers, held if held is not None else (bond["position"],) * 2))
+        a, b = (nearest(k + 1, low + np.asarray(at[k], dtype=float) * voxel_size) for k in (i, j))
         if a is None or b is None:  # a fiber the file doesn't have
             continue
         pairs.add((i, j))

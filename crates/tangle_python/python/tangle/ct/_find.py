@@ -127,7 +127,10 @@ def find_fibers(scan: str | os.PathLike, settings: NetworkSettings,
     ``position`` (x, y, z in voxels, as the centerlines), ``strength`` (the height of the network's bond-point
     peak; NaN for a bond found where its binder joins two fibers with no peak) and ``binder_voxels`` (how many
     binder voxels join the pair there; 0 for a bond-point bond). :func:`add_bpm_binder_bonds` and
-    :func:`add_bpm_binder_spheres` put the bonds or the binder into a bonded-particle model.
+    :func:`add_bpm_binder_spheres` put the bonds or the binder into a bonded-particle model. ``coarse_grained`` and
+    ``relax`` keep all three, and move each bond with its fibers: after ``relaxed, run = fit.relax()``,
+    ``relaxed.bonds`` are on the relaxed fibers, with ``attachments`` (where each bond holds each of its two
+    fibers), and ``relaxed.write_bonds("bonds_relaxed.csv")`` writes them as a ``bonds.csv``.
     """
     from ._network import find_fibers as pipeline  # the network needs PyTorch: imported only when used
 

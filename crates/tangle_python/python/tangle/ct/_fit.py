@@ -13,7 +13,8 @@ import numpy as np
 
 from . import _confidence, _junctions, _moves, _refine, _regrow
 from ._ends import end_cost, end_statistics, evidence_scale
-from ._geometry import coarse_nodes, polyline_length, rasterize, tangents, within_bend_limit
+from ._geometry import (coarse_nodes, nearest_on_line, point_along, polyline_length, rasterize, tangents,
+                        within_bend_limit)
 from ._image import HessianField, Levels, core_holes, half_widths, normalize
 from ._trace import trace_fibers
 
@@ -610,6 +611,12 @@ class FitResult:
     # node (None for a round fiber), or None when every fiber is round.
     # ``radii`` are then the short semi-axes.
     long_axes: list[np.ndarray | None] | None = None
+    # What find_fibers adds (see there): the folder it wrote to, the bonds it found and its binder mask.
+    # coarse_grained and relax carry each bond along with its two fibers (see _carry_bonds); the binder stays where
+    # the scan shows it.
+    folder: Path | None = field(default=None, repr=False, compare=False)
+    bonds: list[dict[str, Any]] | None = field(default=None, repr=False, compare=False)
+    binder: np.ndarray | None = field(default=None, repr=False, compare=False)
 
     def spec_of(self, index: int) -> FiberSpec:
         """The spec (fiber type) of fiber ``index``."""
@@ -716,9 +723,11 @@ class FitResult:
             longest = max_segment / self.voxel_size if max_segment is not None else 10.0 * diameter
             kept.append(coarse_nodes(line, tol, longest))
         before = sum(len(line) for line in self.centerlines)
+        lines = [np.asarray(line)[k] for line, k in zip(self.centerlines, kept)]
         return replace(
             self,
-            centerlines=[np.asarray(line)[k] for line, k in zip(self.centerlines, kept)],
+            centerlines=lines,
+            bonds=_carry_bonds(self.bonds, self.centerlines, lines),
             confidence=None if self.confidence is None else [np.asarray(c)[k] for c, k in zip(self.confidence, kept)],
             long_axes=None if self.long_axes is None else
             [None if axes is None else np.asarray(axes)[k] for axes, k in zip(self.long_axes, kept)],
@@ -782,7 +791,8 @@ class FitResult:
             # the nearest share of the fiber's length
             long_axes = [None if axes is None else np.asarray(axes)[_nearest_share(old, new)]
                          for axes, old, new in zip(long_axes, self.centerlines, relaxed)]
-        return replace(self, centerlines=relaxed, confidence=None, long_axes=long_axes, history=self.history + [{"stage": "tangle relax", "max_penetration_m": run.max_penetration, "adaptive": bool(settings.adaptive_segmentation is not None), "smoothed_to_bend_limit": smoothed}]), run
+        return replace(self, centerlines=relaxed, confidence=None, long_axes=long_axes,
+                       bonds=_carry_bonds(self.bonds, self.centerlines, relaxed), history=self.history + [{"stage": "tangle relax", "max_penetration_m": run.max_penetration, "adaptive": bool(settings.adaptive_segmentation is not None), "smoothed_to_bend_limit": smoothed}]), run
 
     def export_bpm(self, run: Any, data_path: str | os.PathLike, *, lammps_inputs: bool = True,
                    **options: Any) -> tuple[int, int]:
@@ -814,6 +824,33 @@ class FitResult:
 
             write_bpm_lammps_inputs(data_path)
         return counts
+
+    def write_bonds(self, path: str | os.PathLike) -> Path:
+        """Write :attr:`bonds` as a CSV with the columns of find_fibers' ``bonds.csv``, on this fit's centerlines:
+        after :meth:`relax`, where each bond holds the relaxed fibers. Micrometers, from the corner of the region;
+        fiber and bond numbers from 1. ``a_x_um``, ``a_y_um``, ``a_z_um`` are where the bond holds ``fiber_a`` (on
+        its centerline) and ``a_s_um`` how far that is along it from its first node; the ``b_`` columns the same
+        for ``fiber_b``."""
+        import csv
+
+        um = self.voxel_size * 1e6
+        number = lambda value: f"{value * um:.4f}".rstrip("0").rstrip(".")  # noqa: E731
+        path = Path(path)
+        with path.open("w", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["bond", "fiber_a", "fiber_b", "x_um", "y_um", "z_um", "strength", "binder_voxels",
+                             "a_x_um", "a_y_um", "a_z_um", "a_s_um", "b_x_um", "b_y_um", "b_z_um", "b_s_um"])
+            for n, bond in enumerate(self.bonds or []):
+                fibers = [int(k) for k in bond["fibers"]]
+                held = []
+                for k, point in zip(fibers, _attachments(bond, self.centerlines)):
+                    at, along = nearest_on_line(self.centerlines[k], point)
+                    held += [number(v) for v in at] + [number(along)]
+                strength = float(bond.get("strength", float("nan")))
+                writer.writerow([n + 1, fibers[0] + 1, fibers[1] + 1, *[number(v) for v in bond["position"]],
+                                 f"{strength:.3f}".rstrip("0").rstrip(".") if np.isfinite(strength) else "",
+                                 int(bond.get("binder_voxels", 0)), *held])
+        return path
 
     # -- statistics for a generator config ------------------------------------
     def population_summary(self) -> dict[str, Any]:
@@ -1021,6 +1058,40 @@ def _write_stack(stem: Path, array: np.ndarray, voxel_size: float, rgb: bool = F
         metadata={"spacing": pixel, "unit": "um", "axes": "ZYXS" if rgb else "ZYX"},
     )
     return path
+
+
+def _attachments(bond: dict[str, Any], lines: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """Where ``bond`` holds its two fibers (voxels): its ``attachments``, or else the point of each fiber's
+    centerline nearest its ``position``."""
+    if bond.get("attachments") is not None:
+        return tuple(np.asarray(point, dtype=np.float64) for point in bond["attachments"])
+    return tuple(nearest_on_line(lines[int(k)], bond["position"])[0] for k in bond["fibers"])
+
+
+def _carry_bonds(bonds: list[dict[str, Any]] | None, old: list[np.ndarray],
+                 new: list[np.ndarray]) -> list[dict[str, Any]] | None:
+    """``bonds`` on fibers that moved from the centerlines ``old`` to ``new`` (the same fibers, in the same order).
+    Each bond's two ``attachments`` go to the same share of each fiber's length on its new centerline, and its
+    ``position`` moves by their mean shift, so a bond stays at the same places along its fibers however they move."""
+    if not bonds:
+        return bonds
+    carried = []
+    for bond in bonds:
+        fibers = [int(k) for k in bond["fibers"]]
+        if any(k >= len(old) or k >= len(new) for k in fibers):
+            carried.append(bond)
+            continue
+        before = _attachments(bond, old)
+        after = []
+        for k, point in zip(fibers, before):
+            along = nearest_on_line(old[k], point)[1]
+            length = polyline_length(np.asarray(old[k], dtype=np.float64))
+            share = along / length if length > 0 else 0.0
+            after.append(point_along(new[k], share * polyline_length(np.asarray(new[k], dtype=np.float64))))
+        shift = 0.5 * ((after[0] - before[0]) + (after[1] - before[1]))
+        carried.append({**bond, "position": np.asarray(bond["position"], dtype=np.float64) + shift,
+                        "attachments": tuple(after)})
+    return carried
 
 
 def _nearest_share(old: np.ndarray, new: np.ndarray) -> np.ndarray:

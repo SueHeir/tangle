@@ -198,6 +198,46 @@ def test_binder_bonds_bond_each_pair_once_at_its_nearest_particles(tmp_path, cap
     assert ct.add_bpm_binder_bonds(path, [], voxel_size=1.0) == 0 and read_bpm(path)[0]["bonds"] == 3
 
 
+def test_binder_bonds_go_where_they_hold_each_fiber(tmp_path):
+    path = write_bpm(tmp_path)
+    # Near the middle of both fibers, but held at capsule 2's end of fiber 0 and capsule 4's end of fiber 1, as
+    # after a relax that slid the fibers; the attachments are in the order of "fibers".
+    bonds = [{"fibers": (1, 0), "position": np.array([37.0, 30.0, 32.0]),
+              "attachments": (np.array([32.0, 45.0, 36.0]), np.array([55.0, 32.0, 28.0]))}]
+    assert ct.add_bpm_binder_bonds(path, bonds, voxel_size=1.0) == 1
+    assert read_bpm(path)[1]["Bonds"][2] == [3, 2, 2, 4]
+
+
+def test_bonds_move_with_their_fibers_and_write_where_they_hold_them(tmp_path):
+    import csv
+
+    s = np.arange(0.0, 41.0)
+    lines = [np.stack([s, np.full_like(s, 32.0), np.full_like(s, 28.0)], 1),
+             np.stack([np.full_like(s, 32.0), s + 12.0, np.full_like(s, 36.0)], 1)]
+    fit = ct.FitResult(shape=(64, 64, 64), voxel_size=2 * UM, spec=ct.FiberSpec(diameter=6 * UM), centerlines=lines,
+                       radii=np.full(2, 1.5), support=np.ones(2), levels=ct.Levels(0.0, 1.0, 0.5),
+                       bonds=[{"fibers": (0, 1), "position": np.array([32.0, 32.0, 32.0]), "strength": 0.75,
+                               "binder_voxels": 0}])
+    assert fit.coarse_grained().bonds[0]["position"] == pytest.approx([32.0, 32.0, 32.0])
+    # As a relax might leave them: fiber 0 lifted 1 voxel, fiber 1 stretched to twice its length about its start.
+    moved = [lines[0] + [0.0, 0.0, 1.0], lines[1] + np.outer(s, [0.0, 1.0, 0.0])]
+    from tangle.ct._fit import _carry_bonds
+
+    (bond,) = _carry_bonds(fit.bonds, lines, moved)
+    a, b = bond["attachments"]
+    assert a == pytest.approx([32.0, 32.0, 29.0])  # the same place along fiber 0
+    assert b == pytest.approx([32.0, 52.0, 36.0])  # the same share (half) of fiber 1's length
+    assert bond["position"] == pytest.approx([32.0, 42.0, 32.5])  # moved by the mean of the two
+    assert fit.bonds[0].get("attachments") is None  # the fit's own bonds are left as they were
+    relaxed = fit.coarse_grained()
+    relaxed.centerlines, relaxed.bonds = moved, [bond]
+    with relaxed.write_bonds(tmp_path / "bonds.csv").open(newline="") as handle:
+        (row,) = csv.DictReader(handle)
+    assert [float(row[f"a_{k}_um"]) for k in "xyzs"] == pytest.approx([64.0, 64.0, 58.0, 64.0])  # 2 um voxels
+    assert [float(row[f"b_{k}_um"]) for k in "xyzs"] == pytest.approx([64.0, 104.0, 72.0, 80.0])
+    assert (row["fiber_a"], row["fiber_b"], row["strength"], row["binder_voxels"]) == ("1", "2", "0.75", "0")
+
+
 def test_binder_bonds_go_into_a_bacillus_file(tmp_path):
     path = write_bacillus(tmp_path)
     bonds = [{"fibers": (0, 1), "position": np.array([37.0, 30.0, 32.0])}]
@@ -359,13 +399,17 @@ def test_tangles_own_export_takes_both_binder_styles(tmp_path, mode):
     lines = [np.stack([s, np.full_like(s, 32.0), np.full_like(s, 30.0)], 1),
              np.stack([np.full_like(s, 32.0), s, np.full_like(s, 34.0)], 1)]
     fit = ct.FitResult(shape=(64, 64, 64), voxel_size=1 * UM, spec=ct.FiberSpec(diameter=6 * UM), centerlines=lines,
-                       radii=np.full(2, 3.0), support=np.ones(2), levels=ct.Levels(0.0, 1.0, 0.5))
+                       radii=np.full(2, 3.0), support=np.ones(2), levels=ct.Levels(0.0, 1.0, 0.5),
+                       bonds=[{"fibers": (0, 1), "position": np.full(3, 32.0)}])
     relaxed, run = fit.coarse_grained().relax(adaptive=True)
+    for k, at in enumerate(relaxed.bonds[0]["attachments"]):  # on the relaxed fibers, near the crossing
+        line = relaxed.centerlines[k]
+        assert np.linalg.norm(line - at, axis=1).min() < 1.0 and np.linalg.norm(at[:2] - 32.0) < 2.0
     binder = np.zeros((64, 64, 64), dtype=bool)
     binder[26:38, 26:38, 26:38] = True  # around the crossing
     bonds_file, spheres_file = tmp_path / "bonds.data", tmp_path / "spheres.data"
     _, along = run.export_bpm(bonds_file, mode=mode)
-    assert ct.add_bpm_binder_bonds(bonds_file, [{"fibers": (0, 1), "position": np.full(3, 32.0)}], fit.voxel_size) == 1
+    assert ct.add_bpm_binder_bonds(bonds_file, relaxed.bonds, fit.voxel_size) == 1
     run.export_bpm(spheres_file, mode=mode)
     added = ct.add_bpm_binder_spheres(spheres_file, binder, fit.voxel_size)
     assert added.spheres > 0 and added.fiber_bonds > 0

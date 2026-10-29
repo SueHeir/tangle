@@ -399,7 +399,7 @@ one of two ways:
 hexes = fem.hex_mesh(relaxed.to_assembly(), voxel_size=fit.voxel_size, binder=fit.binder)
 
 relaxed.export_bpm(run, "binder_bonds.data")
-ct.add_bpm_binder_bonds("binder_bonds.data", fit.bonds, fit.voxel_size)        # a) bonds from fiber to fiber
+ct.add_bpm_binder_bonds("binder_bonds.data", relaxed.bonds, fit.voxel_size)    # a) bonds from fiber to fiber
 relaxed.export_bpm(run, "binder_spheres.data")
 ct.add_bpm_binder_spheres("binder_spheres.data", fit.binder, fit.voxel_size)   # b) the binder as spheres
 ct.write_bpm_ovito("binder_spheres.data")                                      # binder_spheres.dump, for OVITO
@@ -409,8 +409,12 @@ ct.write_bpm_ovito("binder_spheres.data")                                      #
 bricks that share nodes with the fibers they touch, so the binder holds the
 fibers together in the mesh too; they have fiber id 0 and the material
 `"binder"`. In the particle model, `add_bpm_binder_bonds` bonds each pair of
-fibers the network found bonded once, between their two particles nearest the
-bond (the next bond type after the fibers' own).
+fibers the network found bonded once, between each fiber's particle nearest
+where the bond holds it (the next bond type after the fibers' own). Give it
+`relaxed.bonds`: `coarse_grained` and `relax` move each bond with its fibers,
+keeping it at the same share of each fiber's length, and
+`relaxed.write_bonds("bonds_relaxed.csv")` writes them with the columns of
+`bonds.csv`, so the attachment points there are on the relaxed fibers.
 `add_bpm_binder_spheres` fills the binder with spheres about a fiber across
 (`diameter=` changes that), each with the mass of the binder it stands for,
 and bonds each one to the fibers its binder touches and to the spheres whose
