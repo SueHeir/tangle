@@ -746,44 +746,59 @@ def _small_fields(name: str, fields: list[str]) -> str:
 
 
 def _closest_triangles(points: np.ndarray, triangles: np.ndarray, tolerance: float,
-                       chunk: int = 20_000) -> tuple[np.ndarray, np.ndarray]:
+                       pairs_at_once: int = 500_000) -> tuple[np.ndarray, np.ndarray]:
     """For each point, the closest of ``triangles`` (``(t, 3, 3)`` corner
     coordinates) within ``tolerance``, or -1, and the weights of its corners
-    that give the closest point on it."""
-    centers = triangles.mean(axis=1)
-    reach = float(np.linalg.norm(triangles - centers[:, None, :], axis=2).max())
-    cell = tolerance + reach  # a triangle within tolerance of a point has its center within one cell
-    low = np.minimum(points.min(axis=0), centers.min(axis=0)) - cell
-    dims = np.floor((np.maximum(points.max(axis=0), centers.max(axis=0)) - low) / cell).astype(np.int64) + 3
+    that give the closest point on it.
+
+    Each triangle is listed in every cell of a grid of ``tolerance`` cells
+    that its box, grown by ``tolerance``, reaches, so a point is measured
+    only against the triangles listed in its own cell, a few at a time."""
+    cell = tolerance
+    low = np.minimum(points.min(axis=0), triangles.min(axis=(0, 1))) - 2.0 * cell
+    first_cell = np.floor((triangles.min(axis=1) - tolerance - low) / cell).astype(np.int64)
+    last_cell = np.floor((triangles.max(axis=1) + tolerance - low) / cell).astype(np.int64)
+    dims = np.maximum(last_cell.max(axis=0), np.floor((points.max(axis=0) - low) / cell).astype(np.int64)) + 2
 
     def key(cells: np.ndarray) -> np.ndarray:
         return (cells[..., 2] * dims[1] + cells[..., 1]) * dims[0] + cells[..., 0]
 
-    triangle_keys = key(np.floor((centers - low) / cell).astype(np.int64))
-    order = np.argsort(triangle_keys, kind="stable")
-    keys, starts, counts = np.unique(triangle_keys[order], return_index=True, return_counts=True)
-    offsets = np.array(list(itertools.product((-1, 0, 1), repeat=3)))
+    spans = last_cell - first_cell + 1
+    per_triangle = spans.prod(axis=1)
+    owner = np.repeat(np.arange(len(triangles)), per_triangle)
+    local = np.arange(per_triangle.sum()) - np.repeat(np.cumsum(per_triangle) - per_triangle, per_triangle)
+    nx, ny = spans[owner, 0], spans[owner, 1]
+    listed = first_cell[owner] + np.stack([local % nx, (local // nx) % ny, local // (nx * ny)], axis=1)
+    listed_keys = key(listed)
+    order = np.argsort(listed_keys, kind="stable")
+    listed_keys, owner = listed_keys[order], owner[order]
+    del local, nx, ny, listed, order
+
+    point_keys = key(np.floor((points - low) / cell).astype(np.int64))
+    starts = np.searchsorted(listed_keys, point_keys, side="left")
+    counts = np.searchsorted(listed_keys, point_keys, side="right") - starts
     found = np.full(len(points), -1, dtype=np.int64)
     weights = np.zeros((len(points), 3))
-    for begin in range(0, len(points), chunk):
-        block = points[begin : begin + chunk]
-        cells = np.floor((block - low) / cell).astype(np.int64)
-        near = key(cells[:, None, :] + offsets[None, :, :]).ravel()  # 27 cells for every point
-        at = np.clip(np.searchsorted(keys, near), 0, max(len(keys) - 1, 0))
-        hit = keys[at] == near
-        point_of = np.repeat(np.arange(len(block)), 27)[hit]
-        first, many = starts[at[hit]], counts[at[hit]]
-        pair_points = np.repeat(point_of, many)
-        steps = np.arange(many.sum()) - np.repeat(np.cumsum(many) - many, many)
-        pair_triangles = order[np.repeat(first, many) + steps]
-        distance, shares = _point_triangle(block[pair_points], triangles[pair_triangles])
-        close = distance <= tolerance
-        pair_points, pair_triangles, distance, shares = (
-            pair_points[close], pair_triangles[close], distance[close], shares[close])
-        best = np.lexsort((pair_triangles, distance, pair_points))
-        chosen = best[np.unique(pair_points[best], return_index=True)[1]]
-        found[begin + pair_points[chosen]] = pair_triangles[chosen]
-        weights[begin + pair_points[chosen]] = shares[chosen]
+    total = np.cumsum(counts)
+    begin = 0
+    while begin < len(points):
+        # As many points as keep the pairs measured at once near pairs_at_once.
+        before = total[begin - 1] if begin else 0
+        end = max(int(np.searchsorted(total, before + pairs_at_once, side="right")), begin + 1)
+        many = counts[begin:end]
+        if many.sum():
+            pair_points = np.repeat(np.arange(begin, end), many)
+            steps = np.arange(many.sum()) - np.repeat(np.cumsum(many) - many, many)
+            pair_triangles = owner[np.repeat(starts[begin:end], many) + steps]
+            distance, shares = _point_triangle(points[pair_points], triangles[pair_triangles])
+            close = distance <= tolerance
+            pair_points, pair_triangles, distance, shares = (
+                pair_points[close], pair_triangles[close], distance[close], shares[close])
+            best = np.lexsort((pair_triangles, distance, pair_points))
+            chosen = best[np.unique(pair_points[best], return_index=True)[1]]
+            found[pair_points[chosen]] = pair_triangles[chosen]
+            weights[pair_points[chosen]] = shares[chosen]
+        begin = end
     return found, weights
 
 

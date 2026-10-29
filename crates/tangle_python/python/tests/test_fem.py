@@ -978,6 +978,26 @@ class SweepMeshTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "clip_to_cell=True"):
             fem.sweep_mesh(touching_cross(), binder=crossing_binder(), clip_to_cell=False)
 
+    def test_binder_that_would_come_out_empty_is_an_error(self):
+        # An assembly without junctions, as a CT fit's is, has no bonds to mesh.
+        with self.assertRaisesRegex(ValueError, "pass binder=fit.binder"):
+            fem.sweep_mesh(touching_cross(), bond_radius_ratio=1.0)
+        with self.assertRaisesRegex(ValueError, "no voxel outside the fibers"):
+            fem.sweep_mesh(touching_cross(), binder=np.zeros((20, 20, 20), dtype=bool), voxel_size=0.05)
+
+    def test_a_fiber_a_hair_past_its_bend_limit_still_gets_binder(self):
+        # Fitted fibers can end up just over their bend limit; the binder's voxels do not depend on it.
+        bent = [[0.2, 0.5, 0.4], [0.5, 0.5, 0.4], [0.8, 0.53, 0.4]]
+        step = np.diff(np.asarray(bent), axis=0)
+        angle = math.acos(step[0] @ step[1] / np.linalg.norm(step[0]) / np.linalg.norm(step[1]))
+        assembly = tangle.Assembly(tangle.Cell([1.0, 1.0, 1.0]))
+        assembly.insert(tangle.FiberCollection.from_centerlines(
+            [bent, [list(point) for point in CROSS_AXES[1]]],
+            tangle.Material("fiber", diameter=0.2, min_bend_radius=0.3 / angle)))
+        mesh = fem.sweep_mesh(assembly, binder=crossing_binder(), voxel_size=0.05)
+        self.assertTrue((mesh.element_fibers == 0).any())
+        self.assertEqual(len(mesh.ties), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
