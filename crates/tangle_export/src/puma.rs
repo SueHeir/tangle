@@ -391,6 +391,10 @@ pub struct VoxelLabels {
 /// Rasterizes an assembly onto the PuMA grid and returns the labels in
 /// memory. `bond_radius_ratio` voxelizes persistent junctions as binder, as
 /// [`PumaVoxelExportConfig::with_bonds`] does.
+///
+/// Fibers bent past their bend limit are voxelized as they are: the limit
+/// governs relaxation, not the voxels, and fibers fitted to a CT scan can
+/// end up a hair over it.
 pub fn voxelize_labels(
     assembly: &FiberAssembly,
     voxel_size: f64,
@@ -398,7 +402,7 @@ pub fn voxelize_labels(
 ) -> Result<VoxelLabels, PumaExportError> {
     let config =
         PumaVoxelExportConfig::new(PathBuf::new(), voxel_size).with_bonds(bond_radius_ratio);
-    let (_, counts, total_voxels, bridges) = prepare_grid(assembly, &config)?;
+    let (_, counts, total_voxels, bridges) = prepare_grid(assembly, &config, true)?;
     let fields = voxelize_with_bonds(assembly, &config, counts, total_voxels, &bridges)?;
     Ok(VoxelLabels {
         voxel_counts: counts,
@@ -416,7 +420,7 @@ pub fn write_puma_bundle(
     assembly: &FiberAssembly,
     config: &PumaVoxelExportConfig,
 ) -> Result<PumaExportReport, PumaExportError> {
-    let (lengths, counts, total_voxels, bridges) = prepare_grid(assembly, config)?;
+    let (lengths, counts, total_voxels, bridges) = prepare_grid(assembly, config, false)?;
     fs::create_dir_all(&config.output_directory)?;
     let fields = voxelize_with_bonds(assembly, config, counts, total_voxels, &bridges)?;
     let binder_phase = binder_phase_id(assembly);
@@ -673,13 +677,24 @@ pub fn write_puma_bundle(
 /// Validates the assembly and grid and builds the binder bridges: the
 /// lengths, voxel counts, voxel total and bridges shared by
 /// [`write_puma_bundle`] and [`voxelize_labels`].
+/// The grid's cell lengths and voxel counts, its voxel count and the junction
+/// bridges, once the assembly is valid; `allow_overbent` lets fibers past
+/// their bend limit through.
 fn prepare_grid(
     assembly: &FiberAssembly,
     config: &PumaVoxelExportConfig,
+    allow_overbent: bool,
 ) -> Result<(Vec3, [usize; 3], usize, Vec<JunctionBridge>), PumaExportError> {
-    assembly
-        .validate()
-        .map_err(|error| PumaExportError::InvalidAssembly(error.to_string()))?;
+    if let Err(mut report) = assembly.validate() {
+        if allow_overbent {
+            report
+                .issues
+                .retain(|issue| issue.code != "fiber.intrinsic-bend-limit");
+        }
+        if !report.issues.is_empty() {
+            return Err(PumaExportError::InvalidAssembly(report.to_string()));
+        }
+    }
     let (lengths, counts) = validate_grid(assembly, config)?;
     let total_voxels = counts
         .iter()
@@ -1613,6 +1628,37 @@ mod tests {
         for (phase, fiber) in labels.phase.iter().zip(&labels.fiber) {
             assert_eq!(*phase == 0, *fiber == 0);
         }
+    }
+
+    #[test]
+    fn in_memory_labels_take_fibers_a_hair_past_their_bend_limit() {
+        // A fiber bent at its middle vertex, fitted as from a CT scan, just past its bend limit.
+        let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([1.0; 3], [false; 3]));
+        let material = assembly.materials.add("fiber");
+        let section = assembly.sections.add(Section::Circular { radius: 0.1 });
+        let points = [[0.2, 0.5, 0.5], [0.5, 0.5, 0.5], [0.8, 0.6, 0.5]];
+        assembly
+            .add_fiber(FiberId(1), material, section, &points, &points)
+            .unwrap();
+        let curvature = tangle_core::maximum_polyline_curvature(&points);
+        assembly
+            .set_fiber_bend_limit(
+                FiberId(1),
+                Some(tangle_core::FiberBendLimit {
+                    minimum_bend_radius: 1.001 / curvature,
+                }),
+            )
+            .unwrap();
+        assert!(assembly.validate().is_err());
+        let labels = voxelize_labels(&assembly, 0.05, None).unwrap();
+        assert!(labels.fiber.contains(&1));
+        // The bundle still refuses it, before it writes anything.
+        let config =
+            PumaVoxelExportConfig::new(std::env::temp_dir().join("tangle-never-written"), 0.05);
+        assert!(matches!(
+            write_puma_bundle(&assembly, &config),
+            Err(PumaExportError::InvalidAssembly(_))
+        ));
     }
 
     #[test]

@@ -117,11 +117,19 @@ def sweep_mesh(
     if binder is not None:  # before the fibers, so a binder mask that does not fit fails at once
         pairs = np.array([(corner, corner) for corner in range(8)])
         binder_mesh = _binder_mesh(assembly, voxel_size, None, binder, 1, split=(pairs, VOXEL_PRISMS, PENTA_FACES))
+        if binder_mesh is None:
+            raise ValueError("the binder mask has no voxel outside the fibers at this voxel_size")
 
     # Each bond's junction and its two anchors: (fiber index, arc length along its centerline).
     bonds = []
     if bond_radius_ratio is not None:
-        for junction, *ends in _tangle.fem_bond_anchors(assembly):
+        found = _tangle.fem_bond_anchors(assembly)
+        if not found:
+            raise ValueError(
+                "bond_radius_ratio bonds the assembly's junctions, and it has none; a CT fit's binder is a mask: "
+                "pass binder=fit.binder"
+            )
+        for junction, *ends in found:
             anchors = []
             for fiber, segment, coordinate in (ends[:3], ends[3:]):
                 arcs = _arc_lengths(centerlines[fiber])
