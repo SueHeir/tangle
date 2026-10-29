@@ -402,9 +402,11 @@ def test_tangles_own_export_takes_both_binder_styles(tmp_path, mode):
                        radii=np.full(2, 3.0), support=np.ones(2), levels=ct.Levels(0.0, 1.0, 0.5),
                        bonds=[{"fibers": (0, 1), "position": np.full(3, 32.0)}])
     relaxed, run = fit.coarse_grained().relax(adaptive=True)
-    for k, at in enumerate(relaxed.bonds[0]["attachments"]):  # on the relaxed fibers, near the crossing
-        line = relaxed.centerlines[k]
-        assert np.linalg.norm(line - at, axis=1).min() < 1.0 and np.linalg.norm(at[:2] - 32.0) < 2.0
+    from tangle.ct._geometry import nearest_on_line
+
+    for k, at in enumerate(relaxed.bonds[0]["attachments"]):  # on the relaxed fibers, at the crossing
+        assert np.linalg.norm(nearest_on_line(relaxed.centerlines[k], at)[0] - at) < 1e-6
+        assert np.linalg.norm(at[:2] - 32.0) < 2.0
     binder = np.zeros((64, 64, 64), dtype=bool)
     binder[26:38, 26:38, 26:38] = True  # around the crossing
     bonds_file, spheres_file = tmp_path / "bonds.data", tmp_path / "spheres.data"
