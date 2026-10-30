@@ -3,6 +3,7 @@ so the binder shares its nodes with the fibers instead of being tied to them."""
 
 from __future__ import annotations
 
+import itertools
 import math
 import time
 
@@ -52,7 +53,8 @@ def conformal_mesh(
         elements_around: about this many element edges around a fiber.
         order: 1 for 4-node, 2 for 10-node tetrahedra.
         region: ``(low, high)`` corners in meters of the box to mesh, or the
-            whole cell. A box smaller than the cell is never periodic.
+            whole cell. A smaller box is cut from the periodic cell: the
+            fibers' and bridges' periodic images that reach into it are in it.
         progress: print what it is doing.
         verbose: show gmsh's own output.
     """
@@ -80,19 +82,18 @@ def conformal_mesh(
     origin = np.asarray(cell.origin, dtype=float)
     lengths = np.asarray(cell.lengths, dtype=float)
     periodic = list(cell.periodic)
+    cell_low, cell_size = origin, lengths  # the periodic images come from the cell, the cut from the region
     if region is not None:
         low_m, high_m = (np.asarray(corner, dtype=float) for corner in region)
         if np.any(high_m <= low_m):
             raise ValueError("region's high corner must be above its low corner")
-        whole = np.allclose(low_m, origin) and np.allclose(high_m, origin + lengths)
-        if not whole:
-            periodic = [False, False, False]
         origin, lengths = low_m, high_m - low_m
     if bonds is None:
         bonds = assembly_bonds(assembly)
 
     unit = min(short for _, short in semi_axes)  # see tet_mesh: OpenCASCADE wants lengths near 1
     low, size = origin / unit, lengths / unit
+    cell_low, cell_size = cell_low / unit, cell_size / unit
     element_size = float(np.median([_perimeter(long, short) for long, short in semi_axes])) / elements_around / unit
 
     gmsh.initialize(readConfigFiles=False, interruptible=False)
@@ -103,7 +104,7 @@ def conformal_mesh(
         fiber_volumes, owners = [], []  # one entry per fiber solid piece
         for fiber, (points, axes, (long, short)) in enumerate(zip(centerlines, long_axes, semi_axes)):
             points, axes = _without_repeated_vertices(points / unit, axes)
-            pieces = list(_pieces(points, long / unit, low, size, periodic, True))
+            pieces = list(_pieces(points, long / unit, cell_low, cell_size, periodic, True))
             if not pieces:
                 continue
             for tag in _fiber_solid(occ, fiber_ids[fiber], points, axes, long / unit, short / unit, pieces,
@@ -112,19 +113,26 @@ def conformal_mesh(
                 owners.append(fiber)
         if not fiber_volumes:
             raise ValueError("no fiber reaches into the region")
+        fiber_volumes, owners = _without_overlaps(occ, fiber_volumes, owners)
         say(f"{len(fiber_volumes)} fiber solids")
 
         bridges = []
-        reach = low - 1.0, low + size + 1.0
+        images = [range(-2, 3) if wraps else range(0, 1) for wraps in periodic]
         for fiber_a, point_a, fiber_b, point_b in bonds:
             a, b = np.asarray(point_a, dtype=float) / unit, np.asarray(point_b, dtype=float) / unit
-            if np.any(np.maximum(a, b) < reach[0]) or np.any(np.minimum(a, b) > reach[1]):
-                continue
             step = b - a
+            for axis in range(3):  # a bond across a periodic wall joins a to b's nearest image
+                if periodic[axis]:
+                    step[axis] -= round(step[axis] / cell_size[axis]) * cell_size[axis]
             if np.linalg.norm(step) < 1.0e-6:
                 continue
             radius = bond_radius_ratio * min(semi_axes[fiber_a][1], semi_axes[fiber_b][1]) / unit
-            bridges.append((3, occ.addCylinder(*a, *step, radius)))
+            for image in itertools.product(*images):
+                start = a + np.asarray(image, dtype=float) * cell_size
+                if np.any(np.maximum(start, start + step) + radius < low) or \
+                        np.any(np.minimum(start, start + step) - radius > low + size):
+                    continue
+                bridges.append((3, occ.addCylinder(*start, *step, radius)))
         if bridges:
             box = occ.addBox(*low, *size)
             bridges, _ = occ.intersect(bridges, [(3, box)], removeObject=True, removeTool=True)
@@ -147,6 +155,11 @@ def conformal_mesh(
         gmsh.option.setNumber("Mesh.MeshSizeMin", 0.0)
         gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", max(3, elements_around // 2))
         gmsh.option.setNumber("Mesh.ElementOrder", 1)
+        # Fibers that overlap a little leave a lens-thin piece where they meet, whose two faces are nearly one;
+        # gmsh's check takes them for overlapping facets and refuses to mesh unless it is off.
+        gmsh.option.setNumber("Mesh.AngleToleranceFacetOverlap", 0.0)
+        # Delaunay's boundary recovery fails ("PLC Error") where fibers nearly touch; the frontal mesher copes.
+        gmsh.option.setNumber("Mesh.Algorithm3D", 4)
         gmsh.model.mesh.generate(3)
         if order == 2:
             gmsh.option.setNumber("Mesh.SecondOrderLinear", 0)
@@ -201,6 +214,27 @@ def conformal_mesh(
         cell_origin=tuple(origin.tolist()),
         cell_lengths=tuple(lengths.tolist()),
     )
+
+
+def _without_overlaps(occ, volumes, owners):
+    """The fiber pieces cut by the other fibers' pieces before them, so that
+    where two fibers overlap a little the overlap is the earlier fiber's.
+    Left whole, it is a lens-thin piece whose two faces nearly coincide, and
+    gmsh cannot mesh it ("overlapping facets")."""
+    kept, kept_owners, boxes = [], [], []
+    for volume, owner in zip(volumes, owners):
+        box = np.asarray(occ.getBoundingBox(*volume))
+        tools = [other for other, other_owner, other_box in zip(kept, kept_owners, boxes)
+                 if other_owner != owner and np.all(other_box[:3] <= box[3:]) and np.all(box[:3] <= other_box[3:])]
+        made = [volume]
+        if tools:
+            made, _ = occ.cut([volume], tools, removeObject=True, removeTool=False)
+            made = [(dim, tag) for dim, tag in made if dim == 3]
+        for piece in made:
+            kept.append(piece)
+            kept_owners.append(owner)
+            boxes.append(np.asarray(occ.getBoundingBox(*piece)))
+    return kept, kept_owners
 
 
 def assembly_bonds(assembly) -> list:
