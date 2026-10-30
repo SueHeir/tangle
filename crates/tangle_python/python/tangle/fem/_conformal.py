@@ -6,13 +6,13 @@ from __future__ import annotations
 import itertools
 import math
 import time
+import warnings
 
 import numpy as np
 
 from ._mesh import FemMesh
 from ._source import as_assembly, binder_name, material_table
-from ._tet import GMSH_TET4, GMSH_TET10, GMSH_TO_NASTRAN_TET10, _fiber_solid, _perimeter, _pieces, _upright, \
-    _straighten_distorted, _without_repeated_vertices
+from ._tet import GMSH_TET4, _fiber_solid, _perimeter, _pieces, _upright, _without_repeated_vertices
 
 
 def conformal_mesh(
@@ -23,6 +23,7 @@ def conformal_mesh(
     elements_around: int = 8,
     order: int = 1,
     region=None,
+    min_quality: float = 0.02,
     progress: bool = True,
     verbose: bool = False,
 ) -> FemMesh:
@@ -36,7 +37,15 @@ def conformal_mesh(
     meshes share one triangulation. The part of a bridge inside a fiber is
     that fiber's; fibers that overlap each other share the overlap, which
     goes to the first. There are no ties: the mesh is one connected body
-    wherever fibers are bonded or overlap.
+    wherever fibers are bonded or overlap. Where two fibers touch, a bridge
+    has a hole down its middle, so its binder never thins to a knife-edge.
+
+    It aims for no tetrahedron flatter than 0.1 (:func:`tet_quality`):
+    slivers gmsh leaves are mended (short edges collapsed, tetrahedra
+    flipped, corners slid along their surfaces). It warns with their
+    places if any stay under 0.1, and raises rather than return one
+    flatter than ``min_quality``. (Meshing again finer around them helps
+    as often as it hurts, and can crash gmsh's frontal mesher.)
 
     The whole region goes into one gmsh model, which is far slower than
     :func:`tet_mesh`'s fiber at a time and can fail where fibers only just
@@ -51,10 +60,14 @@ def conformal_mesh(
         bond_radius_ratio: each bridge's radius over the thinner fiber's
             smaller radius.
         elements_around: about this many element edges around a fiber.
-        order: 1 for 4-node, 2 for 10-node tetrahedra.
+        order: 1 for 4-node, 2 for 10-node tetrahedra (with straight edges:
+            the mid-edge nodes are not moved onto the fibers' surfaces).
         region: ``(low, high)`` corners in meters of the box to mesh, or the
             whole cell. A smaller box is cut from the periodic cell: the
             fibers' and bridges' periodic images that reach into it are in it.
+        min_quality: the least signed inverse condition number
+            (:func:`tet_quality`) a tetrahedron may have; 0.02 by default,
+            where Nastran only refuses tetrahedra inside out or flat.
         progress: print what it is doing.
         verbose: show gmsh's own output.
     """
@@ -68,8 +81,8 @@ def conformal_mesh(
 
     if order not in (1, 2):
         raise ValueError("order must be 1 or 2")
-    if not 0.0 < bond_radius_ratio <= 1.0:
-        raise ValueError("bond_radius_ratio must be in (0, 1]")
+    if not 0.0 < bond_radius_ratio < 1.0:
+        raise ValueError("bond_radius_ratio must be in (0, 1): a bridge as wide as the fiber is tangent to it")
     assembly = as_assembly(assembly)
     centerlines = [np.asarray(line, dtype=float) for line in assembly.centerlines()]
     if not centerlines:
@@ -116,28 +129,39 @@ def conformal_mesh(
         fiber_volumes, owners = _without_overlaps(occ, fiber_volumes, owners)
         say(f"{len(fiber_volumes)} fiber solids")
 
-        bridges = []
+        bridges, bridged = [], 0
         images = [range(-2, 3) if wraps else range(0, 1) for wraps in periodic]
         for fiber_a, point_a, fiber_b, point_b in bonds:
-            a, b = np.asarray(point_a, dtype=float) / unit, np.asarray(point_b, dtype=float) / unit
+            thinner = min(semi_axes[fiber_a][1], semi_axes[fiber_b][1]) / unit
+            radius = bond_radius_ratio * thinner
+            # A bridge ending at a fiber's flat end would graze its cap: start it a little way in instead.
+            a = _off_the_end(centerlines[fiber_a] / unit, np.asarray(point_a, dtype=float) / unit, 1.5 * radius)
+            b = _off_the_end(centerlines[fiber_b] / unit, np.asarray(point_b, dtype=float) / unit, 1.5 * radius)
             step = b - a
             for axis in range(3):  # a bond across a periodic wall joins a to b's nearest image
                 if periodic[axis]:
                     step[axis] -= round(step[axis] / cell_size[axis]) * cell_size[axis]
             if np.linalg.norm(step) < 1.0e-6:
                 continue
-            radius = bond_radius_ratio * min(semi_axes[fiber_a][1], semi_axes[fiber_b][1]) / unit
+            gap = np.linalg.norm(step) - (semi_axes[fiber_a][1] + semi_axes[fiber_b][1]) / unit
+            hole = _bridge_hole(gap, thinner, radius)
             for image in itertools.product(*images):
                 start = a + np.asarray(image, dtype=float) * cell_size
                 if np.any(np.maximum(start, start + step) + radius < low) or \
                         np.any(np.minimum(start, start + step) - radius > low + size):
                     continue
-                bridges.append((3, occ.addCylinder(*start, *step, radius)))
+                bridge = [(3, occ.addCylinder(*start, *step, radius))]
+                if hole > 0.0:
+                    core = occ.addCylinder(*(start - 0.05 * step), *(1.1 * step), hole)
+                    bridge, _ = occ.cut(bridge, [(3, core)], removeObject=True, removeTool=True)
+                bridges.extend(volume for volume in bridge if volume[0] == 3)
+                bridged += 1
         if bridges:
             box = occ.addBox(*low, *size)
             bridges, _ = occ.intersect(bridges, [(3, box)], removeObject=True, removeTool=True)
             bridges = [(dim, tag) for dim, tag in bridges if dim == 3]
-        say(f"{len(bridges)} binder bridges")
+        # Bridges that overlap one another come out of the intersection in pieces.
+        say(f"{bridged} binder bridges, {len(bridges)} pieces, from {len(bonds)} bonds")
 
         occ.synchronize()
         pieces, children = occ.fragment(fiber_volumes, bridges)
@@ -155,44 +179,30 @@ def conformal_mesh(
         gmsh.option.setNumber("Mesh.MeshSizeMin", 0.0)
         gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", max(3, elements_around // 2))
         gmsh.option.setNumber("Mesh.ElementOrder", 1)
-        # Fibers that overlap a little leave a lens-thin piece where they meet, whose two faces are nearly one;
-        # gmsh's check takes them for overlapping facets and refuses to mesh unless it is off.
-        gmsh.option.setNumber("Mesh.AngleToleranceFacetOverlap", 0.0)
         # Delaunay's boundary recovery fails ("PLC Error") where fibers nearly touch; the frontal mesher copes.
         gmsh.option.setNumber("Mesh.Algorithm3D", 4)
         gmsh.model.mesh.generate(3)
-        if order == 2:
-            gmsh.option.setNumber("Mesh.SecondOrderLinear", 0)
-            gmsh.model.mesh.setOrder(2)
-
-        node_tags, coordinates, _ = gmsh.model.mesh.getNodes()
-        node_tags = np.asarray(node_tags, dtype=np.int64)
-        node_index = np.full(node_tags.max() + 1, -1, dtype=np.int64)
-        node_index[node_tags] = np.arange(len(node_tags))
-        nodes = np.array(coordinates, dtype=float).reshape(-1, 3)
-        wanted, width = (GMSH_TET4, 4) if order == 1 else (GMSH_TET10, 10)
-        element_blocks, block_owners = [], []
-        for tag, owner in owner_of.items():
-            types, _, members = gmsh.model.mesh.getElements(3, tag)
-            for element_type, block in zip(types, members):
-                if element_type != wanted:
-                    raise RuntimeError(f"gmsh made element type {element_type} instead of tetrahedra")
-                block = node_index[np.asarray(block, dtype=np.int64)].reshape(-1, width)
-                element_blocks.append(block)
-                block_owners.append(np.full(len(block), owner, dtype=np.int64))
+        nodes, elements, owner, on = _linear_mesh(gmsh, owner_of)
+        nodes, elements, owner, mended = _mend(gmsh, nodes, elements, owner, on, max(_AIM, min_quality))
+        quality = tet_quality(nodes, elements)
+        say(f"{len(elements)} tetrahedra, {mended} mended, {int((quality < _AIM).sum())} still under {_AIM}, "
+            f"worst {quality.min():.3f}")
     finally:
         gmsh.finalize()
 
-    elements = np.concatenate(element_blocks)
-    owner = np.concatenate(block_owners)
+    flat = np.flatnonzero(quality < _AIM)
+    if len(flat):
+        worst = flat[np.argsort(quality[flat])]
+        where = "; ".join(f"{quality[k]:.3f} at {np.round(nodes[elements[k]].mean(axis=0) * unit * 1e6, 2).tolist()} um"
+                          for k in worst[:5])
+        if quality.min() < min_quality:
+            raise RuntimeError(f"conformal_mesh: {int((quality < min_quality).sum())} tetrahedra stay flatter than "
+                               f"min_quality {min_quality} (worst: {where}); try more "
+                               "elements_around, a smaller bond_radius_ratio or another region")
+        warnings.warn(f"conformal_mesh: {len(flat)} of {len(elements)} tetrahedra are flatter than {_AIM} "
+                      f"(worst: {where})", stacklevel=2)
     if order == 2:
-        elements = elements[:, GMSH_TO_NASTRAN_TET10]
-    used, elements = np.unique(elements, return_inverse=True)
-    elements = elements.reshape(len(owner), -1)
-    nodes = nodes[used]
-    elements = _upright(nodes, elements)
-    if order == 2:
-        _straighten_distorted(nodes, elements)
+        nodes, elements = _straight_tet10(nodes, elements)
     nodes = nodes * unit
 
     is_binder = owner < 0
@@ -214,6 +224,339 @@ def conformal_mesh(
         cell_origin=tuple(origin.tolist()),
         cell_lengths=tuple(lengths.tolist()),
     )
+
+
+def _off_the_end(line, point, keep):
+    """``point`` on the polyline ``line``, moved along it to at least
+    ``keep`` from either end where the line is long enough."""
+    steps = np.diff(line, axis=0)
+    lengths = np.linalg.norm(steps, axis=1)
+    arcs = np.concatenate([[0.0], np.cumsum(lengths)])
+    if arcs[-1] <= 2.0 * keep:
+        return point
+    along = np.clip(np.einsum("ij,ij->i", point - line[:-1], steps) / np.maximum(lengths**2, 1e-300), 0.0, 1.0)
+    nearest = np.argmin(np.linalg.norm(line[:-1] + along[:, None] * steps - point, axis=1))
+    arc = arcs[nearest] + along[nearest] * lengths[nearest]
+    if keep <= arc <= arcs[-1] - keep:
+        return point
+    arc = min(max(arc, keep), arcs[-1] - keep)
+    k = min(np.searchsorted(arcs, arc, side="right") - 1, len(steps) - 1)
+    return line[k] + (arc - arcs[k]) / lengths[k] * steps[k]
+
+
+_HOLE_GAP = 0.15  # see _bridge_hole
+
+
+def _bridge_hole(gap, thinner, radius):
+    """The radius of the hole down a bridge's axis, where its two fibers'
+    surfaces are closer than ``_HOLE_GAP`` of the thinner fiber's radius.
+
+    Round fibers that touch or nearly touch leave between them a gap that
+    thins to nothing at the contact, and binder filling it right in would
+    end in a knife-edge that only slivers can mesh. Two surfaces of radius
+    ``thinner`` that are ``gap`` apart on the axis are about ``gap + s**2 /
+    thinner`` apart at ``s`` from it (crossing fibers curve only one way
+    each), so the binder stops where that reaches ``_HOLE_GAP * thinner``,
+    and meets the fibers there at about 20 degrees or more. The fibers keep
+    whatever they share at the contact itself."""
+    reach = _HOLE_GAP * thinner - gap
+    if reach <= 0.0:
+        return 0.0
+    return min(math.sqrt(reach * thinner), 0.8 * radius)
+
+
+_AIM = 0.1  # the quality conformal_mesh mends towards, and warns below
+# Edges of the regular tetrahedron of unit edge, as columns: the shape tet_quality measures against.
+_REGULAR_INVERSE = np.linalg.inv(np.array([[1.0, 0.5, 0.5], [0.0, math.sqrt(3.0) / 2.0, math.sqrt(3.0) / 6.0],
+                                           [0.0, 0.0, math.sqrt(2.0 / 3.0)]]))
+_EDGES = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
+_FACES = ((1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2))  # the face opposite each corner
+# Mid-edge nodes 5 to 10 of a Nastran CTETRA (Abaqus C3D10) lie on these edges, zero-based.
+_TET10_EDGES = ((0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3))
+
+
+def tet_quality(nodes: np.ndarray, elements: np.ndarray) -> np.ndarray:
+    """Each tetrahedron's signed inverse condition number (gmsh's SICN):
+    1 for a regular one, near 0 for a sliver, negative inside out. Only its
+    four corners count."""
+    corners = nodes[elements[:, :4]]
+    jacobian = np.transpose(corners[:, 1:] - corners[:, :1], (0, 2, 1)) @ _REGULAR_INVERSE
+    columns = np.transpose(jacobian, (0, 2, 1))
+    # The inverse's norm is the adjugate's over |det|, and the adjugate's rows are crosses of the columns.
+    adjugate = np.stack([np.cross(columns[:, 1], columns[:, 2]), np.cross(columns[:, 2], columns[:, 0]),
+                         np.cross(columns[:, 0], columns[:, 1])], axis=1)
+    det = np.einsum("ni,ni->n", columns[:, 0], adjugate[:, 0])
+    norms = np.sqrt(np.einsum("nij,nij->n", jacobian, jacobian) * np.einsum("nij,nij->n", adjugate, adjugate))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(norms > 0.0, 3.0 * det / norms, 0.0)
+
+
+def _linear_mesh(gmsh, owner_of):
+    """The 4-node tetrahedra gmsh made, upright, with their owners (fiber
+    index, or -1 for binder) and only the nodes they use."""
+    node_tags, coordinates, _ = gmsh.model.mesh.getNodes()
+    node_tags = np.asarray(node_tags, dtype=np.int64)
+    node_index = np.full(node_tags.max() + 1, -1, dtype=np.int64)
+    node_index[node_tags] = np.arange(len(node_tags))
+    nodes = np.array(coordinates, dtype=float).reshape(-1, 3)
+    blocks, owners = [], []
+    for tag, owner in owner_of.items():
+        types, _, members = gmsh.model.mesh.getElements(3, tag)
+        for element_type, block in zip(types, members):
+            if element_type != GMSH_TET4:
+                raise RuntimeError(f"gmsh made element type {element_type} instead of tetrahedra")
+            block = node_index[np.asarray(block, dtype=np.int64)].reshape(-1, 4)
+            blocks.append(block)
+            owners.append(np.full(len(block), owner, dtype=np.int64))
+    elements, owner = np.concatenate(blocks), np.concatenate(owners)
+    # Where each node lies: on a CAD point (dim 0), curve (1) or surface (2), or inside a volume (3).
+    on = np.zeros((len(nodes), 2), dtype=np.int64)
+    for dim, tag in gmsh.model.getEntities():
+        tags, _, _ = gmsh.model.mesh.getNodes(dim, tag)
+        on[node_index[np.asarray(tags, dtype=np.int64)]] = dim, tag
+    used, elements = np.unique(elements, return_inverse=True)
+    nodes = nodes[used]
+    return nodes, _upright(nodes, elements.reshape(-1, 4)), owner, on[used]
+
+
+def _mend(gmsh, nodes, elements, owner, on, min_quality):
+    """Lift tetrahedra under ``min_quality`` without moving the fibers'
+    surfaces: collapse a sliver's edge that is much shorter than the rest,
+    left where two CAD edges or vertices fall a few nanometers apart, then
+    flip tetrahedra of one owner into better shapes (2-3 flips across a
+    face, and removing an edge from the ring around it), and drop slivers
+    lying on the outer surface; and move their corners towards the middle
+    of their neighbours, those on a CAD surface or curve back onto it, those
+    at a CAD corner only a little. A change is kept only if every tetrahedron it
+    touches ends better than the worst one before. Returns the new mesh and
+    how many changes it made."""
+    nodes = nodes.copy()
+    changes = 0
+    for _ in range(8):
+        quality = tet_quality(nodes, elements)
+        flat = np.flatnonzero(quality < min_quality)
+        if not len(flat):
+            break
+        made = _collapse_short_edges(nodes, elements, on, quality, flat)
+        if made is not None:
+            elements, owner, count = made[0], owner[made[1]], made[2]
+            changes += count
+            quality = tet_quality(nodes, elements)
+            flat = np.flatnonzero(quality < min_quality)
+        elements, owner, count = _flip(nodes, elements, owner, quality, flat)
+        changes += count
+        quality = tet_quality(nodes, elements)
+        smoothed = _smooth(gmsh, nodes, elements, on, np.flatnonzero(quality < min_quality))
+        changes += smoothed
+        quality = tet_quality(nodes, elements)
+        elements, owner, dropped = _drop_caps(elements, owner, quality, np.flatnonzero(quality < min_quality))
+        changes += dropped
+        if made is None and not count and not dropped and not smoothed:
+            break
+    used, elements = np.unique(elements, return_inverse=True)
+    return nodes[used], elements.reshape(-1, 4), owner, changes
+
+
+def _corner_tets(elements, count):
+    """For each node, the tetrahedra at it: (order, starts) as for a CSR matrix."""
+    flat = elements.ravel()
+    order = np.argsort(flat, kind="stable")
+    return order // 4, np.searchsorted(flat[order], np.arange(count + 1))
+
+
+def _collapse_short_edges(nodes, elements, on, quality, flat, ratio=0.25):
+    """Collapse the shortest edge of each of ``flat`` that is under ``ratio``
+    of its longest onto one end or its middle, moving ``nodes`` in place
+    (and ``on``, where a node lies, with it).
+    Returns (elements, which of the old ones they are, collapses), or None."""
+    corners = nodes[elements[flat]]
+    lengths = np.stack([np.linalg.norm(corners[:, a] - corners[:, b], axis=1) for a, b in _EDGES], axis=1)
+    shortest = lengths.argmin(axis=1)
+    short = lengths[np.arange(len(flat)), shortest] < ratio * lengths.max(axis=1)
+    if not short.any():
+        return None
+    at, starts = _corner_tets(elements, len(nodes))
+    alive = np.ones(len(elements), dtype=bool)
+    touched = np.zeros(len(nodes), dtype=bool)
+    collapses = 0
+    for k in np.flatnonzero(short)[np.argsort(lengths[short, shortest[short]])]:
+        a, b = (elements[flat[k], corner] for corner in _EDGES[shortest[k]])
+        if touched[a] or touched[b]:
+            continue
+        ring = np.unique(np.concatenate([at[starts[a]:starts[a + 1]], at[starts[b]:starts[b + 1]]]))
+        ring = ring[alive[ring]]
+        both = (elements[ring] == a).any(axis=1) & (elements[ring] == b).any(axis=1)
+        kept = ring[~both]
+        moved = np.where(elements[kept] == a, b, elements[kept])
+        before, saved, best = quality[ring].min(), nodes[b].copy(), None
+        for target in (nodes[a], saved, 0.5 * (nodes[a] + saved)):
+            nodes[b] = target
+            after = tet_quality(nodes, moved).min() if len(moved) else np.inf
+            if after > before and (best is None or after > best[0]):
+                best = (after, target.copy())
+        nodes[b] = saved if best is None else best[1]
+        if best is None:
+            continue
+        if on[a, 0] < on[b, 0]:  # the kept node now lies where the more constrained one did
+            on[b] = on[a]
+        elements[kept] = moved
+        alive[ring[both]] = False
+        touched[np.unique(elements[ring])] = True
+        collapses += 1
+    if not collapses:
+        return None
+    keep = np.flatnonzero(alive)
+    return elements[keep], keep, collapses
+
+
+def _flip(nodes, elements, owner, quality, flat):
+    """2-3 flips across a face, and removing an edge from the ring of 3 to 7
+    tetrahedra around it, between
+    tetrahedra of one owner, wherever they lift the worst of them; so the
+    fiber-binder interfaces and the outer surface stay as they are."""
+    faces = np.sort(elements[:, _FACES].reshape(-1, 3), axis=1)
+    _, face_of = np.unique(faces, axis=0, return_inverse=True)
+    face_of = face_of.ravel()
+    face_order = np.argsort(face_of, kind="stable")
+    face_starts = np.searchsorted(face_of[face_order], np.arange(face_of.max() + 2))
+    at, starts = _corner_tets(elements, len(nodes))
+    dead = np.zeros(len(elements), dtype=bool)
+    made, made_owner = [], []
+    for t in flat[np.argsort(quality[flat])]:
+        if dead[t]:
+            continue
+        best = None
+        for corner in range(4):  # 2-3 across the face opposite this corner
+            f = face_of[4 * t + corner]
+            other = [slot for slot in face_order[face_starts[f]:face_starts[f + 1]] if slot // 4 != t]
+            if not other:
+                continue
+            u = other[0] // 4
+            if dead[u] or owner[u] != owner[t]:
+                continue
+            trial = np.repeat(elements[t:t + 1], 3, axis=0)
+            for row, c in enumerate(_FACES[corner]):
+                trial[row, c] = elements[u, other[0] % 4]
+            worst = tet_quality(nodes, trial).min()
+            if worst > min(quality[t], quality[u]) and (best is None or worst > best[0]):
+                best = (worst, [t, u], trial)
+        for a, b in _EDGES:  # remove the edge from corner a to corner b
+            i, j = elements[t, a], elements[t, b]
+            ring = np.intersect1d(at[starts[i]:starts[i + 1]], at[starts[j]:starts[j + 1]])
+            if not 3 <= len(ring) <= 7 or dead[ring].any() or np.any(owner[ring] != owner[t]):
+                continue
+            for trial in _edge_removals(nodes, elements[ring], i, j):
+                worst = tet_quality(nodes, trial).min()
+                if worst > quality[ring].min() and (best is None or worst > best[0]):
+                    best = (worst, list(ring), trial)
+        if best is not None:
+            dead[best[1]] = True
+            made.extend(best[2])
+            made_owner.extend([owner[t]] * len(best[2]))
+    if not made:
+        return elements, owner, 0
+    elements = np.concatenate([elements[~dead], np.array(made)])
+    owner = np.concatenate([owner[~dead], np.array(made_owner, dtype=owner.dtype)])
+    return elements, owner, len(made_owner) // 2
+
+
+def _edge_removals(nodes, ring, i, j):
+    """Each way of filling the ring of tetrahedra around edge (i, j) without
+    that edge: a fan of triangles across the ring's rim, each joined to i
+    and to j. None if the ring is open (the edge lies on a surface) or a way
+    turns a tetrahedron inside out."""
+    pairs = [tuple(tet[(tet != i) & (tet != j)]) for tet in ring]
+    if any(len(pair) != 2 for pair in pairs):
+        return
+    rim = list(pairs[0])
+    left = pairs[1:]
+    while left:
+        for k, (p, q) in enumerate(left):
+            if rim[-1] in (p, q):
+                rim.append(q if p == rim[-1] else p)
+                del left[k]
+                break
+        else:
+            return
+    if rim[-1] != rim[0]:
+        return  # open ring
+    rim = rim[:-1]
+    n = len(rim)
+    if len(set(rim)) != n:
+        return
+    for apex in range(n):
+        fan = [(rim[apex], rim[(apex + m) % n], rim[(apex + m + 1) % n]) for m in range(1, n - 1)]
+        trial = np.array([[x, y, z, i] for x, y, z in fan] + [[x, z, y, j] for x, y, z in fan])
+        quality = tet_quality(nodes, trial)
+        if np.all(quality > 0.0):
+            yield trial
+        elif np.all(quality < 0.0):
+            yield trial[:, [0, 2, 1, 3]]
+
+
+def _smooth(gmsh, nodes, elements, on, flat):
+    """Move each corner of ``flat`` towards the middle of its neighbours,
+    back onto the CAD curve or surface it lies on (``on``: dim, tag per
+    node; one at a CAD corner moves a quarter of its shortest edge at
+    most), where that lifts the worst
+    tetrahedron around it. Moves ``nodes`` in place."""
+    at, starts = _corner_tets(elements, len(nodes))
+    moved = 0
+    for node in np.unique(elements[flat]):
+        dim, tag = on[node]
+        star = at[starts[node]:starts[node + 1]]
+        around = np.setdiff1d(elements[star], [node])
+        here, middle = nodes[node].copy(), nodes[around].mean(axis=0)
+        if dim == 0:  # a CAD corner moves only a little, a quarter of its shortest edge at most
+            reach = 0.25 * np.linalg.norm(nodes[around] - here, axis=1).min()
+            step = np.linalg.norm(middle - here)
+            middle = here + (middle - here) * min(1.0, reach / max(step, 1e-300))
+        before, best = tet_quality(nodes, elements[star]).min(), None
+        for share in (1.0, 0.5, 0.25):
+            target = here + share * (middle - here)
+            if 0 < dim < 3:
+                target = np.asarray(gmsh.model.getClosestPoint(int(dim), int(tag), target)[0])
+            nodes[node] = target
+            after = tet_quality(nodes, elements[star]).min()
+            if after > before and (best is None or after > best[0]):
+                best = (after, target)
+        nodes[node] = here if best is None else best[1]
+        moved += best is not None
+    return moved
+
+
+def _drop_caps(elements, owner, quality, flat):
+    """Remove each of ``flat`` that has two faces on the outer surface and
+    is the only tetrahedron on the edge between them: a sliver lying on the
+    surface, whose two other faces then become the surface instead."""
+    faces = np.sort(elements[:, _FACES].reshape(-1, 3), axis=1)
+    _, face_of, counts = np.unique(faces, axis=0, return_inverse=True, return_counts=True)
+    outer = counts[face_of.ravel()].reshape(-1, 4) == 1
+    edges = np.sort(elements[:, _EDGES].reshape(-1, 2), axis=1)
+    _, edge_of, edge_counts = np.unique(edges, axis=0, return_inverse=True, return_counts=True)
+    edge_count = edge_counts[edge_of.ravel()].reshape(-1, 6)
+    drop = []
+    for t in flat:
+        sides = np.flatnonzero(outer[t])
+        if len(sides) != 2:
+            continue
+        ridge = sorted(set(range(4)) - set(sides))  # the corners both outer faces hold
+        if edge_count[t, _EDGES.index(tuple(ridge))] == 1:
+            drop.append(t)
+    if not drop:
+        return elements, owner, 0
+    keep = np.setdiff1d(np.arange(len(elements)), drop)
+    return elements[keep], owner[keep], len(drop)
+
+
+def _straight_tet10(nodes, elements):
+    """10-node tetrahedra with straight edges: a node at the middle of each
+    edge, shared by the tetrahedra on it, in Nastran's order."""
+    edges = np.sort(elements[:, _TET10_EDGES].reshape(-1, 2), axis=1)
+    unique, middle_of = np.unique(edges, axis=0, return_inverse=True)
+    middles = 0.5 * (nodes[unique[:, 0]] + nodes[unique[:, 1]])
+    return (np.concatenate([nodes, middles]),
+            np.concatenate([elements, len(nodes) + middle_of.reshape(-1, 6)], axis=1))
 
 
 def _without_overlaps(occ, volumes, owners):
