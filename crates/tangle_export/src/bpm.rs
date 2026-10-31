@@ -619,6 +619,18 @@ fn wrap_position(periodic: [bool; 3], low: Vec3, high: Vec3, position: &mut Vec3
     }
 }
 
+/// Junction bonds the model holds: those of a bond type after the fiber
+/// types'. Anchors that land on one particle write no bond, so this can be
+/// fewer than the junctions' anchor pairs.
+fn junction_bonds(model: &BpmModel, config: &BpmExportConfig) -> usize {
+    let first = first_junction_bond_type(config, model.atom_types());
+    let bonds = match model {
+        BpmModel::Spheres(model) => &model.bonds,
+        BpmModel::Spherocylinders(model) => &model.bonds,
+    };
+    bonds.iter().filter(|bond| bond.bond_type >= first).count()
+}
+
 fn export_bpm_system(
     assembly: Res<FiberAssembly>,
     config: Res<BpmExportConfig>,
@@ -633,12 +645,7 @@ fn export_bpm_system(
         mode: config.mode,
         particles: model.particles(),
         bonds: model.bonds(),
-        junction_bonds: assembly
-            .junctions
-            .junctions
-            .iter()
-            .map(|junction| junction.anchors.len.saturating_sub(1) as usize)
-            .sum(),
+        junction_bonds: junction_bonds(&model, &config),
         atom_types: model.atom_types().to_vec(),
         data_path: config.data_path.clone(),
     };
@@ -1130,7 +1137,11 @@ mod tests {
             else {
                 panic!("expected spherocylinders");
             };
-            let total = model.capsules.iter().map(|c| 2.0 * c.half_length).sum::<f64>();
+            let total = model
+                .capsules
+                .iter()
+                .map(|c| 2.0 * c.half_length)
+                .sum::<f64>();
             assert!((total - 0.65).abs() < 1.0e-12);
             model
                 .capsules
@@ -1143,7 +1154,10 @@ mod tests {
         assert!((merged[0] - 0.3).abs() < 1.0e-12 && (merged[1] - 0.35).abs() < 1.0e-12);
         // Constant mode tiles with at least a diameter too.
         let constant = lengths(&config(BpmExportMode::SpherocylindersConstant));
-        assert!(constant.iter().all(|length| *length >= 0.2 - 1.0e-12), "{constant:?}");
+        assert!(
+            constant.iter().all(|length| *length >= 0.2 - 1.0e-12),
+            "{constant:?}"
+        );
         // Off: every active segment.
         let every = lengths(&BpmExportConfig::new("").with_min_capsule_length_over_diameter(0.0));
         assert_eq!(every.len(), 6);
@@ -1156,5 +1170,81 @@ mod tests {
         };
         assert_eq!(model.capsules.len(), 1);
         assert!(model.bonds.is_empty());
+    }
+
+    #[test]
+    fn a_junction_bonds_the_capsule_that_holds_its_anchor() {
+        // Fiber 1 is a long capsule (x 0.2 to 1.2) then a short one (1.2 to
+        // 1.4). Its anchor at x 1.05 lies in the long capsule, though the
+        // short capsule's center is nearer.
+        let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([2.0; 3], [false; 3]));
+        let material = assembly.materials.add("fiber");
+        let section = assembly.sections.add(Section::Circular { radius: 0.05 });
+        for (id, points) in [
+            (1, vec![[0.2, 0.7, 1.0], [1.2, 0.7, 1.0], [1.4, 0.7, 1.0]]),
+            (2, vec![[1.05, 0.2, 1.2], [1.05, 1.2, 1.2]]),
+        ] {
+            assembly
+                .add_fiber(FiberId(id), material, section, &points, &points)
+                .unwrap();
+        }
+        let law = assembly.junction_laws.add("welded");
+        let anchor = |fiber, rest_arc_length| FiberAnchor {
+            fiber: FiberId(fiber),
+            rest_arc_length,
+            section_offset: None,
+        };
+        assembly
+            .add_junction(
+                JunctionId(1),
+                law,
+                JunctionParameterId(0),
+                &[anchor(1, 0.85), anchor(2, 0.5)],
+            )
+            .unwrap();
+        let BpmModel::Spherocylinders(model) =
+            build_bpm_model(&assembly, &BpmExportConfig::new("")).unwrap()
+        else {
+            panic!("expected spherocylinders");
+        };
+        assert_eq!(model.capsules.len(), 3);
+        let junction = model.bonds.last().unwrap();
+        assert_eq!((junction.particle_a, junction.particle_b), (1, 3));
+    }
+
+    #[test]
+    fn a_sphere_file_without_bonds_has_no_bonds_section() {
+        // Shorter than one spacing: a single sphere.
+        let assembly = one_fiber(&[[0.2, 1.0, 1.0], [0.25, 1.0, 1.0]], 0.1);
+        let model = build_bpm_model(&assembly, &config(BpmExportMode::SpheresExact)).unwrap();
+        assert_eq!(model.particles(), 1);
+        let data = written(&model, "sphere-no-bonds");
+        assert_eq!(header_count(&data, "bonds"), Some(0));
+        assert!(!data.lines().any(|line| line == "Bonds"));
+        assert_eq!(sections(&data)["Atoms"].len(), 1);
+    }
+
+    #[test]
+    fn the_report_counts_the_junction_bonds_written() {
+        let mut assembly = two_fibers(true);
+        let law = assembly.junction_laws.add("welded");
+        let anchor = |fiber, rest_arc_length| FiberAnchor {
+            fiber: FiberId(fiber),
+            rest_arc_length,
+            section_offset: None,
+        };
+        for (id, anchors) in [
+            (1, [anchor(1, 0.8), anchor(2, 0.7)]),
+            // Both on fiber 1's second capsule: no bond.
+            (2, [anchor(1, 0.80), anchor(1, 0.81)]),
+        ] {
+            assembly
+                .add_junction(JunctionId(id), law, JunctionParameterId(0), &anchors)
+                .unwrap();
+        }
+        let config = BpmExportConfig::new("");
+        let model = build_bpm_model(&assembly, &config).unwrap();
+        assert_eq!(model.bonds(), 3);
+        assert_eq!(junction_bonds(&model, &config), 1);
     }
 }

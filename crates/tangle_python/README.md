@@ -383,7 +383,11 @@ segment): shorter segments merge with the next, since a shorter capsule would
 overlap the capsule two along its fiber, which it isn't bonded to, and the BPM
 bond styles keep pair forces on between those two; contacts are `pair_style
 granular/bacillus` and walls `fix wall/gran/bacillus` in the input script.
-The sphere modes write `atom_style bpm/sphere`.
+The sphere modes write `atom_style bpm/sphere`. Below a spacing of two radii,
+each sphere overlaps neighbours along its fiber that it isn't bonded to (at
+`1/3`, the next five), and `special_bonds lj 0 1 1` turns off only the bonded
+pair, so the input script must also exclude pairs within a fiber, for example
+`neigh_modify exclude molecule/intra all`.
 The column names of each section are in the comments at the top of the file.
 
 Each fiber type gets its own atom type and its own bond type for the bonds
@@ -564,7 +568,7 @@ materials and the [`fem_mesh` example](python/examples/fem_mesh.py).
 - `bonded_fibers.py` bonds a felt at its fiber crossings and exports the
   bonds; `oval_fibers.py` stacks plies of flat oval fibers.
 - `periodic_domain_sweep.py` sweeps periodic domain sizes of biased in-plane
-  stacks for DIRT.
+  stacks for bonded-particle tension tests.
 - `native/` mirrors the complete Rust example suite using the same native
   generators and solver. See `native/README.md` for the configuration map.
 - `ct_examples.py` fits Tangle fibers to synthetic CT scans with `tangle.ct`

@@ -21,7 +21,7 @@ except `quickstart`, `fem_mesh` and `ct_examples`.
 | FEM meshes for Nastran and Abaqus | [fem_mesh](../crates/tangle_python/python/examples/fem_mesh.py) | Python only; [guide](../docs/fem_export.md) |
 | Native versus voxel analysis | [puma_cross_validation](../crates/tangle_python/python/examples/puma_cross_validation.py) | [PuMA](puma_cross_validation/README.md) |
 | Fitting fibers to CT scans | [ct_examples](../crates/tangle_python/python/examples/ct_examples.py) | Python only; [results with pictures](../crates/tangle_python/python/examples/ct_results/README.md) |
-| Periodic domain size for DIRT | [periodic_domain_sweep](../crates/tangle_python/python/examples/periodic_domain_sweep.py) | Python only; side 10 to 2 at fixed fiber length |
+| Periodic domain size | [periodic_domain_sweep](../crates/tangle_python/python/examples/periodic_domain_sweep.py) | Python only; side 10 to 2 at fixed fiber length |
 
 For another small staged-insertion example, see
 [layered_recipe](../crates/tangle_python/python/examples/layered_recipe.ipynb).

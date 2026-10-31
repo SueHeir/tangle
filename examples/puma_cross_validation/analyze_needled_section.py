@@ -161,7 +161,7 @@ def write_report(s):
     diag=lambda a: ", ".join(f"{x:.5f}" for x in np.diag(a))
     loc=lambda a: ", ".join(f"{x*1e6:.3f}" for x in a)
     lines=["# Needled felt: TANGLE–PuMA section analysis", "",
-        "Analysis date: 2026-09-22. Source: the final saved TANGLE `needled_capsules.data` from the 20-ply, approximately 1 mm × 1 mm specimen (export dated 2026-09-20). This is the generated structure before DIRT loading.","",
+        "Analysis date: 2026-09-22. Source: the final saved TANGLE `needled_capsules.data` from the 20-ply, approximately 1 mm × 1 mm specimen (export dated 2026-09-20). This is the generated structure before any mechanical loading.","",
         f"The central section has **{100*native_vf:.3f}% nominal solid volume in TANGLE** and **{100*f['voxel_volume_fraction']:.3f}% occupied volume in PuMA** at 1 µm resolution. The difference is **{100*delta:.3f} percentage points ({100*delta/native_vf:.2f}% relative)**. The exact-tangent orientation agrees closely after voxelization; PuMA's independently estimated image orientation has a mean local error of {st['angular_mean_deg']:.2f}°.","",
         "## Specimen and section", "",
         f"- Full specimen: {whole['fibers']} physical fibers, {whole['segments']:,} exported capsule segments; nominal Vf {100*whole['nominal_swept_volume_fraction']:.3f}%.",

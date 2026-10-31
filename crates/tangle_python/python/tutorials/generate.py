@@ -824,7 +824,7 @@ NOTEBOOKS: dict[str, list[dict]] = {
 
         OVITO output visualizes the relaxed spherocylinders; BPM output
         converts them into a bonded-particle model that downstream solvers
-        such as DIRT can consume. Passing `debug_ovito_path` with no
+        such as LAMMPS can consume. Passing `debug_ovito_path` with no
         `debug_snapshot_interval` records concise recipe keyframes. Set an
         integer interval only when detailed relaxation frames are needed.
 
@@ -1945,7 +1945,7 @@ NOTEBOOKS: dict[str, list[dict]] = {
 
         Sphere center spacing is specified in radii and must lie from `1/3`
         through `1`. `density`, `atom_type`, and `bond_type` provide the
-        material and topology metadata required by BPM consumers such as DIRT.
+        material and topology metadata required by BPM consumers such as LAMMPS.
         """),
         code("""
         if RUN_SOLVER:

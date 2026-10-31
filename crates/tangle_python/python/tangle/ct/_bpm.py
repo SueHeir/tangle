@@ -382,7 +382,7 @@ def add_bpm_binder_spheres(path: str | os.PathLike, binder, voxel_size: float, d
         data.add_rows("Atoms", [f"{ids[i]} {first_molecule + i} {kind} {2.0 * sphere_radius[i] * voxel_size:.17e} "
                                 f"{sphere_density[i]:.17e} {position[i, 0]:.17e} {position[i, 1]:.17e} "
                                 f"{position[i, 2]:.17e}" for i in range(n)])
-        # No Capsules rows: an atom without one is a sphere (DIRT turns down a capsule of no length).
+        # No Capsules rows: an atom without one is a sphere.
     first_bond = max((int(row[0]) for row in existing), default=0) + 1
     bond_rows = [f"{ids[i]} {particles.ids[k]}" for i, k in fiber_bonds]
     bond_rows = [f"{to_fiber} {row}" for row in bond_rows] + [f"{between} {ids[a]} {ids[b]}" for a, b in sphere_pairs]

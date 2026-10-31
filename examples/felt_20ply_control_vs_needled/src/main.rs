@@ -224,7 +224,6 @@ fn main() {
             output.directory.join(format!("{stem}.ovito")),
             output.directory.join(format!("{stem}_view.py")),
             output.directory.join(format!("{stem}_capsules.data")),
-            output.directory.join(format!("{stem}_dirt.toml")),
         ];
         if !retry {
             stale.push(checkpoint_path.clone());

@@ -1,8 +1,8 @@
-"""Periodic domain-size sweep: biased in-plane fiber stacks for DIRT.
+"""Periodic domain-size sweep: biased in-plane fiber stacks for BPM tension tests.
 
 Every configuration fills a cell that is periodic in x and y with the same
 straight fibers (length 10, one material), then relaxes, compacts, and
-polishes it for a DIRT through-thickness tension test. Only the in-plane side
+polishes it for a bonded-particle through-thickness tension test. Only the in-plane side
 of the periodic cell changes, from 10 (one fiber length) down to 2 (a fifth of
 a fiber length); side 1 is available on request, but its two fibers never
 touch. Areal fiber density and final volume fraction are held fixed, so every
@@ -21,7 +21,7 @@ thickness, so neighbors interlock instead of lying in separate layers.
 Fibers (diameter 0.2) use 25 segments (length 0.4) wherever the cell allows
 it. A segment plus one diameter must stay below half the cell side, or a
 segment could touch two periodic images of the same neighbor and the
-minimum-image contact (and a DIRT bond or contact) becomes ambiguous; the
+minimum-image contact (and a BPM bond or contact) becomes ambiguous; the
 side-1 cell therefore refines to 40 segments per fiber. Segments must also be
 at least one diameter long: only adjacent segments of a fiber are excluded
 from contact, so shorter segments make every next-nearest pair overlap.
@@ -34,7 +34,7 @@ strands that would touch. Lengths are unitless; scale every length setting
 together to change units.
 
 Each configuration writes ``side_XX/`` with the relaxed geometry (OVITO dump),
-multi-material spherocylinder and bond data for DIRT
+multi-material spherocylinder and bond data for LAMMPS
 (``side_XX_capsules.data``), and a JSON summary. ``summary.csv`` collects one
 row per configuration.
 """
