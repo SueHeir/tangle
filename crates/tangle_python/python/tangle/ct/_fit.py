@@ -796,6 +796,9 @@ class FitResult:
                 max_step=0.25 * float(self.radii.mean()) * self.voxel_size,
                 penetration_tolerance=0.02 * min(spec.diameter for spec in (self.specs or [self.spec])),
             )
+        if (adaptive or settings.adaptive_segmentation is not None) and any(m.is_oval for m in self.materials()):
+            raise ValueError("adaptive segmentation doesn't support oval fibers yet; relax this fit without "
+                             "adaptive=True (coarse_grained() alone still cuts the node count)")
         if adaptive and settings.adaptive_segmentation is None:
             settings = settings.replace(adaptive_segmentation=tangle.AdaptiveSegmentationSettings())
         if tethered:
