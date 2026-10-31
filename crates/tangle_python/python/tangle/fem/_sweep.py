@@ -644,36 +644,42 @@ def _bridge_split(nodes, a, b):
     """Two wedges filling the hexahedron from quadrilateral ``a`` to ``b``
     (each a fiber's side, in order around it), with ``b``'s corners matched
     to ``a``'s across the gap, or None when no way of cutting it leaves both
-    wedges right side out with some thickness."""
-    corners_a = nodes[a]
+    wedges right side out at all six corners."""
     best, best_score = None, 0.0
     for order in (b, b[::-1]):
         for turn in range(4):
             matched = np.roll(order, turn)
-            # Matching corners straight across the gap twists the hexahedron least.
-            twist = np.linalg.norm(nodes[matched] - corners_a, axis=1).sum()
             for cut in range(4):  # the cut runs from a's edge (cut, cut + 1) to b's opposite edge
                 i = [(cut + k) % 4 for k in range(4)]
                 a0, a1, a2, a3 = a[i]
                 b0, b1, b2, b3 = matched[i]
-                pair = [[a0, a3, b3, a1, a2, b2], [a0, b0, b3, a1, b1, b2]]
-                volumes = []
-                for wedge in pair:
-                    corners = nodes[np.asarray(wedge)[PENTA_TETRAHEDRA]]
-                    edges = corners[:, 1:] - corners[:, :1]
-                    volumes.append(np.einsum("ij,ij->i", edges[:, 0], np.cross(edges[:, 1], edges[:, 2])))
-                volumes = np.asarray(volumes)
-                signs = np.sign(volumes.sum(axis=1))
-                if (signs == 0).any():
-                    continue
-                volumes *= signs[:, None]
-                size = np.linalg.norm(corners_a[1] - corners_a[0]) * np.linalg.norm(corners_a[3] - corners_a[0])
-                score = volumes.min() / max(size, 1e-300) ** 1.5 / (1.0 + twist / max(size, 1e-300) ** 0.5)
-                if volumes.min() > 0.0 and score > best_score:
+                pair = np.array([[a0, a3, b3, a1, a2, b2], [a0, b0, b3, a1, b1, b2]])
+                corners = _penta_corner_jacobians(nodes, pair)
+                signs = np.where(corners.sum(axis=1) < 0.0, -1.0, 1.0)
+                score = (corners * signs[:, None]).min()  # the worst corner of the two, right side out
+                if score > best_score:
                     best_score = score
-                    best = [list(wedge) if sign > 0 else [wedge[k] for k in FLIP_PENTA]
+                    best = [wedge.tolist() if sign > 0 else wedge[FLIP_PENTA].tolist()
                             for wedge, sign in zip(pair, signs)]
     return best
+
+
+def _penta_corner_jacobians(nodes, wedges) -> np.ndarray:
+    """Each wedge's scaled Jacobian at each of its six corners: the volume
+    of the corner's three edges over their lengths' product, positive when
+    the wedge is right side out there."""
+    corners = nodes[wedges]  # (wedge, corner, xyz)
+    result = np.empty(wedges.shape, dtype=float)
+    for corner in range(6):
+        level, place = divmod(corner, 3)
+        base = 3 * level
+        here = corners[:, corner]
+        edges = [corners[:, base + (place + 1) % 3] - here, corners[:, base + (place + 2) % 3] - here,
+                 (corners[:, place + 3] - corners[:, place]) * 1.0]
+        volume = np.einsum("ij,ij->i", edges[0], np.cross(edges[1], edges[2]))
+        lengths = np.prod([np.linalg.norm(edge, axis=1) for edge in edges], axis=0)
+        result[:, corner] = volume / np.maximum(lengths, 1e-300)
+    return result
 
 
 def _bond_beams(nodes, bonds, stations_at, centerlines, semi_axes, ratio, origin, lengths, periodic, clip,
