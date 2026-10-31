@@ -278,6 +278,13 @@ class Assembly:
     def centerlines(self) -> list[list[list[float]]]: ...
     def long_axes(self) -> list[list[list[float]]]: ...
     def section_semi_axes(self) -> list[tuple[float, float]]: ...
+    def add_bond(self, fiber_a: int, s_a: float, fiber_b: int, s_b: float, law: str = "binder") -> int:
+        """Bond fiber ``fiber_a`` (fiber order, from 0) at ``s_a`` meters along it to ``fiber_b`` at ``s_b``.
+        The relaxation pulls bonded points back together when ``RelaxationSettings.junction_stiffness`` is above
+        zero, and ``RunResult.export_bpm`` writes each bond. Returns the number of bonds."""
+    @property
+    def bond_count(self) -> int:
+        """Number of bonds between fibers."""
     def fiber_ids(self) -> list[int]:
         """The stable id of every fiber, in fiber order."""
     def fiber_materials(self) -> list[str]:
@@ -724,6 +731,7 @@ class RelaxationSettings:
     constraint_iterations: int
     curvature_cleanup_sweeps: int
     twist_stiffness: float
+    junction_stiffness: float
     max_step: float | None
     max_iterations: int
     iterations_per_batch: int
@@ -751,6 +759,7 @@ class RelaxationSettings:
         constraint_iterations: int = ...,
         curvature_cleanup_sweeps: int = ...,
         twist_stiffness: float = ...,
+        junction_stiffness: float = ...,
         max_step: float | None = ...,
         max_iterations: int = ...,
         iterations_per_batch: int = ...,

@@ -120,6 +120,24 @@ pub struct PackedAssembly {
     /// Assemblies containing persistent junctions remain refined because the
     /// current device solver does not yet carry junction-anchor protection.
     pub coarsening_safe: bool,
+    /// Junction tethers, one from the first anchor of every junction to each
+    /// of its other anchors. Four vertex indices per tether: the two ends of
+    /// the segment holding the first anchor, then the two ends of the segment
+    /// holding the second. In an adaptive layout these are the ends of the
+    /// unrefined source segment, which stay active through refinement, so the
+    /// anchor rides on that segment's chord. Empty in checkpoints written
+    /// before tethers.
+    #[serde(default)]
+    pub junction_vertices: Vec<u32>,
+    /// Two per tether: how far along its segment each anchor sits, from the
+    /// segment's first vertex (0) to its second (1).
+    #[serde(default)]
+    pub junction_coordinates: Vec<f32>,
+    /// Per tether: the anchor distance it pulls back toward once stretched,
+    /// the larger of the packed distance and the two radii summed, so a
+    /// tether never pulls fibers into each other.
+    #[serde(default)]
+    pub junction_rest_lengths: Vec<f32>,
 }
 
 impl PackedAssembly {
@@ -254,6 +272,10 @@ impl PackedAssembly {
 
         let segment_count = segment_fibers.len();
         let vertex_count = vertex_fibers.len();
+        let tethers = JunctionTethers::pack(assembly, |fiber, local| {
+            let start = assembly.topology.fibers[fiber].vertices.start + local;
+            [start, start + 1]
+        })?;
 
         Ok(Self {
             positions,
@@ -291,6 +313,9 @@ impl PackedAssembly {
             adaptive: false,
             has_ovals,
             coarsening_safe: assembly.junctions.junctions.is_empty(),
+            junction_vertices: tethers.vertices,
+            junction_coordinates: tethers.coordinates,
+            junction_rest_lengths: tethers.rest_lengths,
         })
     }
 
@@ -324,6 +349,8 @@ impl PackedAssembly {
         let mut vertex_active = Vec::new();
         let mut vertex_pinned = Vec::new();
         let mut vertex_refinement_levels = Vec::new();
+        // Ends of every source segment's root, per fiber, for junction tethers.
+        let mut root_ends = Vec::with_capacity(assembly.topology.fibers.len());
 
         for (fiber_index, fiber) in assembly.topology.fibers.iter().enumerate() {
             let section = assembly
@@ -395,6 +422,12 @@ impl PackedAssembly {
                 roots.push((first_vertex, leaf_count, levels, rest_length));
             }
 
+            root_ends.push(
+                roots
+                    .iter()
+                    .map(|&(first, leaves, _, _)| [first, first + leaves])
+                    .collect::<Vec<_>>(),
+            );
             for (first_vertex, leaf_count, levels, rest_length) in roots {
                 let root = segment_fibers.len() as u32;
                 let node_count = 2 * leaf_count - 1;
@@ -432,6 +465,9 @@ impl PackedAssembly {
             fiber_segment_spans.extend([segment_start, segment_count]);
         }
 
+        let tethers =
+            JunctionTethers::pack(assembly, |fiber, local| root_ends[fiber][local as usize])?;
+
         Ok(Self {
             directors: vec![0.0; positions.len()],
             positions,
@@ -468,6 +504,9 @@ impl PackedAssembly {
             adaptive: true,
             has_ovals: false,
             coarsening_safe: assembly.junctions.junctions.is_empty(),
+            junction_vertices: tethers.vertices,
+            junction_coordinates: tethers.coordinates,
+            junction_rest_lengths: tethers.rest_lengths,
         })
     }
 
@@ -538,6 +577,11 @@ impl PackedAssembly {
             }
         }
         arc
+    }
+
+    /// Number of junction tethers.
+    pub fn junction_count(&self) -> usize {
+        self.junction_rest_lengths.len()
     }
 
     /// Number of segments in the packed representation.
@@ -690,6 +734,92 @@ impl PackedAssembly {
             assembly.junctions = Default::default();
         }
         Ok(())
+    }
+}
+
+/// Junction tethers of a packed layout, before they join it.
+struct JunctionTethers {
+    vertices: Vec<u32>,
+    coordinates: Vec<f32>,
+    rest_lengths: Vec<f32>,
+}
+
+impl JunctionTethers {
+    /// Resolves every junction anchor on the intrinsic centerline and tethers
+    /// the first anchor of each junction to each of its others. `segment_ends`
+    /// gives the two packed vertices bounding a fiber's source segment.
+    fn pack(
+        assembly: &FiberAssembly,
+        segment_ends: impl Fn(usize, u32) -> [u32; 2],
+    ) -> Result<Self, PackingError> {
+        let mut tethers = Self {
+            vertices: Vec::new(),
+            coordinates: Vec::new(),
+            rest_lengths: Vec::new(),
+        };
+        let table = &assembly.junctions;
+        for junction in &table.junctions {
+            let start = junction.anchors.start as usize;
+            let anchors = table
+                .anchors
+                .get(start..start + junction.anchors.len as usize)
+                .ok_or_else(|| {
+                    PackingError::InvalidAssembly(format!(
+                        "junction {} has an invalid anchor span",
+                        junction.id.0
+                    ))
+                })?;
+            let resolved = anchors
+                .iter()
+                .map(|anchor| {
+                    let resolved = assembly.resolve_anchor(*anchor).map_err(|error| {
+                        PackingError::InvalidAssembly(format!(
+                            "junction {}: {error}",
+                            junction.id.0
+                        ))
+                    })?;
+                    let fiber = &assembly.topology.fibers[resolved.fiber_index as usize];
+                    let first = (fiber.vertices.start + resolved.local_segment) as usize;
+                    let placed = &assembly.geometry.placed.positions;
+                    let t = resolved.coordinate;
+                    let point: Vec3 = std::array::from_fn(|axis| {
+                        placed[first][axis] + t * (placed[first + 1][axis] - placed[first][axis])
+                    });
+                    let section = assembly
+                        .sections
+                        .entries
+                        .get(fiber.section.0 as usize)
+                        .ok_or(PackingError::MissingSection(fiber.id.0))?;
+                    Ok((
+                        segment_ends(resolved.fiber_index as usize, resolved.local_segment),
+                        t as f32,
+                        point,
+                        LaneSection::from_section(section).radius,
+                    ))
+                })
+                .collect::<Result<Vec<_>, PackingError>>()?;
+            let Some((first, others)) = resolved.split_first() else {
+                continue;
+            };
+            for other in others {
+                let mut squared = 0.0;
+                for axis in 0..3 {
+                    let mut delta = other.2[axis] - first.2[axis];
+                    if assembly.cell.periodic[axis] {
+                        let length = assembly.cell.basis[axis][axis];
+                        delta -= (delta / length).round() * length;
+                    }
+                    squared += delta * delta;
+                }
+                tethers.vertices.extend(first.0);
+                tethers.vertices.extend(other.0);
+                tethers.coordinates.extend([first.1, other.1]);
+                tethers
+                    .rest_lengths
+                    .push((squared.sqrt() as f32).max(first.3 + other.3));
+            }
+        }
+        Ok(tethers)
     }
 }
 

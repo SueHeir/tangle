@@ -7,8 +7,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyType;
 use tangle_characterize::characterize_assembly;
 use tangle_core::{
-    default_directors, orthonormalize_directors, polyline_tangents, FiberAssembly, FiberBendLimit,
-    FiberId, PeriodicCell, Section, Vec3,
+    default_directors, orthonormalize_directors, polyline_tangents, FiberAnchor, FiberAssembly,
+    FiberBendLimit, FiberId, JunctionId, JunctionParameterId, PeriodicCell, Section, Vec3,
 };
 use tangle_export::{write_puma_bundle, PumaVoxelExportConfig};
 
@@ -507,6 +507,70 @@ impl PyAssembly {
             inner: model.assembly.cell,
             stack_axis: model.stack_axis,
         }
+    }
+
+    /// Bonds fiber ``fiber_a`` (fiber order, from 0) at ``s_a`` meters along
+    /// it to ``fiber_b`` at ``s_b``: a junction of law ``law``. Arc lengths
+    /// are measured from each fiber's first node along its centerline. The
+    /// relaxation pulls bonded points back together when
+    /// ``RelaxationSettings.junction_stiffness`` is above zero, and
+    /// ``RunResult.export_bpm`` writes each junction as a bond. Returns the
+    /// number of junctions.
+    #[pyo3(signature = (fiber_a, s_a, fiber_b, s_b, law = "binder"))]
+    fn add_bond(
+        &self,
+        fiber_a: usize,
+        s_a: f64,
+        fiber_b: usize,
+        s_b: f64,
+        law: &str,
+    ) -> PyResult<usize> {
+        let mut model = self.model.lock().expect("assembly lock poisoned");
+        let assembly = &mut model.assembly;
+        let fibers = &assembly.topology.fibers;
+        let id_of = |index: usize| {
+            fibers.get(index).map(|fiber| fiber.id).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "fiber {index} is out of range for {} fibers",
+                    fibers.len()
+                ))
+            })
+        };
+        let anchors =
+            [(id_of(fiber_a)?, s_a), (id_of(fiber_b)?, s_b)].map(|(fiber, s)| FiberAnchor {
+                fiber,
+                rest_arc_length: s,
+                section_offset: None,
+            });
+        for anchor in anchors {
+            assembly
+                .resolve_anchor(anchor)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        }
+        let law = assembly.junction_laws.add(law);
+        let next = assembly
+            .junctions
+            .junctions
+            .iter()
+            .map(|junction| junction.id.0)
+            .max()
+            .map_or(1, |id| id + 1);
+        assembly
+            .add_junction(JunctionId(next), law, JunctionParameterId(0), &anchors)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        Ok(assembly.junctions.junctions.len())
+    }
+
+    /// Number of bonds (junctions) between fibers.
+    #[getter]
+    fn bond_count(&self) -> usize {
+        self.model
+            .lock()
+            .expect("assembly lock poisoned")
+            .assembly
+            .junctions
+            .junctions
+            .len()
     }
 
     fn centerlines(&self) -> Vec<Vec<Vec3>> {

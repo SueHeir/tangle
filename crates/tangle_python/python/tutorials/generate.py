@@ -93,6 +93,7 @@ RELAXATION_FIELDS = [
     ("constraint_iterations", "Constraint sweeps in each solver iteration.", "count"),
     ("curvature_cleanup_sweeps", "Extra hard-curvature projections per iteration.", "count"),
     ("twist_stiffness", "Oval fibers only: how strongly each long-axis direction is pulled toward its neighbours' mean each iteration.", "fraction"),
+    ("junction_stiffness", "How hard bonds (`Assembly.add_bond`) pull their fibers back together once stretched: the fraction of the stretch closed per iteration. Zero leaves bonds unenforced.", "fraction"),
     ("max_step", "Maximum vertex displacement in one correction; `None` uses 10% of the smallest fiber diameter.", "length, m, or `None`"),
     ("max_iterations", "Global relaxation iteration budget.", "count"),
     ("iterations_per_batch", "Iterations in one scheduler/device batch.", "count"),
@@ -1715,9 +1716,12 @@ NOTEBOOKS: dict[str, list[dict]] = {
         `capture_junctions(policy)` samples once at that recipe point.
         `relax_and_capture(iterations=, capture_every=, policy=)` samples
         repeatedly at an explicit cadence independent of scheduler batch size.
-        Captured junctions are topology/export data; current relaxation does
-        not enforce their mechanics, so late capture is normally the physically
-        appropriate workflow.
+        Captured junctions are topology/export data: a run's relaxation does
+        not enforce junctions captured while it runs, so late capture is
+        normally the physically appropriate workflow. Junctions already in an
+        assembly when its run starts (`Assembly.add_bond`) are pulled back
+        together once stretched when `RelaxationSettings.junction_stiffness`
+        is above zero.
         """),
         code("""
         recipe = tangle.Recipe(tangle.Cell([1 * mm, 1 * mm, 1 * mm]))

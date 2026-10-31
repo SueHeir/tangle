@@ -748,7 +748,8 @@ class FitResult:
         return replace(self, radii=radii, history=self.history + [{"stage": "defined radii"}])
 
     def relax(self, settings: Any | None = None, adaptive: bool = False,
-              defined_radii: bool = False, *, _radii_before: np.ndarray | None = None) -> tuple["FitResult", Any]:
+              defined_radii: bool = False, *, bond_stiffness: float = 0.0,
+              _radii_before: np.ndarray | None = None) -> tuple["FitResult", Any]:
         """Remove remaining overlaps with Tangle's own contact relaxation.
 
         Returns the relaxed fit and the ``RunResult`` (which reports
@@ -761,11 +762,17 @@ class FitResult:
         pairs with :meth:`coarse_grained`. ``defined_radii=True`` first sets every fiber to the diameter its type
         defines (see :meth:`with_defined_radii`), so the relaxation separates the fibers at those diameters.
 
-        The relaxation itself doesn't know about binder: nothing holds bonded fibers together while overlaps are
-        pushed apart. Afterwards each bond is carried along with its two fibers (its ``gap_growth`` is how much
-        the gap between the two fibers' surfaces there grew, in voxels, counting the larger radii with
-        ``defined_radii``; the history entry sums these up), and the ``binder`` mask moves with the fibers around
-        it, so ``relaxed.binder`` lines up with the relaxed fibers.
+        By default the relaxation doesn't know about binder: nothing holds bonded fibers together while overlaps
+        are pushed apart. ``bond_stiffness`` above zero (try 0.5) makes every bond a tether in the solve: once a
+        bond's two points drift further apart than they were in the scan (or than the two radii, if closer), each
+        iteration pulls them back by that fraction of the stretch, so bonded fibers move together instead of
+        apart. Contact still wins, so fibers are never pulled into each other. The run then holds the bonds as
+        junctions, and ``RunResult.export_bpm`` writes them as bonds between the two fibers.
+
+        Afterwards each bond is carried along with its two fibers (its ``gap_growth`` is how much the gap between
+        the two fibers' surfaces there grew, in voxels, counting the larger radii with ``defined_radii``; the
+        history entry sums these up), and the ``binder`` mask moves with the fibers around it, so
+        ``relaxed.binder`` lines up with the relaxed fibers.
 
         A fitted fiber that bends a hair past its type's limit is first smoothed just inside it, since Tangle
         refuses it otherwise; the history entry counts them (``smoothed_input_to_bend_limit``).
@@ -773,9 +780,14 @@ class FitResult:
         import tangle
 
         if defined_radii:
-            return self.with_defined_radii().relax(settings, adaptive, _radii_before=self.radii)
+            return self.with_defined_radii().relax(settings, adaptive, bond_stiffness=bond_stiffness,
+                                                   _radii_before=self.radii)
+        if not (np.isfinite(bond_stiffness) and 0.0 <= bond_stiffness <= 1.0):
+            raise ValueError(f"bond_stiffness must be within [0, 1], not {bond_stiffness}")
         start, smoothed_input = self._within_bend_limits(self.centerlines)
-        recipe = tangle.Recipe(replace(self, centerlines=start).to_assembly())
+        assembly = replace(self, centerlines=start).to_assembly()
+        tethered = self._add_bonds(assembly, start) if bond_stiffness > 0.0 else 0
+        recipe = tangle.Recipe(assembly)
         if settings is None:
             settings = tangle.RelaxationSettings(
                 max_iterations=2000,
@@ -784,6 +796,8 @@ class FitResult:
             )
         if adaptive and settings.adaptive_segmentation is None:
             settings = settings.replace(adaptive_segmentation=tangle.AdaptiveSegmentationSettings())
+        if tethered:
+            settings = settings.replace(junction_stiffness=float(bond_stiffness))
         recipe.relax_until_converged(max_iterations=int(settings.max_iterations))
         run = recipe.run(settings)
         relaxed = [np.asarray(line) / self.voxel_size for line in run.centerlines()]
@@ -801,9 +815,10 @@ class FitResult:
         binder = _carry_binder(self.binder, self.centerlines, relaxed)
         stage = {"stage": "tangle relax", "max_penetration_m": run.max_penetration,
                  "adaptive": bool(settings.adaptive_segmentation is not None), "smoothed_to_bend_limit": smoothed,
-                 "smoothed_input_to_bend_limit": smoothed_input}
+                 "smoothed_input_to_bend_limit": smoothed_input, "bond_stiffness": float(bond_stiffness) if tethered
+                 else 0.0, "bonds_tethered": tethered}
         if bonds:
-            # Nothing holds bonded fibers together in the solve: how much each bond's surface gap grew.
+            # How much each bond's surface gap grew through the solve.
             carried = [bond for bond in bonds if "gap_growth" in bond]
             if carried:
                 growth = np.array([bond["gap_growth"] for bond in carried])
@@ -813,6 +828,27 @@ class FitResult:
                              bonds_grown_over_half_diameter=int((growth > 0.5 * thinner).sum()))
         return replace(self, centerlines=relaxed, confidence=None, long_axes=long_axes, bonds=bonds, binder=binder,
                        history=self.history + [stage]), run
+
+    def _add_bonds(self, assembly: Any, lines: list[np.ndarray]) -> int:
+        """Add every bond of this fit to ``assembly`` (built from ``lines``, this fit's fibers in order, perhaps
+        smoothed) as a junction between its two fibers, each at the same share of the fiber's length as its
+        attachment on this fit's centerlines. One bond per pair of fibers, at its first bond in the list, as
+        :func:`add_bpm_binder_bonds` does. Returns how many were added."""
+        added, pairs = 0, set()
+        for bond in self.bonds or []:
+            fibers = [int(k) for k in bond["fibers"]]
+            pair = tuple(sorted(fibers))
+            if pair[0] == pair[1] or pair in pairs or pair[1] >= len(lines):
+                continue
+            arcs = []
+            for k, point in zip(fibers, _attachments(bond, self.centerlines)):
+                old = polyline_length(np.asarray(self.centerlines[k], dtype=np.float64))
+                new = polyline_length(np.asarray(lines[k], dtype=np.float64))
+                share = nearest_on_line(self.centerlines[k], point)[1] / old if old > 0 else 0.0
+                arcs.append(min(max(share, 0.0), 1.0) * new * self.voxel_size)
+            pairs.add(pair)
+            added = assembly.add_bond(fibers[0], arcs[0], fibers[1], arcs[1])
+        return added
 
     def _within_bend_limits(self, lines: list[np.ndarray]) -> tuple[list[np.ndarray], int]:
         """``lines`` (this fit's fibers, in order) each smoothed just inside its type's bend limit, and how many

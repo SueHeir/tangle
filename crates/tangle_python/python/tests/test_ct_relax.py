@@ -2,6 +2,7 @@
 and a relaxed fit that Tangle accepts as an assembly again (so it can be meshed or exported)."""
 
 import os
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -138,3 +139,39 @@ def test_binder_that_stretches_keeps_its_voxel_count():
     assert abs(int(moved.sum()) - int(binder.sum())) <= 0.02 * binder.sum()  # thinner, not bigger
     z = np.nonzero(moved)[0]
     assert z.min() <= 31 and z.max() >= 35  # stretched between the two, not just shifted
+
+
+def _pushed_off_its_bond():
+    """Fibers A and B side by side 8 um apart (a 2 um gap, bonded), and fiber C overlapping B from below and the
+    side, so contact pushes B up and away from A."""
+    s = np.arange(4.0, 61.0)
+    line = lambda y, z: np.stack([s, np.full_like(s, y), np.full_like(s, z)], 1)  # noqa: E731
+    fit = _fit([line(24.0, 32.0), line(32.0, 32.0), line(30.0, 29.0)])
+    bond = {"fibers": (0, 1), "position": np.array([32.0, 28.0, 32.0])}
+    return replace(fit, bonds=[bond])
+
+
+@pytest.mark.skipif(not GPU, reason="Tangle's solve runs on the GPU")
+def test_bond_stiffness_keeps_bonded_fibers_together():
+    fit = _pushed_off_its_bond()
+    free, _ = fit.relax()
+    held, run = fit.relax(bond_stiffness=0.5)
+    assert run.max_penetration < 0.1 * 6 * UM
+    assert held.history[-1]["bonds_tethered"] == 1 and free.history[-1]["bonds_tethered"] == 0
+    loose, tight = free.bonds[0]["gap_growth"], held.bonds[0]["gap_growth"]
+    assert loose > 0.3, loose  # B moved away from A
+    assert tight < 0.5 * loose, (tight, loose)  # the bond held A and B together
+    held.to_assembly()
+
+
+def test_bonds_become_junctions_at_the_same_share_of_each_fiber():
+    fit = _pushed_off_its_bond()
+    assembly = fit.to_assembly()
+    assert fit._add_bonds(assembly, fit.centerlines) == 1
+    assert assembly.bond_count == 1
+    # A bond on a pair that already has one is not added twice.
+    twice = replace(fit, bonds=fit.bonds * 2)
+    assembly = twice.to_assembly()
+    assert twice._add_bonds(assembly, twice.centerlines) == 1
+    with pytest.raises(ValueError):
+        fit.relax(bond_stiffness=2.0)
