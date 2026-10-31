@@ -1187,17 +1187,31 @@ def _carry_binder(binder: np.ndarray | None, old: list[np.ndarray], new: list[np
     # Each candidate voxel carries a share of the binder's volume. Where fibers pull apart, several voxels trace
     # back to one source: each gets 1/k of it, so stretched binder thins instead of growing. Where binder is
     # squeezed, several sources land on one voxel and the gather sees only one of them: a voxel where binder
-    # landed but that traced back elsewhere counts whole, so squeezed binder isn't lost. The shares are scaled to
-    # the binder's voxel count (none above one), and a running sum keeps one voxel per whole unit, evenly.
+    # landed but that traced back elsewhere counts whole, so squeezed binder isn't lost. Whole voxels are kept;
+    # the shares are scaled so the total is the binder's voxel count (none above one), and a running sum keeps one
+    # voxel per whole unit of them, evenly.
     weight = near[z, y, x].astype(np.float64)
     gathered = np.flatnonzero(found)
     _, group, k = np.unique(np.ravel_multi_index(cells[gathered].T[::-1], binder.shape), return_inverse=True,
                             return_counts=True)
     weight[gathered] = 1.0 / k[group]
-    if weight.sum() > 0:
-        weight = np.minimum(1.0, weight * np.count_nonzero(binder) / weight.sum())
-    total = np.cumsum(weight)
-    keep = np.flatnonzero(np.floor(total + 1e-9) > np.floor(total - weight + 1e-9))
+    whole = weight >= 1.0
+    part = np.flatnonzero((weight > 0.0) & ~whole)
+    budget = max(np.count_nonzero(binder) - int(whole.sum()), 0)
+    share = weight[part]
+    for _ in range(32):  # scale to the budget; what the cap at one clips goes to the rest
+        if share.sum() <= 0.0 or abs(share.sum() - budget) < 1e-6:
+            break
+        free = share < 1.0
+        rest = budget - (len(share) - free.sum())
+        if rest <= 0 or share[free].sum() <= 0.0:
+            share[free] = 0.0
+            break
+        share[free] *= rest / share[free].sum()
+        share = np.minimum(share, 1.0)
+    total = np.cumsum(share)
+    picked = part[np.floor(total + 0.5) > np.floor(total - share + 0.5)]
+    keep = np.concatenate([np.flatnonzero(whole), picked])
     out = np.zeros_like(binder, dtype=bool)
     out[z[keep], y[keep], x[keep]] = True
     return out
