@@ -96,9 +96,11 @@ def sweep_mesh(
             fiber_b, point_b)`` for each bond, fibers as indices into the
             assembly's fibers and points in meters on their centerlines (for
             a CT fit, ``fem.fit_bonds(fit)`` with ``fit.to_assembly()``).
-            Not with ``bond_radius_ratio``. Bonds whose fibers' sides cannot
-            take a bridge (they are crowded by other bonds, too near a
-            fiber's end or a wall, or the sides overlap) are left out, with a
+            Not with ``bond_radius_ratio``. Bonds close together along a
+            fiber share its pair of sections, each on its own side; a bond
+            near a fiber's end moves inward until its sides fit. Bonds that
+            still cannot take a bridge (their sides are taken, a wall cuts
+            them, or the two fibers' sides overlap) are left out, with a
             warning.
 
     Returns:
@@ -164,7 +166,7 @@ def sweep_mesh(
     bridge_ends = _bridge_ends(assembly, centerlines, bridges) if bridges is not None and bridges is not False else []
     scale = math.sqrt(2.0 * math.pi / (nodes_around * math.sin(2.0 * math.pi / nodes_around)))
     half_sides = [scale * short * math.sin(math.pi / nodes_around) for _, short in semi_axes]
-    facing_of = {}  # (fiber, low arc) -> (bridge, end, high arc, unit direction toward the other fiber)
+    on_fiber = [[] for _ in centerlines]  # (arc, bridge, end, unit direction toward the other fiber)
     for bridge, ends in enumerate(bridge_ends):
         for end, (fiber, arc) in enumerate(ends):
             other_fiber, other_arc = ends[1 - end]
@@ -174,10 +176,32 @@ def sweep_mesh(
             for axis in range(3):
                 if periodic[axis]:
                     toward[axis] -= round(toward[axis] / lengths[axis]) * lengths[axis]
-            low, high = arc - half_sides[fiber], arc + half_sides[fiber]
-            if low <= 0.0 or high >= _arc_lengths(centerlines[fiber])[-1] or np.linalg.norm(toward) <= 0.0:
-                continue
-            facing_of[(fiber, low)] = (bridge, end, high, toward / np.linalg.norm(toward))
+            if np.linalg.norm(toward) > 0.0:
+                on_fiber[fiber].append((arc, bridge, end, toward / np.linalg.norm(toward)))
+    # Bonds whose sides along one fiber would overlap share one pair of sections, each on its own side of
+    # them; a pair near a fiber's end moves inward until it fits.
+    facing_of = {}  # (fiber, low arc) -> (high arc, [(bridge, end, direction)], the first turning the sections)
+    for fiber, found in enumerate(on_fiber):
+        if not found:
+            continue
+        half, (long, short) = half_sides[fiber], semi_axes[fiber]
+        length, margin = _arc_lengths(centerlines[fiber])[-1], 0.05 * (long + short)
+        if length < 2.0 * (half + margin):
+            continue
+        groups = []
+        for item in sorted(found, key=lambda item: item[0]):
+            if groups and item[0] - groups[-1][0][0] < 2.0 * half + margin:
+                groups[-1].append(item)
+            else:
+                groups.append([item])
+        previous_high = -math.inf
+        for group in groups:
+            middle = float(np.clip(np.mean([item[0] for item in group]), half + margin, length - half - margin))
+            low, high = middle - half, middle + half
+            if low < previous_high + margin:
+                continue  # crowded against the group before: left out
+            previous_high = high
+            facing_of[(fiber, low)] = (high, [item[1:] for item in group])
             forced[fiber] += [low, high]
     bridge_images = {}  # (bridge, end) -> [(low section nodes, high section nodes, facing side, bond position)]
 
@@ -207,22 +231,24 @@ def sweep_mesh(
                 reach[1] = 0.0
             stations = _stations(points, arcs, start, end, kept, spacing, bend_tolerance * short, gap, reach)
             facing, wanted = {}, []  # station index -> direction its flat side faces; the bridges here
-            for (bridge_fiber, low), (bridge, bridge_end, high, toward) in facing_of.items():
+            for (bridge_fiber, low), (high, members) in facing_of.items():
                 if bridge_fiber != fiber or not (start < low and high < end):
                     continue
                 first, second = np.searchsorted(stations, [low - 1e-9 * spacing, high - 1e-9 * spacing])
                 if (second != first + 1 or second >= len(stations) or abs(stations[first] - low) > 1e-9 * spacing
                         or abs(stations[second] - high) > 1e-9 * spacing or first in facing or second in facing):
                     continue  # another section lies between, or one of these already faces another bond
-                facing[first] = facing[second] = toward
-                wanted.append((bridge, bridge_end, first, (low + high) / 2.0))
+                facing[first] = facing[second] = [toward for _, _, toward in members]
+                wanted.append((members, first, (low + high) / 2.0))
             nodes, elements, outer, sides = _piece(points + shift, axes, arcs, stations, long, short, nodes_around,
                                                    start_wall if reach[0] else None, end_wall if reach[1] else None,
                                                    facing)
-            for bridge, bridge_end, first, middle in wanted:
+            for members, first, middle in wanted:
                 low_section = node_count + first * (nodes_around + 1) + np.arange(nodes_around + 1)
-                bridge_images.setdefault((bridge, bridge_end), []).append(
-                    (low_section, low_section + nodes_around + 1, sides[first], _at(points, arcs, middle) + shift))
+                for (bridge, bridge_end, _), side in zip(members, sides[first]):
+                    if side is not None:
+                        bridge_images.setdefault((bridge, bridge_end), []).append(
+                            (low_section, low_section + nodes_around + 1, side, _at(points, arcs, middle) + shift))
             node_blocks.append(nodes)
             element_blocks.append(elements + node_count)
             block_fibers.append(np.full(len(elements), fiber, dtype=np.int64))
@@ -446,11 +472,12 @@ def _stations(points, arcs, start, end, forced, spacing, tolerance, gap, clear=(
 def _piece(points, axes, arcs, stations, long, short, around, start_wall, end_wall, facing=None):
     """Nodes, wedges and ``(wedge, face)`` surface faces of one stretch of a
     fiber with sections at these arc lengths, and for each station of
-    ``facing`` (station index -> a direction) the side ``k`` (between its
-    outline nodes ``k`` and ``k + 1``) that faces that way. Each section is
+    ``facing`` (station index -> directions) the side ``k`` (between its
+    outline nodes ``k`` and ``k + 1``) that faces each direction, or None
+    when an earlier direction has that side. Each section is
     its middle node, then ``around`` nodes counterclockwise seen from the
     next one. A round fiber's facing sections turn, by at most half a side,
-    so that a side faces the direction squarely."""
+    so that a side faces the first direction squarely."""
     facing = facing or {}
     centers = np.array([_at(points, arcs, arc) for arc in stations])
     steps = np.diff(centers, axis=0)
@@ -470,21 +497,33 @@ def _piece(points, axes, arcs, stations, long, short, around, start_wall, end_wa
     across = np.cross(tangents, directions)
     angles = 2.0 * math.pi * np.arange(around) / around
     sides = {}
-    for index, toward in sorted(facing.items()):
-        angle = math.atan2(float(toward @ across[index]), float(toward @ directions[index]))
-        same = index - 1 in sides and facing[index - 1] is toward  # the other section of the same bond
+    middles = angles + math.pi / around  # where each side faces, from the section's direction
+    for index, towards in sorted(facing.items()):
+        angles_toward = [math.atan2(float(toward @ across[index]), float(toward @ directions[index]))
+                         for toward in towards]
+        same = index - 1 in sides and facing[index - 1] is towards  # the other section of the same bonds
+        angle = angles_toward[0]
         if oval:  # an oval's outline keeps its long axis: the side nearest the direction
-            middles = angles + math.pi / around
-            sides[index] = sides[index - 1] if same else int(np.argmax(np.cos(middles - angle)))
-        else:  # turn the section by at most half a side so that a side faces it squarely
+            side = sides[index - 1][0] if same else int(np.argmax(np.cos(middles - angle)))
+            turn = 0.0
+        else:  # turn the section by at most half a side so that a side faces the first bond squarely
             side = round((angle - math.pi / around) / (2.0 * math.pi / around))
-            if same:  # the side the bond's other section turned to, whichever way this one rounds
-                step = (sides[index - 1] - side) % around
+            if same:  # the side the bonds' other section turned to, whichever way this one rounds
+                step = (sides[index - 1][0] - side) % around
                 side += step - around if step > around / 2 else step
             turn = angle - 2.0 * math.pi * (side + 0.5) / around
             turned = math.cos(turn) * directions[index] + math.sin(turn) * across[index]
             directions[index], across[index] = turned, np.cross(tangents[index], turned)
-            sides[index] = side % around
+            side %= around
+        if same:
+            sides[index] = list(sides[index - 1])
+            continue
+        # Each other bond here takes the side nearest it, unless an earlier bond has that side.
+        chosen = [side]
+        for other in angles_toward[1:]:
+            nearest = int(np.argmax(np.cos(middles + turn - other)))
+            chosen.append(None if nearest in chosen else nearest)
+        sides[index] = chosen
     scale = math.sqrt(2.0 * math.pi / (around * math.sin(2.0 * math.pi / around)))  # the polygon's area is the outline's
     outline = scale * np.stack([long * np.cos(angles), short * np.sin(angles)], axis=1)
     rim = (centers[:, None, :] + outline[None, :, :1] * directions[:, None, :]
