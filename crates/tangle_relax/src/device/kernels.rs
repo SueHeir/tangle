@@ -1199,7 +1199,17 @@ fn project_curvature_triplet_in_place(
             let sine_half = 0.25 * maximum_curvature * (first_length + second_length);
             if sine_half < 1.0 {
                 let minimum_cosine = 1.0 - 2.0 * sine_half * sine_half;
-                let violation = minimum_cosine - cosine;
+                let mut violation = minimum_cosine - cosine;
+                // The constraint is linearized in the turning angle, not its
+                // cosine: one projection of a kink well past the limit then
+                // removes the whole excess angle instead of about half of it,
+                // because the cosine flattens out near a straight line.
+                // Near a full reversal the angle's gradient vanishes, so keep
+                // the cosine there.
+                let sine = (1.0 - cosine * cosine).max(0.0).sqrt();
+                if violation > 0.0 && sine > 1.0e-3_f32 {
+                    violation = (cosine.acos() - minimum_cosine.acos()) * sine;
+                }
                 if violation > 0.0 {
                     let gux = (vnx - cosine * unx) / first_length;
                     let guy = (vny - cosine * uny) / first_length;
