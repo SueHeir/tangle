@@ -21,9 +21,10 @@ classifiers = [
 [project.optional-dependencies]
 # The core package needs nothing else. tangle.ct (CT fitting) needs NumPy and
 # SciPy; tifffile and matplotlib write its TIFF and PNG outputs. tangle.fem
-# (Nastran and Abaqus meshes) needs NumPy, and gmsh for tetrahedra.
+# (Nastran and Abaqus meshes) needs NumPy, gmsh for tetrahedra, and SciPy for
+# conformal_mesh.
 ct = ["numpy>=1.24", "scipy>=1.10", "tifffile", "matplotlib"]
-fem = ["numpy>=1.24", "gmsh>=4.11"]
+fem = ["numpy>=1.24", "scipy>=1.10", "gmsh>=4.11"]
 
 [tool.maturin]
 module-name = "tangle._tangle"

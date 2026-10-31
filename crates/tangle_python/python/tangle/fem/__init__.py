@@ -14,6 +14,11 @@ Three meshers return the same :class:`FemMesh`:
     diameters apart. ``bond_radius_ratio=`` adds each junction's bond as a
     beam (:class:`Bonds`); ``binder=`` adds binder voxels as wedges, tied to
     the fibers.
+``conformal_mesh(assembly, bonds)``
+    Experimental: fibers and a smooth binder bridge at each bond fragmented
+    in one gmsh model, so binder and fibers share nodes and need no ties;
+    ``binder=`` meshes a binder mask the same way, coarsely. No tetrahedron
+    comes out flatter than ``min_quality`` (see ``tet_quality``).
 
 Write a mesh with ``mesh.write_nastran("fibers.bdf")`` (bulk data: ``GRID``,
 ``CHEXA``, ``CTETRA`` or ``CPENTA``, ``PSOLID``, ``MAT1``, and ``MPC`` ties
@@ -24,9 +29,13 @@ ParaView. The module needs NumPy; ``tet_mesh`` also needs gmsh.
 See ``docs/fem_export.md``.
 """
 
+from ._conformal import assembly_bonds, conformal_mesh, fit_bonds, tet_quality
 from ._hex import hex_mesh
 from ._mesh import Bonds, ElasticMaterial, FemMesh, Tie
 from ._sweep import sweep_mesh
 from ._tet import tet_mesh
 
-__all__ = ["Bonds", "ElasticMaterial", "FemMesh", "Tie", "hex_mesh", "sweep_mesh", "tet_mesh"]
+__all__ = [
+    "Bonds", "ElasticMaterial", "FemMesh", "Tie", "assembly_bonds", "conformal_mesh", "fit_bonds", "hex_mesh",
+    "sweep_mesh", "tet_mesh", "tet_quality",
+]

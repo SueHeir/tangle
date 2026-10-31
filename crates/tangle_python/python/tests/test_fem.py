@@ -923,6 +923,32 @@ class SweepMeshTests(unittest.TestCase):
             self.assertEqual(arrays["types"][-1], 3)  # VTK_LINE
             np.testing.assert_array_equal(arrays["connectivity"][-2:], bonds.beams[0])
 
+    def test_bridges_are_binder_wedges_on_the_fibers_own_facing_sides(self):
+        assembly = touching_cross()
+        with mock.patch.object(sweep_module._tangle, "fem_bond_anchors", return_value=[(7, 0, 0, 0.5, 1, 0, 0.5)]):
+            mesh = fem.sweep_mesh(assembly, bridges=True)
+        given = fem.sweep_mesh(assembly, bridges=[(0, (0.5, 0.5, 0.4), 1, (0.5, 0.5, 0.6))])
+        for current in (mesh, given):
+            self.assertEqual(current.element_type, "penta6")
+            self.assertEqual(current.materials, ("fiber", "binder"))
+            self.assertIsNone(current.bonds)
+            self.assertEqual(current.ties, ())
+            self.assertTrue((current.element_volumes() > 0).all())
+            binder = current.element_materials == 1
+            self.assertEqual(int(binder.sum()), 2)
+            self.assertTrue((current.element_fibers[binder] == 0).all())
+            # The binder's nodes are all the fibers': half on each, on a flat side facing the other fiber.
+            fiber_nodes = [set(current.elements[current.element_fibers == fiber_id].ravel().tolist())
+                           for fiber_id in sorted(set(current.element_fibers[~binder].tolist()))]
+            binder_nodes = set(current.elements[binder].ravel().tolist())
+            self.assertEqual([len(binder_nodes & nodes) for nodes in fiber_nodes], [4, 4])
+            heights = np.sort(np.unique(np.round(current.nodes[sorted(binder_nodes), 2], 9)))
+            self.assertEqual(len(heights), 2)
+            apothem = 0.1 * math.sqrt(2 * math.pi / (6 * math.sin(math.pi / 3))) * math.cos(math.pi / 6)
+            np.testing.assert_allclose(heights, [0.4 + apothem, 0.6 - apothem])
+        with self.assertRaises(ValueError):
+            fem.sweep_mesh(assembly, bridges=True, bond_radius_ratio=0.5)
+
     def test_a_bond_across_a_periodic_wall_stops_at_the_wall_on_both_sides(self):
         # Fiber 1 along y at x = 0.05 and fiber 2 along z at x = 0.85: 0.2 apart through the x wall.
         assembly = assembly_of([1.0, 1.0, 1.0], [[[0.05, 0.2, 0.5], [0.05, 0.8, 0.5]], [[0.85, 0.5, 0.2], [0.85, 0.5, 0.8]]],
@@ -1001,3 +1027,43 @@ class SweepMeshTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(fem is None or gmsh is None, "tangle.fem.conformal_mesh needs NumPy, SciPy and gmsh")
+class ConformalBinderTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.binder = np.zeros((20, 20, 20), dtype=bool)  # (z, y, x): a block around the crossing
+        cls.binder[7:13, 7:13, 7:13] = True
+        cls.mesh = fem.conformal_mesh(touching_cross(), binder=cls.binder, voxel_size=0.05, elements_around=6,
+                                      progress=False)
+        cls.is_binder = cls.mesh.element_fibers == 0
+
+    def test_the_mask_becomes_binder_tetrahedra_of_about_its_volume(self):
+        mesh = self.mesh
+        self.assertTrue(self.is_binder.any())
+        self.assertEqual(mesh.materials[-1], "binder")
+        self.assertTrue((mesh.element_materials[self.is_binder] == len(mesh.materials) - 1).all())
+        volumes = mesh.element_volumes()
+        self.assertTrue((volumes > 0).all())
+        # The block less the fibers inside it, roughly: its elements are a third of the block across.
+        centers = (np.argwhere(self.binder)[:, ::-1] + 0.5) * 0.05
+        outside = np.min([np.abs(distance) for distance in axis_distances(centers)], axis=0) > 0.1
+        self.assertAlmostEqual(volumes[self.is_binder].sum() / (outside.sum() * 0.05**3), 1.0, delta=0.4)
+
+    def test_the_binder_shares_nodes_with_both_fibers(self):
+        mesh = self.mesh
+        binder_nodes = set(mesh.elements[self.is_binder].ravel().tolist())
+        for fiber in (1, 2):
+            fiber_nodes = set(mesh.elements[mesh.element_fibers == fiber].ravel().tolist())
+            self.assertTrue(binder_nodes & fiber_nodes, f"no node shared with fiber {fiber}")
+        self.assertEqual(mesh.ties, ())
+
+    def test_no_tetrahedron_is_flatter_than_min_quality(self):
+        self.assertGreaterEqual(fem.tet_quality(self.mesh.nodes, self.mesh.elements).min(), 0.02)
+
+    def test_a_mask_that_does_not_fit_the_cell_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "whole cell"):
+            fem.conformal_mesh(touching_cross(), binder=self.binder, voxel_size=0.04, progress=False)
+        with self.assertRaisesRegex(ValueError, "voxel_size"):
+            fem.conformal_mesh(touching_cross(), binder=self.binder, progress=False)

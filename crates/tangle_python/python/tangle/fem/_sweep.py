@@ -36,6 +36,7 @@ def sweep_mesh(
     bond_radius_ratio: float | None = None,
     binder=None,
     voxel_size: float | None = None,
+    bridges=None,
 ) -> FemMesh:
     """Mesh each fiber with few wedges: a cross-section of ``nodes_around``
     nodes on its surface and one in its middle every so often along the
@@ -60,6 +61,13 @@ def sweep_mesh(
     Nastran file writes as ``MPC`` equations and the Abaqus file as a
     ``*TIE``.
 
+    Bonds can instead be solid binder that shares the fibers' nodes
+    (``bridges``): each becomes two binder wedges between the two fibers.
+    Each fiber gets a section half a side on either side of the bond, turned
+    so a flat side faces the other fiber, and the binder's two quadrilateral
+    faces are those sides of the fibers' own wedges. The mesh then needs no
+    ties and no beams, and stays as coarse as the fibers'.
+
     Args:
         assembly: an ``Assembly`` or a recipe's ``RunResult``.
         nodes_around: nodes on each section's outline; with the middle one,
@@ -83,6 +91,17 @@ def sweep_mesh(
             divide every cell length. By default, a whole number of the
             mask's voxels as near as that allows to the fibers' smaller
             radius (their median).
+        bridges: also mesh bonds as solid binder bridges: ``True`` for the
+            assembly's persistent junctions, or ``(fiber_a, point_a,
+            fiber_b, point_b)`` for each bond, fibers as indices into the
+            assembly's fibers and points in meters on their centerlines (for
+            a CT fit, ``fem.fit_bonds(fit)`` with ``fit.to_assembly()``).
+            Not with ``bond_radius_ratio``. Bonds close together along a
+            fiber share its pair of sections, each on its own side; a bond
+            near a fiber's end moves inward until its sides fit. Bonds that
+            still cannot take a bridge (their sides are taken, a wall cuts
+            them, or the two fibers' sides overlap) are left out, with a
+            warning.
 
     Returns:
         A :class:`FemMesh` of ``"penta6"`` elements, with :attr:`FemMesh.bonds`
@@ -95,6 +114,8 @@ def sweep_mesh(
             raise ValueError(f"{name} must be finite and positive")
     if bond_radius_ratio is not None and not (math.isfinite(bond_radius_ratio) and bond_radius_ratio > 0.0):
         raise ValueError("bond_radius_ratio must be finite and positive")
+    if bridges is not None and bridges is not False and bond_radius_ratio is not None:
+        raise ValueError("bridges and bond_radius_ratio both mesh the bonds; pass one of them")
     if voxel_size is not None and binder is None:
         raise ValueError("voxel_size only sets the binder's voxels; pass binder with it")
     if binder is not None and not clip_to_cell:
@@ -140,6 +161,50 @@ def sweep_mesh(
         for fiber, arc in anchors:
             forced[fiber].append(arc)
 
+    # Each bridge's two ends: (fiber, arc length of the bond on it), and the
+    # sections half a side before and after it on each fiber.
+    bridge_ends = _bridge_ends(assembly, centerlines, bridges) if bridges is not None and bridges is not False else []
+    scale = math.sqrt(2.0 * math.pi / (nodes_around * math.sin(2.0 * math.pi / nodes_around)))
+    half_sides = [scale * short * math.sin(math.pi / nodes_around) for _, short in semi_axes]
+    on_fiber = [[] for _ in centerlines]  # (arc, bridge, end, unit direction toward the other fiber)
+    for bridge, ends in enumerate(bridge_ends):
+        for end, (fiber, arc) in enumerate(ends):
+            other_fiber, other_arc = ends[1 - end]
+            here = _at(centerlines[fiber], _arc_lengths(centerlines[fiber]), arc)
+            there = _at(centerlines[other_fiber], _arc_lengths(centerlines[other_fiber]), other_arc)
+            toward = there - here
+            for axis in range(3):
+                if periodic[axis]:
+                    toward[axis] -= round(toward[axis] / lengths[axis]) * lengths[axis]
+            if np.linalg.norm(toward) > 0.0:
+                on_fiber[fiber].append((arc, bridge, end, toward / np.linalg.norm(toward)))
+    # Bonds whose sides along one fiber would overlap share one pair of sections, each on its own side of
+    # them; a pair near a fiber's end moves inward until it fits.
+    facing_of = {}  # (fiber, low arc) -> (high arc, [(bridge, end, direction)], the first turning the sections)
+    for fiber, found in enumerate(on_fiber):
+        if not found:
+            continue
+        half, (long, short) = half_sides[fiber], semi_axes[fiber]
+        length, margin = _arc_lengths(centerlines[fiber])[-1], 0.05 * (long + short)
+        if length < 2.0 * (half + margin):
+            continue
+        groups = []
+        for item in sorted(found, key=lambda item: item[0]):
+            if groups and item[0] - groups[-1][0][0] < 2.0 * half + margin:
+                groups[-1].append(item)
+            else:
+                groups.append([item])
+        previous_high = -math.inf
+        for group in groups:
+            middle = float(np.clip(np.mean([item[0] for item in group]), half + margin, length - half - margin))
+            low, high = middle - half, middle + half
+            if low < previous_high + margin:
+                continue  # crowded against the group before: left out
+            previous_high = high
+            facing_of[(fiber, low)] = (high, [item[1:] for item in group])
+            forced[fiber] += [low, high]
+    bridge_images = {}  # (bridge, end) -> [(low section nodes, high section nodes, facing side, bond position)]
+
     node_blocks, element_blocks, block_fibers, surfaces = [], [], [], []
     stations_at = {}  # (fiber, arc) -> [(section nodes, middle position)], one per image in the cell
     node_count = element_count = 0
@@ -165,8 +230,25 @@ def sweep_mesh(
             if any(end - reach[1] < arc < end for arc in kept):
                 reach[1] = 0.0
             stations = _stations(points, arcs, start, end, kept, spacing, bend_tolerance * short, gap, reach)
-            nodes, elements, outer = _piece(points + shift, axes, arcs, stations, long, short, nodes_around,
-                                            start_wall if reach[0] else None, end_wall if reach[1] else None)
+            facing, wanted = {}, []  # station index -> direction its flat side faces; the bridges here
+            for (bridge_fiber, low), (high, members) in facing_of.items():
+                if bridge_fiber != fiber or not (start < low and high < end):
+                    continue
+                first, second = np.searchsorted(stations, [low - 1e-9 * spacing, high - 1e-9 * spacing])
+                if (second != first + 1 or second >= len(stations) or abs(stations[first] - low) > 1e-9 * spacing
+                        or abs(stations[second] - high) > 1e-9 * spacing or first in facing or second in facing):
+                    continue  # another section lies between, or one of these already faces another bond
+                facing[first] = facing[second] = [toward for _, _, toward in members]
+                wanted.append((members, first, (low + high) / 2.0))
+            nodes, elements, outer, sides = _piece(points + shift, axes, arcs, stations, long, short, nodes_around,
+                                                   start_wall if reach[0] else None, end_wall if reach[1] else None,
+                                                   facing)
+            for members, first, middle in wanted:
+                low_section = node_count + first * (nodes_around + 1) + np.arange(nodes_around + 1)
+                for (bridge, bridge_end, _), side in zip(members, sides[first]):
+                    if side is not None:
+                        bridge_images.setdefault((bridge, bridge_end), []).append(
+                            (low_section, low_section + nodes_around + 1, side, _at(points, arcs, middle) + shift))
             node_blocks.append(nodes)
             element_blocks.append(elements + node_count)
             block_fibers.append(np.full(len(elements), fiber, dtype=np.int64))
@@ -203,11 +285,20 @@ def sweep_mesh(
         element_materials = np.concatenate(
             [element_materials, np.full(len(binder_elements), binder_material, dtype=np.int64)]
         )
+    if bridge_ends:
+        binder_nodes = _bridge_wedges(nodes, bridge_ends, bridge_images, centerlines, semi_axes, nodes_around,
+                                      lengths, periodic)
+        if len(binder_nodes):
+            elements = np.concatenate([elements, binder_nodes])
+            element_fibers = np.concatenate([element_fibers, np.zeros(len(binder_nodes), dtype=np.int64)])
+            element_materials = np.concatenate(
+                [element_materials, np.full(len(binder_nodes), binder_material, dtype=np.int64)]
+            )
     beams = None
     if bonds:
         nodes, beams = _bond_beams(nodes, bonds, stations_at, centerlines, semi_axes, bond_radius_ratio,
                                    origin, lengths, periodic, clip_to_cell, binder_material)
-    if binder_mesh is not None or beams is not None:
+    if binder_mesh is not None or beams is not None or (element_materials == binder_material).any():
         materials = (*materials, binder_name(materials))
 
     sequence = np.lexsort((np.arange(len(elements)), element_fibers, element_materials))
@@ -378,10 +469,16 @@ def _stations(points, arcs, start, end, forced, spacing, tolerance, gap, clear=(
     return np.asarray(stations)
 
 
-def _piece(points, axes, arcs, stations, long, short, around, start_wall, end_wall):
+def _piece(points, axes, arcs, stations, long, short, around, start_wall, end_wall, facing=None):
     """Nodes, wedges and ``(wedge, face)`` surface faces of one stretch of a
-    fiber with sections at these arc lengths. Each section is its middle
-    node, then ``around`` nodes counterclockwise seen from the next one."""
+    fiber with sections at these arc lengths, and for each station of
+    ``facing`` (station index -> directions) the side ``k`` (between its
+    outline nodes ``k`` and ``k + 1``) that faces each direction, or None
+    when an earlier direction has that side. Each section is
+    its middle node, then ``around`` nodes counterclockwise seen from the
+    next one. A round fiber's facing sections turn, by at most half a side,
+    so that a side faces the first direction squarely."""
+    facing = facing or {}
     centers = np.array([_at(points, arcs, arc) for arc in stations])
     steps = np.diff(centers, axis=0)
     steps /= np.linalg.norm(steps, axis=1)[:, None]
@@ -399,6 +496,34 @@ def _piece(points, axes, arcs, stations, long, short, around, start_wall, end_wa
     directions = _section_directions(tangents, long_axes)
     across = np.cross(tangents, directions)
     angles = 2.0 * math.pi * np.arange(around) / around
+    sides = {}
+    middles = angles + math.pi / around  # where each side faces, from the section's direction
+    for index, towards in sorted(facing.items()):
+        angles_toward = [math.atan2(float(toward @ across[index]), float(toward @ directions[index]))
+                         for toward in towards]
+        same = index - 1 in sides and facing[index - 1] is towards  # the other section of the same bonds
+        angle = angles_toward[0]
+        if oval:  # an oval's outline keeps its long axis: the side nearest the direction
+            side = sides[index - 1][0] if same else int(np.argmax(np.cos(middles - angle)))
+            turn = 0.0
+        else:  # turn the section by at most half a side so that a side faces the first bond squarely
+            side = round((angle - math.pi / around) / (2.0 * math.pi / around))
+            if same:  # the side the bonds' other section turned to, whichever way this one rounds
+                step = (sides[index - 1][0] - side) % around
+                side += step - around if step > around / 2 else step
+            turn = angle - 2.0 * math.pi * (side + 0.5) / around
+            turned = math.cos(turn) * directions[index] + math.sin(turn) * across[index]
+            directions[index], across[index] = turned, np.cross(tangents[index], turned)
+            side %= around
+        if same:
+            sides[index] = list(sides[index - 1])
+            continue
+        # Each other bond here takes the side nearest it, unless an earlier bond has that side.
+        chosen = [side]
+        for other in angles_toward[1:]:
+            nearest = int(np.argmax(np.cos(middles + turn - other)))
+            chosen.append(None if nearest in chosen else nearest)
+        sides[index] = chosen
     scale = math.sqrt(2.0 * math.pi / (around * math.sin(2.0 * math.pi / around)))  # the polygon's area is the outline's
     outline = scale * np.stack([long * np.cos(angles), short * np.sin(angles)], axis=1)
     rim = (centers[:, None, :] + outline[None, :, :1] * directions[:, None, :]
@@ -438,7 +563,123 @@ def _piece(points, axes, arcs, stations, long, short, around, start_wall, end_wa
     outer = [np.stack([wedges, np.full(len(wedges), SIDE_FACE)], axis=1),
              np.stack([wedges[:around], np.full(around, START_FACE)], axis=1),
              np.stack([wedges[-around:], np.full(around, END_FACE)], axis=1)]
-    return nodes, elements, np.concatenate(outer)
+    return nodes, elements, np.concatenate(outer), sides
+
+
+def _bridge_ends(assembly, centerlines, bridges) -> list:
+    """``((fiber, arc), (fiber, arc))`` for each bond: where it holds each of
+    its two fibers, as an arc length along the centerline."""
+    ends = []
+    if bridges is True:
+        for _, *anchors in _tangle.fem_bond_anchors(assembly):
+            pair = []
+            for fiber, segment, coordinate in (anchors[:3], anchors[3:]):
+                arcs = _arc_lengths(centerlines[fiber])
+                pair.append((fiber, arcs[segment] + coordinate * (arcs[segment + 1] - arcs[segment])))
+            ends.append(tuple(pair))
+        return ends
+    for fiber_a, point_a, fiber_b, point_b in bridges:
+        pair = []
+        for fiber, point in ((int(fiber_a), point_a), (int(fiber_b), point_b)):
+            if not 0 <= fiber < len(centerlines):
+                raise ValueError(f"a bridge names fiber {fiber}, and the assembly has {len(centerlines)}")
+            pair.append((fiber, _nearest_arc(centerlines[fiber], np.asarray(point, dtype=float))))
+        ends.append(tuple(pair))
+    return ends
+
+
+def _nearest_arc(points: np.ndarray, point: np.ndarray) -> float:
+    """The arc length of the point of the polyline nearest ``point``."""
+    start, step = points[:-1], np.diff(points, axis=0)
+    t = np.clip(((point - start) * step).sum(axis=1) / np.maximum((step * step).sum(axis=1), 1e-300), 0.0, 1.0)
+    k = int(np.argmin(np.linalg.norm(start + t[:, None] * step - point, axis=1)))
+    return float(_arc_lengths(points)[k] + t[k] * np.linalg.norm(step[k]))
+
+
+def _bridge_wedges(nodes, bridge_ends, images, centerlines, semi_axes, around, lengths, periodic) -> np.ndarray:
+    """Two binder wedges for each bridge whose two ends both have their
+    sides in the mesh: a hexahedron from the side of one fiber's wedge that
+    faces the other fiber to the side of the other's that faces back, cut
+    into two wedges that keep those sides whole, so the binder shares its
+    nodes with both fibers. Bridges that cannot take one are counted and
+    left out with a warning."""
+    import warnings
+
+    wedges, missing = [], 0
+    scale = float(lengths.max())
+    for bridge, ((fiber_a, arc_a), (fiber_b, arc_b)) in enumerate(bridge_ends):
+        firsts, seconds = images.get((bridge, 0), []), images.get((bridge, 1), [])
+        if not firsts or not seconds:
+            missing += 1
+            continue
+        delta = (_at(centerlines[fiber_b], _arc_lengths(centerlines[fiber_b]), arc_b)
+                 - _at(centerlines[fiber_a], _arc_lengths(centerlines[fiber_a]), arc_a))
+        for axis in range(3):
+            if periodic[axis]:
+                delta[axis] -= round(delta[axis] / lengths[axis]) * lengths[axis]
+        made = False
+        for low_a, high_a, side_a, here in firsts:
+            # The image of the other end nearest where the bond reaches: the two fibers' middles of the bond
+            # are at most a little apart, not a cell length.
+            low_b, high_b, side_b, there = min(seconds, key=lambda image: np.linalg.norm(image[3] - here - delta))
+            if np.linalg.norm(there - here - delta) > 0.25 * scale:
+                continue
+            a = np.array([low_a[1 + side_a], high_a[1 + side_a], high_a[1 + (side_a + 1) % around],
+                          low_a[1 + (side_a + 1) % around]])
+            b = np.array([low_b[1 + side_b], high_b[1 + side_b], high_b[1 + (side_b + 1) % around],
+                          low_b[1 + (side_b + 1) % around]])
+            best = _bridge_split(nodes, a, b)
+            if best is None:
+                continue
+            wedges += best
+            made = True
+        missing += not made
+    if missing:
+        warnings.warn(f"sweep_mesh left out {missing} of {len(bridge_ends)} bridges: their fibers' sides could not "
+                      "take one (crowded by other bonds, near a fiber's end or a wall, or overlapping)", stacklevel=3)
+    return np.asarray(wedges, dtype=np.int64).reshape(-1, 6)
+
+
+def _bridge_split(nodes, a, b):
+    """Two wedges filling the hexahedron from quadrilateral ``a`` to ``b``
+    (each a fiber's side, in order around it), with ``b``'s corners matched
+    to ``a``'s across the gap, or None when no way of cutting it leaves both
+    wedges right side out at all six corners."""
+    best, best_score = None, 0.0
+    for order in (b, b[::-1]):
+        for turn in range(4):
+            matched = np.roll(order, turn)
+            for cut in range(4):  # the cut runs from a's edge (cut, cut + 1) to b's opposite edge
+                i = [(cut + k) % 4 for k in range(4)]
+                a0, a1, a2, a3 = a[i]
+                b0, b1, b2, b3 = matched[i]
+                pair = np.array([[a0, a3, b3, a1, a2, b2], [a0, b0, b3, a1, b1, b2]])
+                corners = _penta_corner_jacobians(nodes, pair)
+                signs = np.where(corners.sum(axis=1) < 0.0, -1.0, 1.0)
+                score = (corners * signs[:, None]).min()  # the worst corner of the two, right side out
+                if score > best_score:
+                    best_score = score
+                    best = [wedge.tolist() if sign > 0 else wedge[FLIP_PENTA].tolist()
+                            for wedge, sign in zip(pair, signs)]
+    return best
+
+
+def _penta_corner_jacobians(nodes, wedges) -> np.ndarray:
+    """Each wedge's scaled Jacobian at each of its six corners: the volume
+    of the corner's three edges over their lengths' product, positive when
+    the wedge is right side out there."""
+    corners = nodes[wedges]  # (wedge, corner, xyz)
+    result = np.empty(wedges.shape, dtype=float)
+    for corner in range(6):
+        level, place = divmod(corner, 3)
+        base = 3 * level
+        here = corners[:, corner]
+        edges = [corners[:, base + (place + 1) % 3] - here, corners[:, base + (place + 2) % 3] - here,
+                 (corners[:, place + 3] - corners[:, place]) * 1.0]
+        volume = np.einsum("ij,ij->i", edges[0], np.cross(edges[1], edges[2]))
+        lengths = np.prod([np.linalg.norm(edge, axis=1) for edge in edges], axis=0)
+        result[:, corner] = volume / np.maximum(lengths, 1e-300)
+    return result
 
 
 def _bond_beams(nodes, bonds, stations_at, centerlines, semi_axes, ratio, origin, lengths, periodic, clip,

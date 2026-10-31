@@ -2,21 +2,26 @@
 
 `tangle.fem` turns an assembly into a solid finite-element mesh and writes it
 as Nastran bulk data (`.bdf`) or as an Abaqus input file (`.inp`). There are
-three meshers, and all return the same `FemMesh`:
+four meshers, and all return the same `FemMesh`:
 
-| | `hex_mesh` | `tet_mesh` | `sweep_mesh` |
-|---|---|---|---|
-| Elements | 8-node hexahedra (`CHEXA`, `C3D8`) | 4- or 10-node tetrahedra (`CTETRA`, `C3D4` or `C3D10`) | 6-node wedges (`CPENTA`, `C3D6`) |
-| Fiber surface | voxel steps, like a CT scan | follows the round or oval surface (10-node elements curve with it) | a hexagon of the fiber's area, swept along the centerline |
-| Size | many elements | many elements | 6 wedges every few diameters |
-| Fibers that touch | share nodes, so they are bonded | separate bodies, so the solver needs contact or glue | separate bodies |
-| Bonds at junctions (`bond_radius_ratio`) | binder voxels | binder voxels, tied to the fibers | one beam per bond, tied to the two fibers' cross-sections |
-| Binder voxels (`binder`) | share nodes with the fibers | tetrahedra tied to the fibers | wedges tied to the fibers |
-| Needs | NumPy | NumPy and [gmsh](https://gmsh.info) | NumPy |
+| | `hex_mesh` | `tet_mesh` | `sweep_mesh` | `conformal_mesh` |
+|---|---|---|---|---|
+| Elements | 8-node hexahedra (`CHEXA`, `C3D8`) | 4- or 10-node tetrahedra (`CTETRA`, `C3D4` or `C3D10`) | 6-node wedges (`CPENTA`, `C3D6`) | 4- or 10-node tetrahedra |
+| Fiber surface | voxel steps, like a CT scan | follows the round or oval surface (10-node elements curve with it) | a hexagon of the fiber's area, swept along the centerline | follows the surface, faceted at the element size |
+| Size | many elements | many elements | 6 wedges every few diameters | coarse with `elements_around=5` or `6` |
+| Fibers that touch | share nodes, so they are bonded | separate bodies, so the solver needs contact or glue | separate bodies | share nodes where they overlap |
+| Bonds at junctions | binder voxels (`bond_radius_ratio`) | binder voxels, tied to the fibers | one beam per bond (`bond_radius_ratio`), or two binder wedges on the fibers' own sides (`bridges`) | a smooth bridge per bond, sharing nodes with the fibers |
+| Binder mask (`binder`) | shares nodes with the fibers | tetrahedra tied to the fibers | wedges tied to the fibers | smooth tetrahedra sharing nodes with the fibers |
+| Needs | NumPy | NumPy and [gmsh](https://gmsh.info) | NumPy | NumPy, gmsh and SciPy |
 
-Install the extras with `pip install numpy gmsh`, or `pip install "tangle[fem]"`.
-gmsh is GPL software that TANGLE calls but does not ship; `hex_mesh` and the
-writers work without it.
+For a Nastran model of a CT scan with its binder, `conformal_mesh` with the
+scan's binder mask is the one to start with: the binder and the fibers share
+nodes, so the `.bdf` needs no `MPC` ties, and the mesh is coarse. See
+[Conformal tetrahedra with binder](#conformal-tetrahedra-with-binder).
+
+Install the extras with `pip install numpy gmsh scipy`, or
+`pip install "tangle[fem]"`. gmsh is GPL software that TANGLE calls but does
+not ship; `hex_mesh`, `sweep_mesh` and the writers work without it.
 
 ## Quick start
 
@@ -238,6 +243,109 @@ mesh = fem.sweep_mesh(fit.to_assembly(), binder=fit.binder)
 mesh.write_nastran("scan.bdf")  # add MAT1 1 (fiber) and 2 (binder), or pass them
 ```
 
+### Bonds as binder wedges
+
+`bridges` makes each bond solid binder that shares the fibers' nodes, instead
+of a beam: `bridges=True` for the assembly's persistent junctions, or a list
+of `(fiber_a, point_a, fiber_b, point_b)` (fiber indices, points in meters on
+the centerlines), such as `fem.fit_bonds(fit)` for a CT fit's bonds. Each
+fiber gets a section half a side on either side of the bond, turned so a flat
+side faces the other fiber, and two binder wedges fill the space between the
+two facing sides. The binder's quadrilateral faces are the fibers' own wedge
+faces, so there are no ties and no beams, and the mesh stays as coarse as the
+fibers'.
+
+```python
+mesh = fem.sweep_mesh(assembly, bridges=True)
+```
+
+Each bridge is one side of the hexagon wide, and only as thick as the gap
+between the two hexagons' flat sides, about a tenth of a radius where fibers
+touch. It bonds the fibers, but it is not the shape of real binder; for a
+scan's webbed binder use `conformal_mesh` with the mask. Bonds close together
+along a fiber share its pair of sections, each on its own side, and a bond
+near a fiber's end moves inward until its sides fit. Bonds that still cannot
+take a bridge (their side is taken, a periodic wall cuts it, or the two
+fibers' sides overlap) are left out with a warning that counts them. Not with
+`bond_radius_ratio`.
+
+## Conformal tetrahedra with binder
+
+`conformal_mesh(assembly, bonds=None, *, binder=None, voxel_size=None,
+elements_around=8, order=1, region=None, min_quality=0.02,
+bond_radius_ratio=0.5)` meshes the fibers and their binder as one body in one
+gmsh model, so every fiber-binder face is shared: the binder's tetrahedra use
+the fibers' nodes, and the `.bdf` has no `MPC` ties.
+
+### From a binder mask
+
+With a binder mask, the binder is the mask's own shape. gmsh meshes the
+fibers and the space between them together; the tetrahedra of that space
+whose middles lie in the mask (smoothed by a voxel, read at the level that
+keeps its volume) become binder, and the rest are dropped, as is any piece of
+binder that no fiber holds. The binder's outer nodes then move onto the
+smoothed mask's surface. There are no voxel steps; the binder's outer surface
+is faceted at the element size.
+
+```python
+import tifffile
+from tangle import fem
+from tangle.ct import load_fit
+
+fit = load_fit("fit/fit.json")
+binder = tifffile.imread("fit/binder.tif") > 0  # or fit.binder from find_fibers with NetworkSettings(binder=True)
+mesh = fem.conformal_mesh(fit.to_assembly(), binder=binder, voxel_size=fit.voxel_size, elements_around=6)
+print(mesh)
+fiber = fem.ElasticMaterial(youngs_modulus=2.5e9, poisson_ratio=0.35, density=1380.0)
+glue = fem.ElasticMaterial(youngs_modulus=3.0e9, poisson_ratio=0.35, density=1200.0)
+mesh.write_nastran("scan.bdf", {name: glue if name.startswith("binder") else fiber for name in mesh.materials})
+mesh.write_vtu("scan.vtu")  # binder is fiber id 0 and its own material
+```
+
+- `binder` is a boolean `(z, y, x)` array over the whole cell, with voxels of
+  `voxel_size` meters: a CT fit's `binder.tif` or `fit.binder`, or
+  `scan.binder_occupancy > 0.5` for a synthetic scan. The fibers can be the
+  fit's, coarse-grained or relaxed: the binder stays where the scan shows it,
+  and wherever a relaxed fiber has moved into the mask, the fiber wins.
+- `elements_around=5` or `6` keeps the mesh coarse. On a synthetic webbed
+  scan of 160 um (24 fibers, 7.7% binder), `elements_around=6` gives about
+  5,000 nodes and 18,700 tetrahedra, 7,000 of them binder, in 8 seconds, and
+  keeps 96% of the mask's binder volume; `sweep_mesh(binder=...)` of the same
+  cell has 407,000 nodes. At 8 and above gmsh's frontal mesher can crash on a
+  whole cell.
+- The fibers' volume comes out a few percent under their true volume at
+  these settings, since their faceted surfaces cut the round ones.
+
+### From bonds
+
+Without a mask, each bond becomes a round bridge from one fiber's centerline
+to the other's, of radius `bond_radius_ratio` times the thinner fiber's
+smaller radius (below 1). `bonds` defaults to the assembly's junctions; for a
+CT fit pass `fem.fit_bonds(fit)`. Bonds across periodic walls go to the
+nearest image of the other fiber. Where two fibers touch, a bridge has a hole
+down its middle, so its binder never thins to a knife-edge; the fibers share
+nodes there instead.
+
+```python
+mesh = fem.conformal_mesh(result.assembly, bond_radius_ratio=0.9, elements_around=6)
+```
+
+### Quality
+
+`conformal_mesh` aims for no tetrahedron flatter than 0.1 in signed inverse
+condition number (`fem.tet_quality(mesh)`, 1 for a regular tetrahedron).
+Slivers gmsh leaves where fibers nearly touch are mended: short edges
+collapsed, tetrahedra flipped, corners slid along their surfaces. It warns
+with their places if any stay under 0.1, and raises rather than return one
+flatter than `min_quality` (0.02 by default; Nastran itself only refuses
+tetrahedra that are inside out or flat). A handful between the two is
+normal on a large cell and does not spoil a linear solve; lower
+`min_quality` to 0.005 if one run stops on a single tetrahedron.
+
+The whole region goes into one gmsh model, so this is slower than
+`tet_mesh`, which meshes a fiber at a time. Try a small `region=(low, high)`
+(corners in meters) first on a new scan.
+
 ## Writing the files
 
 `write_nastran(path, material=None, *, scale=1.0)` and
@@ -338,6 +446,9 @@ mesh, write it with `write_vtu` and open it in ParaView.
 ## Limits
 
 - Orthorhombic cells only, as for `export_puma`.
+- `conformal_mesh` binder is only as fine as the elements: a binder sheet
+  much thinner than an element is lost or thickened, and the binder volume
+  should be checked against the mask's.
 - The `MPC` ties glue a binder node to the flat corner triangle of a 10-node
   tetrahedron's face, not to its curved face.
 - Element and node ids must fit Nastran's 8-column fields, so a mesh can have
