@@ -123,3 +123,18 @@ def test_binder_that_shears_keeps_its_volume():
     assert abs(int(moved.sum()) - int(binder.sum())) <= 0.05 * binder.sum()
     for y in range(40, 60):  # no gap opened along the strip
         assert moved[:, y, 31:33].any()
+
+
+def test_binder_that_stretches_keeps_its_voxel_count():
+    from tangle.ct._fit import _carry_binder
+
+    s = np.arange(4.0, 61.0)
+    old = [np.stack([s, np.full_like(s, 32.0), np.full_like(s, 28.0)], 1),
+           np.stack([s, np.full_like(s, 32.0), np.full_like(s, 36.0)], 1)]
+    new = [old[0], old[1] + [0.0, 0.0, 4.0]]  # the two fibers pull 4 voxels apart
+    binder = np.zeros((64, 64, 64), dtype=bool)
+    binder[30:34, 30:35, 20:44] = True  # (z, y, x): a web between them
+    moved = _carry_binder(binder, old, new)
+    assert moved.sum() == binder.sum()
+    z = np.nonzero(moved)[0]
+    assert z.min() <= 31 and z.max() >= 35  # stretched between the two, not just shifted
