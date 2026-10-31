@@ -6,9 +6,9 @@ per relaxed segment by default, for ``atom_style bacillus``, or spheres for ``at
 one of two ways:
 
     >>> run.export_bpm("binder_bonds.data")
-    >>> ct.add_bpm_binder_bonds("binder_bonds.data", fit.bonds, fit.voxel_size)        # bonds from fiber to fiber
+    >>> ct.add_bpm_binder_bonds("binder_bonds.data", relaxed.bonds, fit.voxel_size)    # bonds from fiber to fiber
     >>> run.export_bpm("binder_spheres.data")
-    >>> ct.add_bpm_binder_spheres("binder_spheres.data", fit.binder, fit.voxel_size)   # the binder as spheres
+    >>> ct.add_bpm_binder_spheres("binder_spheres.data", relaxed.binder, fit.voxel_size)  # the binder as spheres
     >>> ct.write_bpm_ovito("binder_spheres.data")                                      # binder_spheres.dump
 
 Both keep the file's particles and bonds and add the binder with the next free atom and bond types, noted in the
@@ -231,7 +231,9 @@ def add_bpm_binder_spheres(path: str | os.PathLike, binder, voxel_size: float, d
     bonded to the fibers and to each other.
 
     ``binder`` is a boolean ``(z, y, x)`` mask over the file's box in voxels of ``voxel_size``, such as the binder
-    :func:`find_fibers` finds (``fit.binder``). Binder inside a fiber particle is left out (the fibers win).
+    :func:`find_fibers` finds. Use the binder of the fit the file was written from (``relaxed.binder`` after
+    ``relaxed, run = fit.relax()``), which has moved with the fibers; ``fit.binder`` is where the scan shows it,
+    before the fibers moved. Binder inside a fiber particle is left out (the fibers win).
 
     - Where: spheres of ``diameter`` (default: the median diameter of the file's particles, so about a fiber across)
       go into the binder deepest first, each at least a diameter from the others, so they don't overlap. Every

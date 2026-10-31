@@ -612,8 +612,8 @@ class FitResult:
     # ``radii`` are then the short semi-axes.
     long_axes: list[np.ndarray | None] | None = None
     # What find_fibers adds (see there): the folder it wrote to, the bonds it found and its binder mask.
-    # coarse_grained and relax carry each bond along with its two fibers (see _carry_bonds); the binder stays where
-    # the scan shows it.
+    # coarse_grained and relax carry each bond along with its two fibers (see _carry_bonds), and relax moves the
+    # binder with the fibers around it (see _carry_binder).
     folder: Path | None = field(default=None, repr=False, compare=False)
     bonds: list[dict[str, Any]] | None = field(default=None, repr=False, compare=False)
     binder: np.ndarray | None = field(default=None, repr=False, compare=False)
@@ -760,6 +760,11 @@ class FitResult:
         split where fibers touch and merge again where they run free, which
         pairs with :meth:`coarse_grained`. ``defined_radii=True`` first sets every fiber to the diameter its type
         defines (see :meth:`with_defined_radii`), so the relaxation separates the fibers at those diameters.
+
+        The relaxation itself doesn't know about binder: nothing holds bonded fibers together while overlaps are
+        pushed apart. Afterwards each bond is carried along with its two fibers (its ``gap_growth`` is how much
+        farther apart its attachments ended up, in voxels; the history entry sums these up), and the ``binder``
+        mask moves with the fibers around it, so ``relaxed.binder`` lines up with the relaxed fibers.
         """
         import tangle
 
@@ -770,7 +775,7 @@ class FitResult:
             settings = tangle.RelaxationSettings(
                 max_iterations=2000,
                 max_step=0.25 * float(self.radii.mean()) * self.voxel_size,
-                penetration_tolerance=0.02 * self.spec.diameter,
+                penetration_tolerance=0.02 * min(spec.diameter for spec in (self.specs or [self.spec])),
             )
         if adaptive and settings.adaptive_segmentation is None:
             settings = settings.replace(adaptive_segmentation=tangle.AdaptiveSegmentationSettings())
@@ -791,8 +796,21 @@ class FitResult:
             # the nearest share of the fiber's length
             long_axes = [None if axes is None else np.asarray(axes)[_nearest_share(old, new)]
                          for axes, old, new in zip(long_axes, self.centerlines, relaxed)]
-        return replace(self, centerlines=relaxed, confidence=None, long_axes=long_axes,
-                       bonds=_carry_bonds(self.bonds, self.centerlines, relaxed), history=self.history + [{"stage": "tangle relax", "max_penetration_m": run.max_penetration, "adaptive": bool(settings.adaptive_segmentation is not None), "smoothed_to_bend_limit": smoothed}]), run
+        bonds = _carry_bonds(self.bonds, self.centerlines, relaxed)
+        binder = _carry_binder(self.binder, self.centerlines, relaxed)
+        stage = {"stage": "tangle relax", "max_penetration_m": run.max_penetration,
+                 "adaptive": bool(settings.adaptive_segmentation is not None), "smoothed_to_bend_limit": smoothed}
+        if bonds:
+            # Nothing holds bonded fibers together in the solve: how far each bond's two attachments moved apart.
+            carried = [bond for bond in bonds if "gap_growth" in bond]
+            if carried:
+                growth = np.array([bond["gap_growth"] for bond in carried])
+                thinner = np.array([2.0 * min(self.radii[int(k)] for k in bond["fibers"]) for bond in carried])
+                stage.update(bond_gap_growth_median_m=float(np.median(growth)) * self.voxel_size,
+                             bond_gap_growth_max_m=float(growth.max()) * self.voxel_size,
+                             bonds_grown_over_half_diameter=int((growth > 0.5 * thinner).sum()))
+        return replace(self, centerlines=relaxed, confidence=None, long_axes=long_axes, bonds=bonds, binder=binder,
+                       history=self.history + [stage]), run
 
     def export_bpm(self, run: Any, data_path: str | os.PathLike, *, lammps_inputs: bool = True,
                    **options: Any) -> tuple[int, int]:
@@ -1072,7 +1090,8 @@ def _carry_bonds(bonds: list[dict[str, Any]] | None, old: list[np.ndarray],
                  new: list[np.ndarray]) -> list[dict[str, Any]] | None:
     """``bonds`` on fibers that moved from the centerlines ``old`` to ``new`` (the same fibers, in the same order).
     Each bond's two ``attachments`` go to the same share of each fiber's length on its new centerline, and its
-    ``position`` moves by their mean shift, so a bond stays at the same places along its fibers however they move."""
+    ``position`` moves by their mean shift, so a bond stays at the same places along its fibers however they move.
+    ``gap_growth`` is how much farther apart its attachments are than before (voxels; negative when closer)."""
     if not bonds:
         return bonds
     carried = []
@@ -1089,9 +1108,47 @@ def _carry_bonds(bonds: list[dict[str, Any]] | None, old: list[np.ndarray],
             share = along / length if length > 0 else 0.0
             after.append(point_along(new[k], share * polyline_length(np.asarray(new[k], dtype=np.float64))))
         shift = 0.5 * ((after[0] - before[0]) + (after[1] - before[1]))
+        growth = float(np.linalg.norm(after[0] - after[1]) - np.linalg.norm(before[0] - before[1]))
         carried.append({**bond, "position": np.asarray(bond["position"], dtype=np.float64) + shift,
-                        "attachments": tuple(after)})
+                        "attachments": tuple(after), "gap_growth": growth})
     return carried
+
+
+def _carry_binder(binder: np.ndarray | None, old: list[np.ndarray], new: list[np.ndarray],
+                  neighbors: int = 8) -> np.ndarray | None:
+    """``binder`` (a ``(z, y, x)`` mask) moved with the fibers that moved from the centerlines ``old`` to ``new``
+    (the same fibers, in the same order). Each binder voxel moves by the inverse-square-distance weighted mean shift
+    of the ``neighbors`` nearest points of the fibers (sampled a voxel apart, each point going to the same share of
+    its fiber's length), so binder between two fibers moves with both. Voxels land on the nearest voxel; one moved
+    out of the volume is dropped."""
+    if binder is None or not np.any(binder) or not old:
+        return binder
+    from scipy.spatial import cKDTree
+
+    points, shifts = [], []
+    for before, after in zip(old, new):
+        before = np.asarray(before, dtype=np.float64).reshape(-1, 3)
+        after = np.asarray(after, dtype=np.float64).reshape(-1, 3)
+        length, moved_length = polyline_length(before), polyline_length(after)
+        along = np.linspace(0.0, length, max(int(np.ceil(length)) + 1, 2))
+        start = np.array([point_along(before, a) for a in along])
+        end = np.array([point_along(after, a / length * moved_length if length > 0 else 0.0) for a in along])
+        points.append(start)
+        shifts.append(end - start)
+    points, shifts = np.concatenate(points), np.concatenate(shifts)
+    z, y, x = np.nonzero(binder)
+    voxels = np.stack([x, y, z], axis=1) + 0.5
+    k = min(neighbors, len(points))
+    distance, index = cKDTree(points).query(voxels, k=k)
+    distance, index = distance.reshape(len(voxels), k), index.reshape(len(voxels), k)
+    weight = 1.0 / np.maximum(distance, 0.5) ** 2
+    shift = (weight[:, :, None] * shifts[index]).sum(1) / weight.sum(1)[:, None]
+    moved = np.floor(voxels + shift).astype(np.int64)
+    upper = np.array(binder.shape[::-1])
+    inside = np.all((moved >= 0) & (moved < upper), axis=1)
+    out = np.zeros_like(binder, dtype=bool)
+    out[moved[inside, 2], moved[inside, 1], moved[inside, 0]] = True
+    return out
 
 
 def _nearest_share(old: np.ndarray, new: np.ndarray) -> np.ndarray:
