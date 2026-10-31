@@ -178,7 +178,10 @@ pub struct BpmExportConfig {
     /// Geometry representation and sampling policy.
     pub mode: BpmExportMode,
     /// Sphere center spacing divided by fiber radius. Sphere modes support
-    /// values from one third through one radius, inclusive.
+    /// values from one third through one radius, inclusive. Below two radii,
+    /// spheres of one fiber overlap neighbours they are not bonded to (at one
+    /// third, the next five), so the input script must exclude pair forces
+    /// within a fiber, e.g. `neigh_modify exclude molecule/intra all`.
     pub sphere_spacing_over_radius: f64,
     /// Particle material density.
     pub density: f64,
@@ -625,15 +628,18 @@ pub(crate) fn write_lammps_data(model: &DemBpmModel, path: &Path) -> Result<(), 
             particle.position[2]
         )?;
     }
-    writeln!(writer)?;
-    writeln!(writer, "Bonds")?;
-    writeln!(writer)?;
-    for bond in &model.bonds {
-        writeln!(
-            writer,
-            "{} {} {} {}",
-            bond.id, bond.bond_type, bond.particle_a, bond.particle_b
-        )?;
+    // LAMMPS refuses a Bonds section in a file that declares no bonds.
+    if !model.bonds.is_empty() {
+        writeln!(writer)?;
+        writeln!(writer, "Bonds")?;
+        writeln!(writer)?;
+        for bond in &model.bonds {
+            writeln!(
+                writer,
+                "{} {} {} {}",
+                bond.id, bond.bond_type, bond.particle_a, bond.particle_b
+            )?;
+        }
     }
     writer.flush()?;
     Ok(())
@@ -889,14 +895,36 @@ fn nearest_anchor_capsule(
             resolved.coordinate,
         ),
     );
+    // The capsule whose axis passes nearest the anchor holds it; a long
+    // capsule's center can be farther away than a short neighbour's. At a
+    // joint, where two capsules tie, the nearer center wins.
+    let key = |index: usize| {
+        let capsule = &model.capsules[index];
+        (
+            axis_distance(capsule, target),
+            distance(capsule.position, target),
+        )
+    };
     fiber_capsule_ranges[resolved.fiber_index as usize]
         .clone()
         .min_by(|first, second| {
-            distance(model.capsules[*first].position, target)
-                .total_cmp(&distance(model.capsules[*second].position, target))
+            let (first, second) = (key(*first), key(*second));
+            first
+                .0
+                .total_cmp(&second.0)
+                .then(first.1.total_cmp(&second.1))
         })
         .map(|index| model.capsules[index].id)
         .ok_or(ExportError::InvalidFiberSpan(anchor.fiber.0))
+}
+
+/// Distance from `point` to the capsule's axis segment, center ± half length.
+fn axis_distance(capsule: &DemCapsule, point: Vec3) -> f64 {
+    let offset = sub(point, capsule.position);
+    let along =
+        (offset[0] * capsule.axis[0] + offset[1] * capsule.axis[1] + offset[2] * capsule.axis[2])
+            .clamp(-capsule.half_length, capsule.half_length);
+    distance(offset, scale(capsule.axis, along))
 }
 
 fn add(a: Vec3, b: Vec3) -> Vec3 {
