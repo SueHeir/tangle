@@ -2204,6 +2204,8 @@ fn stretched_bond_world(stiffness: f32) -> f32 {
     );
     let config = RelaxationConfig {
         junction_stiffness: stiffness,
+        // Tethers move each anchor at most half this per iteration.
+        penetration_tolerance: 0.02,
         force_full_iterations: true,
         max_step: 0.05,
         max_iterations: 200,

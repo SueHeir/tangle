@@ -765,8 +765,10 @@ class FitResult:
         By default the relaxation doesn't know about binder: nothing holds bonded fibers together while overlaps
         are pushed apart. ``bond_stiffness`` above zero (try 0.5) makes every bond a tether in the solve: once a
         bond's two points drift further apart than they were in the scan (or than the two radii, if closer), each
-        iteration pulls them back by that fraction of the stretch, so bonded fibers move together instead of
-        apart. Contact still wins, so fibers are never pulled into each other. The run then holds the bonds as
+        iteration pulls them back by that fraction of the stretch (at most half the penetration tolerance per
+        iteration), so bonded fibers move together instead of apart. Contact still wins, so fibers are not pulled
+        into each other, and the run uses all of ``max_iterations`` since bonds keep closing after contact
+        converges. The run then holds the bonds as
         junctions, and ``RunResult.export_bpm`` writes them as bonds between the two fibers.
 
         Afterwards each bond is carried along with its two fibers (its ``gap_growth`` is how much the gap between
@@ -797,7 +799,8 @@ class FitResult:
         if adaptive and settings.adaptive_segmentation is None:
             settings = settings.replace(adaptive_segmentation=tangle.AdaptiveSegmentationSettings())
         if tethered:
-            settings = settings.replace(junction_stiffness=float(bond_stiffness))
+            # Contact can converge while bonds are still closing, so tethered runs use their whole budget.
+            settings = settings.replace(junction_stiffness=float(bond_stiffness), force_full_iterations=True)
         recipe.relax_until_converged(max_iterations=int(settings.max_iterations))
         run = recipe.run(settings)
         relaxed = [np.asarray(line) / self.voxel_size for line in run.centerlines()]

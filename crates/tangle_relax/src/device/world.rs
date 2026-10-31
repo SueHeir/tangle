@@ -1476,8 +1476,16 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     if let Some(image) = &self.image_force {
                         self.launch_image_force(image, config.max_step);
                     }
-                    // Bonded anchors drifted apart are pulled back together.
-                    self.launch_junction_tethers(config.junction_stiffness, config.max_step);
+                    // Bonded anchors drifted apart are pulled back together,
+                    // never by more per iteration than half the penetration
+                    // tolerance, so the next contact pass (which removes most
+                    // of any overlap) always wins against a tether pulling a
+                    // fiber through a third one.
+                    let tether_step = config
+                        .max_step
+                        .min(0.5 * config.penetration_tolerance)
+                        .max(f32::MIN_POSITIVE);
+                    self.launch_junction_tethers(config.junction_stiffness, tether_step);
                 }
             }
             self.flag_neighbor_list_displacement();

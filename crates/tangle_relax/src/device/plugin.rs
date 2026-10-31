@@ -115,8 +115,12 @@ pub struct RelaxationConfig {
     pub twist_stiffness: f32,
     /// Fraction of a junction tether's stretch past its rest length pulled
     /// back per iteration, half at each anchor. Zero, the default, leaves
-    /// junctions as bookkeeping only. Tethers pull only in tension and never
-    /// closer than the two fiber radii, so contact still separates fibers.
+    /// junctions as bookkeeping only. Each anchor moves at most half the
+    /// penetration tolerance per iteration, so contact always wins; a large
+    /// stretch takes correspondingly many iterations to close, and contact
+    /// convergence alone may stop the run first (see `force_full_iterations`).
+    /// Tethers pull only in tension and never closer than the two fiber
+    /// radii.
     pub junction_stiffness: f32,
     /// Maximum contact displacement of one vertex in an iteration.
     pub max_step: f32,

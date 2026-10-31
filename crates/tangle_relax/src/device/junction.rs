@@ -3,8 +3,10 @@
 //! A tether joins two anchor points, each interpolated on one segment of a
 //! fiber. It acts only in tension: once the anchors drift further apart than
 //! the tether's rest length, each anchor moves a share of the excess back
-//! toward the other, capped at the iteration's step. Contact still keeps the
-//! fibers apart, because a rest length is never shorter than the two radii.
+//! toward the other, capped at a small step (the solver passes half the
+//! penetration tolerance). Contact therefore always wins: a rest length is
+//! never shorter than the two radii, and a tether pulling a fiber into a third
+//! one moves it less per iteration than the next contact pass undoes.
 //!
 //! The work is split in two deterministic launches, as for the image force:
 //! one thread per tether finds its correction, then one thread per touched
@@ -35,7 +37,7 @@ pub(crate) fn find_junction_corrections(
     if tether >= junction_rest_lengths.len() || control[0] == 0 {
         terminate!();
     }
-    let index = tether as usize;
+    let index = tether;
     corrections[3 * index] = 0.0;
     corrections[3 * index + 1] = 0.0;
     corrections[3 * index + 2] = 0.0;
