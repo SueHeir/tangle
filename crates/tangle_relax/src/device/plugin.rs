@@ -113,6 +113,15 @@ pub struct RelaxationConfig {
     /// long-axis direction and its neighbours' mean removed per iteration.
     /// Larger values make ovals resist twisting more.
     pub twist_stiffness: f32,
+    /// Fraction of a junction tether's stretch past its rest length pulled
+    /// back per iteration, half at each anchor. Zero, the default, leaves
+    /// junctions as bookkeeping only. Each anchor moves at most half the
+    /// penetration tolerance per iteration, so contact always wins; a large
+    /// stretch takes correspondingly many iterations to close, and contact
+    /// convergence alone may stop the run first (see `force_full_iterations`).
+    /// Tethers pull only in tension and never closer than the two fiber
+    /// radii.
+    pub junction_stiffness: f32,
     /// Maximum contact displacement of one vertex in an iteration.
     pub max_step: f32,
     /// Maximum device-side correction iterations.
@@ -148,6 +157,7 @@ impl Default for RelaxationConfig {
             constraint_iterations: 2,
             curvature_cleanup_sweeps: 4,
             twist_stiffness: 0.1,
+            junction_stiffness: 0.0,
             max_step: 0.006,
             max_iterations: 2_000,
             iterations_per_batch: 128,
@@ -1189,6 +1199,9 @@ fn packed_upload_bytes(packed: &PackedAssembly) -> usize {
         + packed.vertex_active.len() * size_of::<u32>()
         + packed.vertex_pinned.len() * size_of::<u32>()
         + packed.vertex_refinement_levels.len() * size_of::<u32>()
+        + packed.junction_vertices.len() * size_of::<u32>()
+        + packed.junction_coordinates.len() * size_of::<f32>()
+        + packed.junction_rest_lengths.len() * size_of::<f32>()
         + 6 * size_of::<f32>()
         + 3 * size_of::<u32>()
 }

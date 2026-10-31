@@ -2165,3 +2165,73 @@ fn deeply_overlapping_parallel_flat_ovals_stay_stacked() {
         );
     }
 }
+
+/// Two parallel fibers 0.4 apart, bonded at their midpoints, with the tether
+/// rest length shortened to 0.25 so the bond starts stretched.
+fn stretched_bond_world(stiffness: f32) -> f32 {
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([4.0; 3], [false; 3]));
+    let material = assembly.materials.add("fiber");
+    let section = assembly.sections.add(Section::Circular { radius: 0.1 });
+    for (id, y) in [(1, 1.8), (2, 2.2)] {
+        let placed = [[1.0, y, 2.0], [2.0, y, 2.0], [3.0, y, 2.0]];
+        assembly
+            .add_fiber(FiberId(id), material, section, &placed, &placed)
+            .unwrap();
+    }
+    let law = assembly.junction_laws.add("binder");
+    let anchor = |id| tangle_core::FiberAnchor {
+        fiber: FiberId(id),
+        rest_arc_length: 1.0,
+        section_offset: None,
+    };
+    assembly
+        .add_junction(
+            tangle_core::JunctionId(1),
+            law,
+            tangle_core::JunctionParameterId(0),
+            &[anchor(1), anchor(2)],
+        )
+        .unwrap();
+    let mut packed = PackedAssembly::from_assembly(&assembly).unwrap();
+    assert_eq!(packed.junction_count(), 1);
+    assert!((packed.junction_rest_lengths[0] - 0.4).abs() < 1.0e-6);
+    packed.junction_rest_lengths[0] = 0.25;
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed,
+        CellListConfig::default(),
+        0.05,
+    );
+    let config = RelaxationConfig {
+        junction_stiffness: stiffness,
+        // Tethers move each anchor at most half this per iteration.
+        penetration_tolerance: 0.02,
+        force_full_iterations: true,
+        max_step: 0.05,
+        max_iterations: 200,
+        iterations_per_batch: 200,
+        ..RelaxationConfig::default()
+    };
+    world.run_batch(&config, 200);
+    let positions = world.download_positions();
+    // Middle vertices are 1 and 4.
+    (0..3)
+        .map(|axis| (positions[12 + axis] - positions[3 + axis]).powi(2))
+        .sum::<f32>()
+        .sqrt()
+}
+
+#[test]
+fn junction_tethers_pull_stretched_bonds_back() {
+    let free = stretched_bond_world(0.0);
+    assert!(
+        (free - 0.4).abs() < 1.0e-4,
+        "no tether force at zero stiffness: {free}"
+    );
+    let tethered = stretched_bond_world(0.5);
+    assert!(
+        tethered < 0.3,
+        "the tether pulls the anchors toward 0.25: {tethered}"
+    );
+    assert!(tethered > 0.2, "contact keeps the fibers apart: {tethered}");
+}

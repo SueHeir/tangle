@@ -167,8 +167,9 @@ def add_bpm_binder_bonds(path: str | os.PathLike, bonds, voxel_size: float, *, b
     gets one bond of ``bond_type`` (default: the next free bond type), at its first bond in the list, between each
     fiber's particle nearest its attachment, or without attachments nearest the position (nearest the axis, for
     capsules). The fibers keep their order through
-    ``coarse_grained``, ``relax`` and ``export_bpm``, so fiber ``k`` is the file's molecule ``k + 1``. Returns how
-    many bonds were added.
+    ``coarse_grained``, ``relax`` and ``export_bpm``, so fiber ``k`` is the file's molecule ``k + 1``. A pair of
+    fibers the file already bonds to each other (as ``relax(bond_stiffness=...)`` has ``export_bpm`` do) is left
+    as it is. Returns how many bonds were added.
     """
     data = _DataFile(path)
     particles = _Particles.read(data)
@@ -182,7 +183,13 @@ def add_bpm_binder_bonds(path: str | os.PathLike, bonds, voxel_size: float, *, b
         mine = by_molecule[start:stop]
         return int(particles.ids[mine[np.argmin(particles.distance(mine, point))]]) if len(mine) else None
 
+    molecule_of = dict(zip(particles.ids.tolist(), particles.molecules.tolist()))
+    existing = data.rows("Bonds")
     pairs, new = set(), []
+    for row in existing:  # pairs of fibers the file already bonds together
+        i, j = sorted(molecule_of.get(int(atom), 0) - 1 for atom in row[2:4])
+        if 0 <= i < j:
+            pairs.add((i, j))
     for bond in bonds:
         fibers = [int(fiber) for fiber in bond["fibers"]]
         i, j = sorted(fibers)
@@ -197,7 +204,6 @@ def add_bpm_binder_bonds(path: str | os.PathLike, bonds, voxel_size: float, *, b
         new.append((a, b))
     if not new:
         return 0
-    existing = data.rows("Bonds")
     kind = bond_type or _next_type(data, "bond types", (row[1] for row in existing))
     first = max((int(row[0]) for row in existing), default=0) + 1
     data.add_rows("Bonds", [f"{first + k} {kind} {a} {b}" for k, (a, b) in enumerate(new)])

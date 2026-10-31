@@ -120,6 +120,24 @@ pub struct PackedAssembly {
     /// Assemblies containing persistent junctions remain refined because the
     /// current device solver does not yet carry junction-anchor protection.
     pub coarsening_safe: bool,
+    /// Junction tethers, one from the first anchor of every junction to each
+    /// of its other anchors. Four vertex indices per tether: the two ends of
+    /// the segment holding the first anchor, then the two ends of the segment
+    /// holding the second. In an adaptive layout these are the ends of the
+    /// unrefined source segment, which stay active through refinement, so the
+    /// anchor rides on that segment's chord. Empty in checkpoints written
+    /// before tethers.
+    #[serde(default)]
+    pub junction_vertices: Vec<u32>,
+    /// Two per tether: how far along its segment each anchor sits, from the
+    /// segment's first vertex (0) to its second (1).
+    #[serde(default)]
+    pub junction_coordinates: Vec<f32>,
+    /// Per tether: the anchor distance it pulls back toward once stretched,
+    /// the larger of the packed distance and the two radii summed, so a
+    /// tether never pulls fibers into each other.
+    #[serde(default)]
+    pub junction_rest_lengths: Vec<f32>,
 }
 
 impl PackedAssembly {
@@ -254,6 +272,10 @@ impl PackedAssembly {
 
         let segment_count = segment_fibers.len();
         let vertex_count = vertex_fibers.len();
+        let tethers = JunctionTethers::pack(assembly, |fiber, local| {
+            let start = assembly.topology.fibers[fiber].vertices.start + local;
+            [start, start + 1]
+        })?;
 
         Ok(Self {
             positions,
@@ -291,6 +313,9 @@ impl PackedAssembly {
             adaptive: false,
             has_ovals,
             coarsening_safe: assembly.junctions.junctions.is_empty(),
+            junction_vertices: tethers.vertices,
+            junction_coordinates: tethers.coordinates,
+            junction_rest_lengths: tethers.rest_lengths,
         })
     }
 
@@ -324,6 +349,8 @@ impl PackedAssembly {
         let mut vertex_active = Vec::new();
         let mut vertex_pinned = Vec::new();
         let mut vertex_refinement_levels = Vec::new();
+        // Ends of every source segment's root, per fiber, for junction tethers.
+        let mut root_ends = Vec::with_capacity(assembly.topology.fibers.len());
 
         for (fiber_index, fiber) in assembly.topology.fibers.iter().enumerate() {
             let section = assembly
@@ -395,6 +422,12 @@ impl PackedAssembly {
                 roots.push((first_vertex, leaf_count, levels, rest_length));
             }
 
+            root_ends.push(
+                roots
+                    .iter()
+                    .map(|&(first, leaves, _, _)| [first, first + leaves])
+                    .collect::<Vec<_>>(),
+            );
             for (first_vertex, leaf_count, levels, rest_length) in roots {
                 let root = segment_fibers.len() as u32;
                 let node_count = 2 * leaf_count - 1;
@@ -432,6 +465,9 @@ impl PackedAssembly {
             fiber_segment_spans.extend([segment_start, segment_count]);
         }
 
+        let tethers =
+            JunctionTethers::pack(assembly, |fiber, local| root_ends[fiber][local as usize])?;
+
         Ok(Self {
             directors: vec![0.0; positions.len()],
             positions,
@@ -468,6 +504,9 @@ impl PackedAssembly {
             adaptive: true,
             has_ovals: false,
             coarsening_safe: assembly.junctions.junctions.is_empty(),
+            junction_vertices: tethers.vertices,
+            junction_coordinates: tethers.coordinates,
+            junction_rest_lengths: tethers.rest_lengths,
         })
     }
 
@@ -538,6 +577,11 @@ impl PackedAssembly {
             }
         }
         arc
+    }
+
+    /// Number of junction tethers.
+    pub fn junction_count(&self) -> usize {
+        self.junction_rest_lengths.len()
     }
 
     /// Number of segments in the packed representation.
@@ -691,6 +735,199 @@ impl PackedAssembly {
         }
         Ok(())
     }
+}
+
+/// Junction tethers of a packed layout, before they join it.
+struct JunctionTethers {
+    vertices: Vec<u32>,
+    coordinates: Vec<f32>,
+    rest_lengths: Vec<f32>,
+}
+
+impl JunctionTethers {
+    /// Resolves every junction anchor on the intrinsic centerline and tethers
+    /// the first anchor of each junction to each of its others. `segment_ends`
+    /// gives the two packed vertices bounding a fiber's source segment.
+    fn pack(
+        assembly: &FiberAssembly,
+        segment_ends: impl Fn(usize, u32) -> [u32; 2],
+    ) -> Result<Self, PackingError> {
+        let mut tethers = Self {
+            vertices: Vec::new(),
+            coordinates: Vec::new(),
+            rest_lengths: Vec::new(),
+        };
+        let table = &assembly.junctions;
+        for junction in &table.junctions {
+            let start = junction.anchors.start as usize;
+            let anchors = table
+                .anchors
+                .get(start..start + junction.anchors.len as usize)
+                .ok_or_else(|| {
+                    PackingError::InvalidAssembly(format!(
+                        "junction {} has an invalid anchor span",
+                        junction.id.0
+                    ))
+                })?;
+            let resolved = anchors
+                .iter()
+                .map(|anchor| {
+                    let resolved = assembly.resolve_anchor(*anchor).map_err(|error| {
+                        PackingError::InvalidAssembly(format!(
+                            "junction {}: {error}",
+                            junction.id.0
+                        ))
+                    })?;
+                    let fiber = &assembly.topology.fibers[resolved.fiber_index as usize];
+                    let first = (fiber.vertices.start + resolved.local_segment) as usize;
+                    let placed = &assembly.geometry.placed.positions;
+                    let t = resolved.coordinate;
+                    let point: Vec3 = std::array::from_fn(|axis| {
+                        placed[first][axis] + t * (placed[first + 1][axis] - placed[first][axis])
+                    });
+                    let section = assembly
+                        .sections
+                        .entries
+                        .get(fiber.section.0 as usize)
+                        .ok_or(PackingError::MissingSection(fiber.id.0))?;
+                    Ok((
+                        segment_ends(resolved.fiber_index as usize, resolved.local_segment),
+                        t as f32,
+                        point,
+                        LaneSection::from_section(section).radius,
+                        (
+                            resolved.fiber_index as usize,
+                            resolved.local_segment as usize,
+                        ),
+                    ))
+                })
+                .collect::<Result<Vec<_>, PackingError>>()?;
+            let Some((first, others)) = resolved.split_first() else {
+                continue;
+            };
+            for other in others {
+                let mut squared = 0.0;
+                for axis in 0..3 {
+                    let mut delta = other.2[axis] - first.2[axis];
+                    if assembly.cell.periodic[axis] {
+                        let length = assembly.cell.basis[axis][axis];
+                        delta -= (delta / length).round() * length;
+                    }
+                    squared += delta * delta;
+                }
+                // Where the two fibers overlap near the bond, contact must part
+                // them by that much, and the anchors move apart by at most as
+                // much: allow for it, so the tether doesn't hold the overlap.
+                let contact = first.3 + other.3;
+                let window = 4.0 * contact as f64;
+                let closest = closest_approach(assembly, first.4, other.4, window);
+                let overlap = (contact - closest as f32).max(0.0);
+                tethers.vertices.extend(first.0);
+                tethers.vertices.extend(other.0);
+                tethers.coordinates.extend([first.1, other.1]);
+                tethers
+                    .rest_lengths
+                    .push((squared.sqrt() as f32 + overlap).max(contact));
+            }
+        }
+        Ok(tethers)
+    }
+}
+
+/// Placed segments of fiber `fiber` within `window` of arc length (along the
+/// placed centerline) of segment `segment`, as endpoint pairs.
+fn segments_near(
+    assembly: &FiberAssembly,
+    fiber: usize,
+    segment: usize,
+    window: f64,
+) -> Vec<[Vec3; 2]> {
+    let span = &assembly.topology.fibers[fiber].vertices;
+    let points =
+        &assembly.geometry.placed.positions[span.start as usize..(span.start + span.len) as usize];
+    let pair = |k: usize| [points[k], points[k + 1]];
+    let mut near = vec![pair(segment)];
+    for direction in [-1_isize, 1] {
+        let mut walked = 0.0;
+        let mut k = segment as isize + direction;
+        while k >= 0 && (k as usize) + 1 < points.len() && walked <= window {
+            let [a, b] = pair(k as usize);
+            walked += f64::from(distance(a, b));
+            near.push([a, b]);
+            k += direction;
+        }
+    }
+    near
+}
+
+/// Smallest centerline distance between the parts of two fibers within
+/// `window` of arc length of the given segments, using the nearest periodic
+/// image.
+fn closest_approach(
+    assembly: &FiberAssembly,
+    (fiber_a, segment_a): (usize, usize),
+    (fiber_b, segment_b): (usize, usize),
+    window: f64,
+) -> f64 {
+    let first = segments_near(assembly, fiber_a, segment_a, window);
+    let second = segments_near(assembly, fiber_b, segment_b, window);
+    let mut closest = f64::INFINITY;
+    for [p0, p1] in &first {
+        for [q0, q1] in &second {
+            let mut shift = [0.0; 3];
+            for axis in 0..3 {
+                if assembly.cell.periodic[axis] {
+                    let length = assembly.cell.basis[axis][axis];
+                    let delta = 0.5 * (q0[axis] + q1[axis] - p0[axis] - p1[axis]);
+                    shift[axis] = -(delta / length).round() * length;
+                }
+            }
+            let q0 = std::array::from_fn(|axis| q0[axis] + shift[axis]);
+            let q1 = std::array::from_fn(|axis| q1[axis] + shift[axis]);
+            closest = closest.min(segment_distance(*p0, *p1, q0, q1));
+        }
+    }
+    closest
+}
+
+/// Distance between segments `p0 p1` and `q0 q1`.
+fn segment_distance(p0: Vec3, p1: Vec3, q0: Vec3, q1: Vec3) -> f64 {
+    let sub = |a: Vec3, b: Vec3| -> Vec3 { std::array::from_fn(|k| a[k] - b[k]) };
+    let dot = |a: Vec3, b: Vec3| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let (d1, d2, r) = (sub(p1, p0), sub(q1, q0), sub(p0, q0));
+    let (a, e, f) = (dot(d1, d1), dot(d2, d2), dot(d2, r));
+    let (mut s, mut t);
+    if a <= 1e-30 && e <= 1e-30 {
+        return dot(r, r).sqrt();
+    }
+    if a <= 1e-30 {
+        s = 0.0;
+        t = (f / e).clamp(0.0, 1.0);
+    } else {
+        let c = dot(d1, r);
+        if e <= 1e-30 {
+            t = 0.0;
+            s = (-c / a).clamp(0.0, 1.0);
+        } else {
+            let b = dot(d1, d2);
+            let denom = a * e - b * b;
+            s = if denom > 1e-30 {
+                ((b * f - c * e) / denom).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            t = (b * s + f) / e;
+            if t < 0.0 {
+                t = 0.0;
+                s = (-c / a).clamp(0.0, 1.0);
+            } else if t > 1.0 {
+                t = 1.0;
+                s = ((b - c) / a).clamp(0.0, 1.0);
+            }
+        }
+    }
+    let closest: Vec3 = std::array::from_fn(|k| p0[k] + s * d1[k] - q0[k] - t * d2[k]);
+    dot(closest, closest).sqrt()
 }
 
 /// Geometry that the initial CubeCL capsule backend cannot represent.

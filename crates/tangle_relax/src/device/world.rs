@@ -1,5 +1,6 @@
 mod cell_list;
 mod image_force;
+mod junction;
 mod neighbor_list;
 mod pinning;
 
@@ -220,6 +221,7 @@ pub struct DeviceFiberWorld<R: Runtime> {
     active_layer_max_translation: f32,
     active_vertex_targets: Option<ActiveVertexTargets>,
     image_force: Option<image_force::ImageForce>,
+    junction_tethers: Option<junction::JunctionTethers>,
     total_iterations: usize,
     cell_size: f32,
     segment_cell_size: f32,
@@ -575,6 +577,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         let reduced_metrics = client.create_from_slice(u32::as_bytes(&[0_u32; 3]));
         let cell_lower_host = packed.cell_lower;
         let cell_upper_host = packed.cell_upper;
+        let junction_tethers = junction::JunctionTethers::upload(&client, &packed);
 
         let always_run = client.create_from_slice(u32::as_bytes(&[1_u32]));
         let mut world = Self {
@@ -667,6 +670,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             active_layer_max_translation: 1.0,
             active_vertex_targets: None,
             image_force: None,
+            junction_tethers,
             total_iterations: 0,
             cell_size,
             segment_cell_size,
@@ -1472,6 +1476,16 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                     if let Some(image) = &self.image_force {
                         self.launch_image_force(image, config.max_step);
                     }
+                    // Bonded anchors drifted apart are pulled back together,
+                    // never by more per iteration than half the penetration
+                    // tolerance, so the next contact pass (which removes most
+                    // of any overlap) always wins against a tether pulling a
+                    // fiber through a third one.
+                    let tether_step = config
+                        .max_step
+                        .min(0.5 * config.penetration_tolerance)
+                        .max(f32::MIN_POSITIVE);
+                    self.launch_junction_tethers(config.junction_stiffness, tether_step);
                 }
             }
             self.flag_neighbor_list_displacement();

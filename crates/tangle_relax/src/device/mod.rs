@@ -1,4 +1,5 @@
 mod image_force;
+mod junction;
 mod kernels;
 mod packed;
 mod plugin;
