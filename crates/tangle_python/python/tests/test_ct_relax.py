@@ -83,3 +83,25 @@ def test_adaptive_relax_separates_fibers_and_stays_valid_tangle():
     assert relaxed.history[-1]["adaptive"]
     relaxed.to_assembly()  # Tangle validates every fiber's shape against its bend limit here
 
+
+
+def test_binder_and_bonds_move_with_the_fibers():
+    from tangle.ct._fit import _carry_binder, _carry_bonds
+
+    old = _crossing()
+    # The second fiber moves 3 voxels up, the first stays.
+    new = [old[0], old[1] + [0.0, 0.0, 3.0]]
+    binder = np.zeros((64, 64, 64), dtype=bool)
+    binder[37:39, 10:12, 32:34] = True  # (z, y, x): just above the second fiber, far from the first
+    binder[31:33, 31:33, 31:33] = True  # between the two where they cross
+    moved = _carry_binder(binder, old, new)
+    assert moved.sum() == binder.sum()
+    assert moved[37:40, 10:12].sum() == 0 and moved[40:42, 10:12, 32:34].all()  # follows the second fiber
+    z = np.nonzero(moved[:, 31:33, 31:33])[0]
+    assert 31 < z.mean() < 34.5  # between staying put and moving with the second fiber
+    assert _carry_binder(None, old, new) is None
+
+    bond = {"fibers": (0, 1), "position": np.array([32.0, 32.0, 32.0])}
+    carried = _carry_bonds([bond], old, new)[0]
+    assert carried["gap_growth"] == pytest.approx(3.0)
+    assert np.allclose(carried["position"], [32.0, 32.0, 33.5])

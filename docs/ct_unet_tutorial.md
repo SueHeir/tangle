@@ -401,7 +401,7 @@ hexes = fem.hex_mesh(relaxed.to_assembly(), voxel_size=fit.voxel_size, binder=fi
 relaxed.export_bpm(run, "binder_bonds.data")
 ct.add_bpm_binder_bonds("binder_bonds.data", relaxed.bonds, fit.voxel_size)    # a) bonds from fiber to fiber
 relaxed.export_bpm(run, "binder_spheres.data")
-ct.add_bpm_binder_spheres("binder_spheres.data", fit.binder, fit.voxel_size)   # b) the binder as spheres
+ct.add_bpm_binder_spheres("binder_spheres.data", relaxed.binder, fit.voxel_size)   # b) the binder as spheres
 ct.write_bpm_ovito("binder_spheres.data")                                      # binder_spheres.dump, for OVITO
 ```
 
@@ -415,6 +415,9 @@ where the bond holds it (the next bond type after the fibers' own). Give it
 keeping it at the same share of each fiber's length, and
 `relaxed.write_bonds("bonds_relaxed.csv")` writes them with the columns of
 `bonds.csv`, so the attachment points there are on the relaxed fibers.
+`relax` also moves the binder with the fibers around it, so give
+`add_bpm_binder_spheres` `relaxed.binder`; `fit.binder` is where the scan
+showed it, before the fibers moved.
 `add_bpm_binder_spheres` fills the binder with spheres about a fiber across
 (`diameter=` changes that), each with the mass of the binder it stands for,
 and bonds each one to the fibers its binder touches and to the spheres whose
