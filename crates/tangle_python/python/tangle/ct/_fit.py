@@ -1139,7 +1139,8 @@ def _carry_binder(binder: np.ndarray | None, old: list[np.ndarray], new: list[np
     of the ``neighbors`` nearest points of the fibers (sampled a voxel apart, each point going to the same share of
     its fiber's length), so binder between two fibers moves with both. Voxels land on the nearest voxel; one moved
     out of the volume is dropped. Each new voxel is traced back to the voxel it came from (a gather), so binder that
-    spreads out leaves no holes, and binder that stretches keeps its voxel count (the binder doesn't grow)."""
+    spreads out leaves no holes, and binder that stretches thins evenly to keep its voxel count (binder doesn't
+    grow)."""
     if binder is None or not np.any(binder) or not old:
         return binder
     from scipy import ndimage
@@ -1180,17 +1181,18 @@ def _carry_binder(binder: np.ndarray | None, old: list[np.ndarray], new: list[np
     near[landed[:, 2], landed[:, 1], landed[:, 0]] = True
     z, y, x = np.nonzero(ndimage.binary_dilation(near, structure=np.ones((3, 3, 3), bool)))
     targets = np.stack([x, y, z], axis=1) + 0.5
-    source = targets - shift_at(targets - shift_at(targets))
-    cells = np.floor(source).astype(np.int64)
+    cells = np.floor(targets - shift_at(targets - shift_at(targets))).astype(np.int64)
     found = inside(cells)
     found[found] = binder[cells[found, 2], cells[found, 1], cells[found, 0]]
-    # Where fibers pull apart, the binder between them stretches over more voxels than it had; binder doesn't grow,
-    # so keep as many voxels as there were, dropping those traced back farthest from their source voxel's center.
+    # Where fibers pull apart, the binder between them stretches: several voxels trace back to one source. Binder
+    # doesn't grow, so it thins instead: each source voxel counts once, spread over the k voxels that came from it
+    # (1/k each), and a running sum keeps one voxel per whole unit, evenly through the stretched part.
     keep = np.flatnonzero(found)
-    excess = len(keep) - int(np.count_nonzero(binder))
-    if excess > 0:
-        off = np.abs(source[keep] - cells[keep] - 0.5).sum(1)
-        keep = keep[np.argsort(off, kind="stable")[: len(keep) - excess]]
+    _, group, k = np.unique(np.ravel_multi_index(cells[keep].T[::-1], binder.shape), return_inverse=True,
+                            return_counts=True)
+    share = 1.0 / k[group]
+    total = np.cumsum(share)
+    keep = keep[np.floor(total + 1e-9) > np.floor(total - share + 1e-9)]
     out = np.zeros_like(binder, dtype=bool)
     out[z[keep], y[keep], x[keep]] = True
     return out
