@@ -1139,8 +1139,8 @@ def _carry_binder(binder: np.ndarray | None, old: list[np.ndarray], new: list[np
     of the ``neighbors`` nearest points of the fibers (sampled a voxel apart, each point going to the same share of
     its fiber's length), so binder between two fibers moves with both. Voxels land on the nearest voxel; one moved
     out of the volume is dropped. Each new voxel is traced back to the voxel it came from (a gather), so binder that
-    spreads out leaves no holes, and binder that stretches thins evenly to keep its voxel count (binder doesn't
-    grow)."""
+    spreads out leaves no holes; binder that stretches thins evenly and binder that is squeezed isn't lost, so the
+    voxel count stays about the same."""
     if binder is None or not np.any(binder) or not old:
         return binder
     from scipy import ndimage
@@ -1184,15 +1184,20 @@ def _carry_binder(binder: np.ndarray | None, old: list[np.ndarray], new: list[np
     cells = np.floor(targets - shift_at(targets - shift_at(targets))).astype(np.int64)
     found = inside(cells)
     found[found] = binder[cells[found, 2], cells[found, 1], cells[found, 0]]
-    # Where fibers pull apart, the binder between them stretches: several voxels trace back to one source. Binder
-    # doesn't grow, so it thins instead: each source voxel counts once, spread over the k voxels that came from it
-    # (1/k each), and a running sum keeps one voxel per whole unit, evenly through the stretched part.
-    keep = np.flatnonzero(found)
-    _, group, k = np.unique(np.ravel_multi_index(cells[keep].T[::-1], binder.shape), return_inverse=True,
+    # Each candidate voxel carries a share of the binder's volume. Where fibers pull apart, several voxels trace
+    # back to one source: each gets 1/k of it, so stretched binder thins instead of growing. Where binder is
+    # squeezed, several sources land on one voxel and the gather sees only one of them: a voxel where binder
+    # landed but that traced back elsewhere counts whole, so squeezed binder isn't lost. The shares are scaled to
+    # the binder's voxel count (none above one), and a running sum keeps one voxel per whole unit, evenly.
+    weight = near[z, y, x].astype(np.float64)
+    gathered = np.flatnonzero(found)
+    _, group, k = np.unique(np.ravel_multi_index(cells[gathered].T[::-1], binder.shape), return_inverse=True,
                             return_counts=True)
-    share = 1.0 / k[group]
-    total = np.cumsum(share)
-    keep = keep[np.floor(total + 1e-9) > np.floor(total - share + 1e-9)]
+    weight[gathered] = 1.0 / k[group]
+    if weight.sum() > 0:
+        weight = np.minimum(1.0, weight * np.count_nonzero(binder) / weight.sum())
+    total = np.cumsum(weight)
+    keep = np.flatnonzero(np.floor(total + 1e-9) > np.floor(total - weight + 1e-9))
     out = np.zeros_like(binder, dtype=bool)
     out[z[keep], y[keep], x[keep]] = True
     return out
