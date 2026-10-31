@@ -795,6 +795,9 @@ class FitResult:
                 max_iterations=2000,
                 max_step=0.25 * float(self.radii.mean()) * self.voxel_size,
                 penetration_tolerance=0.02 * min(spec.diameter for spec in (self.specs or [self.spec])),
+                # Fits sample a node about every voxel, where contact kinks fibers far past their bend limit;
+                # the default 4 straightening sweeps per iteration leave them 2-3x over it on dense fits.
+                curvature_cleanup_sweeps=32,
             )
         if (adaptive or settings.adaptive_segmentation is not None) and any(m.is_oval for m in self.materials()):
             raise ValueError("adaptive segmentation doesn't support oval fibers yet; relax this fit without "
