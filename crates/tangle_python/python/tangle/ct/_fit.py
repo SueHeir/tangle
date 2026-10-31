@@ -1139,7 +1139,8 @@ def _carry_binder(binder: np.ndarray | None, old: list[np.ndarray], new: list[np
     of the ``neighbors`` nearest points of the fibers (sampled a voxel apart, each point going to the same share of
     its fiber's length), so binder between two fibers moves with both. Voxels land on the nearest voxel; one moved
     out of the volume is dropped. Each new voxel is traced back to the voxel it came from (a gather), so binder that
-    spreads out leaves no holes and binder that only translates keeps exactly its volume."""
+    spreads out leaves no holes; binder that stretches thins evenly and binder that is squeezed isn't lost, so the
+    voxel count stays about the same."""
     if binder is None or not np.any(binder) or not old:
         return binder
     from scipy import ndimage
@@ -1183,8 +1184,36 @@ def _carry_binder(binder: np.ndarray | None, old: list[np.ndarray], new: list[np
     cells = np.floor(targets - shift_at(targets - shift_at(targets))).astype(np.int64)
     found = inside(cells)
     found[found] = binder[cells[found, 2], cells[found, 1], cells[found, 0]]
+    # Each candidate voxel carries a share of the binder's volume. Where fibers pull apart, several voxels trace
+    # back to one source: each gets 1/k of it, so stretched binder thins instead of growing. Where binder is
+    # squeezed, several sources land on one voxel and the gather sees only one of them: a voxel where binder
+    # landed but that traced back elsewhere counts whole, so squeezed binder isn't lost. Whole voxels are kept;
+    # the shares are scaled so the total is the binder's voxel count (none above one), and a running sum keeps one
+    # voxel per whole unit of them, evenly.
+    weight = near[z, y, x].astype(np.float64)
+    gathered = np.flatnonzero(found)
+    _, group, k = np.unique(np.ravel_multi_index(cells[gathered].T[::-1], binder.shape), return_inverse=True,
+                            return_counts=True)
+    weight[gathered] = 1.0 / k[group]
+    whole = weight >= 1.0
+    part = np.flatnonzero((weight > 0.0) & ~whole)
+    budget = max(np.count_nonzero(binder) - int(whole.sum()), 0)
+    share = weight[part]
+    for _ in range(32):  # scale to the budget; what the cap at one clips goes to the rest
+        if share.sum() <= 0.0 or abs(share.sum() - budget) < 1e-6:
+            break
+        free = share < 1.0
+        rest = budget - (len(share) - free.sum())
+        if rest <= 0 or share[free].sum() <= 0.0:
+            share[free] = 0.0
+            break
+        share[free] *= rest / share[free].sum()
+        share = np.minimum(share, 1.0)
+    total = np.cumsum(share)
+    picked = part[np.floor(total + 0.5) > np.floor(total - share + 0.5)]
+    keep = np.concatenate([np.flatnonzero(whole), picked])
     out = np.zeros_like(binder, dtype=bool)
-    out[z[found], y[found], x[found]] = True
+    out[z[keep], y[keep], x[keep]] = True
     return out
 
 
