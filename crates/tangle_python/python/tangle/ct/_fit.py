@@ -777,10 +777,7 @@ class FitResult:
         ``relaxed.binder`` lines up with the relaxed fibers.
 
         A fitted fiber that bends a hair past its type's limit is first smoothed just inside it, since Tangle
-        refuses it otherwise; the history entry counts them (``smoothed_input_to_bend_limit``). Fibers the solve
-        leaves past their limit (``smoothed_to_bend_limit``) are smoothed the same way and then solved once more
-        (up to 500 iterations), so smoothing doesn't leave them inside their neighbours; the returned run is that
-        second solve, and ``first_solve_max_penetration_m`` is the first one's.
+        refuses it otherwise; the history entry counts them (``smoothed_input_to_bend_limit``).
         """
         import tangle
 
@@ -806,30 +803,20 @@ class FitResult:
             settings = settings.replace(junction_stiffness=float(bond_stiffness), force_full_iterations=True)
         recipe.relax_until_converged(max_iterations=int(settings.max_iterations))
         run = recipe.run(settings)
-        first_penetration = run.max_penetration
         relaxed = [np.asarray(line) / self.voxel_size for line in run.centerlines()]
-        # A solve that runs out of iterations can leave fibers past their bend limit, and Tangle refuses those
-        # when this fit becomes an assembly again: smooth them just inside. Smoothing a whole fiber can push it
-        # into its neighbours, so then solve once more from the smoothed fibers, which starts within every limit,
-        # and give contact the last word; smooth again only what that leaves a hair over.
+        # The solve keeps every fiber's bending within its limit to a small tolerance, and a fiber left a hair
+        # past it would be refused when this fit becomes an assembly again: smooth those just inside.
         relaxed, smoothed = self._within_bend_limits(relaxed)
-        if smoothed:
-            assembly = replace(self, centerlines=relaxed, long_axes=self._long_axes_on(relaxed)).to_assembly()
-            if tethered:
-                self._add_bonds(assembly, relaxed)
-            polish = settings.replace(max_iterations=min(500, int(settings.max_iterations)),
-                                      force_full_iterations=False)
-            recipe = tangle.Recipe(assembly)
-            recipe.relax_until_converged(max_iterations=int(polish.max_iterations))
-            run = recipe.run(polish)
-            relaxed, _ = self._within_bend_limits([np.asarray(line) / self.voxel_size
-                                                   for line in run.centerlines()])
-        long_axes = self._long_axes_on(relaxed)
+        long_axes = self.long_axes
+        if long_axes is not None and any(len(a) != len(b) for a, b in zip(relaxed, self.centerlines)):
+            # adaptive segmentation changed the node counts: each new node takes the axis of the old node at
+            # the nearest share of the fiber's length
+            long_axes = [None if axes is None else np.asarray(axes)[_nearest_share(old, new)]
+                         for axes, old, new in zip(long_axes, self.centerlines, relaxed)]
         grown = None if _radii_before is None else np.asarray(self.radii, float) - np.asarray(_radii_before, float)
         bonds = _carry_bonds(self.bonds, self.centerlines, relaxed, grown)
         binder = _carry_binder(self.binder, self.centerlines, relaxed)
         stage = {"stage": "tangle relax", "max_penetration_m": run.max_penetration,
-                 "first_solve_max_penetration_m": first_penetration,
                  "adaptive": bool(settings.adaptive_segmentation is not None), "smoothed_to_bend_limit": smoothed,
                  "smoothed_input_to_bend_limit": smoothed_input, "bond_stiffness": float(bond_stiffness) if tethered
                  else 0.0, "bonds_tethered": tethered}
@@ -844,14 +831,6 @@ class FitResult:
                              bonds_grown_over_half_diameter=int((growth > 0.5 * thinner).sum()))
         return replace(self, centerlines=relaxed, confidence=None, long_axes=long_axes, bonds=bonds, binder=binder,
                        history=self.history + [stage]), run
-
-    def _long_axes_on(self, lines: list[np.ndarray]) -> list[np.ndarray | None] | None:
-        """This fit's long axes on ``lines`` (its fibers, in order): where adaptive segmentation changed the node
-        counts, each new node takes the axis of the old node at the nearest share of the fiber's length."""
-        if self.long_axes is None or all(len(a) == len(b) for a, b in zip(lines, self.centerlines)):
-            return self.long_axes
-        return [None if axes is None else np.asarray(axes)[_nearest_share(old, new)]
-                for axes, old, new in zip(self.long_axes, self.centerlines, lines)]
 
     def _add_bonds(self, assembly: Any, lines: list[np.ndarray]) -> int:
         """Add every bond of this fit to ``assembly`` (built from ``lines``, this fit's fibers in order, perhaps
