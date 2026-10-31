@@ -74,30 +74,6 @@ the plies in sequence, applies localized through-thickness pulls to the larger
 fibers, releases those targets, and performs final contact and curvature
 cleanup. Ordinary contacts are not converted into permanent junctions.
 
-## Downstream mechanics in DIRT
-
-TANGLE generates and relaxes the fiber geometry, then exports multi-material
-spherocylinders and intra-fiber bonds for dynamic loading in
-[DIRT](https://github.com/SueHeir/dirt). The interim result below compares
-otherwise matched twenty-ply control and needled specimens in through-thickness
-tension. DIRT grips the upper and lower 15% of each specimen; engineering strain
-is referenced to the initial internal, non-gripped gauge length.
-
-![Interim DIRT through-thickness stress-strain comparison of unneedled and needled synthetic felt](docs/media/dirt-through-thickness-tension-interim.png)
-
-[![Needled synthetic felt undergoing through-thickness tension in DIRT](docs/media/dirt-needled-tension.png)](docs/media/dirt-needled-tension.mp4)
-
-The movie shows the needled specimen during the same DIRT through-thickness
-tension calculation. The two colors distinguish the 7 and 19 micrometer fiber
-populations; click the preview to play it.
-
-At approximately 16.6% strain, the needled specimen retains a larger,
-intermittent load path while the unneedled control has fallen close to zero
-stress. No bonds have broken at this point. This is a developing numerical
-demonstration of the TANGLE-to-DIRT workflow, not a calibrated material
-prediction. This figure is an archived interim snapshot, not a live indication
-of simulation progress.
-
 ## Representative examples
 
 The smaller examples isolate individual mechanics concepts. These two give a
@@ -134,7 +110,7 @@ See the [solver notes](docs/architecture.md#solver-notes) for details.
 - **OVITO:** final geometry or an opt-in multi-frame spherocylinder trajectory.
   Keyframes reduce snapshot traffic; dense debug output can dominate runtime.
 - **BPM (bonded-particle model, for DEM):** `spheres-exact`, `spheres-dynamic`, `spherocylinders-exact`, and
-  `spherocylinders-constant`. TANGLE writes geometry and bonds, not DIRT runtime
+  `spherocylinders-constant`. TANGLE writes geometry and bonds, not solver runtime
   configuration files. Check downstream atom-style compatibility and overlap
   tolerances before running a dynamic solver.
 - **LAMMPS BPM files:** `tangle.lammps` reads the fibers of a LAMMPS

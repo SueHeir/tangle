@@ -59,8 +59,8 @@ shape, and use **File → Save Session State** to create the same `.ovito` file.
 
 The exported data file uses `spheres-dynamic` mode with one-radius target
 spacing, so source centerline endpoints remain explicit. It contains both the
-`bpm/sphere` Atoms section and the Bonds section. DIRT or another compatible
-LAMMPS BPM workflow can consume the model without TANGLE owning its runtime
+`bpm/sphere` Atoms section and the Bonds section. Any compatible LAMMPS BPM
+workflow can consume the model without TANGLE owning its runtime
 configuration.
 
 Useful first experiments are changing `FIBER_COUNT`, the generator radius, or

@@ -66,7 +66,7 @@ Not yet supported for ovals:
   ellipsoidal caps at the fiber ends.
 - **OVITO** draws each oval as its row of lane capsules, the same geometry the
   solver sees.
-- **DIRT** (DEM-BPM) export still rejects oval fibers.
+- **BPM** (bonded-particle) export still rejects oval fibers.
 
 The oval example is
 [`oval_fibers.py`](../crates/tangle_python/python/examples/oval_fibers.py).

@@ -127,7 +127,7 @@ boundary; compare per-length quantities rather than per-fiber counts.
   transport calculation through the void.
 - **Voxel connectivity is not bonding.** A connected solid voxel cluster does
   not establish TANGLE junctions, friction, or mechanically bonded contacts.
-  PuMA continuum elasticity is not equivalent to a DIRT bonded-particle test.
+  PuMA continuum elasticity is not equivalent to a bonded-particle test.
 
 ## Fiber shape
 

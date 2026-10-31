@@ -564,7 +564,7 @@ materials and the [`fem_mesh` example](python/examples/fem_mesh.py).
 - `bonded_fibers.py` bonds a felt at its fiber crossings and exports the
   bonds; `oval_fibers.py` stacks plies of flat oval fibers.
 - `periodic_domain_sweep.py` sweeps periodic domain sizes of biased in-plane
-  stacks for DIRT.
+  stacks for bonded-particle tension tests.
 - `native/` mirrors the complete Rust example suite using the same native
   generators and solver. See `native/README.md` for the configuration map.
 - `ct_examples.py` fits Tangle fibers to synthetic CT scans with `tangle.ct`

@@ -6,8 +6,8 @@ See the [installation guide](../../crates/tangle_python/README.md) first.
 The commands and output paths below describe the native Rust version; Python
 uses the same solver but can have different export/debug defaults and paths.
 
-This example builds the larger twenty-ply control and needled specimens used
-by the paired DIRT through-thickness tension experiments. It is a hypothetical
+This example builds the larger twenty-ply control and needled specimens for
+through-thickness tension studies. It is a hypothetical
 material-generation study rather than a calibrated material model.
 
 | Specimen | Formation video |
@@ -15,16 +15,11 @@ material-generation study rather than a calibrated material model.
 | Unneedled control | [![Twenty-ply control formation](../../docs/media/felted-control.png)](../../docs/media/felted-control.mp4) |
 | Needled continuation | [![Twenty-ply needled formation](../../docs/media/felted-needled.png)](../../docs/media/felted-needled.mp4) |
 
-The exported needled specimen can then be loaded in DIRT for through-thickness
-tension. [Click the preview below to play the DIRT simulation.](../../docs/media/dirt-needled-tension.mp4)
-
-[![Needled felt undergoing through-thickness tension in DIRT](../../docs/media/dirt-needled-tension.png)](../../docs/media/dirt-needled-tension.mp4)
-
 The control is constructed one physically separated ply at a time, with each
 ply approached and relaxed against the existing stack. The needled path uses
 the same population and deposition sequence, then applies layer-scoped needle
 pulls before final cleanup. Both paths export multi-material capsule and bond
-data for DIRT.
+data for a LAMMPS bonded-particle model.
 
 Each run picks a specimen and a stage. `--specimen` is `control` (default) or
 `needled`; `--stage` is `form` (default), `cleanup`, or `polish`:
