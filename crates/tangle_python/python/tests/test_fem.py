@@ -1027,3 +1027,43 @@ class SweepMeshTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(fem is None or gmsh is None, "tangle.fem.conformal_mesh needs NumPy, SciPy and gmsh")
+class ConformalBinderTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.binder = np.zeros((20, 20, 20), dtype=bool)  # (z, y, x): a block around the crossing
+        cls.binder[7:13, 7:13, 7:13] = True
+        cls.mesh = fem.conformal_mesh(touching_cross(), binder=cls.binder, voxel_size=0.05, elements_around=6,
+                                      progress=False)
+        cls.is_binder = cls.mesh.element_fibers == 0
+
+    def test_the_mask_becomes_binder_tetrahedra_of_about_its_volume(self):
+        mesh = self.mesh
+        self.assertTrue(self.is_binder.any())
+        self.assertEqual(mesh.materials[-1], "binder")
+        self.assertTrue((mesh.element_materials[self.is_binder] == len(mesh.materials) - 1).all())
+        volumes = mesh.element_volumes()
+        self.assertTrue((volumes > 0).all())
+        # The block less the fibers inside it, roughly: its elements are a third of the block across.
+        centers = (np.argwhere(self.binder)[:, ::-1] + 0.5) * 0.05
+        outside = np.min([np.abs(distance) for distance in axis_distances(centers)], axis=0) > 0.1
+        self.assertAlmostEqual(volumes[self.is_binder].sum() / (outside.sum() * 0.05**3), 1.0, delta=0.4)
+
+    def test_the_binder_shares_nodes_with_both_fibers(self):
+        mesh = self.mesh
+        binder_nodes = set(mesh.elements[self.is_binder].ravel().tolist())
+        for fiber in (1, 2):
+            fiber_nodes = set(mesh.elements[mesh.element_fibers == fiber].ravel().tolist())
+            self.assertTrue(binder_nodes & fiber_nodes, f"no node shared with fiber {fiber}")
+        self.assertEqual(mesh.ties, ())
+
+    def test_no_tetrahedron_is_flatter_than_min_quality(self):
+        self.assertGreaterEqual(fem.tet_quality(self.mesh.nodes, self.mesh.elements).min(), 0.02)
+
+    def test_a_mask_that_does_not_fit_the_cell_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "whole cell"):
+            fem.conformal_mesh(touching_cross(), binder=self.binder, voxel_size=0.04, progress=False)
+        with self.assertRaisesRegex(ValueError, "voxel_size"):
+            fem.conformal_mesh(touching_cross(), binder=self.binder, progress=False)

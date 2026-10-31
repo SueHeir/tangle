@@ -24,11 +24,14 @@ def conformal_mesh(
     order: int = 1,
     region=None,
     min_quality: float = 0.02,
+    binder=None,
+    voxel_size: float | None = None,
     progress: bool = True,
     verbose: bool = False,
 ) -> FemMesh:
-    """Mesh the fibers and a smooth binder bridge at each bond as one body
-    whose tetrahedra share nodes across every fiber-binder face.
+    """Mesh the fibers and their binder (a smooth bridge at each bond, or a
+    binder mask) as one body whose tetrahedra share nodes across every
+    fiber-binder face.
 
     Each fiber is the same solid as in :func:`tet_mesh`. Each bond becomes a
     round bridge from one fiber's centerline to the other's, of radius
@@ -47,6 +50,17 @@ def conformal_mesh(
     flatter than ``min_quality``. (Meshing again finer around them helps
     as often as it hurts, and can crash gmsh's frontal mesher.)
 
+    With a binder mask (``binder``, as for :func:`sweep_mesh`) the binder is
+    the mask instead of bridges: gmsh meshes the fibers and the space
+    between them together, the tetrahedra of that space whose middles lie in
+    the mask (smoothed by a voxel, read at the level that keeps its volume)
+    become binder and the rest are dropped, with any piece of binder that
+    no fiber holds. The binder's outer nodes are then moved onto the
+    smoothed mask's surface. So the binder shares its nodes with the fibers,
+    with no voxel steps and no ties, at the fibers' coarseness: its outer
+    surface is faceted at the element size. ``elements_around=5`` or ``6``
+    keeps the mesh coarse; 8 and more can crash gmsh on a whole cell.
+
     The whole region goes into one gmsh model, which is far slower than
     :func:`tet_mesh`'s fiber at a time and can fail where fibers only just
     touch, so start with a small ``region``.
@@ -56,10 +70,11 @@ def conformal_mesh(
         bonds: ``(fiber_a, point_a, fiber_b, point_b)`` per bond, fibers as
             indices into ``assembly.centerlines()`` and points in meters on
             their centerlines. Defaults to the assembly's junctions; for a CT
-            fit, see ``fit_bonds``.
+            fit, see ``fit_bonds``. Not used with ``binder``.
         bond_radius_ratio: each bridge's radius over the thinner fiber's
             smaller radius.
-        elements_around: about this many element edges around a fiber.
+        elements_around: about this many element edges around a fiber; 5 or
+            6 for a coarse mesh.
         order: 1 for 4-node, 2 for 10-node tetrahedra (with straight edges:
             the mid-edge nodes are not moved onto the fibers' surfaces).
         region: ``(low, high)`` corners in meters of the box to mesh, or the
@@ -68,6 +83,11 @@ def conformal_mesh(
         min_quality: the least signed inverse condition number
             (:func:`tet_quality`) a tetrahedron may have; 0.02 by default,
             where Nastran only refuses tetrahedra inside out or flat.
+        binder: a boolean ``(z, y, x)`` binder mask over the whole cell in
+            voxels of ``voxel_size`` (a CT fit's binder, or
+            ``scan.binder_occupancy > 0.5`` for a synthetic scan), meshed
+            as binder in place of bridges. Needs SciPy.
+        voxel_size: the mask's voxel size in meters.
         progress: print what it is doing.
         verbose: show gmsh's own output.
     """
@@ -101,7 +121,14 @@ def conformal_mesh(
         if np.any(high_m <= low_m):
             raise ValueError("region's high corner must be above its low corner")
         origin, lengths = low_m, high_m - low_m
-    if bonds is None:
+    if binder is not None:
+        if voxel_size is None:
+            raise ValueError("pass the binder mask's voxel_size with it")
+        binder = np.asarray(binder, dtype=bool)
+        if binder.ndim != 3 or not np.allclose(np.asarray(binder.shape[::-1]) * voxel_size, np.asarray(cell.lengths)):
+            raise ValueError("binder must be a (z, y, x) mask over the whole cell in voxels of voxel_size")
+        bonds = []  # the mask is the binder
+    elif bonds is None:
         bonds = assembly_bonds(assembly)
 
     unit = min(short for _, short in semi_axes)  # see tet_mesh: OpenCASCADE wants lengths near 1
@@ -163,16 +190,18 @@ def conformal_mesh(
         # Bridges that overlap one another come out of the intersection in pieces.
         say(f"{bridged} binder bridges, {len(bridges)} pieces, from {len(bonds)} bonds")
 
+        if binder is not None:  # the space between the fibers, meshed with them; the mask picks the binder from it
+            bridges = [(3, occ.addBox(*low, *size))]
         occ.synchronize()
         pieces, children = occ.fragment(fiber_volumes, bridges)
         occ.synchronize()
-        owner_of = {}  # volume tag -> fiber index, or -1 for binder
+        owner_of = {}  # volume tag -> fiber index, or -1 for binder (-2 for the space between, with a mask)
         for parent, made in enumerate(children):  # the fibers come first, so a fiber keeps what it shares
-            owner = owners[parent] if parent < len(owners) else -1
+            owner = owners[parent] if parent < len(owners) else (-1 if binder is None else -2)
             for dim, tag in made:
                 if dim == 3 and tag not in owner_of:
                     owner_of[tag] = owner
-        binder_volumes = sum(1 for owner in owner_of.values() if owner < 0)
+        binder_volumes = sum(1 for owner in owner_of.values() if owner < 0)  # with a mask: the space between
         say(f"fragmented into {len(owner_of)} volumes, {binder_volumes} of them binder; meshing")
 
         gmsh.option.setNumber("Mesh.MeshSizeMax", element_size)
@@ -184,6 +213,10 @@ def conformal_mesh(
         gmsh.model.mesh.generate(3)
         nodes, elements, owner, on = _linear_mesh(gmsh, owner_of)
         nodes, elements, owner, mended = _mend(gmsh, nodes, elements, owner, on, max(_AIM, min_quality))
+        if binder is not None:
+            nodes, elements, owner, dropped = _carve(nodes, elements, owner, binder, voxel_size / unit,
+                                                     np.asarray(cell.origin, dtype=float) / unit)
+            say(f"binder from the mask: {int((owner < 0).sum())} tetrahedra kept, {dropped} dropped")
         quality = tet_quality(nodes, elements)
         say(f"{len(elements)} tetrahedra, {mended} mended, {int((quality < _AIM).sum())} still under {_AIM}, "
             f"worst {quality.min():.3f}")
@@ -547,6 +580,116 @@ def _drop_caps(elements, owner, quality, flat):
         return elements, owner, 0
     keep = np.setdiff1d(np.arange(len(elements)), drop)
     return elements[keep], owner[keep], len(drop)
+
+
+def _carve(nodes, elements, owner, mask, voxel, origin):
+    """Keep the tetrahedra between the fibers (owner -2) whose middles lie
+    in the binder ``mask`` (smoothed by a voxel, read at the level that
+    keeps its volume) as
+    binder (-1), and drop the rest, and any piece of binder that touches no
+    fiber. Returns the mesh and how many tetrahedra were dropped."""
+    from scipy import ndimage
+
+    field = ndimage.gaussian_filter(mask.astype(float), 1.0)
+    # Read the smoothed mask at the level that keeps the mask's volume (thin sheets would shrink at 0.5).
+    field -= np.partition(field.ravel(), field.size - int(mask.sum()))[field.size - int(mask.sum())] - 0.5
+    between = np.flatnonzero(owner == -2)
+    middles = nodes[elements[between]].mean(axis=1)
+    where = ((middles - origin) / voxel - 0.5)[:, ::-1].T  # (z, y, x) voxel coordinates
+    inside = ndimage.map_coordinates(field, where, order=1, mode="nearest") >= 0.5
+    owner = owner.copy()
+    owner[between[inside]] = -1
+    # Smooth the carving: a binder tetrahedron with three or four faces on empty space is a spike, and an empty
+    # one with three or four faces on binder (or fibers) a dent.
+    faces = np.sort(elements[:, _FACES].reshape(-1, 3), axis=1)
+    _, face_of = np.unique(faces, axis=0, return_inverse=True)
+    face_of = face_of.ravel()
+    order = np.argsort(face_of, kind="stable")
+    paired = face_of[order[1:]] == face_of[order[:-1]]
+    neighbour = np.full(len(face_of), -1)
+    neighbour[order[1:][paired]] = order[:-1][paired] // 4
+    neighbour[order[:-1][paired]] = order[1:][paired] // 4
+    neighbour = neighbour.reshape(-1, 4)
+    for _ in range(3):
+        kind = np.where(neighbour >= 0, owner[np.maximum(neighbour, 0)], -3)  # -3: the cell's walls
+        empty_faces = ((kind == -2) | (kind == -3)).sum(axis=1)
+        solid_faces = (kind >= -1).sum(axis=1)
+        spikes = (owner == -1) & (empty_faces >= 3)
+        dents = (owner == -2) & (solid_faces >= 3) & np.isin(np.arange(len(owner)), between)
+        if not spikes.any() and not dents.any():
+            break
+        owner[spikes], owner[dents] = -2, -1
+    keep = owner != -2
+    # Binder pieces (joined through shared nodes) that no fiber holds.
+    binder_tets = np.flatnonzero(keep & (owner == -1))
+    if len(binder_tets):
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+
+        rows = np.repeat(np.arange(len(binder_tets)), 4)
+        graph = coo_matrix((np.ones(len(rows)), (rows, elements[binder_tets].ravel())),
+                           shape=(len(binder_tets), len(nodes))).tocsr()
+        _, piece = connected_components(graph @ graph.T, directed=False)
+        on_fiber = np.zeros(len(nodes), dtype=bool)
+        on_fiber[elements[owner >= 0].ravel()] = True
+        held = np.zeros(piece.max() + 1, dtype=bool)
+        np.logical_or.at(held, piece, on_fiber[elements[binder_tets]].any(axis=1))
+        keep[binder_tets[~held[piece]]] = False
+    used, kept = np.unique(elements[keep], return_inverse=True)
+    nodes, elements, owner = nodes[used], kept.reshape(-1, 4), owner[keep]
+    _snap(nodes, elements, owner, field, voxel, origin)
+    return nodes, elements, owner, int((~keep).sum())
+
+
+def _snap(nodes, elements, owner, field, voxel, origin, aim=_AIM):
+    """Move the nodes of the binder's free surface (faces of one binder
+    tetrahedron, touching no fiber) onto the mask's 0.5 level along its
+    gradient, a step at a time and only as far as leaves every tetrahedron
+    around them better than ``aim`` (or no worse than it was), so that the
+    carved binder is smooth instead of jagged. Moves ``nodes`` in place."""
+    from scipy import ndimage
+
+    faces = np.sort(elements[:, _FACES].reshape(-1, 3), axis=1)
+    _, face_of, counts = np.unique(faces, axis=0, return_inverse=True, return_counts=True)
+    free = (counts[face_of.ravel()] == 1).reshape(-1, 4) & (owner == -1)[:, None]
+    on_fiber = np.zeros(len(nodes), dtype=bool)
+    on_fiber[elements[owner >= 0].ravel()] = True
+    low, high = nodes.min(axis=0), nodes.max(axis=0)
+    movable = np.zeros(len(nodes), dtype=bool)
+    movable[faces[free.ravel()].ravel()] = True
+    movable &= ~on_fiber
+    movable &= np.all((nodes > low + 1e-6 * voxel) & (nodes < high - 1e-6 * voxel), axis=1)  # not on the cell's walls
+    gradient = np.gradient(field)  # along z, y, x
+
+    def sample(values, points):
+        where = ((points - origin) / voxel - 0.5)[:, ::-1].T
+        return ndimage.map_coordinates(values, where, order=1, mode="nearest")
+
+    at, starts = _corner_tets(elements, len(nodes))
+    for _ in range(6):
+        candidates = np.flatnonzero(movable)
+        level = sample(field, nodes[candidates]) - 0.5
+        grad = np.stack([sample(g, nodes[candidates]) for g in gradient[::-1]], axis=1) / voxel  # x, y, z
+        norm2 = np.einsum("ij,ij->i", grad, grad)
+        step = -(level / np.maximum(norm2, 1e-300))[:, None] * grad
+        lengths = np.linalg.norm(step, axis=1)
+        step *= np.minimum(1.0, voxel / np.maximum(lengths, 1e-300))[:, None]  # a voxel at a time
+        moved = 0
+        for node, delta in zip(candidates, step):
+            if not np.any(delta):
+                continue
+            star = at[starts[node]:starts[node + 1]]
+            here = nodes[node].copy()
+            floor = min(aim, tet_quality(nodes, elements[star]).min())
+            for share in (1.0, 0.5, 0.25):
+                nodes[node] = here + share * delta
+                if tet_quality(nodes, elements[star]).min() >= floor:
+                    moved += 1
+                    break
+            else:
+                nodes[node] = here
+        if not moved:
+            break
 
 
 def _straight_tet10(nodes, elements):
