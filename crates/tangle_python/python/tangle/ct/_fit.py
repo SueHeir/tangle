@@ -1138,8 +1138,8 @@ def _carry_binder(binder: np.ndarray | None, old: list[np.ndarray], new: list[np
     (the same fibers, in the same order). Each binder voxel moves by the inverse-square-distance weighted mean shift
     of the ``neighbors`` nearest points of the fibers (sampled a voxel apart, each point going to the same share of
     its fiber's length), so binder between two fibers moves with both. Voxels land on the nearest voxel; one moved
-    out of the volume is dropped. Where binder spreads out, a voxel next to the moved binder whose shift traced back
-    lands in the old binder is binder too, so spreading leaves no holes."""
+    out of the volume is dropped. Each new voxel is traced back to the voxel it came from (a gather), so binder that
+    spreads out leaves no holes and binder that only translates keeps exactly its volume."""
     if binder is None or not np.any(binder) or not old:
         return binder
     from scipy import ndimage
@@ -1169,20 +1169,21 @@ def _carry_binder(binder: np.ndarray | None, old: list[np.ndarray], new: list[np
     def inside(cells: np.ndarray) -> np.ndarray:
         return np.all((cells >= 0) & (cells < upper), axis=1)
 
+    # Gather, so each voxel takes one source and the volume stays as it was (exactly, where the binder only
+    # translates): the voxels where the binder lands, and those beside them, each traced back to where it came
+    # from, two steps of c - shift(c - shift(c)) since a voxel's shift is nearly that of its source.
     z, y, x = np.nonzero(binder)
     voxels = np.stack([x, y, z], axis=1) + 0.5
-    moved = np.floor(voxels + shift_at(voxels)).astype(np.int64)
-    moved = moved[inside(moved)]
-    out = np.zeros_like(binder, dtype=bool)
-    out[moved[:, 2], moved[:, 1], moved[:, 0]] = True
-    # The voxels beside the moved binder, traced back: a target's shift is nearly that of where it came from, so
-    # two steps of c - shift(c - shift(c)) find the source.
-    z, y, x = np.nonzero(ndimage.binary_dilation(out, structure=np.ones((3, 3, 3), bool)) & ~out)
+    landed = np.floor(voxels + shift_at(voxels)).astype(np.int64)
+    landed = landed[inside(landed)]
+    near = np.zeros_like(binder, dtype=bool)
+    near[landed[:, 2], landed[:, 1], landed[:, 0]] = True
+    z, y, x = np.nonzero(ndimage.binary_dilation(near, structure=np.ones((3, 3, 3), bool)))
     targets = np.stack([x, y, z], axis=1) + 0.5
-    source = targets - shift_at(targets - shift_at(targets))
-    cells = np.floor(source).astype(np.int64)
+    cells = np.floor(targets - shift_at(targets - shift_at(targets))).astype(np.int64)
     found = inside(cells)
     found[found] = binder[cells[found, 2], cells[found, 1], cells[found, 0]]
+    out = np.zeros_like(binder, dtype=bool)
     out[z[found], y[found], x[found]] = True
     return out
 

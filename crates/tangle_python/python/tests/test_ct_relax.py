@@ -95,7 +95,7 @@ def test_binder_and_bonds_move_with_the_fibers():
     binder[37:39, 10:12, 32:34] = True  # (z, y, x): just above the second fiber, far from the first
     binder[31:33, 31:33, 31:33] = True  # between the two where they cross
     moved = _carry_binder(binder, old, new)
-    assert moved.sum() >= binder.sum()  # none lost where two voxels land on one
+    assert abs(int(moved.sum()) - int(binder.sum())) <= 4  # neither lost nor grown, but for rounding
     assert moved[30:45, 5:17, 27:39].sum() == 8 and moved[40:42, 10:12, 32:34].all()  # follows the second fiber
     z = np.nonzero(moved[:, 31:33, 31:33])[0]
     assert 31 < z.mean() < 34.5  # between staying put and moving with the second fiber
@@ -109,7 +109,7 @@ def test_binder_and_bonds_move_with_the_fibers():
     assert _carry_bonds([bond], old, new, np.array([0.0, 1.0]))[0]["gap_growth"] == pytest.approx(2.0)
 
 
-def test_binder_that_spreads_out_keeps_its_volume():
+def test_binder_that_shears_keeps_its_volume():
     from tangle.ct._fit import _carry_binder
 
     old = _crossing()
@@ -119,6 +119,7 @@ def test_binder_that_spreads_out_keeps_its_volume():
     binder = np.zeros((64, 64, 64), dtype=bool)
     binder[37:39, 40:60, 31:33] = True  # (z, y, x): a strip just above the second fiber, along it
     moved = _carry_binder(binder, old, new)
-    assert moved.sum() >= binder.sum()
+    # A shear: each column only translates, so the volume stays (within the odd voxel where shifts round apart).
+    assert abs(int(moved.sum()) - int(binder.sum())) <= 0.05 * binder.sum()
     for y in range(40, 60):  # no gap opened along the strip
         assert moved[:, y, 31:33].any()
