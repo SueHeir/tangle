@@ -245,6 +245,44 @@ mod tests {
     }
 
     #[test]
+    fn rest_length_leaves_room_to_part_an_overlap_near_the_bond() {
+        // Fiber 1 along x, fiber 2 along y 0.03 above it: they cross with
+        // their surfaces overlapping by 0.01. The bond holds fiber 1 at
+        // x = 0.55, beside the crossing, and fiber 2 at the crossing.
+        let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([1.0; 3], [false; 3]));
+        let material = assembly.materials.add("fiber");
+        let section = assembly.sections.add(Section::Circular { radius: 0.02 });
+        let intrinsic = [[0.0, 0.0, 0.0], [0.2, 0.0, 0.0], [0.4, 0.0, 0.0]];
+        let lines = [
+            [[0.3, 0.5, 0.5], [0.5, 0.5, 0.5], [0.7, 0.5, 0.5]],
+            [[0.5, 0.3, 0.53], [0.5, 0.5, 0.53], [0.5, 0.7, 0.53]],
+        ];
+        for (id, placed) in [(1, lines[0]), (2, lines[1])] {
+            assembly
+                .add_fiber(FiberId(id), material, section, &intrinsic, &placed)
+                .unwrap();
+        }
+        let law = assembly.junction_laws.add("binder");
+        let anchor = |fiber, s| FiberAnchor {
+            fiber: FiberId(fiber),
+            rest_arc_length: s,
+            section_offset: None,
+        };
+        assembly
+            .add_junction(
+                JunctionId(1),
+                law,
+                tangle_core::JunctionParameterId(0),
+                &[anchor(1, 0.25), anchor(2, 0.2)],
+            )
+            .unwrap();
+        let packed = PackedAssembly::from_assembly(&assembly).unwrap();
+        // Anchors √(0.05² + 0.03²) apart, plus the 0.01 contact must open.
+        let expected = (0.05_f32.powi(2) + 0.03_f32.powi(2)).sqrt() + 0.01;
+        assert!((packed.junction_rest_lengths[0] - expected).abs() < 1.0e-5);
+    }
+
+    #[test]
     fn coefficients_move_each_anchor_by_its_step() {
         let packed = PackedAssembly::from_assembly(&bonded_pair()).unwrap();
         let entries = TetherEntries::build(&packed);
