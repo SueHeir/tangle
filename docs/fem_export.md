@@ -281,8 +281,8 @@ the fibers' nodes, and the `.bdf` has no `MPC` ties.
 
 With a binder mask, the binder is the mask's own shape. gmsh meshes the
 fibers and the space between them together; the tetrahedra of that space
-whose middles lie in the mask, blurred by a Gaussian and read at the level
-that keeps its volume, become binder, and the rest are dropped, as is any piece of
+whose middles lie in the mask, blurred by a Gaussian over the space between
+the fibers and read at the level that keeps its volume, become binder, and the rest are dropped, as is any piece of
 binder that no fiber holds. The binder's outer nodes then move onto the
 smoothed mask's surface. There are no voxel steps; the binder's outer surface
 is faceted at the element size.
@@ -308,9 +308,11 @@ mesh.write_vtu("scan.vtu")  # binder is fiber id 0 and its own material
   fit's, coarse-grained or relaxed: the binder stays where the scan shows it,
   and wherever a relaxed fiber has moved into the mask, the fiber wins.
 - `binder_smoothing` is the Gaussian's standard deviation in the mask's
-  voxels, 1 by default. Raise it (2 or 3) for a rounder binder with no trace
-  of the voxels; a sheet thinner than about twice it thins out, so compare
-  the binder volume with the mask's.
+  voxels, 2 by default. The blur runs only over the space between the
+  fibers, so the binder keeps its hold on them and its volume; a plain blur
+  would count the fibers as empty and pull the binder off them. Beyond
+  about 2 the surface is as round as the elements allow: for a rounder one,
+  mesh finer. 0 keeps the voxels' shape.
 - `elements_around=5` or `6` keeps the mesh coarse. On a synthetic webbed
   scan of 160 um (24 fibers, 7.7% binder), `elements_around=6` gives about
   5,000 nodes and 18,700 tetrahedra, 7,000 of them binder, in 8 seconds, and

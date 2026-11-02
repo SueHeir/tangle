@@ -26,7 +26,7 @@ def conformal_mesh(
     min_quality: float = 0.02,
     binder=None,
     voxel_size: float | None = None,
-    binder_smoothing: float = 1.0,
+    binder_smoothing: float = 2.0,
     progress: bool = True,
     verbose: bool = False,
 ) -> FemMesh:
@@ -54,8 +54,8 @@ def conformal_mesh(
     With a binder mask (``binder``, as for :func:`sweep_mesh`) the binder is
     the mask instead of bridges: gmsh meshes the fibers and the space
     between them together, the tetrahedra of that space whose middles lie in
-    the mask (blurred by a Gaussian of ``binder_smoothing`` voxels, read at
-    the level that keeps its volume) become binder and the rest are
+    the mask (blurred by a Gaussian of ``binder_smoothing`` voxels over the
+    space between the fibers, read at the level that keeps its volume) become binder and the rest are
     dropped, with any piece of binder that no fiber holds. The binder's outer nodes are then moved onto the
     smoothed mask's surface. So the binder shares its nodes with the fibers,
     with no voxel steps and no ties, at the fibers' coarseness: its outer
@@ -89,11 +89,12 @@ def conformal_mesh(
             ``scan.binder_occupancy > 0.5`` for a synthetic scan), meshed
             as binder in place of bridges. Needs SciPy.
         voxel_size: the mask's voxel size in meters.
-        binder_smoothing: the Gaussian blur's standard deviation, in the
-            mask's voxels, that smooths the binder mask before its surface
-            is read (at the level that keeps the mask's volume). Larger is
-            smoother and rounder; a sheet thinner than about twice it
-            thins out.
+        binder_smoothing: the standard deviation, in the mask's voxels, of
+            the Gaussian blur that smooths the binder mask before its surface
+            is read. The blur runs over the space between the fibers only,
+            so the binder keeps hold of them, and the surface is read at the
+            level that keeps the mask's binder volume. Larger is rounder,
+            down to the element size; 0 keeps the voxels' shape.
         progress: print what it is doing.
         verbose: show gmsh's own output.
     """
@@ -590,17 +591,27 @@ def _drop_caps(elements, owner, quality, flat):
     return elements[keep], owner[keep], len(drop)
 
 
-def _carve(nodes, elements, owner, mask, voxel, origin, sigma=1.0):
+def _carve(nodes, elements, owner, mask, voxel, origin, sigma=2.0):
     """Keep the tetrahedra between the fibers (owner -2) whose middles lie
-    in the binder ``mask`` (blurred by a Gaussian of ``sigma`` voxels, read
-    at the level that keeps its volume) as
+    in the binder ``mask`` (blurred by a Gaussian of ``sigma`` voxels over
+    the space between the fibers, read at the level that keeps its volume)
+    as
     binder (-1), and drop the rest, and any piece of binder that touches no
     fiber. Returns the mesh and how many tetrahedra were dropped."""
     from scipy import ndimage
 
-    field = ndimage.gaussian_filter(mask.astype(float), sigma)
-    # Read the smoothed mask at the level that keeps the mask's volume (thin sheets would shrink at 0.5).
-    field -= np.partition(field.ravel(), field.size - int(mask.sum()))[field.size - int(mask.sum())] - 0.5
+    # A plain blur counts the fibers as empty and pulls the binder off them: blur over the space between them
+    # instead, and read it at the level that keeps the mask's binder volume between them within the meshed box.
+    free = ~_fiber_voxels(nodes, elements[owner >= 0], mask.shape, voxel, origin)
+    held = mask & free
+    field = ndimage.gaussian_filter(held.astype(float), sigma)
+    field /= np.maximum(ndimage.gaussian_filter(free.astype(float), sigma), 1e-6)
+    low = np.clip(np.floor((nodes.min(axis=0) - origin) / voxel).astype(int), 0, None)[::-1]
+    high = np.ceil((nodes.max(axis=0) - origin) / voxel).astype(int)[::-1]
+    box = tuple(slice(a, b) for a, b in zip(low, high))
+    values = field[box][free[box]]
+    kept = min(max(int(held[box].sum()), 1), values.size)
+    field -= np.partition(values, values.size - kept)[values.size - kept] - 0.5
     between = np.flatnonzero(owner == -2)
     middles = nodes[elements[between]].mean(axis=1)
     where = ((middles - origin) / voxel - 0.5)[:, ::-1].T  # (z, y, x) voxel coordinates
@@ -647,6 +658,36 @@ def _carve(nodes, elements, owner, mask, voxel, origin, sigma=1.0):
     nodes, elements, owner = nodes[used], kept.reshape(-1, 4), owner[keep]
     _snap(nodes, elements, owner, field, voxel, origin)
     return nodes, elements, owner, int((~keep).sum())
+
+
+def _fiber_voxels(nodes, tets, shape, voxel, origin, chunk=20_000_000):
+    """The ``(z, y, x)`` mask of the voxels whose middles lie in one of the
+    tetrahedra ``tets``."""
+    mask = np.zeros(shape, dtype=bool)
+    if not len(tets):
+        return mask
+    corners = (nodes[tets] - origin) / voxel - 0.5  # in voxels, x, y, z
+    inverse = np.linalg.inv(np.transpose(corners[:, 1:] - corners[:, :1], (0, 2, 1)))
+    upper = np.array(shape[::-1]) - 1
+    low = np.clip(np.ceil(corners.min(axis=1)), 0, upper).astype(np.int64)
+    sizes = np.maximum(np.clip(np.floor(corners.max(axis=1)), -1, upper).astype(np.int64) - low + 1, 0)
+    counts = sizes.prod(axis=1)
+    order = np.flatnonzero(counts)
+    ends = np.cumsum(counts[order])
+    start = 0
+    while start < len(order):  # a batch of tetrahedra at a time, about ``chunk`` voxels to test
+        stop = max(int(np.searchsorted(ends, (ends[start - 1] if start else 0) + chunk, side="right")), start + 1)
+        batch, start = order[start:stop], stop
+        n = counts[batch]
+        which = np.repeat(batch, n)
+        local = np.arange(int(n.sum())) - np.repeat(np.cumsum(n) - n, n)
+        nx, ny = sizes[which, 0], sizes[which, 1]
+        point = low[which] + np.stack([local % nx, (local // nx) % ny, local // (nx * ny)], axis=1)
+        bary = np.einsum("kij,kj->ki", inverse[which], point - corners[which, 0])
+        inside = (bary >= -1e-9).all(axis=1) & (bary.sum(axis=1) <= 1.0 + 1e-9)
+        x, y, z = point[inside].T
+        mask[z, y, x] = True
+    return mask
 
 
 def _snap(nodes, elements, owner, field, voxel, origin, aim=_AIM):
