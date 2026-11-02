@@ -26,6 +26,7 @@ def conformal_mesh(
     min_quality: float = 0.02,
     binder=None,
     voxel_size: float | None = None,
+    binder_smoothing: float = 1.0,
     progress: bool = True,
     verbose: bool = False,
 ) -> FemMesh:
@@ -53,9 +54,9 @@ def conformal_mesh(
     With a binder mask (``binder``, as for :func:`sweep_mesh`) the binder is
     the mask instead of bridges: gmsh meshes the fibers and the space
     between them together, the tetrahedra of that space whose middles lie in
-    the mask (smoothed by a voxel, read at the level that keeps its volume)
-    become binder and the rest are dropped, with any piece of binder that
-    no fiber holds. The binder's outer nodes are then moved onto the
+    the mask (blurred by a Gaussian of ``binder_smoothing`` voxels, read at
+    the level that keeps its volume) become binder and the rest are
+    dropped, with any piece of binder that no fiber holds. The binder's outer nodes are then moved onto the
     smoothed mask's surface. So the binder shares its nodes with the fibers,
     with no voxel steps and no ties, at the fibers' coarseness: its outer
     surface is faceted at the element size. ``elements_around=5`` or ``6``
@@ -88,6 +89,11 @@ def conformal_mesh(
             ``scan.binder_occupancy > 0.5`` for a synthetic scan), meshed
             as binder in place of bridges. Needs SciPy.
         voxel_size: the mask's voxel size in meters.
+        binder_smoothing: the Gaussian blur's standard deviation, in the
+            mask's voxels, that smooths the binder mask before its surface
+            is read (at the level that keeps the mask's volume). Larger is
+            smoother and rounder; a sheet thinner than about twice it
+            thins out.
         progress: print what it is doing.
         verbose: show gmsh's own output.
     """
@@ -124,6 +130,8 @@ def conformal_mesh(
     if binder is not None:
         if voxel_size is None:
             raise ValueError("pass the binder mask's voxel_size with it")
+        if not (math.isfinite(binder_smoothing) and binder_smoothing >= 0.0):
+            raise ValueError("binder_smoothing must be finite and not negative")
         binder = np.asarray(binder, dtype=bool)
         if binder.ndim != 3 or not np.allclose(np.asarray(binder.shape[::-1]) * voxel_size, np.asarray(cell.lengths)):
             raise ValueError("binder must be a (z, y, x) mask over the whole cell in voxels of voxel_size")
@@ -215,7 +223,7 @@ def conformal_mesh(
         nodes, elements, owner, mended = _mend(gmsh, nodes, elements, owner, on, max(_AIM, min_quality))
         if binder is not None:
             nodes, elements, owner, dropped = _carve(nodes, elements, owner, binder, voxel_size / unit,
-                                                     np.asarray(cell.origin, dtype=float) / unit)
+                                                     np.asarray(cell.origin, dtype=float) / unit, binder_smoothing)
             say(f"binder from the mask: {int((owner < 0).sum())} tetrahedra kept, {dropped} dropped")
         quality = tet_quality(nodes, elements)
         say(f"{len(elements)} tetrahedra, {mended} mended, {int((quality < _AIM).sum())} still under {_AIM}, "
@@ -582,15 +590,15 @@ def _drop_caps(elements, owner, quality, flat):
     return elements[keep], owner[keep], len(drop)
 
 
-def _carve(nodes, elements, owner, mask, voxel, origin):
+def _carve(nodes, elements, owner, mask, voxel, origin, sigma=1.0):
     """Keep the tetrahedra between the fibers (owner -2) whose middles lie
-    in the binder ``mask`` (smoothed by a voxel, read at the level that
-    keeps its volume) as
+    in the binder ``mask`` (blurred by a Gaussian of ``sigma`` voxels, read
+    at the level that keeps its volume) as
     binder (-1), and drop the rest, and any piece of binder that touches no
     fiber. Returns the mesh and how many tetrahedra were dropped."""
     from scipy import ndimage
 
-    field = ndimage.gaussian_filter(mask.astype(float), 1.0)
+    field = ndimage.gaussian_filter(mask.astype(float), sigma)
     # Read the smoothed mask at the level that keeps the mask's volume (thin sheets would shrink at 0.5).
     field -= np.partition(field.ravel(), field.size - int(mask.sum()))[field.size - int(mask.sum())] - 0.5
     between = np.flatnonzero(owner == -2)
