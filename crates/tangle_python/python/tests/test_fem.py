@@ -1062,6 +1062,39 @@ class ConformalBinderTests(unittest.TestCase):
     def test_no_tetrahedron_is_flatter_than_min_quality(self):
         self.assertGreaterEqual(fem.tet_quality(self.mesh.nodes, self.mesh.elements).min(), 0.02)
 
+    def test_a_wide_blur_keeps_the_binder_on_both_fibers_and_its_volume(self):
+        # A coat four voxels thick on the fibers around the crossing: a blur three voxels wide that counted
+        # the fibers as empty would pull it off them, losing contact and volume.
+        z, y, x = np.indices((40, 40, 40))
+        centers = (np.stack([x, y, z], axis=-1).reshape(-1, 3) + 0.5) * 0.025
+        distance = np.min([np.abs(d) for d in axis_distances(centers)], axis=0).reshape(40, 40, 40)
+        near_crossing = np.max(np.abs(np.stack([x, y, z]) + 0.5 - 20.0), axis=0) < 12.0
+        coat = (distance > 0.1) & (distance < 0.2) & near_crossing
+
+        def meshed(sigma):
+            return fem.conformal_mesh(touching_cross(), binder=coat, voxel_size=0.025, elements_around=6,
+                                      binder_smoothing=sigma, progress=False)
+
+        def contact_area(mesh):
+            """Area of the faces between a binder tetrahedron and a fiber tetrahedron."""
+            faces = np.sort(mesh.elements[:, [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]]].reshape(-1, 3), axis=1)
+            is_binder = np.repeat(mesh.element_fibers == 0, 4)
+            _, which, counts = np.unique(faces, axis=0, return_inverse=True, return_counts=True)
+            which = which.ravel()
+            on_both = (counts[which] == 2) & (np.bincount(which, is_binder, minlength=counts.size)[which] == 1)
+            corners = mesh.nodes[faces[on_both & is_binder]]
+            return 0.5 * np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), axis=1).sum()
+
+        mesh = meshed(3.0)
+        is_binder = mesh.element_fibers == 0
+        binder_nodes = set(mesh.elements[is_binder].ravel().tolist())
+        for fiber in (1, 2):
+            fiber_nodes = set(mesh.elements[mesh.element_fibers == fiber].ravel().tolist())
+            self.assertTrue(binder_nodes & fiber_nodes, f"no node shared with fiber {fiber}")
+        self.assertAlmostEqual(mesh.element_volumes()[is_binder].sum() / (coat.sum() * 0.025**3), 1.0, delta=0.12)
+        self.assertGreater(contact_area(mesh), 0.9 * contact_area(meshed(1.0)))
+        self.assertGreaterEqual(fem.tet_quality(mesh.nodes, mesh.elements).min(), 0.02)
+
     def test_a_mask_that_does_not_fit_the_cell_is_refused(self):
         with self.assertRaisesRegex(ValueError, "whole cell"):
             fem.conformal_mesh(touching_cross(), binder=self.binder, voxel_size=0.04, progress=False)
