@@ -283,6 +283,45 @@ class FemMesh:
         """Total element volume, in cubic meters."""
         return float(self.element_volumes().sum())
 
+    def voxel_labels(self, shape, voxel_size: float, *, binder_label: int | None = None,
+                     origin=None) -> np.ndarray:
+        """The mesh drawn on a voxel grid, for an overlay on the scan it came
+        from: a ``(z, y, x)`` ``uint16`` array of ``shape`` where each voxel
+        whose middle lies in an element holds that element's fiber id, binder
+        voxels hold ``binder_label`` (one above the largest fiber id by
+        default) and the rest 0.
+
+        Voxel ``(k, j, i)`` has its middle at ``origin + (i, j, k) + 0.5``
+        voxel sizes; ``origin`` is the cell's corner by default, which is a
+        CT fit's grid (``fit.shape``, ``fit.voxel_size``). Elements are
+        drawn through their corner nodes, so a 10-node tetrahedron's curved
+        edges count as straight.
+
+        >>> labels = mesh.voxel_labels(fit.shape, fit.voxel_size)
+        >>> overlay = ct.overlay_volume(block, labels)  # RGB, fibers and binder tinted
+        """
+        shape = tuple(int(n) for n in shape)
+        if len(shape) != 3 or min(shape) < 1:
+            raise ValueError("shape must be three positive voxel counts, (z, y, x)")
+        if not (math.isfinite(voxel_size) and voxel_size > 0.0):
+            raise ValueError("voxel_size must be finite and positive")
+        fibers = self.element_fibers.astype(np.int64)
+        if binder_label is None:
+            binder_label = int(fibers.max(initial=0)) + 1
+        if not 0 < binder_label <= np.iinfo(np.uint16).max or fibers.max(initial=0) > np.iinfo(np.uint16).max:
+            raise ValueError("fiber ids and binder_label must fit in uint16 and binder_label must be positive")
+        if self.element_type == "hex8":
+            corners = self.elements[:, HEX_TETRAHEDRA]
+        elif self.element_type == "penta6":
+            corners = self.elements[:, PENTA_TETRAHEDRA]
+        else:
+            corners = self.elements[:, None, :4]
+        values = np.where(fibers == 0, binder_label, fibers)
+        origin = np.asarray(self.cell_origin if origin is None else origin, dtype=float)
+        labels = np.zeros(shape, dtype=np.uint16)
+        voxelize(self.nodes, corners.reshape(-1, 4), np.repeat(values, corners.shape[1]), labels, voxel_size, origin)
+        return labels
+
     def node_sets(self) -> dict[str, np.ndarray]:
         """Zero-based indices of the nodes on each cell face, keyed ``XMIN``,
         ``XMAX``, ``YMIN``, ``YMAX``, ``ZMIN`` and ``ZMAX``."""
@@ -878,3 +917,36 @@ def _abaqus_names(names: tuple[str, ...]) -> list[str]:
             label, suffix = f"{base}_{suffix}", suffix + 1
         labels.append(label)
     return labels
+
+
+def voxelize(nodes, tets, values, out, voxel_size, origin, chunk=20_000_000) -> None:
+    """Set each voxel of the ``(z, y, x)`` array ``out`` whose middle lies in
+    one of the tetrahedra ``tets`` (corner node indices into ``nodes``) to
+    that tetrahedron's entry of ``values``. Voxel ``(k, j, i)`` has its
+    middle at ``origin + (i, j, k) + 0.5`` voxel sizes."""
+    if not len(tets):
+        return
+    corners = (nodes[tets] - origin) / voxel_size - 0.5  # in voxels, x, y, z
+    edges = np.transpose(corners[:, 1:] - corners[:, :1], (0, 2, 1))
+    solid = np.abs(np.linalg.det(edges)) > 1e-12
+    tets, corners, edges, values = tets[solid], corners[solid], edges[solid], np.asarray(values)[solid]
+    inverse = np.linalg.inv(edges)
+    upper = np.array(out.shape[::-1]) - 1
+    low = np.clip(np.ceil(corners.min(axis=1)), 0, upper).astype(np.int64)
+    sizes = np.maximum(np.clip(np.floor(corners.max(axis=1)), -1, upper).astype(np.int64) - low + 1, 0)
+    counts = sizes.prod(axis=1)
+    order = np.flatnonzero(counts)
+    ends = np.cumsum(counts[order])
+    start = 0
+    while start < len(order):  # a batch of tetrahedra at a time, about ``chunk`` voxels to test
+        stop = max(int(np.searchsorted(ends, (ends[start - 1] if start else 0) + chunk, side="right")), start + 1)
+        batch, start = order[start:stop], stop
+        n = counts[batch]
+        which = np.repeat(batch, n)
+        local = np.arange(int(n.sum())) - np.repeat(np.cumsum(n) - n, n)
+        nx, ny = sizes[which, 0], sizes[which, 1]
+        point = low[which] + np.stack([local % nx, (local // nx) % ny, local // (nx * ny)], axis=1)
+        bary = np.einsum("kij,kj->ki", inverse[which], point - corners[which, 0])
+        inside = (bary >= -1e-9).all(axis=1) & (bary.sum(axis=1) <= 1.0 + 1e-9)
+        x, y, z = point[inside].T
+        out[z, y, x] = values[which[inside]]
