@@ -330,8 +330,8 @@ mesh.write_vtu("scan.vtu")  # binder is fiber id 0 and its own material
   leaves the space between the fibers unmeshed. The clearance removes them.
   `conformal_mesh` raises if the tetrahedra do not fill the box, and on a gmsh
   failure or a flat tetrahedron it tries again with a larger clearance, up to
-  0.2, warning which one worked. No `region` is needed on a block of a thousand
-  fibers, which takes some minutes; a `region` is a quicker first try.
+  0.2, warning which one worked. A whole block needs no `region`, though a
+  large one takes some minutes; a `region` is a quicker first try.
 
 ### From bonds
 
