@@ -58,9 +58,18 @@ def overlay_slice(
     return np.clip(rgb, 0.0, 1.0)
 
 
-def overlay_volume(volume: np.ndarray, labels: np.ndarray, *, alpha: float = 0.3) -> np.ndarray:
-    """``uint8`` RGB stack ``(z, y, x, 3)`` for viewing in Fiji/Napari/ParaView."""
-    palette = fiber_palette(int(labels.max()))
+BINDER_COLOR = (1.0, 0.55, 0.0)  # orange
+
+
+def overlay_volume(volume: np.ndarray, labels: np.ndarray, *, alpha: float = 0.3,
+                   binder_label: int | None = None) -> np.ndarray:
+    """``uint8`` RGB stack ``(z, y, x, 3)`` for viewing in Fiji/Napari/ParaView.
+
+    Voxels labelled ``binder_label`` (``FemMesh.voxel_labels``' binder) are
+    tinted orange rather than with a fiber's color."""
+    palette = fiber_palette(max(int(labels.max()), binder_label or 0))
+    if binder_label is not None:
+        palette[binder_label] = BINDER_COLOR
     low, high = np.percentile(np.asarray(volume)[:: max(1, volume.shape[0] // 32)], [0.5, 99.5])
     out = np.empty(volume.shape + (3,), dtype=np.uint8)
     for z in range(volume.shape[0]):

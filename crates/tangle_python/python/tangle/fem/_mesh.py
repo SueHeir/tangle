@@ -289,16 +289,17 @@ class FemMesh:
         from: a ``(z, y, x)`` ``uint16`` array of ``shape`` where each voxel
         whose middle lies in an element holds that element's fiber id, binder
         voxels hold ``binder_label`` (one above the largest fiber id by
-        default) and the rest 0.
+        default, so the largest label when there is binder) and the rest 0.
 
         Voxel ``(k, j, i)`` has its middle at ``origin + (i, j, k) + 0.5``
-        voxel sizes; ``origin`` is the cell's corner by default, which is a
-        CT fit's grid (``fit.shape``, ``fit.voxel_size``). Elements are
+        voxel sizes; ``origin`` is ``(0, 0, 0)`` by default, the corner of a
+        CT fit's grid (``fit.shape``, ``fit.voxel_size``), also for a mesh of
+        a ``region`` of it. Elements are
         drawn through their corner nodes, so a 10-node tetrahedron's curved
         edges count as straight.
 
         >>> labels = mesh.voxel_labels(fit.shape, fit.voxel_size)
-        >>> overlay = ct.overlay_volume(block, labels)  # RGB, fibers and binder tinted
+        >>> overlay = ct.overlay_volume(block, labels, binder_label=int(mesh.element_fibers.max()) + 1)
         """
         shape = tuple(int(n) for n in shape)
         if len(shape) != 3 or min(shape) < 1:
@@ -317,7 +318,7 @@ class FemMesh:
         else:
             corners = self.elements[:, None, :4]
         values = np.where(fibers == 0, binder_label, fibers)
-        origin = np.asarray(self.cell_origin if origin is None else origin, dtype=float)
+        origin = np.zeros(3) if origin is None else np.asarray(origin, dtype=float)
         labels = np.zeros(shape, dtype=np.uint16)
         voxelize(self.nodes, corners.reshape(-1, 4), np.repeat(values, corners.shape[1]), labels, voxel_size, origin)
         return labels

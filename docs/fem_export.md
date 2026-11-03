@@ -449,18 +449,22 @@ nodes.
 draws the mesh back onto a voxel grid: a `(z, y, x)` `uint16` array where each
 voxel whose middle lies in an element holds that element's fiber id, binder
 voxels hold `binder_label` (one above the largest fiber id by default) and the
-rest 0. With a CT fit's grid it lines up with the scan, so
-`ct.overlay_volume` tints the mesh's fibers and binder over it:
+rest 0. The grid starts at `origin`, `(0, 0, 0)` by default, which is a CT
+fit's grid, so with `fit.shape` and `fit.voxel_size` the labels line up with
+the scan block the fit came from, also for a mesh of a `region` of it.
+`ct.overlay_volume` then tints the mesh's fibers, and its binder orange, over
+the scan:
 
 ```python
 import numpy as np
 import tifffile
 from tangle import ct
 
-labels = mesh.voxel_labels(fit.shape, fit.voxel_size)  # the grid starts at the cell's corner
+labels = mesh.voxel_labels(fit.shape, fit.voxel_size)
+binder = int(mesh.element_fibers.max()) + 1  # voxel_labels' default binder label
 tifffile.imwrite("mesh_labels.tif", labels, imagej=True)
-block = tifffile.imread("block.tif")  # the scan block the fit came from, (z, y, x)
-tifffile.imwrite("mesh_overlay.tif", ct.overlay_volume(block, labels), photometric="rgb")
+block = np.asarray(ct.open_scan("scan.tif")[z0:z1, y0:y1, x0:x1])  # the block the fit came from, (z, y, x)
+tifffile.imwrite("mesh_overlay.tif", ct.overlay_volume(block, labels, binder_label=binder), photometric="rgb")
 ```
 
 Compare `labels` with the fit's own (`fit.label_volume()`, and `fit.binder`)

@@ -413,6 +413,15 @@ class WriterTests(unittest.TestCase):
         self.assertTrue((wide[:, :, 8:] == 0).all())
         shifted = mesh.voxel_labels((4, 4, 8), 0.25, origin=(0.5, 0.0, 0.0))
         self.assertTrue((shifted[:, :, :2] == 2).all() and (shifted[:, :, 2:6] == 3).all() and (shifted[:, :, 6:] == 0).all())
+        # A mesh of a region keeps the grid's corner at 0: the mesh's own cell corner doesn't move it.
+        region = dataclasses.replace(mesh, cell_origin=(1.0, 0.0, 0.0))
+        np.testing.assert_array_equal(region.voxel_labels((4, 4, 8), 0.25), labels)
+        # ct's overlay tints the binder orange, the fibers their palette colors.
+        from tangle import ct
+
+        overlay = ct.overlay_volume(np.zeros(labels.shape), labels, alpha=1.0, binder_label=3)
+        np.testing.assert_array_equal(overlay[2, 2, 6], [255, 140, 0])
+        self.assertFalse((overlay[2, 2, 1] == [255, 140, 0]).all())
         with self.assertRaisesRegex(ValueError, "shape"):
             mesh.voxel_labels((4, 8), 0.25)
 
