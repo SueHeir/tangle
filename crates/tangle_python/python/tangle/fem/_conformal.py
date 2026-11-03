@@ -27,8 +27,10 @@ def conformal_mesh(
     binder=None,
     voxel_size: float | None = None,
     binder_smoothing: float = 2.0,
+    fiber_clearance: float = 0.05,
     progress: bool = True,
     verbose: bool = False,
+    _retry: bool = True,
 ) -> FemMesh:
     """Mesh the fibers and their binder (a smooth bridge at each bond, or a
     binder mask) as one body whose tetrahedra share nodes across every
@@ -95,10 +97,45 @@ def conformal_mesh(
             so the binder keeps hold of them, and the surface is read at the
             level that keeps the mask's binder volume. Larger is rounder,
             down to the element size; 0 keeps the voxels' shape.
+        fiber_clearance: with ``binder``, each fiber is meshed this share
+            thinner than it is. Fibers that overlap a little, as relaxed
+            fibers do, leave thin wedges of empty space at the rims of their
+            overlaps, where gmsh's surface meshes cross and its 3D mesher
+            crashes or leaves the space between the fibers unmeshed. Their
+            surface nodes then move back out, as far as the tetrahedra around
+            them allow, until each fiber's meshed volume is its full round
+            volume. If gmsh fails or tetrahedra stay flatter than
+            ``min_quality``, it tries again with the larger clearances up to
+            0.2, warning which one worked, before giving up.
         progress: print what it is doing.
         verbose: show gmsh's own output.
     """
     import gmsh
+
+    if binder is not None and _retry:
+        if not (math.isfinite(fiber_clearance) and 0.0 <= fiber_clearance < 0.5):
+            raise ValueError("fiber_clearance must be within [0, 0.5)")
+        clearances = [fiber_clearance, *(c for c in (0.1, 0.15, 0.2) if c > fiber_clearance)]
+        for clearance in clearances:
+            try:
+                mesh = conformal_mesh(assembly, bonds, bond_radius_ratio=bond_radius_ratio,
+                                      elements_around=elements_around, order=order, region=region,
+                                      min_quality=min_quality, binder=binder, voxel_size=voxel_size,
+                                      binder_smoothing=binder_smoothing, fiber_clearance=clearance, progress=progress,
+                                      verbose=verbose, _retry=False)
+            except ValueError:  # bad arguments: another clearance won't help
+                raise
+            except Exception as error:  # gmsh raises a plain Exception
+                if clearance == clearances[-1]:
+                    raise
+                if progress:
+                    print(f"conformal_mesh: fiber_clearance {clearance:g} failed ({str(error)[:200]}); trying a larger "
+                          "one", flush=True)
+                continue
+            if clearance != fiber_clearance:
+                warnings.warn(f"conformal_mesh: fiber_clearance {fiber_clearance:g} failed; {clearance:g} worked",
+                              stacklevel=2)
+            return mesh
 
     started = time.monotonic()
 
@@ -133,6 +170,8 @@ def conformal_mesh(
             raise ValueError("pass the binder mask's voxel_size with it")
         if not (math.isfinite(binder_smoothing) and binder_smoothing >= 0.0):
             raise ValueError("binder_smoothing must be finite and not negative")
+        if not (math.isfinite(fiber_clearance) and 0.0 <= fiber_clearance < 0.5):
+            raise ValueError("fiber_clearance must be within [0, 0.5)")
         binder = np.asarray(binder, dtype=bool)
         if binder.ndim != 3 or not np.allclose(np.asarray(binder.shape[::-1]) * voxel_size, np.asarray(cell.lengths)):
             raise ValueError("binder must be a (z, y, x) mask over the whole cell in voxels of voxel_size")
@@ -156,8 +195,9 @@ def conformal_mesh(
             pieces = list(_pieces(points, long / unit, cell_low, cell_size, periodic, True))
             if not pieces:
                 continue
-            for tag in _fiber_solid(occ, fiber_ids[fiber], points, axes, long / unit, short / unit, pieces,
-                                    (low, size)):
+            thinner = 1.0 - fiber_clearance if binder is not None else 1.0
+            for tag in _fiber_solid(occ, fiber_ids[fiber], points, axes, thinner * long / unit, thinner * short / unit,
+                                    pieces, (low, size)):
                 fiber_volumes.append((3, tag))
                 owners.append(fiber)
         if not fiber_volumes:
@@ -221,8 +261,17 @@ def conformal_mesh(
         gmsh.option.setNumber("Mesh.Algorithm3D", 4)
         gmsh.model.mesh.generate(3)
         nodes, elements, owner, on = _linear_mesh(gmsh, owner_of)
+        if binder is not None:
+            _check_box_filled(nodes, elements, float(np.prod(size)))
         nodes, elements, owner, mended = _mend(gmsh, nodes, elements, owner, on, max(_AIM, min_quality))
         if binder is not None:
+            wanted = np.zeros(len(centerlines))  # each fiber's round volume, from its solids at their thinner size
+            for tag, fiber in owner_of.items():
+                if fiber >= 0:
+                    wanted[fiber] += occ.getMass(3, tag) / (1.0 - fiber_clearance) ** 2
+            grown = _grow_fibers(nodes, elements, owner, [line / unit for line in centerlines], wanted, low, low + size,
+                                 cell_size, periodic)
+            say(f"fibers grown back: {grown:.1%} of their round volume")
             nodes, elements, owner, dropped = _carve(nodes, elements, owner, binder, voxel_size / unit,
                                                      np.asarray(cell.origin, dtype=float) / unit, binder_smoothing)
             say(f"binder from the mask: {int((owner < 0).sum())} tetrahedra kept, {dropped} dropped")
@@ -239,8 +288,9 @@ def conformal_mesh(
                           for k in worst[:5])
         if quality.min() < min_quality:
             raise RuntimeError(f"conformal_mesh: {int((quality < min_quality).sum())} tetrahedra stay flatter than "
-                               f"min_quality {min_quality} (worst: {where}); try more "
-                               "elements_around, a smaller bond_radius_ratio or another region")
+                               f"min_quality {min_quality} (worst: {where}); lower min_quality if these few are "
+                               "acceptable, or try another elements_around, fiber_clearance, bond_radius_ratio or "
+                               "region")
         warnings.warn(f"conformal_mesh: {len(flat)} of {len(elements)} tetrahedra are flatter than {_AIM} "
                       f"(worst: {where})", stacklevel=2)
     if order == 2:
@@ -331,6 +381,83 @@ def tet_quality(nodes: np.ndarray, elements: np.ndarray) -> np.ndarray:
     norms = np.sqrt(np.einsum("nij,nij->n", jacobian, jacobian) * np.einsum("nij,nij->n", adjugate, adjugate))
     with np.errstate(divide="ignore", invalid="ignore"):
         return np.where(norms > 0.0, 3.0 * det / norms, 0.0)
+
+
+def _grow_fibers(nodes, elements, owner, lines, wanted, low, high, cell_size, periodic, aim=_AIM, passes=4):
+    """Move the nodes on each fiber's surface away from its centerline, in ``passes`` steps, until the fiber's meshed
+    volume is ``wanted``, and each only as far as leaves every tetrahedron around it better than ``aim`` (or no worse
+    than it was), so fibers stop where they would run into a neighbor. Nodes that two fibers share stay, and nodes on
+    the box's walls stay on them. Moves ``nodes`` in place and returns the fibers' volume over ``wanted``."""
+    faces = np.sort(elements[:, _FACES].reshape(-1, 3), axis=1)
+    _, face_of = np.unique(faces, axis=0, return_inverse=True)
+    face_of = face_of.ravel()
+    face_owner = np.repeat(owner, 4)
+    order = np.lexsort((face_owner, face_of))
+    same = (face_of[order[1:]] == face_of[order[:-1]]) & (face_owner[order[1:]] == face_owner[order[:-1]])
+    inner = np.zeros(len(faces), dtype=bool)
+    inner[order[1:][same]] = inner[order[:-1][same]] = True
+    on_surface = (~inner) & (face_owner >= 0)
+    fiber_of = np.full(len(nodes), -1, dtype=np.int64)
+    shared = np.zeros(len(nodes), dtype=bool)
+    for fiber in np.unique(face_owner[on_surface]):
+        touched = np.unique(faces[on_surface & (face_owner == fiber)])
+        shared[touched[fiber_of[touched] >= 0]] = True
+        fiber_of[touched] = fiber
+    movable = np.flatnonzero((fiber_of >= 0) & ~shared)
+    tolerance = 1.0e-6 * np.linalg.norm(high - low)
+    at, starts = _corner_tets(elements, len(nodes))
+    corners = nodes[elements]
+    volume = np.abs(np.linalg.det(corners[:, 1:] - corners[:, :1])) / 6.0
+    for _ in range(passes):
+        corners = nodes[elements]
+        volume = np.abs(np.linalg.det(corners[:, 1:] - corners[:, :1])) / 6.0
+        have = np.bincount(owner[owner >= 0], volume[owner >= 0], minlength=len(lines))
+        scale = np.sqrt(wanted / np.maximum(have, 1.0e-300))
+        moved = 0
+        for fiber in np.flatnonzero(scale > 1.001):
+            members = movable[fiber_of[movable] == fiber]
+            if not len(members):
+                continue
+            line = lines[fiber]
+            start, step = line[:-1], np.diff(line, axis=0)
+            # Each node's nearest point on the fiber's centerline, through the periodic walls.
+            offset = nodes[members][:, None, :] - start[None, :, :]
+            for axis in range(3):
+                if periodic[axis]:
+                    offset[..., axis] -= np.round(offset[..., axis] / cell_size[axis]) * cell_size[axis]
+            along = np.clip(np.einsum("nsi,si->ns", offset, step) / np.maximum(np.einsum("si,si->s", step, step), 1e-300),
+                            0.0, 1.0)
+            away = offset - along[..., None] * step[None, :, :]
+            nearest = np.argmin(np.einsum("nsi,nsi->ns", away, away), axis=1)
+            push = away[np.arange(len(members)), nearest] * (scale[fiber] - 1.0)
+            walled = (np.abs(nodes[members] - low) < tolerance) | (np.abs(nodes[members] - high) < tolerance)
+            push[walled] = 0.0
+            for node, delta in zip(members, push):
+                star = at[starts[node]:starts[node + 1]]
+                here = nodes[node].copy()
+                floor = min(aim, tet_quality(nodes, elements[star]).min())
+                for share in (1.0, 0.5, 0.25):
+                    nodes[node] = here + share * delta
+                    if tet_quality(nodes, elements[star]).min() >= floor:
+                        moved += 1
+                        break
+                else:
+                    nodes[node] = here
+        if not moved:
+            break
+    corners = nodes[elements]
+    volume = np.abs(np.linalg.det(corners[:, 1:] - corners[:, :1])) / 6.0
+    return float(volume[owner >= 0].sum() / max(wanted.sum(), 1.0e-300))
+
+
+def _check_box_filled(nodes, elements, box_volume, tolerance=0.02):
+    """Raise unless the tetrahedra fill the box: where its surface meshes cross, gmsh's 3D mesher can report success
+    with the space between the fibers left unmeshed, and the binder would quietly come out almost empty."""
+    corners = nodes[elements]
+    filled = float(np.abs(np.linalg.det(corners[:, 1:] - corners[:, :1])).sum()) / 6.0 / box_volume
+    if abs(filled - 1.0) > tolerance:
+        raise RuntimeError(f"conformal_mesh: gmsh's tetrahedra fill {filled:.1%} of the box, so the space between the "
+                           "fibers did not mesh; try a larger fiber_clearance or another elements_around or region")
 
 
 def _linear_mesh(gmsh, owner_of):
