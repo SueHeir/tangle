@@ -272,8 +272,8 @@ fibers' sides overlap) are left out with a warning that counts them. Not with
 ## Conformal tetrahedra with binder
 
 `conformal_mesh(assembly, bonds=None, *, binder=None, voxel_size=None,
-elements_around=8, order=1, region=None, min_quality=0.02,
-bond_radius_ratio=0.5)` meshes the fibers and their binder as one body in one
+binder_smoothing=2.0, fiber_clearance=0.05, elements_around=8, order=1,
+region=None, min_quality=0.02, bond_radius_ratio=0.5)` meshes the fibers and their binder as one body in one
 gmsh model, so every fiber-binder face is shared: the binder's tetrahedra use
 the fibers' nodes, and the `.bdf` has no `MPC` ties.
 
@@ -319,8 +319,19 @@ mesh.write_vtu("scan.vtu")  # binder is fiber id 0 and its own material
   keeps 96% of the mask's binder volume; `sweep_mesh(binder=...)` of the same
   cell has 407,000 nodes. At 8 and above gmsh's frontal mesher can crash on a
   whole cell.
-- The fibers' volume comes out a few percent under their true volume at
-  these settings, since their faceted surfaces cut the round ones.
+- Each fiber's meshed volume matches its round volume where there is room:
+  gmsh meshes it a `fiber_clearance` (5% by default) thinner, and its surface
+  nodes then move back out until the volume is right, each only as far as the
+  tetrahedra around it stay good. At 6 elements around, a fiber's section is
+  about a hexagon whose corners stick out past the round fiber, so its volume
+  is right even though its surface is not exactly round.
+- Thin wedges of empty space at the rims of overlapping fibers are what gmsh
+  cannot mesh: there its surface meshes cross, and its 3D mesher crashes or
+  leaves the space between the fibers unmeshed. The clearance removes them.
+  `conformal_mesh` raises if the tetrahedra do not fill the box, and on a gmsh
+  failure or a flat tetrahedron it tries again with a larger clearance, up to
+  0.2, warning which one worked. No `region` is needed on a block of a thousand
+  fibers, which takes some minutes; a `region` is a quicker first try.
 
 ### From bonds
 
@@ -345,8 +356,9 @@ collapsed, tetrahedra flipped, corners slid along their surfaces. It warns
 with their places if any stay under 0.1, and raises rather than return one
 flatter than `min_quality` (0.02 by default; Nastran itself only refuses
 tetrahedra that are inside out or flat). A handful between the two is
-normal on a large cell and does not spoil a linear solve; lower
-`min_quality` to 0.005 if one run stops on a single tetrahedron.
+normal on a large cell and does not spoil a linear solve. `min_quality` is a
+floor, so a lower value accepts flatter tetrahedra and a higher one refuses
+more of them; lower it to 0.005 if a run stops on a single tetrahedron.
 
 The whole region goes into one gmsh model, so this is slower than
 `tet_mesh`, which meshes a fiber at a time. Try a small `region=(low, high)`

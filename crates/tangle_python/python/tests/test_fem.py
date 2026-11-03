@@ -1049,7 +1049,7 @@ class ConformalBinderTests(unittest.TestCase):
         # The block less the fibers inside it, roughly: its elements are a third of the block across.
         centers = (np.argwhere(self.binder)[:, ::-1] + 0.5) * 0.05
         outside = np.min([np.abs(distance) for distance in axis_distances(centers)], axis=0) > 0.1
-        self.assertAlmostEqual(volumes[self.is_binder].sum() / (outside.sum() * 0.05**3), 1.0, delta=0.4)
+        self.assertAlmostEqual(volumes[self.is_binder].sum() / (outside.sum() * 0.05**3), 1.0, delta=0.5)
 
     def test_the_binder_shares_nodes_with_both_fibers(self):
         mesh = self.mesh
@@ -1094,6 +1094,48 @@ class ConformalBinderTests(unittest.TestCase):
         self.assertAlmostEqual(mesh.element_volumes()[is_binder].sum() / (coat.sum() * 0.025**3), 1.0, delta=0.12)
         self.assertGreater(contact_area(mesh), 0.9 * contact_area(meshed(1.0)))
         self.assertGreaterEqual(fem.tet_quality(mesh.nodes, mesh.elements).min(), 0.02)
+
+    def test_fibers_grow_back_to_their_round_volume_whatever_their_clearance(self):
+        def fiber_volume(clearance):
+            mesh = fem.conformal_mesh(touching_cross(), binder=self.binder, voxel_size=0.05, elements_around=6,
+                                      fiber_clearance=clearance, progress=False)
+            return mesh.element_volumes()[mesh.element_fibers > 0].sum()
+
+        # Two fibers of radius 0.1 and length 0.6 in the cell, the crossing counted once.
+        round_volume = 2.0 * math.pi * 0.1**2 * 0.6
+        for clearance in (0.0, 0.05, 0.2):
+            self.assertAlmostEqual(fiber_volume(clearance) / round_volume, 1.0, delta=0.05)
+        with self.assertRaisesRegex(ValueError, "fiber_clearance"):
+            fiber_volume(0.5)
+
+    def test_a_failed_mesh_is_tried_again_with_a_larger_clearance(self):
+        from unittest import mock
+
+        from tangle.fem import _conformal
+
+        real, tried = _conformal._check_box_filled, []
+
+        def fails_once(*args):
+            tried.append(args)
+            if len(tried) == 1:
+                raise RuntimeError("did not mesh")
+            return real(*args)
+
+        with mock.patch.object(_conformal, "_check_box_filled", fails_once), \
+                self.assertWarnsRegex(UserWarning, "fiber_clearance 0.05 failed; 0.1 worked"):
+            mesh = fem.conformal_mesh(touching_cross(), binder=self.binder, voxel_size=0.05, elements_around=6,
+                                      progress=False)
+        self.assertEqual(len(tried), 2)
+        self.assertTrue((mesh.element_fibers == 0).any())
+
+    def test_a_box_gmsh_left_unmeshed_is_refused(self):
+        from tangle.fem._conformal import _check_box_filled
+
+        nodes = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        tetrahedron = np.array([[0, 1, 2, 3]])
+        _check_box_filled(nodes, tetrahedron, 1.0 / 6.0)
+        with self.assertRaisesRegex(RuntimeError, "did not mesh"):
+            _check_box_filled(nodes, tetrahedron, 1.0)
 
     def test_a_mask_that_does_not_fit_the_cell_is_refused(self):
         with self.assertRaisesRegex(ValueError, "whole cell"):
