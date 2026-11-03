@@ -443,6 +443,33 @@ apply a Threshold on it from 0 to 0 to see only the binder. ParaView cannot
 read the `.bdf` itself: its Nastran reader does not read large-field `GRID*`
 nodes.
 
+### On the scan
+
+`mesh.voxel_labels(shape, voxel_size, *, binder_label=None, origin=None)`
+draws the mesh back onto a voxel grid: a `(z, y, x)` `uint16` array where each
+voxel whose middle lies in an element holds that element's fiber id, binder
+voxels hold `binder_label` (one above the largest fiber id by default) and the
+rest 0. The grid starts at `origin`, `(0, 0, 0)` by default, which is a CT
+fit's grid, so with `fit.shape` and `fit.voxel_size` the labels line up with
+the scan block the fit came from, also for a mesh of a `region` of it.
+`ct.overlay_volume` then tints the mesh's fibers, and its binder orange, over
+the scan:
+
+```python
+import numpy as np
+import tifffile
+from tangle import ct
+
+labels = mesh.voxel_labels(fit.shape, fit.voxel_size)
+binder = int(mesh.element_fibers.max()) + 1  # voxel_labels' default binder label
+tifffile.imwrite("mesh_labels.tif", labels, imagej=True)
+block = np.asarray(ct.open_scan("scan.tif")[z0:z1, y0:y1, x0:x1])  # the block the fit came from, (z, y, x)
+tifffile.imwrite("mesh_overlay.tif", ct.overlay_volume(block, labels, binder_label=binder), photometric="rgb")
+```
+
+Compare `labels` with the fit's own (`fit.label_volume()`, and `fit.binder`)
+to see how far meshing moved the fibers and binder.
+
 ## Units
 
 TANGLE works in meters. Give material values in the unit system the file is
@@ -459,7 +486,8 @@ written in:
 curved faces of 10-node tetrahedra, and `mesh.node_sets()` the face node sets. Dividing `mesh.volume` by the cell
 volume gives the solid fraction, which should be close to the
 `voxel_volume_fraction` of `export_puma` at a fine voxel size. To look at a
-mesh, write it with `write_vtu` and open it in ParaView.
+mesh, write it with `write_vtu` and open it in ParaView, or draw it on the scan
+with `voxel_labels` ([On the scan](#on-the-scan)).
 
 ## Limits
 

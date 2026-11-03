@@ -790,30 +790,10 @@ def _carve(nodes, elements, owner, mask, voxel, origin, sigma=2.0):
 def _fiber_voxels(nodes, tets, shape, voxel, origin, chunk=20_000_000):
     """The ``(z, y, x)`` mask of the voxels whose middles lie in one of the
     tetrahedra ``tets``."""
+    from ._mesh import voxelize
+
     mask = np.zeros(shape, dtype=bool)
-    if not len(tets):
-        return mask
-    corners = (nodes[tets] - origin) / voxel - 0.5  # in voxels, x, y, z
-    inverse = np.linalg.inv(np.transpose(corners[:, 1:] - corners[:, :1], (0, 2, 1)))
-    upper = np.array(shape[::-1]) - 1
-    low = np.clip(np.ceil(corners.min(axis=1)), 0, upper).astype(np.int64)
-    sizes = np.maximum(np.clip(np.floor(corners.max(axis=1)), -1, upper).astype(np.int64) - low + 1, 0)
-    counts = sizes.prod(axis=1)
-    order = np.flatnonzero(counts)
-    ends = np.cumsum(counts[order])
-    start = 0
-    while start < len(order):  # a batch of tetrahedra at a time, about ``chunk`` voxels to test
-        stop = max(int(np.searchsorted(ends, (ends[start - 1] if start else 0) + chunk, side="right")), start + 1)
-        batch, start = order[start:stop], stop
-        n = counts[batch]
-        which = np.repeat(batch, n)
-        local = np.arange(int(n.sum())) - np.repeat(np.cumsum(n) - n, n)
-        nx, ny = sizes[which, 0], sizes[which, 1]
-        point = low[which] + np.stack([local % nx, (local // nx) % ny, local // (nx * ny)], axis=1)
-        bary = np.einsum("kij,kj->ki", inverse[which], point - corners[which, 0])
-        inside = (bary >= -1e-9).all(axis=1) & (bary.sum(axis=1) <= 1.0 + 1e-9)
-        x, y, z = point[inside].T
-        mask[z, y, x] = True
+    voxelize(nodes, tets, np.ones(len(tets), dtype=bool), mask, voxel, origin, chunk)
     return mask
 
 

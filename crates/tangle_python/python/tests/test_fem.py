@@ -394,6 +394,37 @@ class WriterTests(unittest.TestCase):
         lowest, mean = mesh_module.tet10_jacobians(nodes, elements)
         np.testing.assert_allclose([lowest[0], mean[0]], [6.0, 7.2], rtol=1e-12)  # 6 (1 + 0.4 x) at x = 0, and its mean
 
+    def test_voxel_labels_draw_each_element_on_the_grid(self):
+        # Two unit cubes side by side along x: fiber 2, then binder; 4 voxels to a cube's side.
+        cube = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]],
+                        dtype=float)
+        mesh = fem.FemMesh(
+            nodes=np.concatenate([cube, cube + [1, 0, 0]]), elements=np.arange(16).reshape(2, 8),
+            element_type="hex8", element_fibers=np.array([2, 0]), element_materials=np.array([0, 1]),
+            materials=("fiber", "binder"), cell_origin=(0.0, 0.0, 0.0), cell_lengths=(2.0, 1.0, 1.0),
+        )
+        labels = mesh.voxel_labels((4, 4, 8), 0.25)
+        self.assertEqual(labels.dtype, np.uint16)
+        self.assertTrue((labels[:, :, :4] == 2).all())
+        self.assertTrue((labels[:, :, 4:] == 3).all())  # binder: one above the largest fiber id
+        self.assertTrue((mesh.voxel_labels((4, 4, 8), 0.25, binder_label=65535)[:, :, 4:] == 65535).all())
+        # A grid that reaches past the mesh leaves its voxels empty; one shifted by origin moves with it.
+        wide = mesh.voxel_labels((4, 4, 12), 0.25)
+        self.assertTrue((wide[:, :, 8:] == 0).all())
+        shifted = mesh.voxel_labels((4, 4, 8), 0.25, origin=(0.5, 0.0, 0.0))
+        self.assertTrue((shifted[:, :, :2] == 2).all() and (shifted[:, :, 2:6] == 3).all() and (shifted[:, :, 6:] == 0).all())
+        # A mesh of a region keeps the grid's corner at 0: the mesh's own cell corner doesn't move it.
+        region = dataclasses.replace(mesh, cell_origin=(1.0, 0.0, 0.0))
+        np.testing.assert_array_equal(region.voxel_labels((4, 4, 8), 0.25), labels)
+        # ct's overlay tints the binder orange, the fibers their palette colors.
+        from tangle import ct
+
+        overlay = ct.overlay_volume(np.zeros(labels.shape), labels, alpha=1.0, binder_label=3)
+        np.testing.assert_array_equal(overlay[2, 2, 6], [255, 140, 0])
+        self.assertFalse((overlay[2, 2, 1] == [255, 140, 0]).all())
+        with self.assertRaisesRegex(ValueError, "shape"):
+            mesh.voxel_labels((4, 8), 0.25)
+
     def test_material_values_must_be_physical(self):
         with self.assertRaises(ValueError):
             fem.ElasticMaterial(2.5e9, 0.5)
