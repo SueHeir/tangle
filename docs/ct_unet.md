@@ -90,6 +90,70 @@ from a trained 16-wide one with `train.py --widen` (Net2Net: the wider copy
 starts with exactly the same maps). Training crops are 128³; any volume whose
 sides are divisible by 16 can be predicted in one go, and bigger ones in tiles.
 
+![The network: encoder, decoder, skips, hint conditioning and the 14 output channels](media/ct-unet-architecture.png)
+
+*The current network's layout, with its sizes read from the checkpoint
+([`make_architecture_figure.py`](../crates/tangle_python/python/examples/ct_unet/make_architecture_figure.py)).*
+
+## The maps on held-out scans
+
+Each figure below is one case group: two simulated scans from the group's test
+range (for pairs and hard pairs, the last two indices of the family's range), with
+the true maps above the network's maps, one column per output. They show the
+current network (r23), given no hints. Each slice is the one with the most
+fibers, binder and bonds in its truth, not chosen by how well the network did,
+and the scans are picked by index alone, so they are examples, not averages.
+Where a map only means something on a fiber (offset, direction, radius), voxels
+off the fiber are left dark grey: off the true fiber in the truth row, under 0.5
+fiber probability in the network row. The number by each network row is that
+scan's centerline F1 (false traces, for the fiber-free scans).
+
+For the group as a whole, r23's centerline F1 on the full test sets:
+
+| group | F1 |
+|---|---|
+| pairs | 0.991 |
+| hard pairs | 0.915 |
+| mixed | 0.858 |
+| bends | 0.847 |
+| seams | 0.830 |
+| stiff | 0.716 |
+| webs (blur capped) | 0.619 |
+| empty | 2.7 false traces per scan, 38 of 48 clean |
+
+![Every output channel, truth and network](media/ct-unet-val-all-channels.png)
+
+*The 14 channels one by one on one mixed scan, unmasked: off the fibers the
+network's offset, direction and radius are not trained, and those voxels mean
+nothing. The figures below show the offset as its length and the direction tensor
+as a colour instead, on fiber voxels only.*
+
+![dense_hard: two fiber types, dense and bent](media/ct-unet-val-dense-hard.png)
+
+![scanned: other voxel sizes, blur and orientations](media/ct-unet-val-scanned.png)
+
+![pairs: fine fibers in touching side-by-side pairs](media/ct-unet-val-pairs.png)
+
+![hard pairs: thin touching pairs, blurred and noisy](media/ct-unet-val-hardpairs.png)
+
+![stiff: nearly straight fibers bonded at tight crossings](media/ct-unet-val-stiff.png)
+
+![easy webs: binder webs and fillets, clean scans](media/ct-unet-val-web-easy.png)
+
+![webs: binder as bright as the fibers](media/ct-unet-val-web2.png)
+
+![mixed: every kind of variety inside each scan](media/ct-unet-val-mixed.png)
+
+![seams: mixed, plus binder seams along neighbouring fibers](media/ct-unet-val-seams.png)
+
+![bends: a straight and a bendable type of one size and material](media/ct-unet-val-bends.png)
+
+![empty: no fibers, only noise and black regions](media/ct-unet-val-empty.png)
+
+The figures come from
+[`make_validation_figures.py`](../crates/tangle_python/python/examples/ct_unet/make_validation_figures.py),
+which reads a checkpoint and a folder of `make_data` scans.
+
 ## The tracer
 
 [`trace_maps.py`](../crates/tangle_python/python/examples/ct_unet/trace_maps.py):
