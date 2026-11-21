@@ -124,9 +124,9 @@ def find_fibers(scan: str | os.PathLike, settings: NetworkSettings,
     written; ``binder``, with ``settings.binder``, the binder as a boolean ``(z, y, x)`` voxel mask as in
     ``binder.tif`` (else None), which ``tangle.fem.hex_mesh(..., binder=fit.binder)`` meshes; and ``bonds``, a list
     of the bonds the network found, each a dict with ``fibers`` (the two fibers' indices in ``centerlines``),
-    ``position`` (x, y, z in voxels, as the centerlines), ``strength`` (the height of the network's bond-point
-    peak; NaN for a bond found where its binder joins two fibers with no peak) and ``binder_voxels`` (how many
-    binder voxels join the pair there; 0 for a bond-point bond). :func:`add_bpm_binder_bonds` and
+    ``position`` (x, y, z in voxels, as the centerlines), ``strength`` (NaN: the network has no bond output, and
+    bonds are found where its binder fills the gap between two traced fibers; older runs' bond-point bonds carry
+    their peak height) and ``binder_voxels`` (how many binder voxels join the pair there). :func:`add_bpm_binder_bonds` and
     :func:`add_bpm_binder_spheres` put the bonds or the binder into a bonded-particle model. ``coarse_grained`` and
     ``relax`` keep all three, and move each bond with its fibers: after ``relaxed, run = fit.relax()``,
     ``relaxed.bonds`` are on the relaxed fibers, with ``attachments`` (where each bond holds each of its two

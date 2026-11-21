@@ -1,7 +1,7 @@
 """The guide's validation figures: what the network's maps should be, and what it draws, on held-out simulated scans.
 
 One figure per case group: two scans, a truth row and a prediction row each, a column per output. Each scan's slice
-is the one with the most fibers, binder and bonds in its truth, never picked by how well the network did. The
+is the one with the most fibers, binder and binder in its truth, never picked by how well the network did. The
 network gets no hints. Scans come from make_data; a fiber-free scan is scaled by its stored greys, as in training.
 
 usage: python make_validation_figures.py CHECKPOINT SCANS_DIR OUT_DIR
@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from maps import BINDER, BONDPT, CHANNELS, DIRECTION, FIBER, HEAT, OFFSET, RADIUS, load, predict
+from maps import BINDER, CHANNELS, DIRECTION, FIBER, HEAT, OFFSET, RADIUS, load, predict
 from score_trace import _samples_inside, centerline_agreement, from_npz, true_maps
 from trace_maps import principal, trace
 
@@ -62,11 +62,10 @@ def pad_predict(model, volume, device, grey):
 
 
 def best_slice(truth):
-    """The z with the most structure in the truth (fibers, then binder and bonds), or the middle of an empty scan."""
+    """The z with the most structure in the truth (fibers, then binder), or the middle of an empty scan."""
     nz = truth.shape[1]
     margin = min(8, nz // 4)
-    per_z = ((truth[FIBER][0] > 0.5).mean((1, 2)) + 5.0 * (truth[BINDER][0] > 0.5).mean((1, 2))
-             + 50.0 * (truth[BONDPT][0] > 0.3).mean((1, 2)))
+    per_z = (truth[FIBER][0] > 0.5).mean((1, 2)) + 5.0 * (truth[BINDER][0] > 0.5).mean((1, 2))
     if per_z.max() == 0.0:
         return nz // 2
     return margin + int(per_z[margin:nz - margin].argmax())
@@ -95,12 +94,11 @@ def panels(volume, maps, z, is_truth):
         (direction_rgb(maps, z, on_fiber), None, None, None),
         (diameter, "plasma", 0.0, None),
         (maps[BINDER][0, z], "cividis", 0.0, 1.0),
-        (maps[BONDPT][0, z], "inferno", 0.0, 1.0),
     ]
 
 
 COLUMNS = ["CT slice", "axis heatmap", "fiber", "distance to own axis\n(offset, voxels)",
-           "direction\n(|x| red, |y| green, |z| blue)", "fiber diameter\n(radius map, voxels)", "binder", "bond points"]
+           "direction\n(|x| red, |y| green, |z| blue)", "fiber diameter\n(radius map, voxels)", "binder"]
 
 
 def group_figure(model, files, title, out, device):
@@ -139,16 +137,16 @@ def group_figure(model, files, title, out, device):
 
 
 CHANNEL_NAMES = ["axis heatmap", "offset x", "offset y", "offset z", "direction xx", "direction yy", "direction zz",
-                 "direction xy", "direction xz", "direction yz", "fiber", "radius", "binder", "bond points"]
+                 "direction xy", "direction xz", "direction yz", "fiber", "radius", "binder"]
 
 
 def channel_figure(model, path, out, device):
-    """Every one of the 14 numbers per voxel, plain, for one scan (truth above prediction)."""
+    """Every one of the 13 maps per voxel, plain, for one scan (truth above prediction)."""
     volume, truth, maps, score = infer(model, path, device)
     z = best_slice(truth)
     per_row = 7
     fig, axes = plt.subplots(4, per_row, figsize=(2.0 * per_row, 4 * 2.2), facecolor="white", layout="constrained")
-    fig.suptitle(f"All 14 output channels, {path.stem}, z = {z} (network: {score})", fontsize=13, x=0.01, ha="left")
+    fig.suptitle(f"All {len(CHANNEL_NAMES)} maps, {path.stem}, z = {z} (network: {score})", fontsize=13, x=0.01, ha="left")
     for i, name in enumerate(CHANNEL_NAMES):
         pair = truth[i, z], maps[i, z]
         signed = 1 <= i <= 3 or 7 <= i <= 9
@@ -160,6 +158,9 @@ def channel_figure(model, path, out, device):
             ax.set_title(f"{name}, {'truth' if r == 0 else 'network'}", fontsize=8)
             ax.set_xticks([])
             ax.set_yticks([])
+    for i in range(len(CHANNEL_NAMES), 2 * per_row):  # the empty places of the last row
+        for r in range(2):
+            axes[2 * (i // per_row) + r, i % per_row].axis("off")
     fig.savefig(out, dpi=110)
     plt.close(fig)
     print("wrote", out, flush=True)

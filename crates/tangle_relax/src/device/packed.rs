@@ -579,6 +579,77 @@ impl PackedAssembly {
         arc
     }
 
+    /// Oval fibers' twist at the start of a run, as the cosine and sine of the
+    /// angle that turns each vertex's director onto the next one's about the
+    /// segment between them (two values per vertex, the last vertex of each
+    /// fiber and round fibers `[1, 0]`). Directors are sign-free, so the turn
+    /// is taken to the nearer of the next director and its opposite.
+    pub fn vertex_rest_twists(&self) -> Vec<f32> {
+        let mut twists = vec![0.0_f32; 2 * self.vertex_count()];
+        for vertex in 0..self.vertex_count() {
+            twists[2 * vertex] = 1.0;
+        }
+        if self.directors.len() != self.positions.len() {
+            return twists;
+        }
+        let read = |values: &[f32], vertex: usize| -> [f64; 3] {
+            [0, 1, 2].map(|axis| values[3 * vertex + axis] as f64)
+        };
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let across = |d: [f64; 3], t: [f64; 3]| -> Option<[f64; 3]> {
+            let along = dot(d, t);
+            let p = [
+                d[0] - along * t[0],
+                d[1] - along * t[1],
+                d[2] - along * t[2],
+            ];
+            let length = dot(p, p).sqrt();
+            (length > 1.0e-9).then(|| p.map(|value| value / length))
+        };
+        for (fiber, span) in self.fiber_vertex_spans.chunks_exact(2).enumerate() {
+            let (start, count) = (span[0] as usize, span[1] as usize);
+            let segment = self.fiber_segment_spans[2 * fiber] as usize;
+            if count < 2
+                || self
+                    .segment_lane_offsets
+                    .get(segment)
+                    .is_none_or(|&o| o <= 0.0)
+            {
+                continue;
+            }
+            for vertex in start..start + count - 1 {
+                let (p, q) = (
+                    read(&self.positions, vertex),
+                    read(&self.positions, vertex + 1),
+                );
+                let mut t = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+                let length = dot(t, t).sqrt();
+                if length <= 1.0e-12 {
+                    continue;
+                }
+                t = t.map(|value| value / length);
+                let (Some(a), Some(mut b)) = (
+                    across(read(&self.directors, vertex), t),
+                    across(read(&self.directors, vertex + 1), t),
+                ) else {
+                    continue;
+                };
+                if dot(a, b) < 0.0 {
+                    b = b.map(|value| -value);
+                }
+                let cross = [
+                    a[1] * b[2] - a[2] * b[1],
+                    a[2] * b[0] - a[0] * b[2],
+                    a[0] * b[1] - a[1] * b[0],
+                ];
+                let angle = dot(cross, t).atan2(dot(a, b));
+                twists[2 * vertex] = angle.cos() as f32;
+                twists[2 * vertex + 1] = angle.sin() as f32;
+            }
+        }
+        twists
+    }
+
     /// Number of junction tethers.
     pub fn junction_count(&self) -> usize {
         self.junction_rest_lengths.len()

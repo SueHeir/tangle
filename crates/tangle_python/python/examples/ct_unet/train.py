@@ -29,11 +29,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from maps import (BINDER, CHANNELS, HINT_CODE, UNet3D, augment, draw_hints, load, loss_terms, normalize, scan_hints,
+from maps import (HEAD_CHANNELS, HINT_CODE, VOID, UNet3D, augment, draw_hints, load, loss_terms, normalize, scan_hints,
                   size_code, targets, widen)
 
 AMP = None  # autocast dtype on CUDA (set from --amp)
-WEIGHTS = {"heat": 1.0, "offset": 1.0, "direction": 1.0, "fiber": 0.5, "radius": 1.0, "binder": 1.0, "bondpt": 1.0}
+WEIGHTS = {"heat": 1.0, "offset": 1.0, "direction": 1.0, "radius": 1.0, "classes": 1.0}
 
 
 class _ReadOnce(dict):
@@ -69,7 +69,9 @@ class Crops(Dataset):
         low = [int(rng.integers(0, s - self.crop + 1)) if self.train else (s - self.crop) // 2 for s in shape]
         window = tuple(slice(l, l + self.crop) for l in low)
         sample = targets(data, window)
-        sample["image"] = normalize(data["volume"])[window][None]
+        # Scaled by the scan's own greys, or by the stored ones (fiber-free scans have no fiber grey; see empty.py)
+        grey = tuple(float(g) for g in data["grey"]) if "grey" in data else None
+        sample["image"] = normalize(data["volume"], grey)[window][None]
         # The hints, as a user would give them: in training, a random part of what is true about the scan (often
         # nothing; see draw_hints); in validation, everything for every other scan and nothing for the rest, so
         # the best checkpoint is the best one both ways.
@@ -141,7 +143,9 @@ def main():
     parser.add_argument("--extra-rate", type=float, default=0.5,
                         help="of the other crops, the share given each further hint: the types' section shapes and "
                              "hollowness (with the diameters), and whether there are broken pieces, dust, voids")
-    parser.add_argument("--binder-weight", type=float, default=1.0, help="weight of the binder loss")
+    parser.add_argument("--class-weight", type=float, default=1.0,
+                        help="weight of the 3-way (background / fiber / binder) loss")
+    parser.add_argument("--fiber-positive", type=float, default=2.0, help="extra weight on true fiber voxels")
     parser.add_argument("--binder-positive", type=float, default=9.0, help="extra weight on true binder voxels")
     parser.add_argument("--condition", action="store_true", help="add the fiber-size conditioning (FiLM)")
     parser.add_argument("--widen", type=int, help="with --init: widen that network to this base width (Net2Net)")
@@ -152,15 +156,27 @@ def main():
     parser.add_argument("--pace", action="append", default=[], metavar="DIR:TOTAL",
                         help="at each refresh, wait until DIR holds its share of TOTAL scans (TOTAL x the share of "
                              "steps done by the next refresh)")
-    parser.add_argument("--exclude", type=Path,
-                        help="leave out the volumes listed in this file, one FOLDER/NAME per line (e.g. those "
-                             "overlaps.py finds with fibers through each other)")
+    parser.add_argument("--exclude", type=Path, action="append", default=[],
+                        help="leave out the volumes listed in this file, one per line: a path, FOLDER/NAME or NAME "
+                             "(.npz optional; e.g. those overlaps.py finds with fibers through each other, or an "
+                             "audit's cuts). Read again at every listing, so lines added while training runs take "
+                             "effect at the next pass; may be given more than once")
     args = parser.parse_args()
-    skip = set(args.exclude.read_text().split()) if args.exclude else set()
+
+    def skipped() -> set[str]:
+        names = set()
+        for path in args.exclude:
+            if path.exists():
+                names.update(line.strip().removesuffix(".npz") for line in path.read_text().splitlines() if line.strip())
+        return names
 
     def volumes(folders: str) -> list[Path]:
+        """The scans in the folders (a folder that doesn't exist yet has none), less the excluded ones and any
+        written in the last minute (a generator may still be writing it)."""
+        skip, now = skipped(), time.time()
         return sorted(f for d in folders.split(",") for f in Path(d).glob("*.npz")
-                      if f"{f.parent.name}/{f.stem}" not in skip)
+                      if not {f.stem, f"{f.parent.name}/{f.stem}", str(f.with_suffix(""))} & skip
+                      and now - f.stat().st_mtime > 60)
 
     # Several GPUs (torchrun sets WORLD_SIZE): one process per GPU, gradients averaged across them each step.
     shared = int(os.environ.get("WORLD_SIZE", "1")) > 1
@@ -188,18 +204,22 @@ def main():
     args.out.mkdir(parents=True, exist_ok=True)
     import maps as maps_module
 
-    WEIGHTS["binder"] = args.binder_weight
+    WEIGHTS["classes"] = args.class_weight
+    maps_module.FIBER_POSITIVE = args.fiber_positive
     maps_module.BINDER_POSITIVE = args.binder_positive
 
     if args.init:
         source = load(args.init, "cpu")
         args.base = source.down[0][0].out_channels
         hints_in = source.film[0].in_features if getattr(source, "condition", False) else HINT_CODE
-        if source.head.out_channels == CHANNELS and hints_in == HINT_CODE:
+        if source.layout == "classes" and hints_in == HINT_CODE:
             model = source.to(device)
-        elif source.layout in ("fibers", "bonds", "bondpoints"):
-            # a network with fewer outputs or a shorter hint: grow it. Every weight it has is copied; new
-            # outputs start at "nothing here" and new hint inputs start unread.
+        elif source.layout in ("classes", "fibers", "bonds", "bondpoints"):
+            # a network with other outputs or a shorter hint: grow it into the 3-way layout. Every weight that
+            # still means the same is copied; new outputs start at "nothing here", new hint inputs start unread.
+            # Its fiber and binder logits become two of the 3-way call's, against a background logit of 0, so the
+            # softmax starts close to its old yes / no calls; a bondpoints network's bond-point channel (the
+            # background logit's place) is dropped.
             model = UNet3D(base=args.base, group_sizes=source.group_sizes, condition=source.condition).to(device)
             grown = model.state_dict()
             for name, value in source.state_dict().items():
@@ -210,8 +230,11 @@ def main():
                     target.zero_()
                     target[tuple(slice(0, n) for n in value.shape)] = value
                 grown[name] = target
-            for new_channel in range(source.head.out_channels, CHANNELS):
+            for new_channel in range(source.head.out_channels, HEAD_CHANNELS):
                 grown["head.bias"][new_channel] = -4.0
+            if source.layout != "classes":
+                grown["head.weight"][VOID] = 0.0
+                grown["head.bias"][VOID] = 0.0
             model.load_state_dict(grown)
         else:
             # a first-layout network: its body, and the head channels both layouts share (heatmap, offset,
@@ -323,7 +346,7 @@ def main():
                 parts = {k: np.mean([float(v[1][k]) for v in vals]) for k in vals[0][1]}
                 print(f"VAL step {step} loss {val:.4f} " + " ".join(f"{k} {v:.4f}" for k, v in parts.items()), flush=True)
                 state = {"model": net.state_dict(), "optimizer": optimizer.state_dict(),
-                         "scheduler": scheduler.state_dict(), "step": step, "best": min(best, val), "base": args.base, "condition": bool(getattr(net, "condition", False)), "layout": "bondpoints",
+                         "scheduler": scheduler.state_dict(), "step": step, "best": min(best, val), "base": args.base, "condition": bool(getattr(net, "condition", False)), "layout": "classes",
                          "group_sizes": net.group_sizes}
                 save(state, args.out / "last.pt")
                 if val < best:

@@ -51,7 +51,7 @@ under the blur are the hardest shape).
 
 ## What the network predicts
 
-For every voxel, 14 numbers:
+For every voxel, 14 outputs (13 maps):
 
 1. **Axis heatmap:** a peak on every fiber centerline, exp(-d²/2s²) with d the
    distance to the nearest axis and s = max(1, 0.3 r). It is kept sharp on
@@ -62,13 +62,19 @@ For every voxel, 14 numbers:
    so the boundary between them is explicit even where the grey shows no gap.
 3. **Direction** (6): the fiber's tangent as the sign-free tensor t tᵀ, so a
    fiber pointing +x and one pointing -x read the same.
-4. **Fiber:** fiber or void.
+4. **Class** (3): one call per voxel, background, fiber or binder (bridges,
+   menisci, blobs and coatings), under one softmax, so a voxel is never both.
+   The maps keep the fiber and binder probabilities.
 5. **Radius:** the radius of the voxel's own fiber (predicted as its log).
-6. **Binder:** binder or not (bridges, menisci, blobs and coatings).
-7. **Bond points:** a small peak (1.5 voxels) at the center of every bond.
 
 There is no type output: types are decided per fiber after tracing (below), so
-one network handles any number of fiber types.
+one network handles any number of fiber types. There is no bond output either:
+what counts as a bond is hard to label voxel by voxel, so bonds are read off
+the binder and the traced fibers afterwards (below). Networks up to r23 had a
+bond-point heatmap and separate yes/no fiber and binder outputs; they still
+load, and their bond points are ignored. `train.py --init` turns one into the
+3-way layout: its fiber and binder logits become two of the three, against a
+background logit of 0, so it starts close to its old calls.
 
 **Hints.** The network can be told what is known about the sample, through a
 small code that scales and shifts the features after every block (FiLM; it
@@ -181,9 +187,17 @@ fiber sizes known, each fiber gets the type whose diameter is nearest
 number of types given or picked by BIC (`assign_types`).
 
 **Bonds** ([`bonds.py`](../crates/tangle_python/python/examples/ct_unet/bonds.py)):
-every bond-point peak, and every group of binder voxels, is given to the two
-traced fibers whose surfaces are nearest it; the two lists are merged. Binder
-touching one fiber only (a coating) is no bond.
+two fibers are bonded when binder, with no fiber material in between, runs
+from one fiber's surface to the other's without passing a third fiber: a web
+bonds each fiber to its direct neighbours. The binder outside the traced fibers
+falls into blobs (26-connected); a blob holds the fibers it touches (binder
+within 1.5 voxels of the surface), and each of its voxels goes to the held fiber
+whose surface is nearest (a Voronoi split). Two fibers are bonded where their
+regions meet (neighbouring voxels, a voxel touching both, or a path through
+binder nearest to no held fiber). A blob touching one fiber only is a coating
+and one touching none is loose binder: neither is a bond, but touching coated
+fibers whose coatings merge are bonded. A bond sits at the centroid of the
+voxels where the two regions meet, one per contact.
 
 Whole scans are traced from overlapping tiles (`tiled_axis_points`: 128³ tiles
 every 64 voxels). Each voxel votes from the tile whose center it is nearest, so

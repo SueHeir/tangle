@@ -13,6 +13,7 @@ See [docs/ct_unet.md](../../../../../docs/ct_unet.md) for the method, results an
 | `scan_io.py`, `fiber_outputs.py` | reading scans in the common formats; writing the results |
 | `make_demo_scan.py`, `compare_fibers.py` | a small made-up scan with known fibers, and scoring found fibers against known ones |
 | `make_data.py` | simulated training scans and their truth |
+| `regenerate_kept.py` | makes a training mix again from its list of kept scans (only those, none of the cut ones) |
 | `mixed.py` | the `--mixed` scans: every kind of variety at random inside each scan |
 | `overlaps.py` | the check that no true fibers pass through each other |
 | `maps.py` | the network, its targets, its optional hints, augmentation, losses, `predict` |

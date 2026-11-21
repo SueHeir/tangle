@@ -279,6 +279,10 @@ pub(crate) struct PyRelaxationSettings {
     pub curvature_cleanup_sweeps: usize,
     #[pyo3(get, set)]
     pub twist_stiffness: f64,
+    /// Oval fibers: smooth the long axis toward the twist the fibers start
+    /// the run with (twisted ribbons stay twisted) instead of toward none.
+    #[pyo3(get, set)]
+    pub keep_rest_twist: bool,
     /// How hard bonds (`Assembly.add_bond`) pull their fibers back together
     /// once stretched; zero, the default, leaves them unenforced.
     #[pyo3(get, set)]
@@ -323,6 +327,7 @@ impl Default for PyRelaxationSettings {
             constraint_iterations: config.constraint_iterations,
             curvature_cleanup_sweeps: config.curvature_cleanup_sweeps,
             twist_stiffness: widen(config.twist_stiffness),
+            keep_rest_twist: config.keep_rest_twist,
             junction_stiffness: widen(config.junction_stiffness),
             max_step: None,
             max_iterations: config.max_iterations,
@@ -443,6 +448,7 @@ impl PyRelaxationSettings {
         output.set_item("constraint_iterations", self.constraint_iterations)?;
         output.set_item("curvature_cleanup_sweeps", self.curvature_cleanup_sweeps)?;
         output.set_item("twist_stiffness", self.twist_stiffness)?;
+        output.set_item("keep_rest_twist", self.keep_rest_twist)?;
         output.set_item("junction_stiffness", self.junction_stiffness)?;
         output.set_item("max_step", self.max_step)?;
         output.set_item("max_iterations", self.max_iterations)?;
@@ -586,6 +592,7 @@ impl PyRelaxationSettings {
             constraint_iterations: self.constraint_iterations,
             curvature_cleanup_sweeps: self.curvature_cleanup_sweeps,
             twist_stiffness: self.twist_stiffness as f32,
+            keep_rest_twist: self.keep_rest_twist,
             junction_stiffness: self.junction_stiffness as f32,
             max_step: max_step as f32,
             max_iterations: self.max_iterations,

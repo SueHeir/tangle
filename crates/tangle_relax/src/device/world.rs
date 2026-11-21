@@ -129,6 +129,7 @@ pub struct DeviceFiberWorld<R: Runtime> {
     segment_radii: Handle,
     segment_lane_offsets: Handle,
     directors: Handle,
+    vertex_rest_twists: Handle,
     director_corrections: Handle,
     vertex_wall_extents: Handle,
     segment_rest_lengths: Handle,
@@ -426,6 +427,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         let segment_lane_offsets =
             client.create_from_slice(f32::as_bytes(&packed.segment_lane_offsets));
         let directors = client.create_from_slice(f32::as_bytes(&packed.directors));
+        let vertex_rest_twists =
+            client.create_from_slice(f32::as_bytes(&packed.vertex_rest_twists()));
         let director_corrections =
             client.create_from_slice(f32::as_bytes(&vec![0.0_f32; 2 * packed.segment_count()]));
         let vertex_wall_extents =
@@ -592,6 +595,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
             segment_radii,
             segment_lane_offsets,
             directors,
+            vertex_rest_twists,
             director_corrections,
             vertex_wall_extents,
             segment_rest_lengths,
@@ -972,6 +976,10 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 BufferArg::from_raw_parts(self.positions.clone(), self.packed.positions.len()),
                 BufferArg::from_raw_parts(self.directors.clone(), self.packed.positions.len()),
                 BufferArg::from_raw_parts(
+                    self.vertex_rest_twists.clone(),
+                    2 * self.packed.vertex_count(),
+                ),
+                BufferArg::from_raw_parts(
                     self.director_corrections.clone(),
                     2 * self.packed.segment_count(),
                 ),
@@ -1001,6 +1009,7 @@ impl<R: Runtime> DeviceFiberWorld<R> {
                 ),
                 BufferArg::from_raw_parts(self.control.clone(), 4),
                 config.twist_stiffness,
+                u32::from(config.keep_rest_twist),
                 MAXIMUM_DIRECTOR_TURN,
             );
         }
