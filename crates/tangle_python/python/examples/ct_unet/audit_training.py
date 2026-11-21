@@ -17,7 +17,8 @@ Per scan:
 - measured from the volume and the truth: fiber count, fiber and binder volume fractions, the contrast-to-noise
   ratio per fiber type (median grey on its axes minus the median void grey, over the void's noise sd; void = more
   than 3 voxels from fiber and binder), the share of fiber voxels darker than the void's 95th percentile (fibers
-  invisible in the scan), and the eigenvalues of the length-weighted orientation tensor of the true centerlines
+  invisible in the scan; on scans with a constant fill, e.g. edges_ masked past the field of view, the fill makes
+  the void's noise sd near 0 and the CNR meaningless), and the eigenvalues of the length-weighted orientation tensor of the true centerlines
   (all fibers, and the largest one per type).
 - the network's loss on the center 128^3 crop as validation computes it, every term apart, with no hints and with
   every hint the truth allows. A 3-way network ("classes") gets train.py's terms; an older bond-point network
