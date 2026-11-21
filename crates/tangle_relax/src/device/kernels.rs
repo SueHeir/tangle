@@ -1695,11 +1695,15 @@ pub(crate) fn total_active_list_weight(
 /// Turns, re-projects and smooths the long-axis directors of oval fibers,
 /// then refreshes their per-axis wall extents. One thread owns each fiber, so
 /// the forward smoothing sweep updates directors in place. Round fibers and
-/// fibers not yet inserted are skipped.
+/// fibers not yet inserted are skipped. With `keep_rest_twist` nonzero the
+/// smoothing pulls each director toward its neighbours turned by the rest
+/// twist between them (`vertex_rest_twists`: cosine and sine of the turn from
+/// each vertex's director to the next one's), so twisted fibers stay twisted.
 #[cube(launch_unchecked)]
 pub(crate) fn update_fiber_directors(
     positions: &[f32],
     directors: &mut [f32],
+    vertex_rest_twists: &[f32],
     director_corrections: &[f32],
     vertex_wall_extents: &mut [f32],
     fiber_segment_spans: &[u32],
@@ -1709,6 +1713,7 @@ pub(crate) fn update_fiber_directors(
     vertex_active: &[u32],
     control: &[u32],
     twist_stiffness: f32,
+    keep_rest_twist: u32,
     max_turn: f32,
 ) {
     let fiber = ABSOLUTE_POS;
@@ -1803,7 +1808,7 @@ pub(crate) fn update_fiber_directors(
 
     // Twist stiffness: pull each director toward its neighbours' mean,
     // measured in the plane perpendicular to the local tangent.
-    if twist_stiffness > 0.0 {
+    if twist_stiffness > 0.0 && keep_rest_twist == 0 {
         for local in 0..count {
             let vertex = start + local;
             let mut before = vertex;
@@ -1850,6 +1855,95 @@ pub(crate) fn update_fiber_directors(
                 dx += twist_stiffness * (mx / mean_length - dx);
                 dy += twist_stiffness * (my / mean_length - dy);
                 dz += twist_stiffness * (mz / mean_length - dz);
+                let along = dx * tx + dy * ty + dz * tz;
+                dx -= along * tx;
+                dy -= along * ty;
+                dz -= along * tz;
+                let length = (dx * dx + dy * dy + dz * dz).sqrt();
+                if length > 1.0e-6_f32 {
+                    directors[3 * vertex] = dx / length;
+                    directors[3 * vertex + 1] = dy / length;
+                    directors[3 * vertex + 2] = dz / length;
+                }
+            }
+        }
+    }
+
+    // The same with the rest twist kept: each neighbour's director is turned
+    // about the local tangent by the rest twist between it and this vertex
+    // (forward by the twist from the vertex before, back by the twist to the
+    // vertex after) before it joins the mean, sign-matched to this director.
+    if twist_stiffness > 0.0 && keep_rest_twist != 0 {
+        for local in 0..count {
+            let vertex = start + local;
+            let mut before = vertex;
+            let mut after = vertex;
+            if local > 0 {
+                before = vertex - 1;
+            }
+            if local + 1 < count {
+                after = vertex + 1;
+            }
+            let mut tx = positions[3 * after] - positions[3 * before];
+            let mut ty = positions[3 * after + 1] - positions[3 * before + 1];
+            let mut tz = positions[3 * after + 2] - positions[3 * before + 2];
+            let tangent_length = (tx * tx + ty * ty + tz * tz).sqrt().max(1.0e-20_f32);
+            tx /= tangent_length;
+            ty /= tangent_length;
+            tz /= tangent_length;
+            let cx = directors[3 * vertex];
+            let cy = directors[3 * vertex + 1];
+            let cz = directors[3 * vertex + 2];
+            let mut mx = 0.0_f32;
+            let mut my = 0.0_f32;
+            let mut mz = 0.0_f32;
+            if local > 0 {
+                let c = vertex_rest_twists[2 * before];
+                let sn = vertex_rest_twists[2 * before + 1];
+                let nx = directors[3 * before];
+                let ny = directors[3 * before + 1];
+                let nz = directors[3 * before + 2];
+                let rx = c * nx + sn * (ty * nz - tz * ny);
+                let ry = c * ny + sn * (tz * nx - tx * nz);
+                let rz = c * nz + sn * (tx * ny - ty * nx);
+                if rx * cx + ry * cy + rz * cz < 0.0 {
+                    mx -= rx;
+                    my -= ry;
+                    mz -= rz;
+                } else {
+                    mx += rx;
+                    my += ry;
+                    mz += rz;
+                }
+            }
+            if local + 1 < count {
+                let c = vertex_rest_twists[2 * vertex];
+                let sn = -vertex_rest_twists[2 * vertex + 1];
+                let nx = directors[3 * after];
+                let ny = directors[3 * after + 1];
+                let nz = directors[3 * after + 2];
+                let rx = c * nx + sn * (ty * nz - tz * ny);
+                let ry = c * ny + sn * (tz * nx - tx * nz);
+                let rz = c * nz + sn * (tx * ny - ty * nx);
+                if rx * cx + ry * cy + rz * cz < 0.0 {
+                    mx -= rx;
+                    my -= ry;
+                    mz -= rz;
+                } else {
+                    mx += rx;
+                    my += ry;
+                    mz += rz;
+                }
+            }
+            let along_mean = mx * tx + my * ty + mz * tz;
+            mx -= along_mean * tx;
+            my -= along_mean * ty;
+            mz -= along_mean * tz;
+            let mean_length = (mx * mx + my * my + mz * mz).sqrt();
+            if mean_length > 1.0e-6_f32 {
+                let mut dx = cx + twist_stiffness * (mx / mean_length - cx);
+                let mut dy = cy + twist_stiffness * (my / mean_length - cy);
+                let mut dz = cz + twist_stiffness * (mz / mean_length - cz);
                 let along = dx * tx + dy * ty + dz * tz;
                 dx -= along * tx;
                 dy -= along * ty;

@@ -26,6 +26,11 @@ Indices: training from 100001, validation 99001-99032, test 99501-99548.
 ``--bends`` makes ``bends_<index>`` scans (``mixed.bends_settings``): two fiber types of one material and size,
 one straight and one bendable, so only bending tells them apart. Indices: training from 200001, validation
 199001-199032, test 199501-199548.
+
+``--networks`` makes ``networks_<index>`` scans (``mixed.networks_settings``): random fiber networks, from loosely
+aligned to fully random in 3D (cotton-like), with orientation domains (tufts), a different orientation per type,
+fibers that wander every which way along their length, and twisted ribbons. Indices: training from 300001,
+validation 299001-299032, test 299501-299548.
 """
 
 import argparse
@@ -460,6 +465,9 @@ def main() -> None:
                         help="every kind of variety at random inside each scan (mixed_<index>; see mixed.py)")
     parser.add_argument("--bends", action="store_true",
                         help="two types of one material and size, one straight, one bendable (bends_<index>)")
+    parser.add_argument("--networks", action="store_true",
+                        help="random fiber networks, loosely aligned to fully random in 3D, wandering fibers and "
+                             "twisted ribbons (networks_<index>; see mixed.networks_settings)")
     parser.add_argument("--empty", action="store_true",
                         help="fiber-free scans: heavy noise, and pure black regions (empty_<index>; see empty.py)")
     parser.add_argument("--no-overlap-check", action="store_true",
@@ -476,7 +484,8 @@ def main() -> None:
     for index in range(args.first, args.first + args.count):
         # Which settings family is a fixed function of the index, so reruns agree.
         family = ("varied" if args.varied else "pairs" if args.pairs else "hardpairs" if args.hard_pairs
-                  else "mixed" if args.mixed else "bends" if args.bends else "empty" if args.empty
+                  else "mixed" if args.mixed else "bends" if args.bends else "networks" if args.networks
+                  else "empty" if args.empty
                   else "scanned" if np.random.default_rng(index).random() < args.scanned_share else "dense_hard")
         name = f"{family}_{index}"
         target = args.out / f"{name}.npz"
@@ -490,12 +499,13 @@ def main() -> None:
                 scan, varied = empty.empty_scan(index)
             elif family == "varied":
                 scan, varied = varied_scan(index, cache, check=not args.no_overlap_check)
-            elif family in ("mixed", "bends"):
+            elif family in ("mixed", "bends", "networks"):
                 import mixed
 
                 scan, varied = mixed.mixed_scan(index, cache, check_overlaps=not args.no_overlap_check,
-                                                settings=mixed.bends_settings if family == "bends" else
-                                                mixed.mixed_settings)
+                                                settings={"bends": mixed.bends_settings,
+                                                          "networks": mixed.networks_settings}.get(
+                                                    family, mixed.mixed_settings))
             else:
                 settings = {"dense_hard": ex.dense_hard_settings, "pairs": pairs_settings,
                             "hardpairs": hard_pairs_settings}.get(family, ex.scanned_settings)
@@ -515,11 +525,11 @@ def main() -> None:
             print(f"{name}: failed ({error})", flush=True)
             continue
         most = EASY_MAX_BINDER if family == "varied" and index >= EASY_FIRST else (
-            MIXED_MAX_BINDER if family in ("mixed", "bends") else None)
+            MIXED_MAX_BINDER if family in ("mixed", "bends", "networks") else None)
         if most is not None and scan.binder_occupancy is not None and float((scan.binder_occupancy > 0.5).mean()) > most:
             print(f"{name}: skipped (binder {float((scan.binder_occupancy > 0.5).mean()):.1%} > {most:.0%})", flush=True)
             continue
-        made_here = family in ("mixed", "bends", "empty")  # rendered by mixed.py: its own point table (thinning fibers' radii)
+        made_here = family in ("mixed", "bends", "networks", "empty")  # rendered by mixed.py: its own point table (thinning fibers' radii)
         table = scan.table if made_here else point_table(scan)
         if not len(table["pos"]) and family != "empty":  # e.g. a sparse scan whose fibers all lie past a cut face: nothing to learn from
             print(f"{name}: skipped (no fibers in the volume)", flush=True)

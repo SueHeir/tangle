@@ -46,6 +46,9 @@ TEST = range(99_501, 99_549)
 BENDS_FIRST = 200_001  # bends_<index> (bends_settings): training from here up
 BENDS_VAL = range(199_001, 199_033)
 BENDS_TEST = range(199_501, 199_549)
+NETWORKS_FIRST = 300_001  # networks_<index> (networks_settings): training from here up
+NETWORKS_VAL = range(299_001, 299_033)
+NETWORKS_TEST = range(299_501, 299_549)
 SEAMS_FIRST = 129_001  # mixed scans from here up may also have binder seams (val 129001-129032, test 129501-129548,
 # training from 130001); the scans below keep exactly what they were made with
 SEED = 1_000_000  # each scan's random stream is default_rng(SEED + index): no other family's seeds are met
@@ -195,6 +198,75 @@ def bends_settings(index: int) -> dict:
             "dust": None, "edge": None, "fov": None}
 
 
+def _unit(rng) -> list[float]:
+    z = rng.uniform(-1, 1)
+    a = rng.uniform(0, 2 * np.pi)
+    return np.round([np.sqrt(1 - z * z) * np.cos(a), np.sqrt(1 - z * z) * np.sin(a), z], 4).tolist()
+
+
+def _spread(rng, cone: tuple[float, float]) -> dict:
+    """Fibers within ``cone`` (radians, drawn from the range) of one axis: a coordinate axis half the time,
+    otherwise any direction. A cone of pi/2 is fully random."""
+    axis = np.roll([1.0, 0.0, 0.0], int(rng.integers(0, 3))).tolist() if rng.random() < 0.5 else _unit(rng)
+    return {"orientation": "spread", "axis": axis, "cone": round(float(rng.uniform(*cone)), 3)}
+
+
+def networks_settings(index: int) -> dict:
+    """``networks_<index>``: random fiber networks, from loosely aligned to fully random in 3D (cotton-like). As
+    ``mixed_settings``, with the placement drawn from a stream of its own:
+
+    * Orientation: fully random (30%), within a cone of 17-90 degrees of one axis (25%: from loosely aligned to
+      isotropic), domains (20%: 2-8 tufts, each aligned its own way within 6-45 degrees), a different orientation
+      per type (15%: say a random web around aligned fibers), or flat layers with tilts of 30-75 degrees (10%).
+    * Shape: in about 60% of the types the fibers wander, turning every which way along their length (a smoothly
+      turning 3D path, typical bend radius 4-30 diameters), so a single fiber runs in many directions, and they
+      run 0.8-2.5 times the volume's side; a third of the wandering types are twisted ribbons (flat, the long axis
+      turning round along the fiber, reversing now and then, as cotton's convolutions).
+    * Fill: more medium and dense networks than ``mixed``.
+    """
+    s = mixed_settings(index)
+    rng = np.random.default_rng([SEED + index, 13])  # its own stream: the mixed draws above stay as they are
+    kind = str(rng.choice(["isotropic", "spread", "domains", "pertype", "planar"], p=[0.3, 0.25, 0.2, 0.15, 0.1]))
+    types = [dict(t) for t in s["types"]]
+    if kind == "pertype" and len(types) < 2:
+        kind = "spread"
+    orient: dict = {"orientation": kind}
+    if kind == "spread":
+        orient.update(_spread(rng, (0.3, 0.5 * np.pi)))
+    elif kind == "planar":
+        orient["tilt"] = round(float(rng.uniform(0.5, 1.3)), 2)
+    elif kind == "domains":
+        orient["domains"] = [{"center": rng.uniform(0, SIDE, 3).round(1).tolist(), **_spread(rng, (0.1, 0.8))}
+                             for _ in range(int(rng.integers(2, 9)))]
+    elif kind == "pertype":  # one type fully random, the others aligned or random
+        first = int(rng.integers(0, len(types)))
+        for k, t in enumerate(types):
+            random = k == first or rng.random() < 0.3
+            t["orient"] = {"orientation": "isotropic"} if random else _spread(rng, (0.05, 0.5))
+        if all(t["orient"]["orientation"] == "isotropic" for t in types):
+            types[(first + 1) % len(types)]["orient"] = _spread(rng, (0.05, 0.5))
+    for t in types:
+        d = t["diameter"]
+        if d <= 16 and rng.random() < 0.6:
+            for key in ("bend", "bow", "curvature", "coil", "pitch", "wave", "helical", "amplitude", "wavelength",
+                        "corner"):
+                t.pop(key, None)
+            t["shape"] = "wander"
+            t["radius"] = round(min(_log_uniform(rng, 4.0, 30.0), 1.5 * SIDE / d), 2)  # typical bend radius, diameters
+            t["corr"] = round(float(rng.uniform(0.5, 2.0)), 2)  # how far a turn keeps on, x the radius
+            t["loops"] = 0.0
+            t["length"] = [round(float(rng.uniform(0.8, 1.3)), 2), round(float(rng.uniform(1.5, 2.5)), 2)]
+            if t["packing"] in ("bundle", "yarn") and rng.random() < 0.5:
+                t["packing"] = "single"
+            if t["packing"] == "single" and rng.random() < 0.35:  # a twisted ribbon
+                t.update(ratio=round(float(rng.uniform(0.3, 0.6)), 2), hollow=0.0, taper=1.0,
+                         convolution=round(_log_uniform(rng, 3.0, 12.0), 2),  # a half turn, diameters
+                         reversal=round(_log_uniform(rng, 8.0, 40.0), 1))  # between reversals, diameters
+    fill = str(rng.choice(["sparse", "medium", "dense"], p=[0.25, 0.45, 0.3]))
+    total = float(rng.uniform(*{"sparse": (0.02, 0.06), "medium": (0.06, 0.17), "dense": (0.17, 0.28)}[fill]))
+    return {**s, **orient, "fill": fill, "total": round(total, 4), "types": types, "family": "networks"}
+
+
 def _type_settings(rng, d: float, share: float, brightness: float) -> dict:
     """One fiber type of diameter ``d`` voxels (lengths below in diameters unless they say voxels)."""
     t = {"diameter": round(d, 2), "share": round(share, 4), "brightness": round(brightness, 3),
@@ -322,6 +394,8 @@ def _axis(rng, t: dict, length: float, d: float, kink: bool, reach: float = 0.0)
         path = np.stack([x, radius * np.cos(theta), radius * np.sin(theta)], axis=1)
         c = pitch / (2 * np.pi)
         bend = 0.8 * (radius**2 + c**2) / radius
+    elif shape == "wander":
+        path = _wander(rng, t, length, d, reach)
     else:  # wavy
         amplitude = t["amplitude"] * d * float(rng.uniform(0.8, 1.2))
         wavelength = t["wavelength"] * d * float(rng.uniform(0.85, 1.15))
@@ -343,13 +417,13 @@ def _axis(rng, t: dict, length: float, d: float, kink: bool, reach: float = 0.0)
         z = amplitude * jitter * np.cos(phase) if t["helical"] else np.zeros_like(x)
         path = np.stack([x, y, z], axis=1)
     path = resample(path, max(0.15 * d, 0.25))
-    for _ in range(3):  # a group's axis: soften its bends (the sideways part of the path) to 2 x reach
+    for _ in range(3 if shape != "wander" else 0):  # a group's axis: soften its bends (the sideways part) to 2 x reach
         kappa = max_curvature(path)
         if reach <= 0 or kappa * 2.0 * reach <= 1.0:
             break
         path[:, 1:] *= 0.95 / (kappa * 2.0 * reach)
         path = resample(path, max(0.15 * d, 0.25))
-    if shape == "wavy":
+    if shape in ("wavy", "wander"):
         bend = 0.8 / max(max_curvature(path), 1e-9)
     elif shape == "straight":  # stiff, and no straighter than its slight sag
         bend = min(bend, 0.9 / max(max_curvature(path), 1e-9))
@@ -359,6 +433,50 @@ def _axis(rng, t: dict, length: float, d: float, kink: bool, reach: float = 0.0)
         path, kink_bend = _kink(rng, path, d)
         bend = min(bend, kink_bend)
     return path, max(bend, 0.75 * d)
+
+
+def _wander(rng, t: dict, length: float, d: float, reach: float = 0.0) -> np.ndarray:
+    """A path that turns every which way along its length: its tangent turns at a smoothly varying rate (a random
+    turning vector, correlated over ``corr`` x the bend radius, of typical size 1 / the bend radius, never bending
+    tighter than 1.2 diameters, nor than 2.5 x ``reach`` for a group), so a long fiber runs in many directions.
+    Starts along +x; centered on its mean."""
+    from scipy.ndimage import gaussian_filter1d
+
+    step = max(0.15 * d, 0.25)
+    n = max(int(length / step), 8)
+    radius = max(t["radius"] * d * float(rng.uniform(0.8, 1.25)), 2.5 * reach, 1.5 * d)
+    sigma = max(t["corr"] * radius / step / 2.0, 1.0)  # the turning's correlation length, in steps
+    turn = gaussian_filter1d(rng.normal(size=(n, 3)), sigma, axis=0, mode="nearest")
+    turn *= np.sqrt(1.5) / radius / max(np.sqrt((turn**2).sum(axis=1).mean()), 1e-12)  # its sideways part ~ 1 / radius
+    tightest = 1.0 / max(1.2 * d, 2.5 * reach)
+    tangent = np.array([1.0, 0.0, 0.0])
+    tangents = np.empty((n, 3))
+    for k in range(n):
+        tangents[k] = tangent
+        w = turn[k] - (turn[k] @ tangent) * tangent  # twisting about the tangent does not bend it
+        size = np.linalg.norm(w)
+        if size > tightest:
+            w *= tightest / size
+        tangent = tangent + step * np.cross(w, tangent)
+        tangent /= np.linalg.norm(tangent)
+    path = np.concatenate([[np.zeros(3)], np.cumsum(tangents * step, axis=0)])
+    return path - path.mean(axis=0)
+
+
+def _ribbon_axes(line, axes, f) -> np.ndarray:
+    """A twisted ribbon's long axes (cotton's convolutions): ``axes`` turned about the fiber by half a turn every
+    ``f.convolution`` voxels along it, the sense reversing about every ``f.reversal`` voxels."""
+    t = np.gradient(line, axis=0)
+    t /= np.maximum(np.linalg.norm(t, axis=1, keepdims=True), 1e-12)
+    s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(line, axis=0), axis=1))])
+    # the turning rate's sense flips at reversals: a smoothed square wave of the arc length
+    sense = np.tanh(4.0 * np.sin(np.pi * s / f.reversal + f.phase))
+    angle = np.concatenate([[0.0], np.cumsum(sense[1:] * np.diff(s))]) * np.pi / f.convolution + f.phase
+    u = np.asarray(axes, dtype=np.float64)
+    u = u - (u * t).sum(axis=1, keepdims=True) * t
+    u /= np.maximum(np.linalg.norm(u, axis=1, keepdims=True), 1e-12)
+    out = np.cos(angle)[:, None] * u + np.sin(angle)[:, None] * np.cross(t, u)
+    return out / np.linalg.norm(out, axis=1, keepdims=True)
 
 
 def _kink(rng, path, d):
@@ -447,9 +565,16 @@ def _members(rng, t: dict, axis: np.ndarray, d_mean: float) -> list[np.ndarray]:
 
 
 def _direction(rng, s: dict, layer: int | None) -> np.ndarray:
-    tilt = s["tilt"]
     o = s["orientation"]
-    if o == "isotropic":
+    if o == "domains":  # one of the domains at random (build_fibers picks it by where the fiber goes)
+        return _direction(rng, {**s, **s["domains"][int(rng.integers(len(s["domains"])))]}, layer)
+    if o == "spread":  # within the cone of the axis, either way along it (uniform over the cap)
+        c = rng.uniform(np.cos(s["cone"]), 1.0)
+        a = rng.uniform(0, 2 * np.pi)
+        v = np.array([c, np.sqrt(1 - c * c) * np.cos(a), np.sqrt(1 - c * c) * np.sin(a)]) * rng.choice([-1, 1])
+        return _rotation_to(s["axis"]) @ v
+    tilt = s["tilt"]
+    if o in ("isotropic", "pertype"):
         z = rng.uniform(-1, 1)
         a = rng.uniform(0, 2 * np.pi)
         return np.array([np.sqrt(1 - z * z) * np.cos(a), np.sqrt(1 - z * z) * np.sin(a), z])
@@ -465,6 +590,22 @@ def _direction(rng, s: dict, layer: int | None) -> np.ndarray:
         a = rng.uniform(0, 2 * np.pi)
     e = rng.uniform(-tilt, tilt) * (0.4 if o == "biaxial" else 1.0)
     return np.array([np.cos(e) * np.cos(a), np.cos(e) * np.sin(a), np.sin(e)])
+
+
+def _rotation_to(axis) -> np.ndarray:
+    """A rotation taking +x to ``axis``."""
+    e1 = np.asarray(axis, dtype=np.float64)
+    e1 = e1 / np.linalg.norm(e1)
+    a = np.array([0.0, 0.0, 1.0]) if abs(e1[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+    e2 = a - (a @ e1) * e1
+    e2 /= np.linalg.norm(e2)
+    return np.stack([e1, e2, np.cross(e1, e2)], axis=1)
+
+
+def _domain(s: dict, point) -> int:
+    """The domain (nearest center) a point lies in."""
+    centers = np.array([dom["center"] for dom in s["domains"]])
+    return int(np.argmin(((centers - np.asarray(point)) ** 2).sum(axis=1)))
 
 
 def _rotation(rng, direction) -> np.ndarray:
@@ -516,6 +657,9 @@ class Fiber:
     kind: str = "fiber"  # "fiber", "loop", "hairpin" or "broken"
     taper: float = 1.0  # the radius at the thin end over the full radius
     flip: bool = False  # which end is thin
+    convolution: float = 0.0  # voxels per half turn of a twisted ribbon's long axis (0: not twisted)
+    reversal: float = 0.0  # voxels between reversals of the twist
+    phase: float = 0.0
 
 
 def build_fibers(s: dict, crowd: float = 1.0, placement: int = 0) -> list[Fiber]:
@@ -529,7 +673,8 @@ def build_fibers(s: dict, crowd: float = 1.0, placement: int = 0) -> list[Fiber]
         area = np.pi * (0.5 * d0) ** 2 * t["ratio"]
         target = t["share"] * target_total
         volume = 0.0
-        layers = max(3, int(side / (4 * d0))) if s["orientation"] == "biaxial" else None
+        so = {**s, **t["orient"]} if t.get("orient") else s  # this type's orientation
+        layers = max(3, int(side / (4 * d0))) if so["orientation"] == "biaxial" else None
         tries = 0
         while volume < target and len(fibers) < MAX_FIBERS and tries < 4000:
             tries += 1
@@ -544,12 +689,19 @@ def build_fibers(s: dict, crowd: float = 1.0, placement: int = 0) -> list[Fiber]
             if len(group) > 1:  # members off the axis (on helices, in a yarn) bend tighter than it
                 bend = min(bend, 0.9 / max(max(max_curvature(m) for m in group), 1e-9))
             layer = int(rng.integers(0, layers)) if layers else None
-            rot = _rotation(rng, _direction(rng, s, layer))
+            domain = None
+            if so["orientation"] == "domains":  # the domain of a point at random; the fiber goes there below
+                domain = _domain(so, rng.uniform(0, side, 3))
+                rot = _rotation(rng, _direction(rng, {**so, **so["domains"][domain]}, layer))
+            else:
+                rot = _rotation(rng, _direction(rng, so, layer))
             placed = [m @ rot.T for m in group]
             low, high = np.min([p.min(0) for p in placed], axis=0), np.max([p.max(0) for p in placed], axis=0)
             margin = 0.5 * d_mean + 0.6
             for _ in range(20):
                 center = rng.uniform(margin, side - margin, 3) - 0.5 * (low + high)
+                if domain is not None and _domain(so, center + 0.5 * (low + high)) != domain:
+                    continue
                 if layers:
                     center[2] = (layer + 0.5) * side / layers + rng.normal(0.0, 0.1 * side / layers) - 0.5 * (low[2] + high[2])
                 members = []
@@ -562,6 +714,10 @@ def build_fibers(s: dict, crowd: float = 1.0, placement: int = 0) -> list[Fiber]
                 for m in members:  # a group's members share its diameter
                     fibers.append(Fiber(m, d_mean, t["ratio"], bend, ti, "loop" if kink else "fiber", t["taper"],
                                         bool(rng.random() < 0.5)))
+                    if t.get("convolution"):
+                        fibers[-1].convolution = t["convolution"] * d_mean * float(rng.uniform(0.8, 1.25))
+                        fibers[-1].reversal = t["reversal"] * d_mean * float(rng.uniform(0.7, 1.4))
+                        fibers[-1].phase = float(rng.uniform(0, 2 * np.pi))
                     volume += np.pi * (0.5 * d_mean) ** 2 * t["ratio"] * _length(m)
                 break
         if t["broken"] > 0:  # short broken pieces of this type, lying among the rest
@@ -575,10 +731,10 @@ def build_fibers(s: dict, crowd: float = 1.0, placement: int = 0) -> list[Fiber]
                 x = np.arange(-0.5 * length, 0.5 * length + 1e-9, max(0.15 * d_mean, 0.25))
                 bow = rng.uniform(0.0, 0.05) * length * (1 - (2 * x / length) ** 2)
                 piece = np.stack([x, bow, np.zeros_like(x)], axis=1)
-                if s["orientation"] == "isotropic" or rng.random() < 0.5:
-                    direction = _direction(rng, {**s, "orientation": "isotropic"}, None)
+                if so["orientation"] == "isotropic" or rng.random() < 0.5:
+                    direction = _direction(rng, {**so, "orientation": "isotropic"}, None)
                 else:
-                    direction = _direction(rng, s, None)
+                    direction = _direction(rng, so, None)
                 piece = piece @ _rotation(rng, direction).T
                 margin = 0.5 * d_mean + 0.6
                 for _ in range(20):
@@ -597,6 +753,8 @@ def segment_points(f: Fiber) -> np.ndarray:
     step = float(np.clip(min(0.33 * f.bend, 1.25 * f.diameter), 0.4 * f.diameter, 1.25 * f.diameter))
     length = _length(f.line)
     step = min(step, length / 4.0)
+    if f.convolution:  # a twisted ribbon: its twist turns the long axis at most 30 degrees from node to node
+        step = min(step, f.convolution / 6.0)
     return resample(f.line, step)
 
 
@@ -626,7 +784,12 @@ def _collection(fibers: list[Fiber], lines, layered: bool, loosen: bool, axes=No
         oval = {"thickness": f.ratio * f.diameter * um} if f.ratio < 1.0 else {}
         material = tangle.Material(f"m{k}", diameter=f.diameter * um, min_bend_radius=bend * um, **oval)
         if f.ratio < 1.0:
-            long_axis = axes[k] if axes is not None else _long_axes(line, f.ratio, layered).tolist()
+            if axes is not None:
+                long_axis = axes[k]
+            elif f.convolution:
+                long_axis = _ribbon_axes(line, _long_axes(line, f.ratio, layered), f).tolist()
+            else:
+                long_axis = _long_axes(line, f.ratio, layered).tolist()
             collection.add_fiber((line * um).tolist(), material, long_axis=long_axis)
         else:
             collection.add_fiber((line * um).tolist(), material)
@@ -648,6 +811,8 @@ def relax(fibers: list[Fiber], s: dict, cache_file: Path, steps: int | None = No
     settings = dict(ex.TRUTH_RELAXATION)
     if steps:
         settings["max_iterations"] = settings.get("max_iterations", 12_000) + steps
+    if any(f.convolution for f in fibers):  # twisted ribbons: smooth their long axes toward their own twist
+        settings["keep_rest_twist"] = True
     started = time.perf_counter()
     run = recipe.run(tangle.RelaxationSettings(backend=ex.BACKEND, max_step=1.0 * um, penetration_tolerance=0.1 * um,
                                                **settings))
@@ -681,8 +846,9 @@ def truth_from_cache(fibers: list[Fiber], s: dict, cache_file: Path):
         "binder", "bond", max_surface_gap=bonds["gap"] * um, min_crossing_angle=0.0,
         probability=bonds["probability"], seed=s["seed"], max_per_fiber_pair=1,
         candidate_capacity=1 << 21))  # dense scans of finely segmented fibers touch in very many places
+    twisted = {"keep_rest_twist": True} if any(f.convolution for f in fibers) else {}  # keep ribbons' twist
     return recipe.run(tangle.RelaxationSettings(backend=ex.BACKEND, max_iterations=300, max_step=0.5 * um,
-                                                penetration_tolerance=0.1 * um))
+                                                penetration_tolerance=0.1 * um, **twisted))
 
 
 def self_overlaps(fib, quarter: float = 0.5) -> int:
@@ -1146,6 +1312,8 @@ def mixed_scan(index: int, cache: Path, check_overlaps: bool = True, settings=mi
             placed = hashlib.sha1()
             for f in fibers:
                 placed.update(np.round(f.line, 3).tobytes() + np.float64([f.diameter, f.ratio, f.bend]).tobytes())
+                if f.convolution:
+                    placed.update(np.float64([f.convolution, f.reversal, f.phase]).tobytes() + b"rest twist")
             key = hashlib.sha1(f"{placed.hexdigest()}{crowd}{placement}".encode()).hexdigest()[:8]
             cache_file = cache / f"mixed_{index}-{key}.json"
             try:
