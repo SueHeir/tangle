@@ -58,6 +58,8 @@ def main():
     parser.add_argument("checkpoint")
     parser.add_argument("files", nargs="+", type=Path)
     parser.add_argument("--out", type=Path, help="write one row per matched fiber here")
+    parser.add_argument("--smooth", type=float, nargs="*", default=[0.0, 0.5, 1.0, 2.0],
+                        help="also measure bend and curvature on the traced lines smoothed over these many diameters")
     args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     model = load(args.checkpoint, device)
@@ -77,6 +79,8 @@ def main():
             continue
         true_m = measures(lines, radii, volume, grey)
         found_m = measures(traced, traced_r, volume, grey)
+        raw_true, raw_found = measures(lines, radii, volume, (0.0, 1.0)), measures(traced, traced_r, volume, (0.0, 1.0))
+        smooth_m = {w: measures(traced, traced_r, smooth=w) for w in args.smooth if w}
         bright, spread = type_brightness(path, types)
         points = np.concatenate(lines)
         owner = np.concatenate([np.full(len(line), g) for g, line in enumerate(lines)])
@@ -90,7 +94,10 @@ def main():
             rows.append({"scan": path.stem, "true_diameter": 2 * radii[g], "found_diameter": 2 * traced_r[k],
                          "true_bend": true_m["bend"][g], "found_bend": found_m["bend"][k],
                          "true_curvature": true_m["curvature"][g], "found_curvature": found_m["curvature"][k],
+                         **{f"found_bend_s{w:g}": m["bend"][k] for w, m in smooth_m.items()},
+                         **{f"found_curvature_s{w:g}": m["curvature"][k] for w, m in smooth_m.items()},
                          "true_axis_grey": true_m["grey"][g], "found_axis_grey": found_m["grey"][k],
+                         "true_raw_grey": raw_true["grey"][g], "found_raw_grey": raw_found["grey"][k],
                          "type_brightness": np.nan if bright is None else bright[g],
                          "brightness_spread": np.nan if spread is None else spread})
         print(f"{path.stem}: {len(lines)} true, {len(traced)} traced, {sum(r['scan'] == path.stem for r in rows)} "
@@ -102,31 +109,43 @@ def main():
             writer = csv.DictWriter(f, fieldnames=list(rows[0]))
             writer.writeheader()
             writer.writerows(rows)
-    report({k: np.array([r[k] for r in rows], float) for k in rows[0] if k != "scan"})
+    report({k: np.array([r[k] for r in rows], float) for k in rows[0] if k != "scan"},
+           np.array([r["scan"] for r in rows]))
 
 
-def report(c):
+def report(c, scans):
     n = len(c["true_bend"])
     print(f"\n{n} matched fibers")
     for name, floor in (("bend", 0.005), ("curvature", 0.002)):
-        t, f = np.log(c[f"true_{name}"] + floor), np.log(c[f"found_{name}"] + floor)
-        err = f - t
-        print(f"{name} (log, + {floor}): r = {np.corrcoef(t, f)[0, 1]:.3f}, error median {np.median(err):+.3f}, "
-              f"IQR {np.percentile(err, 25):+.3f}..{np.percentile(err, 75):+.3f}")
+        t = np.log(c[f"true_{name}"] + floor)
+        for key in [f"found_{name}"] + sorted(k for k in c if k.startswith(f"found_{name}_s")):
+            f = np.log(c[key] + floor)
+            err = f - t
+            label = name + (f", smoothed over {key.rsplit('_s', 1)[1]} diameters" if "_s" in key[6:] else ", as traced")
+            print(f"{label} (log, + {floor}): r = {np.corrcoef(t, f)[0, 1]:.3f}, error median {np.median(err):+.3f}, "
+                  f"IQR {np.percentile(err, 25):+.3f}..{np.percentile(err, 75):+.3f}")
     ok = np.isfinite(c["true_axis_grey"]) & np.isfinite(c["found_axis_grey"])
     t, f = c["true_axis_grey"][ok], c["found_axis_grey"][ok]
     print(f"axis grey, traced vs true axis: r = {np.corrcoef(t, f)[0, 1]:.3f}, error median {np.median(f - t):+.3f}")
-    has = ok & np.isfinite(c["type_brightness"])
-    if has.sum() > 10:
-        ratio = c["found_axis_grey"][has] / c["type_brightness"][has]
+    has = ok & np.isfinite(c["type_brightness"]) & np.isfinite(c["found_raw_grey"])
+    if has.sum() > 10 and np.ptp(c["type_brightness"][has]) > 0:
+        # in the scan's own grey: the scaling's void level (the median) sits at fiber grey on dense scans
+        ratio = c["found_raw_grey"] / c["type_brightness"]
+        for scan in np.unique(scans[has]):  # each scan has its own grey scale: relative to its own median
+            m = has & (scans == scan)
+            ratio[m] /= np.median(ratio[m])
+        ratio = ratio[has]
         d = c["true_diameter"][has]
-        print(f"axis grey / type brightness ({has.sum()} fibers with known brightness), by true diameter:")
+        print(f"raw axis grey / type brightness, relative to each scan's median ({has.sum()} fibers with known "
+              "brightness), by true diameter:")
         for low, high in ((0, 5), (5, 7), (7, 10), (10, 14), (14, 20), (20, 40)):
             m = (d >= low) & (d < high)
             if m.sum() >= 5:
                 print(f"  {low:>2}-{high:<2} voxels, n {m.sum():4d}: median {np.median(ratio[m]):.3f}, "
                       f"IQR {np.percentile(ratio[m], 25):.3f}..{np.percentile(ratio[m], 75):.3f}")
-        print(f"  r(axis grey, type brightness) = {np.corrcoef(c['found_axis_grey'][has], c['type_brightness'][has])[0, 1]:.3f}")
+        print(f"  r(raw axis grey, type brightness) = {np.corrcoef(c['found_raw_grey'][has], c['type_brightness'][has])[0, 1]:.3f}")
+    elif has.sum():
+        print("type brightness: every fiber here has the same, so grey against brightness can't be checked")
 
 
 if __name__ == "__main__":

@@ -86,11 +86,28 @@ def curvature(line, radius: float) -> float:
     return float(np.median(turn / np.maximum(0.5 * (la + lb), 1e-12)))
 
 
-def measures(lines, radii, volume=None, grey=None) -> dict:
+def smoothed(line, radius: float, width: float = 1.0) -> np.ndarray:
+    """A traced line 1 voxel apart with the tracer's jitter smoothed out: a Gaussian average along it over
+    ``width`` diameters (sd; at least 1 voxel), its ends held. Bends much longer than that are kept."""
+    from scipy.ndimage import gaussian_filter1d
+
+    p = _dense(np.asarray(line, float))
+    sd = max(2.0 * width * radius, 1.0)
+    if len(p) < 3:
+        return p
+    q = gaussian_filter1d(p, sd, axis=0, mode="nearest")
+    q[0], q[-1] = p[0], p[-1]
+    return q
+
+
+def measures(lines, radii, volume=None, grey=None, smooth: float = 0.0) -> dict:
     """Per-fiber measures for the tables, one array each: ``bend`` (``bend``), ``curvature`` (1/voxels,
-    ``curvature``) and, with ``volume`` and ``grey`` levels, ``grey`` (``axis_grey``)."""
-    out = {"bend": np.array([bend(line, r) for line, r in zip(lines, radii)], float),
-           "curvature": np.array([curvature(line, r) for line, r in zip(lines, radii)], float)}
+    ``curvature``) and, with ``volume`` and ``grey`` levels, ``grey`` (``axis_grey``; ``grey=(0, 1)`` gives
+    the scan's own grey values). ``smooth``: measure bend and curvature on the lines ``smoothed`` over that many
+    diameters (0: as traced)."""
+    shapes = [smoothed(line, r, smooth) for line, r in zip(lines, radii)] if smooth else lines
+    out = {"bend": np.array([bend(line, r) for line, r in zip(shapes, radii)], float),
+           "curvature": np.array([curvature(line, r) for line, r in zip(shapes, radii)], float)}
     if volume is not None:
         out["grey"] = np.array([axis_grey(line, volume, grey) for line in lines], float)
     return out
