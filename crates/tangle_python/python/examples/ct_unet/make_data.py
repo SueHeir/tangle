@@ -12,7 +12,7 @@ equivalent radius; ovals also their semi-axes) and type, so the training
 targets (axis heatmap, offset to the axis, direction, type) are gathers at
 load time.
 
-usage: python make_data.py OUT FIRST COUNT [--scanned-share 0.2] [--varied | --pairs | --hard-pairs | --mixed]
+usage: python make_data.py OUT FIRST COUNT [--scanned-share 0.2] [--varied | --pairs | --hard-pairs | --mixed | --bends | --empty | --edges]
 
 ``--varied`` draws every structure from ``varied_settings``: 1-4 fiber types of any size, shape and brightness,
 any orientation, and a wide range of scanner settings (see there).
@@ -26,6 +26,14 @@ Indices: training from 100001, validation 99001-99032, test 99501-99548.
 ``--bends`` makes ``bends_<index>`` scans (``mixed.bends_settings``): two fiber types of one material and size,
 one straight and one bendable, so only bending tells them apart. Indices: training from 200001, validation
 199001-199032, test 199501-199548.
+
+``--empty`` makes ``empty_<index>`` scans (``empty.py``): no fibers, heavy noise or black regions. Indices:
+training from 300001, validation 299001-299032, test 299501-299548.
+
+``--edges`` makes ``edges_<index>`` scans (``edges.py``): the edge of a reconstruction's field of view as truncated
+filtered back-projection makes it (rim, rings about the true axis, the fill), the volume all beyond it, or the
+circle crossing empty space or a mixed scan. Indices: training from 400001, validation 399001-399032, test
+399501-399548.
 """
 
 import argparse
@@ -462,6 +470,9 @@ def main() -> None:
                         help="two types of one material and size, one straight, one bendable (bends_<index>)")
     parser.add_argument("--empty", action="store_true",
                         help="fiber-free scans: heavy noise, and pure black regions (empty_<index>; see empty.py)")
+    parser.add_argument("--edges", action="store_true",
+                        help="the edge of a reconstruction's field of view: all black, black beside empty space, "
+                             "black beside fibers (edges_<index>; see edges.py)")
     parser.add_argument("--no-overlap-check", action="store_true",
                         help="keep structures whose fibers pass through each other (as every set made before had them)")
     args = parser.parse_args()
@@ -477,6 +488,7 @@ def main() -> None:
         # Which settings family is a fixed function of the index, so reruns agree.
         family = ("varied" if args.varied else "pairs" if args.pairs else "hardpairs" if args.hard_pairs
                   else "mixed" if args.mixed else "bends" if args.bends else "empty" if args.empty
+                  else "edges" if args.edges
                   else "scanned" if np.random.default_rng(index).random() < args.scanned_share else "dense_hard")
         name = f"{family}_{index}"
         target = args.out / f"{name}.npz"
@@ -488,6 +500,10 @@ def main() -> None:
                 import empty
 
                 scan, varied = empty.empty_scan(index)
+            elif family == "edges":
+                import edges
+
+                scan, varied = edges.edges_scan(index, cache, check_overlaps=not args.no_overlap_check)
             elif family == "varied":
                 scan, varied = varied_scan(index, cache, check=not args.no_overlap_check)
             elif family in ("mixed", "bends"):
@@ -515,13 +531,14 @@ def main() -> None:
             print(f"{name}: failed ({error})", flush=True)
             continue
         most = EASY_MAX_BINDER if family == "varied" and index >= EASY_FIRST else (
-            MIXED_MAX_BINDER if family in ("mixed", "bends") else None)
+            MIXED_MAX_BINDER if family in ("mixed", "bends", "edges") else None)
         if most is not None and scan.binder_occupancy is not None and float((scan.binder_occupancy > 0.5).mean()) > most:
             print(f"{name}: skipped (binder {float((scan.binder_occupancy > 0.5).mean()):.1%} > {most:.0%})", flush=True)
             continue
-        made_here = family in ("mixed", "bends", "empty")  # rendered by mixed.py: its own point table (thinning fibers' radii)
+        made_here = family in ("mixed", "bends", "empty", "edges")  # rendered by mixed.py: its own point table (thinning fibers' radii)
         table = scan.table if made_here else point_table(scan)
-        if not len(table["pos"]) and family != "empty":  # e.g. a sparse scan whose fibers all lie past a cut face: nothing to learn from
+        fiber_free = family == "empty" or (family == "edges" and varied["field"]["kind"] != "fibers")
+        if not len(table["pos"]) and not fiber_free:  # e.g. a sparse scan whose fibers all lie past a cut face
             print(f"{name}: skipped (no fibers in the volume)", flush=True)
             continue
         near = (nearest_points(scan.volume.shape, table["pos"]) if len(table["pos"])
