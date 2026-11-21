@@ -156,15 +156,24 @@ def main():
     parser.add_argument("--pace", action="append", default=[], metavar="DIR:TOTAL",
                         help="at each refresh, wait until DIR holds its share of TOTAL scans (TOTAL x the share of "
                              "steps done by the next refresh)")
-    parser.add_argument("--exclude", type=Path,
-                        help="leave out the volumes listed in this file, one FOLDER/NAME per line (e.g. those "
-                             "overlaps.py finds with fibers through each other)")
+    parser.add_argument("--exclude", type=Path, action="append", default=[],
+                        help="leave out the volumes listed in this file, one per line: a path, FOLDER/NAME or NAME "
+                             "(.npz optional; e.g. those overlaps.py finds with fibers through each other, or an "
+                             "audit's cuts). Read again at every listing, so lines added while training runs take "
+                             "effect at the next pass; may be given more than once")
     args = parser.parse_args()
-    skip = set(args.exclude.read_text().split()) if args.exclude else set()
+
+    def skipped() -> set[str]:
+        names = set()
+        for path in args.exclude:
+            if path.exists():
+                names.update(line.strip().removesuffix(".npz") for line in path.read_text().splitlines() if line.strip())
+        return names
 
     def volumes(folders: str) -> list[Path]:
+        skip = skipped()
         return sorted(f for d in folders.split(",") for f in Path(d).glob("*.npz")
-                      if f"{f.parent.name}/{f.stem}" not in skip)
+                      if not {f.stem, f"{f.parent.name}/{f.stem}", str(f.with_suffix(""))} & skip)
 
     # Several GPUs (torchrun sets WORLD_SIZE): one process per GPU, gradients averaged across them each step.
     shared = int(os.environ.get("WORLD_SIZE", "1")) > 1
