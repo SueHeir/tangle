@@ -171,9 +171,12 @@ def main():
         return names
 
     def volumes(folders: str) -> list[Path]:
-        skip = skipped()
+        """The scans in the folders (a folder that doesn't exist yet has none), less the excluded ones and any
+        written in the last minute (a generator may still be writing it)."""
+        skip, now = skipped(), time.time()
         return sorted(f for d in folders.split(",") for f in Path(d).glob("*.npz")
-                      if not {f.stem, f"{f.parent.name}/{f.stem}", str(f.with_suffix(""))} & skip)
+                      if not {f.stem, f"{f.parent.name}/{f.stem}", str(f.with_suffix(""))} & skip
+                      and now - f.stat().st_mtime > 60)
 
     # Several GPUs (torchrun sets WORLD_SIZE): one process per GPU, gradients averaged across them each step.
     shared = int(os.environ.get("WORLD_SIZE", "1")) > 1
