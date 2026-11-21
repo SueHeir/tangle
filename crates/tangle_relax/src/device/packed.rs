@@ -598,18 +598,30 @@ impl PackedAssembly {
         let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
         let across = |d: [f64; 3], t: [f64; 3]| -> Option<[f64; 3]> {
             let along = dot(d, t);
-            let p = [d[0] - along * t[0], d[1] - along * t[1], d[2] - along * t[2]];
+            let p = [
+                d[0] - along * t[0],
+                d[1] - along * t[1],
+                d[2] - along * t[2],
+            ];
             let length = dot(p, p).sqrt();
             (length > 1.0e-9).then(|| p.map(|value| value / length))
         };
         for (fiber, span) in self.fiber_vertex_spans.chunks_exact(2).enumerate() {
             let (start, count) = (span[0] as usize, span[1] as usize);
             let segment = self.fiber_segment_spans[2 * fiber] as usize;
-            if count < 2 || self.segment_lane_offsets.get(segment).is_none_or(|&o| o <= 0.0) {
+            if count < 2
+                || self
+                    .segment_lane_offsets
+                    .get(segment)
+                    .is_none_or(|&o| o <= 0.0)
+            {
                 continue;
             }
             for vertex in start..start + count - 1 {
-                let (p, q) = (read(&self.positions, vertex), read(&self.positions, vertex + 1));
+                let (p, q) = (
+                    read(&self.positions, vertex),
+                    read(&self.positions, vertex + 1),
+                );
                 let mut t = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
                 let length = dot(t, t).sqrt();
                 if length <= 1.0e-12 {

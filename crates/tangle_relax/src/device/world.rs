@@ -427,7 +427,8 @@ impl<R: Runtime> DeviceFiberWorld<R> {
         let segment_lane_offsets =
             client.create_from_slice(f32::as_bytes(&packed.segment_lane_offsets));
         let directors = client.create_from_slice(f32::as_bytes(&packed.directors));
-        let vertex_rest_twists = client.create_from_slice(f32::as_bytes(&packed.vertex_rest_twists()));
+        let vertex_rest_twists =
+            client.create_from_slice(f32::as_bytes(&packed.vertex_rest_twists()));
         let director_corrections =
             client.create_from_slice(f32::as_bytes(&vec![0.0_f32; 2 * packed.segment_count()]));
         let vertex_wall_extents =

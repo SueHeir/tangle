@@ -283,7 +283,9 @@ fn single_fiber_world(points: &[[f64; 3]]) -> DeviceFiberWorld<WgpuRuntime> {
 fn segments_shorter_than_the_diameter_do_not_touch_their_own_fiber() {
     // Twenty 0.05-long segments of a 0.2-diameter fiber: segments two apart
     // overlap as capsules, but they are neighbours along the fiber.
-    let points: Vec<[f64; 3]> = (0..=20).map(|i| [1.0 + 0.05 * i as f64, 2.0, 2.0]).collect();
+    let points: Vec<[f64; 3]> = (0..=20)
+        .map(|i| [1.0 + 0.05 * i as f64, 2.0, 2.0])
+        .collect();
     let mut world = single_fiber_world(&points);
     let config = RelaxationConfig {
         penetration_tolerance: 1.0e-5,
@@ -2255,7 +2257,9 @@ fn relaxed_ribbon_twist(keep_rest_twist: bool) -> f64 {
             [0.0, angle.cos(), angle.sin()]
         })
         .collect();
-    assembly.set_fiber_directors(FiberId(1), &directors).unwrap();
+    assembly
+        .set_fiber_directors(FiberId(1), &directors)
+        .unwrap();
     let packed = PackedAssembly::from_assembly(&assembly).unwrap();
     let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
         &WgpuDevice::default(),

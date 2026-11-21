@@ -753,7 +753,7 @@ def segment_points(f: Fiber) -> np.ndarray:
     step = float(np.clip(min(0.33 * f.bend, 1.25 * f.diameter), 0.4 * f.diameter, 1.25 * f.diameter))
     length = _length(f.line)
     step = min(step, length / 4.0)
-    if f.convolution:  # a twisted ribbon: its long axis turns at most 30 degrees from node to node
+    if f.convolution:  # a twisted ribbon: its twist turns the long axis at most 30 degrees from node to node
         step = min(step, f.convolution / 6.0)
     return resample(f.line, step)
 
