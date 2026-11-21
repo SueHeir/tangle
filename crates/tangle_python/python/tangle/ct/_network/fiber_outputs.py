@@ -55,6 +55,7 @@ class Fibers:
     type_names: list  # one per type, e.g. "12 um"
     profiles: list | None = None  # diameters.Accumulator.result, in micrometers
     binder: np.ndarray | None = None  # (n, 3) voxels (x, y, z) the network calls binder, for a binder-aware network
+    measures: dict | None = None  # fiber_types.measures: per-fiber bend, curvature (1/voxels) and axis grey
 
     @property
     def count(self) -> int:
@@ -156,6 +157,9 @@ def fiber_rows(fibers: Fibers) -> tuple[list[str], list[list]]:
               "end_z_um"]
     if fibers.profiles is not None:
         header += ["diameter_median_um", "diameter_spread_um", "long_um", "short_um"]
+    measured = fibers.measures or {}
+    extra = [k for k in ("grey", "bend", "curvature") if k in measured]
+    header += [{"grey": "axis_grey", "bend": "bend", "curvature": "curvature_per_um"}[k] for k in extra]
     rows = []
     for k, line in enumerate(fibers.lines):
         line = np.asarray(line, float)
@@ -176,6 +180,9 @@ def fiber_rows(fibers: Fibers) -> tuple[list[str], list[list]]:
             stats = [np.median(p["diameter"][ok]), np.std(p["diameter"][ok]), np.median(p["long"][ok]),
                      np.median(p["short"][ok])] if ok.any() else [np.nan] * 4
             row += [_f(v) for v in stats]
+        for key in extra:
+            value = float(measured[key][k])
+            row.append(_f(value / h if key == "curvature" else value, 6 if key == "curvature" else 4))
         rows.append(row)
     return header, rows
 

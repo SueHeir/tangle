@@ -187,13 +187,17 @@ fiber sizes known, each fiber gets the type whose diameter is nearest
 number of types given or picked by BIC (`assign_types`).
 
 **Bonds** ([`bonds.py`](../crates/tangle_python/python/examples/ct_unet/bonds.py)):
-the binder outside the traced fibers falls into blobs (26-connected). A blob
-touching one fiber only is a coating and one touching none is loose binder:
-neither is a bond. A blob touching two or more fibers (2 voxels within 1.5
-voxels of each surface) bonds them pair by pair where it fills the gap between
-them: at least 4 of its voxels within 2.5 voxels of both surfaces. So a web
-spanning several fibers bonds the neighbours it joins, not every fiber it
-touches to every other.
+two fibers are bonded when binder, with no fiber material in between, runs
+from one fiber's surface to the other's without passing a third fiber: a web
+bonds each fiber to its direct neighbours. The binder outside the traced fibers
+falls into blobs (26-connected); a blob holds the fibers it touches (binder
+within 1.5 voxels of the surface), and each of its voxels goes to the held fiber
+whose surface is nearest (a Voronoi split). Two fibers are bonded where their
+regions meet (neighbouring voxels, a voxel touching both, or a path through
+binder nearest to no held fiber). A blob touching one fiber only is a coating
+and one touching none is loose binder: neither is a bond, but touching coated
+fibers whose coatings merge are bonded. A bond sits at the centroid of the
+voxels where the two regions meet, one per contact.
 
 Whole scans are traced from overlapping tiles (`tiled_axis_points`: 128³ tiles
 every 64 voxels). Each voxel votes from the tile whose center it is nearest, so
