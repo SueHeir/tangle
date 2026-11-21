@@ -134,14 +134,20 @@ def test_bonds_come_from_binder_filling_the_gap_between_fibers():
     bonds = bonds_from_binder(_binder_between(13, 14, range(8, 13)), lines, radii)
     assert [b["fibers"] for b in bonds] == [(0, 1)]
     assert bonds[0]["center"][0] == pytest.approx(10.5, abs=0.6)
-    # one web around x = 30 filling both gaps and wrapping over the middle fiber: neighbours bonded, but not
-    # the outer two to each other
+    # one web around x = 30 filling both gaps and wrapping over the middle fiber: binder runs from each fiber
+    # to every other without crossing fiber, so all three pairs are bonded
     over = np.array([(x + 0.5, y + 0.5, z + 0.5) for x in range(28, 33) for y in range(13, 20) for z in (12, 13)])
     web = np.concatenate([_binder_between(13, 14, range(28, 33)), _binder_between(19, 20, range(28, 33)), over])
-    assert sorted(b["fibers"] for b in bonds_from_binder(web, lines, radii)) == [(0, 1), (1, 2)]
+    assert sorted(b["fibers"] for b in bonds_from_binder(web, lines, radii)) == [(0, 1), (0, 2), (1, 2)]
     # a coating along one side of fiber 0, away from the others: no bond
     coating = np.array([(x + 0.5, 7.5, z + 0.5) for x in range(5, 35) for z in range(9, 12)], float)
     assert bonds_from_binder(coating, lines, radii) == []
+    # coatings on fibers 0 and 1 merging where the two touch: bonded (binder runs from one surface to the other)
+    touching = [np.array([[0.0, 10.5, 10.5], [40.0, 10.5, 10.5]]), np.array([[20.5, 0.0, 15.0], [20.5, 30.0, 15.0]])]
+    shell = np.array([(x + 0.5, y + 0.5, z + 0.5) for x in range(14, 27) for y in range(4, 17) for z in range(6, 20)
+                      if any(r < np.linalg.norm(np.cross(np.array([x + 0.5, y + 0.5, z + 0.5]) - l[0], l[1] - l[0]))
+                             / np.linalg.norm(l[1] - l[0]) <= r + 1.0 for l, r in zip(touching, (2.0, 2.0)))])
+    assert [b["fibers"] for b in bonds_from_binder(shell, touching, [2.0, 2.0])] == [(0, 1)]
     # loose binder far from every fiber: no bond
     assert bonds_from_binder(np.array([[20.5, 40.5, 30.5]]), lines, radii) == []
 
