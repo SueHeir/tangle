@@ -155,7 +155,8 @@ def main():
                                bonds=bonded if args.bond_hint else None)
             else:  # truth
                 maps = true_maps(data if data is not None else truth_of(scan))
-            lines, radii = trace(maps, min_length=shortest, min_votes=args.min_votes, tidy=not args.no_tidy)
+            lines, radii = trace(maps, min_length=shortest, min_votes=args.min_votes, tidy=not args.no_tidy,
+                                 volume=volume, grey=levels(volume[::2, ::2, ::2]))
         seconds = time.perf_counter() - started
         shape = volume.shape[::-1]
         # True pieces shorter in the volume than the minimum length are stubs, left out as ct.score does.

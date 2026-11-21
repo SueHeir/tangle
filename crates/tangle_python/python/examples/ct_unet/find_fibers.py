@@ -238,7 +238,7 @@ def find_in_region(region, voxel_um: float, model, device: str, grey, sizes_um=N
         shortest = 3.0 * TRAINED[0]
     say(f"Tracing the fibers through {len(points[0]):,} axis points")
     lines, radii = track(*points, shape=shape, min_length=shortest, log=lambda text: say("  " + text))
-    lines, radii = tidy_up(lines, radii)
+    lines, radii = tidy_up(lines, radii, region, grey)
     lines, radii = [np.asarray(line, float) for line in lines], np.asarray(radii, float)
     kinds, names = fiber_kinds(lines, radii, sizes, types, region, grey, voxel_um)
     if not min_length_um and not sizes and lines:

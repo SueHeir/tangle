@@ -8,10 +8,15 @@
 2. Fibers are tracked from the best-supported unused axis point, both ways
    along the point's direction: each step looks ``STEP`` voxels ahead and
    moves to the mean of the axis points there whose direction agrees with
-   the track's, so a crossing fiber's points are ignored. A track may coast
-   straight over short gaps, and it stops where it runs onto a fiber
-   already traced.
-3. Tracks shorter than ``min_length`` are dropped. Each track carries its fiber's radius (the median of the
+   the track's, so a crossing fiber's points are ignored. Of those, the
+   points whose predicted radius matches the track's (within
+   ``RADIUS_MATCH``) are preferred: where a fiber of another size touches it
+   running the same way, the track keeps to its own fiber, and where only
+   the other fiber's points are ahead it coasts straight as over a gap. A
+   track may coast straight over short gaps, and it stops where it runs onto
+   a fiber already traced.
+3. Tracks shorter than ``min_length`` are dropped. Pieces of one fiber whose ends face each other across a gap
+   are joined when their diameter, axis grey (given the scan) and bending agree (``join_gaps``). Each track carries its fiber's radius (the median of the
    predicted radius along it); nothing here knows fiber types, so any mix of sizes works. Types are assigned
    per fiber afterwards (``fiber_types.py``).
 
@@ -19,8 +24,10 @@ usage (scoring against the truth): see score_trace.py
 """
 
 import numpy as np
+from scipy.ndimage import map_coordinates
 from scipy.spatial import cKDTree
 
+from .fiber_types import bend
 from .maps import DIRECTION, FIBER, OFFSET, RADIUS
 
 # Tuned on the network's own maps (r19; 34 test scans, then all 9 test sets): short steps, a tight look-ahead and
@@ -36,6 +43,11 @@ GAP_STEPS = 4  # straight steps allowed without support
 OWNED_MIN = 1.2  # voxels: a track uses up the axis points within max(this, OWNED_SHARE x its radius)
 OWNED_SHARE = 0.5  # (a thick fiber's votes spread wider, e.g. onto both rims of a dim core)
 OVERLAP_STEPS = 4  # stop after this many steps on used-up points
+RADIUS_MATCH = 1.35  # a candidate's radius within this factor of the track's counts as the same fiber
+RADIUS_FOLLOW = 0.1  # how fast the track's radius follows the points it steps onto (share per step)
+JOIN_GREY = 0.25  # join_gaps: largest difference in median axis grey (void 0, bright fiber 1) of two pieces
+JOIN_BEND = 1.5  # join_gaps: largest difference in log bend of two pieces, each at least BEND_DIAMETERS long
+BEND_DIAMETERS = 10.0
 
 
 def principal(tensor: np.ndarray) -> np.ndarray:
@@ -120,16 +132,18 @@ def tiled_axis_points(predict_tile, shape, tile: int = 128, stride: int = 64, mi
     return cells_to_points(*parts[0], min_votes=min_votes)
 
 
-def trace(maps: np.ndarray, min_length: float = 10.0, min_votes: int = 3, tidy: bool = True):
-    """Centerlines (x, y, z voxels) and each one's radius (voxels); ``tidy`` drops doubles and joins gaps."""
+def trace(maps: np.ndarray, min_length: float = 10.0, min_votes: int = 3, tidy: bool = True, volume=None,
+          grey=None):
+    """Centerlines (x, y, z voxels) and each one's radius (voxels); ``tidy`` drops doubles and joins gaps (also
+    checking the pieces' axis grey given the scan ``volume`` (z, y, x) and its ``grey`` = (void, bright) levels)."""
     lines, radii = track(*axis_points(maps, min_votes), shape=maps.shape[1:], min_length=min_length)
-    return tidy_up(lines, radii) if tidy else (lines, radii)
+    return tidy_up(lines, radii, volume, grey) if tidy else (lines, radii)
 
 
-def tidy_up(lines, radii):
-    """Doubled traces dropped, then gaps joined."""
+def tidy_up(lines, radii, volume=None, grey=None):
+    """Doubled traces dropped, then gaps joined (see ``trace``)."""
     lines, radii = drop_doubles(lines, radii)
-    return join_gaps(lines, radii)
+    return join_gaps(lines, radii, volume=volume, grey=grey)
 
 
 def track(position, direction, radius, counts, shape, min_length: float = 10.0, log=None):
@@ -150,11 +164,15 @@ def track(position, direction, radius, counts, shape, min_length: float = 10.0, 
         for sign in (1.0, -1.0):
             p, t = position[seed].copy(), sign * direction[seed]
             path, gaps, overlap = [], 0, 0
+            size = max(float(radius[seed]), 0.3)  # the track's radius
             while True:
                 ahead = p + stride * t
                 near = np.array(tree.query_ball_point(ahead, reach), dtype=int)
                 if len(near):
                     near = near[np.abs(direction[near] @ t) >= agree]
+                if len(near) and RADIUS_MATCH:
+                    same = np.abs(np.log(np.maximum(radius[near], 0.3) / size)) <= np.log(RADIUS_MATCH)
+                    near = near[same]  # none left: another fiber's points only, so coast as over a gap
                 if len(near):
                     w = counts[near].astype(np.float64)
                     new = (position[near] * w[:, None]).sum(0) / w.sum()
@@ -168,6 +186,8 @@ def track(position, direction, radius, counts, shape, min_length: float = 10.0, 
                     if overlap >= OVERLAP_STEPS:
                         break
                     p, t = new, t_new
+                    here = float((radius[near] * w).sum() / w.sum())
+                    size *= (max(here, 0.3) / size) ** RADIUS_FOLLOW
                 else:
                     gaps += 1
                     if gaps > GAP_STEPS:
@@ -225,15 +245,26 @@ def drop_doubles(lines, radii, share: float = 0.5):
 
 
 def join_gaps(lines, radii, max_gap: float = 12.0, max_offset: float = 1.5, min_cos: float = 0.9,
-              max_size_ratio: float = 1.3):
-    """Join traces of about the same radius (within ``max_size_ratio``) whose ends face each other across a gap.
+              max_size_ratio: float = 1.3, volume=None, grey=None, max_grey_diff: float | None = None,
+              max_bend_diff: float | None = None):
+    """Join traces of one fiber whose ends face each other across a gap.
 
     Ends are paired best-first by gap length; a pair joins when the gap is under ``max_gap`` voxels, both
-    ends' directions (over their last 5 voxels) point along the gap within ``min_cos``, and each end's
-    straight extension passes within ``max_offset`` voxels of the other end.
+    ends' directions (over their last 5 voxels) point along the gap within ``min_cos``, each end's straight
+    extension passes within ``max_offset`` voxels of the other end, and the two pieces look like one fiber, by
+    the features ``fiber_types`` sorts fibers by:
+
+    * radius within ``max_size_ratio`` of each other;
+    * with the scan (``volume`` (z, y, x) and its ``grey`` = (void, bright) levels): median axis grey within
+      ``max_grey_diff`` (void 0, bright fiber 1; default ``JOIN_GREY``);
+    * bend (``fiber_types.bend``, as a log) within ``max_bend_diff`` (default ``JOIN_BEND``), for pieces at least ``BEND_DIAMETERS``
+      diameters long (a shorter piece's bend says little).
     """
+    max_grey_diff = JOIN_GREY if max_grey_diff is None else max_grey_diff
+    max_bend_diff = JOIN_BEND if max_bend_diff is None else max_bend_diff
     lines = [np.asarray(l, float) for l in lines]
     radii = list(radii)
+    looks = [_looks(l, r, volume, grey) for l, r in zip(lines, radii)]
     while True:
         ends, info = [], []
         for k, l in enumerate(lines):
@@ -257,6 +288,9 @@ def join_gaps(lines, radii, max_gap: float = 12.0, max_offset: float = 1.5, min_
             kb, sb, db = info[b]
             if ka == kb or ka in used or kb in used or max(radii[ka], radii[kb]) > max_size_ratio * min(radii[ka], radii[kb]):
                 continue
+            (ga, ba), (gb, bb) = looks[ka], looks[kb]
+            if abs(ga - gb) > max_grey_diff or abs(ba - bb) > max_bend_diff:  # NaN (not known) passes
+                continue
             gap = ends[b] - ends[a]
             g = np.linalg.norm(gap)
             if g > 1e-6:
@@ -277,5 +311,22 @@ def join_gaps(lines, radii, max_gap: float = 12.0, max_offset: float = 1.5, min_
             lines[ka] = np.vstack([la, lb])
             radii[ka] = (len(la) * radii[ka] + len(lb) * radii[kb]) / (len(la) + len(lb))
             lines[kb] = np.zeros((0, 3))
+            looks[ka] = _looks(lines[ka], radii[ka], volume, grey)
         keep = [k for k, l in enumerate(lines) if len(l)]
-        lines, radii = [lines[k] for k in keep], [radii[k] for k in keep]
+        lines, radii, looks = [lines[k] for k in keep], [radii[k] for k in keep], [looks[k] for k in keep]
+
+
+def _looks(line, radius: float, volume=None, grey=None) -> tuple[float, float]:
+    """(median axis grey, log bend) of a trace for ``join_gaps``; NaN where not known (no scan, too short)."""
+    g = b = float("nan")
+    line = np.asarray(line, float)
+    if len(line) < 2:
+        return g, b
+    if volume is not None and grey is not None:
+        p = _dense(line) - 0.5
+        v = map_coordinates(volume, [p[:, 2], p[:, 1], p[:, 0]], order=1, mode="nearest", output=np.float32)
+        if np.isfinite(v).any():
+            g = (float(np.nanmedian(v)) - grey[0]) / max(grey[1] - grey[0], 1e-6)
+    if np.linalg.norm(np.diff(line, axis=0), axis=1).sum() >= BEND_DIAMETERS * 2.0 * radius:
+        b = float(np.log(bend(line, radius) + 0.005))
+    return g, b
