@@ -1191,8 +1191,16 @@ def render(truth, fibers: list[Fiber], s: dict) -> MixedScan:
     if sc["shading"]:
         ny, nx = shape[1:]
         attenuation += sc["shading"] * (np.cos(np.pi * (xc - nx / 2) / nx) * np.cos(np.pi * (yc - ny / 2) / ny))
-    low, high = np.percentile(attenuation, [0.5, 99.5])
-    volume = np.clip((attenuation - low) / (high - low) * 65535, 0, 65535).astype(np.uint16)
+    out, grey = None, None
+    if s.get("field"):  # a real reconstruction's field-of-view edge (edges.py): its errors, greys and fill
+        import edges
+
+        density = float(sample.mean()) / fa - base.void_attenuation / fa  # the sample's mean, over air
+        volume, out, grey = edges.finish(attenuation, s, (filled < 0.01) & (inside > 0.5), density,
+                                         np.random.default_rng([s["seed"], 32]))
+    else:
+        low, high = np.percentile(attenuation, [0.5, 99.5])
+        volume = np.clip((attenuation - low) / (high - low) * 65535, 0, 65535).astype(np.uint16)
 
     # The field of view's edge: no data beyond it (zero, or the void's grey).
     fov = s["fov"]
@@ -1202,6 +1210,7 @@ def render(truth, fibers: list[Fiber], s: dict) -> MixedScan:
         r2 = (xc[0] - cx) ** 2 + (yc[0] - cy) ** 2  # (y, x)
         out = np.broadcast_to(r2 > np.quantile(r2, 1.0 - fov["outside"]), shape)
         volume[out] = 0 if fov["fill"] == "zero" else np.uint16(np.median(volume[~out]))
+    if out is not None:  # nothing beyond the field of view is in the truth
         labels[out] = 0
         debris[out] = False
         if bond_labels is not None:
@@ -1280,7 +1289,7 @@ def render(truth, fibers: list[Fiber], s: dict) -> MixedScan:
         semi_axes=semi, bond_labels=bond_truth[0], bonds=bond_truth[1], binder_occupancy=binder_occ,
         debris=debris, type_info=np.array(info, np.float32).reshape(-1, 3),
         flags=np.array([broken, bool(debris.any()), voids], bool),
-        extra={"bond_ratio": bonds["radius_ratio"] if bonds else None})
+        extra={"bond_ratio": bonds["radius_ratio"] if bonds else None, **({"grey": grey} if grey is not None else {})})
 
 
 class FibersOverlap(Exception):
