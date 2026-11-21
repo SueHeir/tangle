@@ -48,7 +48,11 @@ two centerlines instead of their own, so every lane moves the oval the same
 way. Pushed apart lane by lane, the two sides would cancel and the pair would
 stay locked.
 `RelaxationSettings.twist_stiffness`, 0.1 by default, keeps the long axis
-smoothly varying along the fiber. Walls touch the outer lane nearest to them,
+smoothly varying along the fiber, by default toward no twist. With
+`keep_rest_twist=True` it smooths toward the twist the fibers start the run
+with, so a twisted ribbon (long axes given per vertex, turning along the fiber)
+keeps its twist; keep that turn under about 60 degrees between neighbouring
+vertices, since a long axis has no sign. Walls touch the outer lane nearest to them,
 so a flat oval rests on a wall with its thin side.
 
 Round fibers are unchanged: they have one lane on the centerline.

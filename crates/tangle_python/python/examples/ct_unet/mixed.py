@@ -753,6 +753,8 @@ def segment_points(f: Fiber) -> np.ndarray:
     step = float(np.clip(min(0.33 * f.bend, 1.25 * f.diameter), 0.4 * f.diameter, 1.25 * f.diameter))
     length = _length(f.line)
     step = min(step, length / 4.0)
+    if f.convolution:  # a twisted ribbon: its long axis turns at most 30 degrees from node to node
+        step = min(step, f.convolution / 6.0)
     return resample(f.line, step)
 
 
@@ -809,8 +811,8 @@ def relax(fibers: list[Fiber], s: dict, cache_file: Path, steps: int | None = No
     settings = dict(ex.TRUTH_RELAXATION)
     if steps:
         settings["max_iterations"] = settings.get("max_iterations", 12_000) + steps
-    if any(f.convolution for f in fibers):  # twisted ribbons: the default twist stiffness untwists them
-        settings["twist_stiffness"] = 0.0
+    if any(f.convolution for f in fibers):  # twisted ribbons: smooth their long axes toward their own twist
+        settings["keep_rest_twist"] = True
     started = time.perf_counter()
     run = recipe.run(tangle.RelaxationSettings(backend=ex.BACKEND, max_step=1.0 * um, penetration_tolerance=0.1 * um,
                                                **settings))
@@ -844,9 +846,9 @@ def truth_from_cache(fibers: list[Fiber], s: dict, cache_file: Path):
         "binder", "bond", max_surface_gap=bonds["gap"] * um, min_crossing_angle=0.0,
         probability=bonds["probability"], seed=s["seed"], max_per_fiber_pair=1,
         candidate_capacity=1 << 21))  # dense scans of finely segmented fibers touch in very many places
-    untwisted = {"twist_stiffness": 0.0} if any(f.convolution for f in fibers) else {}  # keep ribbons' twist
+    twisted = {"keep_rest_twist": True} if any(f.convolution for f in fibers) else {}  # keep ribbons' twist
     return recipe.run(tangle.RelaxationSettings(backend=ex.BACKEND, max_iterations=300, max_step=0.5 * um,
-                                                penetration_tolerance=0.1 * um, **untwisted))
+                                                penetration_tolerance=0.1 * um, **twisted))
 
 
 def self_overlaps(fib, quarter: float = 0.5) -> int:
@@ -1311,7 +1313,7 @@ def mixed_scan(index: int, cache: Path, check_overlaps: bool = True, settings=mi
             for f in fibers:
                 placed.update(np.round(f.line, 3).tobytes() + np.float64([f.diameter, f.ratio, f.bend]).tobytes())
                 if f.convolution:
-                    placed.update(np.float64([f.convolution, f.reversal, f.phase]).tobytes())
+                    placed.update(np.float64([f.convolution, f.reversal, f.phase]).tobytes() + b"rest twist")
             key = hashlib.sha1(f"{placed.hexdigest()}{crowd}{placement}".encode()).hexdigest()[:8]
             cache_file = cache / f"mixed_{index}-{key}.json"
             try:

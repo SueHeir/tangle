@@ -113,6 +113,10 @@ pub struct RelaxationConfig {
     /// long-axis direction and its neighbours' mean removed per iteration.
     /// Larger values make ovals resist twisting more.
     pub twist_stiffness: f32,
+    /// Oval fibers only: the twist stiffness smooths each long axis toward
+    /// its neighbours turned by the twist the fiber had at the start of the
+    /// run (twisted ribbons stay twisted), instead of toward no twist.
+    pub keep_rest_twist: bool,
     /// Fraction of a junction tether's stretch past its rest length pulled
     /// back per iteration, half at each anchor. Zero, the default, leaves
     /// junctions as bookkeeping only. Each anchor moves at most half the
@@ -157,6 +161,7 @@ impl Default for RelaxationConfig {
             constraint_iterations: 2,
             curvature_cleanup_sweeps: 4,
             twist_stiffness: 0.1,
+            keep_rest_twist: false,
             junction_stiffness: 0.0,
             max_step: 0.006,
             max_iterations: 2_000,

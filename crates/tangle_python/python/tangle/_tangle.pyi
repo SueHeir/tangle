@@ -731,6 +731,7 @@ class RelaxationSettings:
     constraint_iterations: int
     curvature_cleanup_sweeps: int
     twist_stiffness: float
+    keep_rest_twist: bool
     junction_stiffness: float
     max_step: float | None
     max_iterations: int
@@ -759,6 +760,7 @@ class RelaxationSettings:
         constraint_iterations: int = ...,
         curvature_cleanup_sweeps: int = ...,
         twist_stiffness: float = ...,
+        keep_rest_twist: bool = ...,
         junction_stiffness: float = ...,
         max_step: float | None = ...,
         max_iterations: int = ...,

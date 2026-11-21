@@ -2235,3 +2235,63 @@ fn junction_tethers_pull_stretched_bonds_back() {
     );
     assert!(tethered > 0.2, "contact keeps the fibers apart: {tethered}");
 }
+
+/// One flat ribbon along x, 11 vertices, its long axis turning 20 degrees
+/// per vertex (200 degrees in all), relaxed alone for 400 forced iterations;
+/// returns its total twist after, in degrees.
+fn relaxed_ribbon_twist(keep_rest_twist: bool) -> f64 {
+    let mut assembly = FiberAssembly::new(PeriodicCell::orthorhombic([4.0; 3], [false; 3]));
+    let material = assembly.materials.add("ribbon");
+    let section = assembly.sections.add(Section::Elliptical {
+        semi_axes: [0.15, 0.05],
+    });
+    let placed: Vec<[f64; 3]> = (0..11).map(|k| [1.5 + 0.1 * k as f64, 2.0, 2.0]).collect();
+    assembly
+        .add_fiber(FiberId(1), material, section, &placed, &placed)
+        .unwrap();
+    let directors: Vec<[f64; 3]> = (0..11)
+        .map(|k| {
+            let angle = (20.0 * k as f64).to_radians();
+            [0.0, angle.cos(), angle.sin()]
+        })
+        .collect();
+    assembly.set_fiber_directors(FiberId(1), &directors).unwrap();
+    let packed = PackedAssembly::from_assembly(&assembly).unwrap();
+    let mut world = DeviceFiberWorld::<WgpuRuntime>::upload(
+        &WgpuDevice::default(),
+        packed,
+        CellListConfig::default(),
+        0.05,
+    );
+    let config = RelaxationConfig {
+        penetration_tolerance: 1.0e-5,
+        max_step: 0.05,
+        max_iterations: 400,
+        iterations_per_batch: 400,
+        force_full_iterations: true,
+        keep_rest_twist,
+        ..RelaxationConfig::default()
+    };
+    world.run_batch(&config, 400);
+    let after = world.download_directors();
+    let mut total = 0.0_f64;
+    for k in 0..10 {
+        let a = (after[3 * k + 2] as f64).atan2(after[3 * k + 1] as f64);
+        let b = (after[3 * k + 5] as f64).atan2(after[3 * k + 4] as f64);
+        // a long axis has no sign: the turn is taken modulo half a turn
+        let mut step = (b - a).to_degrees().rem_euclid(180.0);
+        if step > 90.0 {
+            step -= 180.0;
+        }
+        total += step;
+    }
+    total
+}
+
+#[test]
+fn twisted_ribbon_keeps_its_twist_only_when_asked() {
+    let kept = relaxed_ribbon_twist(true);
+    assert!((kept - 200.0).abs() < 2.0, "kept twist {kept}");
+    let smoothed = relaxed_ribbon_twist(false);
+    assert!(smoothed.abs() < 100.0, "default twist {smoothed}");
+}
