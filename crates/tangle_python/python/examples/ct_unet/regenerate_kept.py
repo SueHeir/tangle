@@ -27,6 +27,13 @@ commits (as on different branches) are best made one commit at a time with ``--o
 PR #77, ``networks_``: PR #79). Flags that change the structures (``--fast-relax``, ``--no-overlap-check``)
 must match too.
 
+Remade scans can differ from the originals (code changed since, or no recorded commit), so the audit cut that
+built KEPT.txt is applied again to what comes out: a scan with fibers is cut when its blur is over 0.7 x its
+thinnest fiber diameter or over 30% of its fiber voxels are darker than the void's 95th percentile (the r24 rule;
+audit_training.py's settings and measurements, no network needed, CPU only). The cut scans go to
+OUT_ROOT/exclude_recut.txt (FOLDER/NAME per line, for train.py --exclude) and every scan's numbers to
+OUT_ROOT/recut.csv; nothing is deleted. ``--no-recut`` skips this; ``--recut-only`` runs it on OUT_ROOT as it is.
+
 make_data.py skips scans already written, so a stopped run picks up where it stopped. ``--jobs`` runs that many
 make_data processes at once (they share the GPU); ``--shard K/N`` takes every Nth run, to split the work over
 machines. At the end it lists kept scans that did not appear (a structure that failed to relax or render with
@@ -36,12 +43,13 @@ this code, or a code mismatch), and any scan in OUT_ROOT that is not in KEPT.txt
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import subprocess
 import sys
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -91,6 +99,69 @@ def family_flag(family: str) -> list[str]:
     return [flag] if flag else []
 
 
+BLUR_CUT = 0.7  # blur (the "resolution" setting) over the thinnest fiber diameter
+INVISIBLE_CUT = 0.30  # share of fiber voxels darker than the void's 95th percentile
+
+
+def recut_row(path: Path) -> dict:
+    """The r24 audit cut for one made scan: its numbers and whether it is cut (scans without fibers never are)."""
+    import numpy as np
+
+    from audit_training import Loaded, measured, settings
+
+    row = {"scan": f"{path.parent.name}/{path.stem}", "blur_over_dmin": "", "invisible_share": "", "fibers": "",
+           "cut": 0, "reason": "", "error": ""}
+    try:
+        d = Loaded(np.load(path))
+        row.update({k: v for k, v in settings(path).items() if k == "blur_over_dmin"})
+        row.update({k: v for k, v in measured(d).items() if k in ("invisible_share", "fibers")})
+    except Exception as e:  # a scan that will not load is reported, not cut
+        row["error"] = f"{type(e).__name__}: {e}"[:200]
+        return row
+
+    def value(key: str) -> float:
+        try:
+            return float(row[key])
+        except (TypeError, ValueError):
+            return float("nan")
+
+    reasons = []
+    if value("fibers") > 0:
+        if value("blur_over_dmin") > BLUR_CUT:
+            reasons.append(f"blur > {BLUR_CUT} x thinnest diameter")
+        if value("invisible_share") > INVISIBLE_CUT:
+            reasons.append(f"invisible share > {INVISIBLE_CUT:.0%}")
+    row["cut"], row["reason"] = int(bool(reasons)), "; ".join(reasons)
+    return row
+
+
+def recut(out_root: Path, folders: list[str], jobs: int) -> list[str]:
+    """Apply the audit cut to every scan in OUT_ROOT/<folder>; write exclude_recut.txt and recut.csv there."""
+    paths = sorted(q for f in folders for q in (out_root / f).glob("*.npz"))
+    print(f"recut: checking {len(paths)} scans with the audit rule", flush=True)
+    if jobs > 1:
+        with ProcessPoolExecutor(jobs) as pool:
+            rows = list(pool.map(recut_row, paths, chunksize=8))
+    else:
+        rows = [recut_row(q) for q in paths]
+    with open(out_root / "recut.csv", "w", newline="") as fh:
+        w = csv.DictWriter(fh, ["scan", "blur_over_dmin", "invisible_share", "fibers", "cut", "reason", "error"])
+        w.writeheader()
+        w.writerows(rows)
+    cut = [r["scan"] for r in rows if r["cut"]]
+    (out_root / "exclude_recut.txt").write_text("".join(f"{c}\n" for c in cut))
+    by_folder: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    for r in rows:
+        by_folder[r["scan"].split("/")[0]][0] += 1
+        by_folder[r["scan"].split("/")[0]][1] += r["cut"]
+    for folder, (total, n_cut) in sorted(by_folder.items()):
+        print(f"  {folder}: {n_cut} of {total} cut", flush=True)
+    errors = sum(1 for r in rows if r["error"])
+    print(f"recut: {len(cut)} of {len(rows)} scans cut -> {out_root / 'exclude_recut.txt'}"
+          + (f"; {errors} would not load (see recut.csv)" if errors else ""), flush=True)
+    return cut
+
+
 def head_commit() -> str | None:
     try:
         return subprocess.run(["git", "rev-parse", "HEAD"], cwd=HERE, capture_output=True, text=True,
@@ -108,6 +179,8 @@ def main() -> None:
     p.add_argument("--jobs", type=int, default=1, help="make_data processes at once")
     p.add_argument("--shard", default="0/1", help="K/N: make every Nth run from the Kth")
     p.add_argument("--dry-run", action="store_true", help="print the make_data commands only")
+    p.add_argument("--no-recut", action="store_true", help="don't apply the audit cut to the remade scans")
+    p.add_argument("--recut-only", action="store_true", help="only apply the audit cut to the scans in OUT_ROOT")
     args = p.parse_args()
 
     kept = read_kept(args.kept)
@@ -116,6 +189,10 @@ def main() -> None:
     folders = sets.get("folders", {})
     only = set(args.only.split(",")) if args.only else None
     k, n = (int(v) for v in args.shard.split("/"))
+
+    if args.recut_only:
+        recut(args.out_root, [f for f in sorted(kept) if not only or f in only], args.jobs)
+        return
 
     head = head_commit()
 
@@ -180,6 +257,8 @@ def main() -> None:
         print(f"{len(missing)} kept scans missing" + "".join(f"\n  {m}" for m in missing[:50]), flush=True)
     if extra:
         print(f"{len(extra)} scans in OUT_ROOT not in KEPT.txt" + "".join(f"\n  {e}" for e in extra[:50]))
+    if not args.no_recut:
+        recut(args.out_root, [f for f in sorted(kept) if not only or f in only], args.jobs)
     sys.exit(1 if failed else 0)
 
 
