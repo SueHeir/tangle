@@ -143,7 +143,14 @@ def report(c, scans):
             if m.sum() >= 5:
                 print(f"  {low:>2}-{high:<2} voxels, n {m.sum():4d}: median {np.median(ratio[m]):.3f}, "
                       f"IQR {np.percentile(ratio[m], 25):.3f}..{np.percentile(ratio[m], 75):.3f}")
-        print(f"  r(raw axis grey, type brightness) = {np.corrcoef(c['found_raw_grey'][has], c['type_brightness'][has])[0, 1]:.3f}")
+        within = []  # the correlation inside each scan whose types differ in brightness (grey scales differ)
+        for scan in np.unique(scans[has]):
+            m = has & (scans == scan)
+            if m.sum() >= 10 and np.ptp(c["type_brightness"][m]) > 0:
+                within.append(np.corrcoef(c["found_raw_grey"][m], c["type_brightness"][m])[0, 1])
+        if within:
+            print(f"  r(raw axis grey, type brightness) within each scan with brighter and dimmer types: median "
+                  f"{np.median(within):.3f} over {len(within)} scans (range {min(within):.3f}..{max(within):.3f})")
     elif has.sum():
         print("type brightness: every fiber here has the same, so grey against brightness can't be checked")
 

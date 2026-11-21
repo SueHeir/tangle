@@ -290,9 +290,9 @@ type 1 is the thinnest.
 | `touches_edge` | 1 when an end is at the region's faces, so its length is a lower bound |
 | `start_*_um`, `end_*_um` | its two ends |
 | `diameter_median_um` and after | with `--diameter-profile`: the median and spread of its diameter along it, and an oval's long and short widths |
-| `axis_grey` | the median scan grey along its axis, 0 = empty space and 1 = bright fiber (the levels in `summary.txt`); blur dims thin fibers |
+| `axis_grey` | the median scan grey along its axis, in the scan's own grey values |
 | `bend` | how far it strays from straight: over stretches 10 diameters long, the largest distance from the line joining a stretch's ends over the stretch's length (median over the stretches; 0 = straight, ~0.1 for a fiber bending round about ten diameters) |
-| `curvature_per_um` | its median curvature (1 / bend radius), each measured over a diameter each way |
+| `curvature_per_um` | its median curvature (1 / bend radius), measured on the trace smoothed over two diameters (unsmoothed, the tracer's jitter about doubles it); noisier than `bend` |
 
 **In ParaView:** open `fibers.vtk`, add a Tube filter, set its Scalars to
 `radius_um` and Vary Radius to "By Absolute Scalar", and color by `fiber_id`

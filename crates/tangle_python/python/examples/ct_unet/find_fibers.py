@@ -264,10 +264,10 @@ def find_in_region(region, voxel_um: float, model, device: str, grey, sizes_um=N
     profiles = None
     if profile and lines:
         profiles = diameter_profiles(region, lines, model, device, grey, hints, voxel_um)
-    from fiber_types import measures
+    from fiber_types import CURVE_SMOOTH, measures
 
     fibers = Fibers(lines, radii, kinds, support, bonds, voxel_um, shape, names, profiles,
-                    binder if want_binder else None, measures(lines, radii, region, grey) if lines else None)
+                    binder if want_binder else None, measures(lines, radii, region, (0.0, 1.0), curve_smooth=CURVE_SMOOTH) if lines else None)
     given = ("diameters " + ", ".join(f"{d:.4g} um" for d in sizes_um)) if sizes_um else ""
     if getattr(model, "condition", False):
         told = [given] if given else []

@@ -99,14 +99,20 @@ def smoothed(line, radius: float, width: float = 1.0) -> np.ndarray:
     return q
 
 
-def measures(lines, radii, volume=None, grey=None, smooth: float = 0.0) -> dict:
+CURVE_SMOOTH = 2.0  # diameters: the tables' curvature is measured on lines smoothed this much (traced jitter
+#                     roughly doubles it unsmoothed; check_measures.py)
+
+
+def measures(lines, radii, volume=None, grey=None, smooth: float = 0.0, curve_smooth: float | None = None) -> dict:
     """Per-fiber measures for the tables, one array each: ``bend`` (``bend``), ``curvature`` (1/voxels,
     ``curvature``) and, with ``volume`` and ``grey`` levels, ``grey`` (``axis_grey``; ``grey=(0, 1)`` gives
-    the scan's own grey values). ``smooth``: measure bend and curvature on the lines ``smoothed`` over that many
-    diameters (0: as traced)."""
+    the scan's own grey values). ``smooth``: measure bend on the lines ``smoothed`` over that many diameters
+    (0: as traced, as the clustering does); ``curve_smooth``: the same for curvature (default ``smooth``)."""
+    curve_smooth = smooth if curve_smooth is None else curve_smooth
     shapes = [smoothed(line, r, smooth) for line, r in zip(lines, radii)] if smooth else lines
+    curves = [smoothed(line, r, curve_smooth) for line, r in zip(lines, radii)] if curve_smooth else lines
     out = {"bend": np.array([bend(line, r) for line, r in zip(shapes, radii)], float),
-           "curvature": np.array([curvature(line, r) for line, r in zip(shapes, radii)], float)}
+           "curvature": np.array([curvature(line, r) for line, r in zip(curves, radii)], float)}
     if volume is not None:
         out["grey"] = np.array([axis_grey(line, volume, grey) for line in lines], float)
     return out
