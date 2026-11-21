@@ -188,13 +188,16 @@ number of types given or picked by BIC (`assign_types`).
 
 **Bonds** ([`bonds.py`](../crates/tangle_python/python/examples/ct_unet/bonds.py)):
 two fibers are bonded when binder, with no fiber material in between, runs
-continuously from one fiber's surface to the other's. So the binder outside the
-traced fibers falls into blobs (26-connected); a blob holds every fiber it
-touches (binder within 1.5 voxels of the surface) and bonds every pair of them.
-A blob touching one fiber only is a coating and one touching none is loose
-binder: neither is a bond, but touching coated fibers whose coatings merge are
-bonded. Each bond sits at the centroid of the blob's voxels within 2.5 voxels
-of both surfaces (the gap between the pair).
+from one fiber's surface to the other's without passing a third fiber: a web
+bonds each fiber to its direct neighbours. The binder outside the traced fibers
+falls into blobs (26-connected); a blob holds the fibers it touches (binder
+within 1.5 voxels of the surface), and each of its voxels goes to the held fiber
+whose surface is nearest (a Voronoi split). Two fibers are bonded where their
+regions meet (neighbouring voxels, a voxel touching both, or a path through
+binder nearest to no held fiber). A blob touching one fiber only is a coating
+and one touching none is loose binder: neither is a bond, but touching coated
+fibers whose coatings merge are bonded. A bond sits at the centroid of the
+voxels where the two regions meet, one per contact.
 
 Whole scans are traced from overlapping tiles (`tiled_axis_points`: 128³ tiles
 every 64 voxels). Each voxel votes from the tile whose center it is nearest, so

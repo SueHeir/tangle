@@ -309,11 +309,13 @@ what it calls binder outside every traced fiber (the fibers always win). They ar
 share of the region is in `summary.txt`, and `--binder` writes them to
 `binder.tif` (255) without pieces smaller than 20 voxels. The network has no
 bond output: bonds are read off the binder. Two fibers are bonded when binder,
-with no fiber material in between, runs from one's surface to the other's: each
-blob of binder that touches two or more traced fibers bonds every pair of them
-(touching coated fibers whose coatings merge included); a blob touching one
-fiber is a coating, not a bond. In `bonds.csv`,
-`binder_voxels` is how many binder voxels lie within 2.5 voxels of both fibers there (`strength` is
+with no fiber material in between, runs from one's surface to the other's
+without passing a third fiber: each blob of binder is split among the traced
+fibers it touches (every voxel to the nearest surface), and fibers whose shares
+meet are bonded, so a web bonds each fiber to its direct neighbours (touching
+coated fibers whose coatings merge included); a blob touching one fiber is a
+coating, not a bond. In `bonds.csv`,
+`binder_voxels` is how many binder voxels lie where the two fibers' shares of the binder meet (`strength` is
 left empty: it held the bond-point peak height of older networks). `a_x_um`, `a_y_um`, `a_z_um` are where the bond holds
 `fiber_a`: the point on its centerline nearest the bond, with `a_s_um` how
 far along the fiber that is from its start (its first point in
