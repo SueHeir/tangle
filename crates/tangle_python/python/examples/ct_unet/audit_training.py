@@ -1,7 +1,7 @@
 """Per-scan audit of a training set: stored settings, measured image quality and orientation, a network's loss.
 
     python audit_training.py NETWORK.pt DATA_ROOT OUT_DIR [--sets data_mixed,data_stiff,...] [--f1-share 0.2]
-                             [--exclude DATA_ROOT/exclude_overlaps.txt] [--shard 0/4] [--binder-positive 19]
+                             [--exclude DATA_ROOT/exclude_overlaps.txt] [--shard 0/4] [--binder-positive 19] [--min-age 60]
     python audit_training.py --report OUT_DIR          (figures and report only, from the csv files there)
 
 Reads DATA_ROOT/<set>/*.npz (make_data scans) and the .json beside each (its settings); every folder of DATA_ROOT
@@ -186,8 +186,10 @@ def audit(args):
     if args.exclude:
         excluded = {Path(line.strip()).name for line in open(args.exclude) if line.strip()}
     k, n = (int(x) for x in args.shard.split("/"))
-    files = [(s, p) for s in sets for p in sorted((root / s).glob("*.npz"))]
-    files = files[k::n]
+    now = time.time()
+    files = [(s, p) for s in sets for p in sorted((root / s).glob("*.npz")) if now - p.stat().st_mtime > args.min_age]
+    # a scan's shard follows from its name, so it stays put while a folder is still filling
+    files = [(s, p) for s, p in files if zlib.crc32(p.name.encode()) % n == k]
     out = Path(args.out_dir) / (f"train_audit_shard{k}.csv" if n > 1 else "train_audit_rows.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
     done = {(r["set"], r["file"]) for r in csv.DictReader(open(out))} if out.exists() else set()
@@ -302,7 +304,10 @@ def main():
     p.add_argument("--sets", help="comma-separated set folders (default: every data* folder)")
     p.add_argument("--exclude", help="a list of scan names (one per line) to flag as excluded from training")
     p.add_argument("--f1-share", type=float, default=0.2)
-    p.add_argument("--shard", default="0/1", help="K/N: audit every N-th scan from the K-th (run N at once)")
+    p.add_argument("--shard", default="0/1", help="K/N: audit the scans whose name hashes to K of N (run N at once)")
+    p.add_argument("--min-age", type=float, default=60.0,
+                   help="seconds: leave out scans written more recently (a generator may still be writing them); "
+                        "run again later for the rest of a folder still filling")
     p.add_argument("--binder-positive", type=float, default=19.0,
                    help="binder positive weight of an older bond-point network's loss (r23: 19)")
     args = p.parse_args()
