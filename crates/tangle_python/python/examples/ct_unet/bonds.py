@@ -1,12 +1,14 @@
 """Bonds from the network's binder map: which traced fibers each blob of binder joins.
 
-The network only says, voxel by voxel, background, fiber or binder; bonds are found here. The binder outside the
-traced fibers falls into blobs (26-connected voxels). A blob that touches one fiber only is a coating, and one that
-touches none is loose binder (dust, a blob in the void): neither is a bond. A blob that touches two or more fibers
-bonds them, but only pair by pair where the binder sits in the gap between the two: a voxel counts for a pair when
-it lies within ``REACH`` of both fibers' surfaces, and a pair with at least ``MIN_VOXELS`` such voxels is a bond. So
-one web spanning several fibers bonds the neighbours it fills the gaps between, not every fiber it touches to every
-other. A bond's center is the centroid of its voxels and its size their count.
+The network only says, voxel by voxel, background, fiber or binder; bonds are found here. Two fibers are bonded
+when binder, with no fiber material in between, runs continuously from one fiber's surface to the other's. So
+the binder outside the traced fibers falls into blobs (26-connected voxels); a blob holds every fiber it touches
+(binder within ``TOUCH`` of the fiber's surface, ``MIN_TOUCH`` voxels or more), and bonds every pair of the
+fibers it holds. A blob touching one fiber only (a coating) or none (loose binder) bonds nothing; touching
+coated fibers whose coatings merge are bonded. One bond per pair and blob (two blobs of one pair close together,
+one neck a threshold split, are one bond): its center is the centroid of the blob's voxels within ``REACH`` of
+both surfaces (the gap between the two), or, when no voxel is that close to both, the midpoint between the blob's
+voxels touching each; its size is the count of those gap voxels.
 """
 
 import numpy as np
@@ -18,8 +20,7 @@ from maps import BINDER
 
 TOUCH = 1.5  # voxels from a traced fiber's surface: binder this close touches the fiber
 REACH = 2.5  # voxels from both fibers' surfaces: binder this close lies in the gap between them
-MIN_TOUCH = 2  # voxels of a blob that must touch a fiber for the blob to hold it
-MIN_VOXELS = 4  # voxels in the gap between a pair for a bond
+MIN_TOUCH = 1  # voxels of a blob that must touch a fiber for the blob to hold it
 NEIGHBOURS = 64  # nearest centerline points looked at per voxel (1 voxel apart, so a thick fiber takes many)
 
 
@@ -75,58 +76,66 @@ def surface_gaps(voxels: np.ndarray, lines, radii, reach: float = REACH):
 
 
 def bonds_from_binder(voxels: np.ndarray, lines, radii, *, touch: float = TOUCH, reach: float = REACH,
-                      min_touch: int = MIN_TOUCH, min_voxels: int = MIN_VOXELS):
+                      min_touch: int = MIN_TOUCH):
     """Bonds from binder voxel centers (x, y, z) outside the traced fibers (see the module notes)."""
     if len(voxels) == 0 or not lines:
         return []
     voxels = np.asarray(voxels, float)
     blob = blobs(voxels)
     v, fiber, gap = surface_gaps(voxels, lines, radii, max(reach, touch))
-    # the fibers each blob touches
+    # the fibers each blob touches, and with which voxels
     touching = gap <= touch
-    held = {}
+    held, touched = {}, {}
     if touching.any():
-        contacts, counts = np.unique(np.stack([blob[v[touching]], fiber[touching]], 1), axis=0, return_counts=True)
-        for (b, f), n in zip(contacts, counts):
-            if n >= min_touch:
-                held.setdefault(int(b), set()).add(int(f))
+        for i, f in zip(v[touching], fiber[touching]):
+            touched.setdefault((int(blob[i]), int(f)), []).append(int(i))
+        for (b, f), members in touched.items():
+            if len(members) >= min_touch:
+                held.setdefault(b, set()).add(f)
     held = {b: fs for b, fs in held.items() if len(fs) >= 2}
     if not held:
         return []
-    # per voxel of those blobs, the held fibers within reach of it
+    # per voxel of those blobs, the held fibers within reach of it: the gap voxels of each pair
     within = {}
     for i, f, g in zip(v, fiber, gap):
         fs = held.get(int(blob[i]))
         if fs is not None and g <= reach and int(f) in fs:
-            within.setdefault(int(i), []).append(int(f))
-    pairs = {}
+            within.setdefault(int(i), set()).add(int(f))
+    gaps = {}
     for i, fs in within.items():
         fs = sorted(fs)
         for a in range(len(fs)):
             for c in range(a + 1, len(fs)):
-                pairs.setdefault((int(blob[i]), fs[a], fs[c]), []).append(i)
+                gaps.setdefault((int(blob[i]), fs[a], fs[c]), []).append(i)
     found = {}
-    for (b, f, g), members in pairs.items():
-        if len(members) < min_voxels:
-            continue
-        found.setdefault((f, g), []).append(members)
+    for b, fs in held.items():
+        fs = sorted(fs)
+        for a in range(len(fs)):
+            for c in range(a + 1, len(fs)):
+                f, g = fs[a], fs[c]
+                members = gaps.get((b, f, g), [])
+                if members:
+                    center = voxels[members].mean(0)
+                else:  # a long path of binder: halfway between where it meets each fiber
+                    center = 0.5 * (voxels[touched[(b, f)]].mean(0) + voxels[touched[(b, g)]].mean(0))
+                found.setdefault((f, g), []).append((members, center))
     bonds = []
     for (f, g), groups in sorted(found.items()):
         # one bond per pair and blob; the same pair bonded through two blobs close together (one neck the
         # threshold split) is one bond
-        groups.sort(key=len, reverse=True)
+        groups.sort(key=lambda m: len(m[0]), reverse=True)
         kept = []
-        for members in groups:
-            center = voxels[members].mean(0)
+        for members, center in groups:
             for k in kept:
                 if np.linalg.norm(k["center"] - center) < 2.0 * max(float(radii[f]), float(radii[g])) + reach:
-                    k["members"] += members
-                    k["center"] = voxels[k["members"]].mean(0)
+                    if members:
+                        k["members"] += members
+                        k["center"] = voxels[k["members"]].mean(0)
                     break
             else:
                 kept.append({"members": list(members), "center": center})
         for k in kept:
-            bonds.append({"fibers": (f, g), "center": k["center"].tolist(), "voxels": len(k["members"])})
+            bonds.append({"fibers": (f, g), "center": np.asarray(k["center"]).tolist(), "voxels": len(k["members"])})
     return bonds
 
 
