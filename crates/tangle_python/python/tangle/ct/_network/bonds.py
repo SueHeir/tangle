@@ -70,7 +70,8 @@ def surface_gaps(voxels: np.ndarray, lines, radii, reach: float = REACH):
     v, fiber, gap = v[near], fiber[near], gap[near]
     order = np.lexsort((gap, fiber, v))  # nearest point of each fiber first
     v, fiber, gap = v[order], fiber[order], gap[order]
-    first = np.r_[True, (v[1:] != v[:-1]) | (fiber[1:] != fiber[:-1])]
+    first = np.ones(len(v), bool)  # (np.r_[True, ...] would be one long when no voxel is near a fiber)
+    first[1:] = (v[1:] != v[:-1]) | (fiber[1:] != fiber[:-1])
     return v[first], fiber[first], gap[first]
 
 
