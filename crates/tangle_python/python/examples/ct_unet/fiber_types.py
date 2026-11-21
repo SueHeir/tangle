@@ -52,6 +52,72 @@ def bend(line, radius: float) -> float:
     return float(np.median(shares)) if shares else 0.0
 
 
+def axis_grey(line, volume, grey) -> float:
+    """The median scan grey along a fiber's axis, scaled so the void is 0 and bright fibers ~1 (``grey`` = (void,
+    bright) levels). Reads only the fiber's bounding box, so ``volume`` may be any (z, y, x) array-like that
+    slices (a memory map, a lazily read stack). NaN where every sample is NaN."""
+    p = _dense(np.asarray(line, float)) - 0.5
+    shape = np.asarray(volume.shape[::-1])  # x, y, z
+    low = np.clip(np.floor(p.min(0)).astype(int) - 1, 0, shape - 1)
+    high = np.clip(np.ceil(p.max(0)).astype(int) + 2, low + 1, shape)
+    box = np.asarray(volume[low[2]:high[2], low[1]:high[1], low[0]:high[0]], np.float32)
+    q = p - low
+    v = map_coordinates(box, [q[:, 2], q[:, 1], q[:, 0]], order=1, mode="nearest", output=np.float32)
+    v = v[np.isfinite(v)]
+    if not len(v):
+        return float("nan")
+    void, bright = grey
+    return (float(np.median(v)) - void) / max(bright - void, 1e-6)
+
+
+def curvature(line, radius: float) -> float:
+    """A fiber's median curvature (1/voxels): at points 1 voxel apart, the turn between the chords to the points
+    a diameter back and ahead (at least 2.5 voxels), over the chords' mean length. 1/R on a circle of radius R;
+    measured over a diameter, so the tracer's jitter of a few tenths of a voxel adds little. Pieces under two
+    such stretches long give 0."""
+    p = _dense(np.asarray(line, float))  # 1 voxel apart
+    m = max(int(round(2.0 * radius)), 3)
+    if len(p) < 2 * m + 1:
+        return 0.0
+    a, b = p[m:-m] - p[:-2 * m], p[2 * m:] - p[m:-m]
+    la, lb = np.linalg.norm(a, axis=1), np.linalg.norm(b, axis=1)
+    turn = np.arccos(np.clip((a * b).sum(1) / np.maximum(la * lb, 1e-12), -1.0, 1.0))
+    return float(np.median(turn / np.maximum(0.5 * (la + lb), 1e-12)))
+
+
+def smoothed(line, radius: float, width: float = 1.0) -> np.ndarray:
+    """A traced line 1 voxel apart with the tracer's jitter smoothed out: a Gaussian average along it over
+    ``width`` diameters (sd; at least 1 voxel), its ends held. Bends much longer than that are kept."""
+    from scipy.ndimage import gaussian_filter1d
+
+    p = _dense(np.asarray(line, float))
+    sd = max(2.0 * width * radius, 1.0)
+    if len(p) < 3:
+        return p
+    q = gaussian_filter1d(p, sd, axis=0, mode="nearest")
+    q[0], q[-1] = p[0], p[-1]
+    return q
+
+
+CURVE_SMOOTH = 2.0  # diameters: the tables' curvature is measured on lines smoothed this much (traced jitter
+#                     roughly doubles it unsmoothed; check_measures.py)
+
+
+def measures(lines, radii, volume=None, grey=None, smooth: float = 0.0, curve_smooth: float | None = None) -> dict:
+    """Per-fiber measures for the tables, one array each: ``bend`` (``bend``), ``curvature`` (1/voxels,
+    ``curvature``) and, with ``volume`` and ``grey`` levels, ``grey`` (``axis_grey``; ``grey=(0, 1)`` gives
+    the scan's own grey values). ``smooth``: measure bend on the lines ``smoothed`` over that many diameters
+    (0: as traced, as the clustering does); ``curve_smooth``: the same for curvature (default ``smooth``)."""
+    curve_smooth = smooth if curve_smooth is None else curve_smooth
+    shapes = [smoothed(line, r, smooth) for line, r in zip(lines, radii)] if smooth else lines
+    curves = [smoothed(line, r, curve_smooth) for line, r in zip(lines, radii)] if curve_smooth else lines
+    out = {"bend": np.array([bend(line, r) for line, r in zip(shapes, radii)], float),
+           "curvature": np.array([curvature(line, r) for line, r in zip(curves, radii)], float)}
+    if volume is not None:
+        out["grey"] = np.array([axis_grey(line, volume, grey) for line in lines], float)
+    return out
+
+
 def features(lines, radii, volume=None, grey=None, curvature: bool = False, bends: bool = True) -> np.ndarray:
     """(fibers, n) features: log radius, grey (with ``volume`` (z, y, x) and ``grey`` = (void, bright) levels),
     curvature (``curvature``), bend (``bends``, on by default)."""
