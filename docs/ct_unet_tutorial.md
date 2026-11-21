@@ -263,7 +263,7 @@ CPU. On a big scan this takes a while; meanwhile:
 | `binder.tif` | with `--binder`: the binder outside every traced fiber (255), see below | Fiji |
 | `fibers.csv` | one row per fiber (columns below) | Excel, Python, R |
 | `centerlines.csv` | every centerline point: fiber, point number, x, y, z | Excel, Python |
-| `bonds.csv` | every bond: its number, the two fibers it joins, where it is, how strong the network's bond-point signal was, how many binder voxels join the pair there, and where it holds each fiber | Excel, Python |
+| `bonds.csv` | every bond: its number, the two fibers it joins, where it is, how many binder voxels join the pair there, and where it holds each fiber | Excel, Python |
 | `diameters.csv` | with `--diameter-profile`: the diameter at every voxel along every fiber, and an oval's long and short widths | Excel, Python |
 | `fibers.vtk`, `bonds.vtk` | the centerlines and bonds | ParaView |
 | `fibers.dump`, `view_in_ovito.py` | the fibers as chains of capsules, the binder as spheres, and bonds | OVITO |
@@ -304,15 +304,16 @@ saved session; Construct surface mesh on type 2 turns it into a surface) and
 the bonds type 3.
 
 **Binder and bonds.** Unless told `--bonded no`, the network also marks binder:
-the voxels it calls binder outside every traced fiber (the fibers always win;
-inside a blob of binder the network often says fiber too, so its own fiber
-call would leave only the blob's rim). They are orange in the overlays, their
+every voxel is called background, fiber or binder, and the binder kept is
+what it calls binder outside every traced fiber (the fibers always win). They are orange in the overlays, their
 share of the region is in `summary.txt`, and `--binder` writes them to
-`binder.tif` (255) without pieces smaller than 20 voxels. A bond is where the
-network marks a bond point, or else where its binder joins two traced fibers
-(at least 4 binder voxels within 2.5 voxels of both surfaces). In `bonds.csv`
-the first kind has the bond point's `strength` and the second the number of
-`binder_voxels`. `a_x_um`, `a_y_um`, `a_z_um` are where the bond holds
+`binder.tif` (255) without pieces smaller than 20 voxels. The network has no
+bond output: bonds are read off the binder. Each blob of binder that touches
+two or more traced fibers bonds them pair by pair where it fills the gap
+between them (at least 4 binder voxels within 2.5 voxels of both surfaces); a
+blob touching one fiber is a coating, not a bond. In `bonds.csv`,
+`binder_voxels` is how many binder voxels join the pair there (`strength` is
+left empty: it held the bond-point peak height of older networks). `a_x_um`, `a_y_um`, `a_z_um` are where the bond holds
 `fiber_a`: the point on its centerline nearest the bond, with `a_s_um` how
 far along the fiber that is from its start (its first point in
 `centerlines.csv`); the `b_` columns give the same for `fiber_b`. With a
@@ -514,7 +515,7 @@ where it is changed, and their `sync_package.py` copies them into the package.
 - Fibers must be 3.5 to 28 voxels across (bin for thicker ones), brighter than
   their surroundings (or `--invert`), in cubic voxels, with mostly empty space
   around them (or `--levels`).
-- Bonds come from the network's bond points and binder, and are found less
+- Bonds are read off the network's binder, and are found less
   reliably than fibers (see the guide's numbers).
 - The result is centerlines with diameters and types, not a solved
   structure: `fit.relax()` in Tangle makes it one.

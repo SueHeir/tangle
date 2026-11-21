@@ -224,12 +224,10 @@ def find_in_region(region, voxel_um: float, model, device: str, grey, sizes_um=N
 
     shape = tuple(int(n) for n in region.shape)
     sizes = [d / voxel_um for d in sizes_um] if sizes_um else None
-    layout = getattr(model, "layout", "bondpoints")
-    want_bonds = layout == "bondpoints" and bonded is not False
-    want_binder = layout in ("bonds", "bondpoints") and bonded is not False
+    layout = getattr(model, "layout", "classes")
+    want_binder = layout in ("classes", "bonds", "bondpoints") and bonded is not False
     hints = {"diameters": sizes, "bonds": bonded}
-    cells, centers, strengths, binder = network_votes(region, model, device, grey, hints, want_bonds, work, key,
-                                                      want_binder=want_binder)
+    cells, binder = network_votes(region, model, device, grey, hints, work, key, want_binder=want_binder)
 
     points = cells_to_points(*cells, min_votes=3)
     if min_length_um:
@@ -252,20 +250,16 @@ def find_in_region(region, voxel_um: float, model, device: str, grey, sizes_um=N
         kinds, names = settle_types(lines, radii, kinds, voxel_um, fold=not types)  # a type may have lost its fibers
     say(f"  {len(lines):,} fibers")
     bonds = []
-    if lines and (len(centers) or len(binder)):
-        from bonds import bonds_at, bonds_from_binder, merge_bonds, outside_fibers
+    if lines and len(binder):
+        from bonds import bonds_from_binder, outside_fibers
 
-        # the fibers always win: the binder is what the network calls binder outside the traced fibers. (Inside a
-        # blob of binder the network often says fiber as well, so its own fiber call would leave only the rims.)
+        # the fibers always win: the binder is what the network calls binder outside the traced fibers
         binder = binder[outside_fibers(binder + 0.5, lines, radii)]
-        # bonds where the network marks a bond point, then where its binder joins two fibers with no point there
-        at_points = bonds_at(centers, strengths, lines, radii) if len(centers) else []
-        through_binder = bonds_from_binder(binder + 0.5, lines, radii) if len(binder) else []
-        for bond in through_binder:
-            bond["strength"] = float("nan")  # no bond-point peak: found through the binder alone
-        bonds = merge_bonds(at_points, through_binder)
-        peaks = sum(1 for b in bonds if np.isfinite(b["strength"]))
-        say(f"  {len(bonds):,} bonds ({peaks:,} at bond points, {len(bonds) - peaks:,} through binder alone)")
+        # bonds where a blob of that binder fills the gap between two traced fibers (bonds.py)
+        bonds = bonds_from_binder(binder + 0.5, lines, radii) if len(binder) else []
+        for bond in bonds:
+            bond["strength"] = float("nan")  # kept for the tables' layout: the network has no bond output
+        say(f"  {len(bonds):,} bonds where the binder joins two fibers")
     support = backing(lines, points[0])
     profiles = None
     if profile and lines:
@@ -283,19 +277,18 @@ def find_in_region(region, voxel_um: float, model, device: str, grey, sizes_um=N
     return fibers, {"hints": said, "min_length_um": shortest * voxel_um}
 
 
-def network_votes(region, model, device: str, grey, hints: dict, want_bonds: bool, work: Path | None = None,
-                  key=None, want_binder: bool = False):
-    """Every fiber voxel's axis vote, pooled in 1-voxel cells over the whole region (``trace_maps.vote_cells``),
-    the bond-point peaks (centers, strengths) and, with ``want_binder``, the voxels the network calls binder
-    (``BINDER_CUTOFF``), as (x, y, z) voxel numbers. Saved to ``work`` as the tiles go, when it is given."""
-    from bonds import bond_peaks
+def network_votes(region, model, device: str, grey, hints: dict, work: Path | None = None, key=None,
+                  want_binder: bool = False):
+    """Every fiber voxel's axis vote, pooled in 1-voxel cells over the whole region (``trace_maps.vote_cells``)
+    and, with ``want_binder``, the voxels the network calls binder (``BINDER_CUTOFF``), as (x, y, z) voxel
+    numbers. Saved to ``work`` as the tiles go, when it is given."""
     from maps import BINDER
     from trace_maps import merge_cells, vote_cells
 
     plan = tile_plan(region.shape)
     layers, per_layer = plan[0], len(plan[1]) * len(plan[2])
     total = len(layers) * per_layer
-    cells, centers, strengths, binder, first = None, [], [], [], 0
+    cells, binder, first = None, [], 0
     saved = work / "votes.npz" if work is not None else None
     if work is not None:
         work.mkdir(parents=True, exist_ok=True)
@@ -303,7 +296,6 @@ def network_votes(region, model, device: str, grey, hints: dict, want_bonds: boo
             with np.load(saved) as data:
                 first = int(data["layers_done"])
                 cells = tuple(data[name] for name in CELLS)
-                centers, strengths = [data["bond_centers"]], [data["bond_strengths"]]
                 binder = [data["binder"]]
             if first >= len(layers):
                 say("Network: reusing the saved votes (same region, network and hints)")
@@ -328,10 +320,6 @@ def network_votes(region, model, device: str, grey, hints: dict, want_bonds: boo
                 maps = tile_maps(region, (oz, oy, ox), model, device, grey, hints)
                 window = (slice(z0 - oz, z1 - oz), slice(y0 - oy, y1 - oy), slice(x0 - ox, x1 - ox))
                 parts.append(vote_cells(maps, (oz, oy, ox), window))
-                if want_bonds:
-                    c, s = bond_peaks(maps, 0.5, window, (oz, oy, ox))
-                    centers.append(c)
-                    strengths.append(s)
                 if want_binder:
                     z, y, x = np.nonzero(maps[BINDER][0][window] > BINDER_CUTOFF)
                     binder.append(np.stack([x + x0, y + y0, z + z0], 1).astype(np.int16))
@@ -341,22 +329,16 @@ def network_votes(region, model, device: str, grey, hints: dict, want_bonds: boo
                     say(f"  tiles {total - left + done:,} of {total:,}, about "
                         f"{duration((shown - started) / done * (left - done))} to go")
         cells = merge_cells(*[np.concatenate(c) for c in zip(*parts)])
-        if centers:
-            centers, strengths = [np.concatenate(centers)], [np.concatenate(strengths)]
         if binder:
             binder = [np.concatenate(binder)]
         if saved is not None and (layer == len(layers) - 1 or time.time() - stored > 120):
             partial = saved.with_name("votes.partial.npz")
             np.savez(partial, **dict(zip(CELLS, cells)),
-                     bond_centers=centers[0] if centers else np.zeros((0, 3)),
-                     bond_strengths=strengths[0] if strengths else np.zeros(0),
                      binder=binder[0] if binder else np.zeros((0, 3), np.int16), layers_done=layer + 1)
             os.replace(partial, saved)
             stored = time.time()
-    centers = np.concatenate(centers) if centers else np.zeros((0, 3))
-    strengths = np.concatenate(strengths) if strengths else np.zeros(0)
     binder = np.concatenate(binder) if binder else np.zeros((0, 3), np.int16)
-    return cells, centers, strengths, binder
+    return cells, binder
 
 
 def tile_plan(shape, tile: int = TILE, stride: int = STRIDE) -> list[list[tuple[int, int, int]]]:
@@ -551,8 +533,8 @@ def describe_hints(model, sizes, bonded) -> None:
         say("Telling the network: " + " and ".join(told))
     else:
         say("No hints given (--diameters, --bonded): the network works without them, a little less accurately")
-    if bonded and getattr(model, "layout", "") != "bondpoints":
-        say("This network has no bond-point output, so no bonds are looked for")
+    if bonded and getattr(model, "layout", "") not in ("classes", "bonds", "bondpoints"):
+        say("This network has no binder output, so no bonds are looked for")
 
 
 def network_file(text: str) -> Path:

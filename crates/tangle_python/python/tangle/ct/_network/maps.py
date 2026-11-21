@@ -11,6 +11,13 @@ order; arrays in (z, y, x) order like the scans):
 * 4-9: fiber direction as the sign-free tensor t t^T (xx, yy, zz, xy, xz, yz).
 * 10: fiber (vs void) logit.
 * 11: log of the local fiber radius (voxels; the equal-area radius of the fiber the voxel belongs to).
+* 10, 12, 13 together: one 3-way call per voxel, fiber (10), binder (12) or background (13) logits under one
+  softmax, so a voxel is never both fiber and binder. ``predict`` returns the fiber and binder probabilities in
+  10 and 12 (``FIBER``, ``BINDER``) and drops 13.
+
+There is no bond output: bonds are found afterwards from the binder and the traced fibers (``bonds.py``). Earlier
+networks (layout "bondpoints") had a bond-point heatmap in channel 13 and independent fiber and binder logits;
+they still load, and ``predict`` ignores their bond points.
 
 No fiber types: the network only finds fibers, whatever their material, and the radius map lets the tracer and
 the per-fiber typing (``fiber_types.py``) work for any mix of sizes. The first networks (13 channels: void /
@@ -25,9 +32,9 @@ from torch import nn
 import torch.nn.functional as F
 
 HEAT, OFFSET, DIRECTION, FIBER, RADIUS = slice(0, 1), slice(1, 4), slice(4, 10), slice(10, 11), slice(11, 12)
-BINDER = slice(12, 13)  # binder (bond) voxel logit
-BONDPT = slice(13, 14)  # bond-point heatmap logit: a peak at each bond's center (as HEAT is for fiber axes)
-BOND_SIGMA = 1.5  # voxels: width of the bond-point peaks
+BINDER = slice(12, 13)  # binder logit (the binder probability in predict's maps)
+VOID = slice(13, 14)  # background logit of the 3-way call (network output only; not in predict's maps)
+FIBER_POSITIVE = 2.0  # extra loss weight on true fiber voxels
 BINDER_POSITIVE = 9.0  # extra loss weight on true binder voxels (binder is ~1% of the voxels)
 SIZE_BINS = np.linspace(np.log(3.0), np.log(32.0), 16)  # log-diameter bins (voxels) of the size code
 SIZE_CODE = len(SIZE_BINS) + 1 + 3  # the first hints: the bins, 1 = sizes known, then binder (known, present, size)
@@ -132,7 +139,8 @@ def draw_hints(truth: dict, rng: np.random.Generator, blank: float = 0.35, sizes
         if rng.random() < extra:
             said[key] = truth[key]
     return said
-CHANNELS = 14
+CHANNELS = 13  # predict's maps: heat, offset, direction, fiber, radius, binder
+HEAD_CHANNELS = 14  # the network's outputs: the same, plus the background logit of the 3-way call
 _OLD_TYPE = slice(10, 13)  # the first networks' void / fine / coarse logits
 _OLD_RADIUS = (2.75, 6.75)  # voxels: what "fine" and "coarse" meant for them
 
@@ -152,32 +160,13 @@ def normalize(volume: np.ndarray, grey: tuple[float, float] | None = None) -> np
 
 
 def _binder(data, window, shape):
-    """The binder target: all binder (bonds and coatings) when stored, else the bond voxels, else none."""
+    """The binder target: all binder (bonds and coatings) when stored, else the bond voxels, else none. (Fiber
+    voxels win over binder in ``targets``.)"""
     for key in ("binder_mask", "bond_labels"):
         if key in data:
             a = data[key] if window is None else data[key][window]
             return (a > 0)[None].astype(np.float32)
     return np.zeros((1, *shape), np.float32)
-
-
-def _bond_points(data, window, shape):
-    """Gaussian peaks (BOND_SIGMA) at the true bond centers inside ``window``."""
-    out = np.zeros(shape, np.float32)
-    if "bond_centers" not in data or not len(data["bond_centers"]):
-        return out[None]
-    z0, y0, x0 = (0, 0, 0) if window is None else (window[0].start, window[1].start, window[2].start)
-    reach = int(np.ceil(3 * BOND_SIGMA))
-    for c in np.asarray(data["bond_centers"], np.float64):
-        p = c - np.array([x0, y0, z0]) - 0.5  # voxel index (x, y, z) in the window
-        lo = np.maximum(np.floor(p).astype(int) - reach, 0)
-        hi = np.minimum(np.floor(p).astype(int) + reach + 2, np.array(shape[::-1]))
-        if np.any(hi <= lo):
-            continue
-        z, y, x = np.mgrid[lo[2]:hi[2], lo[1]:hi[1], lo[0]:hi[0]]
-        g = np.exp(-0.5 * ((x - p[0]) ** 2 + (y - p[1]) ** 2 + (z - p[2]) ** 2) / BOND_SIGMA**2)
-        box = out[lo[2]:hi[2], lo[1]:hi[1], lo[0]:hi[0]]
-        np.maximum(box, g, out=box)
-    return out[None]
 
 
 def targets(data, window=None) -> dict:
@@ -214,8 +203,7 @@ def targets(data, window=None) -> dict:
         "direction": direction,
         "own": own[None],
         "fiber": (labels > 0)[None].astype(np.float32),
-        "binder": _binder(data, window, labels.shape),
-        "bondpt": _bond_points(data, window, labels.shape),
+        "binder": _binder(data, window, labels.shape) * (labels <= 0)[None],
         "radius": (np.log(np.maximum(r, np.float32(0.5))) * own)[None],
     }
 
@@ -257,7 +245,7 @@ def block(cin, cout, groups=None):
 
 
 class UNet3D(nn.Module):
-    def __init__(self, base: int = 16, levels: int = 4, channels: int = CHANNELS, group_sizes=None,
+    def __init__(self, base: int = 16, levels: int = 4, channels: int = HEAD_CHANNELS, group_sizes=None,
                  condition: bool = False, code_size: int = HINT_CODE):
         """``group_sizes``: channels per norm group at each level (default: 8 groups, at least 4 channels each);
         a widened network keeps its source's group sizes, so the old channels stay in groups of their own."""
@@ -313,14 +301,21 @@ def loss_terms(out: torch.Tensor, batch: dict) -> dict:
         "heat": (F.binary_cross_entropy_with_logits(out[:, HEAT], heat, reduction="none") * weight).mean(),
         "offset": (F.smooth_l1_loss(out[:, OFFSET], batch["offset"], reduction="none") * own).sum() / (3 * n_own),
         "direction": ((out[:, DIRECTION] - batch["direction"]) ** 2 * own).sum() / (6 * n_own) * 10.0,
-        "fiber": (F.binary_cross_entropy_with_logits(out[:, FIBER], fiber, reduction="none")
-                  * (1.0 + 2.0 * fiber)).mean(),
         "radius": (F.smooth_l1_loss(out[:, RADIUS], batch["radius"], reduction="none", beta=0.1) * own).sum() / n_own,
-        "binder": (F.binary_cross_entropy_with_logits(out[:, BINDER], batch["binder"], reduction="none")
-                   * (1.0 + BINDER_POSITIVE * batch["binder"])).mean(),
-        "bondpt": (F.binary_cross_entropy_with_logits(out[:, BONDPT], batch["bondpt"], reduction="none")
-                   * (1.0 + 19.0 * (batch["bondpt"] > 0.1))).mean(),
+        "classes": (F.cross_entropy(class_logits(out), class_target(batch), reduction="none")
+                    * (1.0 + FIBER_POSITIVE * fiber[:, 0] + BINDER_POSITIVE * batch["binder"][:, 0])).mean(),
     }
+
+
+def class_logits(out: torch.Tensor) -> torch.Tensor:
+    """The 3-way call's logits, (N, 3, z, y, x): background, fiber, binder."""
+    return torch.cat([out[:, VOID], out[:, FIBER], out[:, BINDER]], dim=1)
+
+
+def class_target(batch: dict) -> torch.Tensor:
+    """The 3-way call's target, (N, z, y, x): 0 background, 1 fiber, 2 binder (fiber wins where both are set)."""
+    fiber, binder = batch["fiber"][:, 0] > 0.5, batch["binder"][:, 0] > 0.5
+    return torch.where(fiber, 1, torch.where(binder, 2, 0)).long()
 
 
 def load(path, device: str) -> nn.Module:
@@ -332,7 +327,10 @@ def load(path, device: str) -> nn.Module:
                    condition=bool(film), code_size=state["model"]["film.0.weight"].shape[1] if film else SIZE_CODE
                    ).to(device)
     model.load_state_dict(state["model"])
-    model.layout = {14: "bondpoints"}.get(channels) or state.get("layout") or {13: "types", 12: "fibers"}[channels]
+    layout = state.get("layout")
+    if layout != "classes":  # the older layouts, told apart by their outputs where the checkpoint doesn't say
+        layout = {14: "bondpoints"}.get(channels) or layout or {13: "types", 12: "fibers"}[channels]
+    model.layout = layout
     return model
 
 
@@ -354,14 +352,16 @@ def predict(model: nn.Module, volume: np.ndarray, device: str, grey: tuple[float
     maps = torch.zeros((CHANNELS, *out.shape[1:]), device=out.device)
     maps[HEAT] = torch.sigmoid(out[HEAT])
     maps[OFFSET], maps[DIRECTION] = out[OFFSET], out[DIRECTION]
-    layout = getattr(model, "layout", "bondpoints")
-    if layout in ("fibers", "bonds", "bondpoints"):
+    layout = getattr(model, "layout", "classes")
+    if layout == "classes":
+        p = torch.softmax(class_logits(out[None])[0], dim=0)
+        maps[FIBER], maps[BINDER] = p[1:2], p[2:3]
+        maps[RADIUS] = torch.exp(out[RADIUS])
+    elif layout in ("fibers", "bonds", "bondpoints"):
         maps[FIBER] = torch.sigmoid(out[FIBER])
         maps[RADIUS] = torch.exp(out[RADIUS])
         if layout in ("bonds", "bondpoints"):
-            maps[BINDER] = torch.sigmoid(out[BINDER])
-        if layout == "bondpoints":
-            maps[BONDPT] = torch.sigmoid(out[BONDPT])
+            maps[BINDER] = torch.sigmoid(out[BINDER])  # a bondpoints network's bond-point channel is not read
     else:  # a first-layout network: fiber = not void, radius from its fine / coarse call
         p = torch.softmax(out[_OLD_TYPE], dim=0)
         maps[FIBER] = 1.0 - p[0:1]

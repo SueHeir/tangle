@@ -47,8 +47,8 @@ class Fibers:
     radii: np.ndarray  # voxels
     types: np.ndarray  # 0 = the thinnest type
     support: np.ndarray  # share of each trace backed by the network's axis votes
-    bonds: list  # {"fibers": (i, j) indices into lines, "center": (x, y, z) voxels, "strength": peak height (NaN for
-    #              a bond found through binder alone, which has "voxels": the binder voxels joining the pair)}
+    bonds: list  # {"fibers": (i, j) indices into lines, "center": (x, y, z) voxels, "voxels": the binder voxels
+    #              joining the pair, "strength": NaN (networks have no bond output; kept for the tables' layout)}
     voxel_um: float
     shape: tuple  # (z, y, x) voxels of the analysed region
     type_names: list  # one per type, e.g. "12 um"
@@ -791,9 +791,8 @@ def summary(fibers: Fibers, given_um: list | None, fractions: dict | None) -> li
     if weak:
         lines.append(f"Traces less than half backed by the network: {weak} (support < 0.5 in fibers.csv; check them)")
     if fibers.bonds:
-        points = sum(1 for b in fibers.bonds if np.isfinite(b["strength"]))
-        lines.append(f"Bonds: {len(fibers.bonds):,} ({2 * len(fibers.bonds) / n:.2f} per fiber): {points:,} at the "
-                     f"network's bond points, {len(fibers.bonds) - points:,} where its binder joins two fibers")
+        lines.append(f"Bonds: {len(fibers.bonds):,} ({2 * len(fibers.bonds) / n:.2f} per fiber), where the "
+                     f"network's binder joins two fibers")
     if fractions:
         lines.append(f"Volume fraction of the drawn fibers: {100 * fractions['fibers']:.1f}%")
         if "binder" in fractions:

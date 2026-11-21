@@ -82,7 +82,7 @@ def tiny_network(tmp_path_factory) -> Path:
 
     torch.manual_seed(0)
     path = tmp_path_factory.mktemp("network") / "tiny.pt"
-    torch.save({"model": maps.UNet3D(base=8, condition=True).state_dict(), "base": 8}, path)
+    torch.save({"model": maps.UNet3D(base=8, condition=True).state_dict(), "base": 8, "layout": "classes"}, path)
     return path
 
 
@@ -114,3 +114,52 @@ def test_find_fibers_matches_the_tutorial_script(tmp_path):
     assert len(fit.centerlines) == len(ours) >= 3  # the three fibers of the test scan, at least
     assert [f["centerline"] for f in ours] == [f["centerline"] for f in theirs]
     assert [f["diameter"] for f in ours] == [f["diameter"] for f in theirs]
+
+
+def _binder_between(a, b, x_range, half=1):
+    """Binder voxel centers (x, y, z) filling the gap between fibers along x at y = a and y = b (z 10), for x in
+    ``x_range``, ``half`` voxels either side in z."""
+    return np.array([(x + 0.5, y + 0.5, z + 0.5) for x in x_range for y in range(a, b)
+                     for z in range(10 - half, 10 + half + 1)], float)
+
+
+def test_bonds_come_from_binder_filling_the_gap_between_fibers():
+    pytest.importorskip("torch")  # bonds.py reads the map layout from maps.py
+    from tangle.ct._network.bonds import bonds_from_binder
+
+    # three parallel fibers of radius 2 along x, surfaces 2 voxels apart: y = 10, 16, 22, all at z = 10.5
+    lines = [np.array([[0.0, y + 0.5, 10.5], [40.0, y + 0.5, 10.5]]) for y in (10, 16, 22)]
+    radii = [2.0, 2.0, 2.0]
+    # a neck of binder between fibers 0 and 1 around x = 10: one bond, near there
+    bonds = bonds_from_binder(_binder_between(13, 14, range(8, 13)), lines, radii)
+    assert [b["fibers"] for b in bonds] == [(0, 1)]
+    assert bonds[0]["center"][0] == pytest.approx(10.5, abs=0.6)
+    # one web around x = 30 filling both gaps and wrapping over the middle fiber: neighbours bonded, but not
+    # the outer two to each other
+    over = np.array([(x + 0.5, y + 0.5, z + 0.5) for x in range(28, 33) for y in range(13, 20) for z in (12, 13)])
+    web = np.concatenate([_binder_between(13, 14, range(28, 33)), _binder_between(19, 20, range(28, 33)), over])
+    assert sorted(b["fibers"] for b in bonds_from_binder(web, lines, radii)) == [(0, 1), (1, 2)]
+    # a coating along one side of fiber 0, away from the others: no bond
+    coating = np.array([(x + 0.5, 7.5, z + 0.5) for x in range(5, 35) for z in range(9, 12)], float)
+    assert bonds_from_binder(coating, lines, radii) == []
+    # loose binder far from every fiber: no bond
+    assert bonds_from_binder(np.array([[20.5, 40.5, 30.5]]), lines, radii) == []
+
+
+def test_three_way_call_starts_from_a_bond_point_network():
+    torch = pytest.importorskip("torch")
+    from tangle.ct._network import maps
+
+    torch.manual_seed(0)
+    old = maps.UNet3D(base=8)
+    out = torch.randn(1, maps.HEAD_CHANNELS, 2, 2, 2) * 3
+    # a background logit of 0 next to the old fiber and binder logits: the softmax keeps the old calls' order
+    out[:, maps.VOID] = 0.0
+    p = torch.softmax(maps.class_logits(out), dim=1)
+    assert torch.allclose(p.sum(1), torch.ones(1, 2, 2, 2))
+    fiber, binder = torch.zeros(1, 1, 2, 2, 2), torch.zeros(1, 1, 2, 2, 2)
+    fiber[..., 0, 0, 0] = 1.0
+    binder[..., 0, 0, :] = 1.0  # one voxel marked both: fiber wins
+    target = maps.class_target({"fiber": fiber, "binder": binder})
+    assert target[0, 0, 0, 0] == 1 and target[0, 0, 0, 1] == 2 and target[0, 1, 1, 1] == 0
+    assert old.head.out_channels == maps.HEAD_CHANNELS
