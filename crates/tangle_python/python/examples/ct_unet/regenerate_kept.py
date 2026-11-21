@@ -9,9 +9,11 @@ overlap exclusions. SETS.json says how each folder was made (the family flag, ``
 folder may hold several families; ``flags`` adds the rest):
 
     {"commit": "<git commit the scans were made with>",
-     "folders": {"data_mixed": {"flags": ["--mixed", "--fast-relax"], "commit": "<optional, per folder>"},
-                 "data": {"flags": ["--scanned-share", "0.2"]}, ...},
-     "train": "data,data_mixed,...", "val": "val,val_mixed,..."}
+     "folders": {"data_mixed": {"make_data_flags": ["--mixed", "--fast-relax"], "commit": "<per folder>"},
+                 "data": {"make_data_flags": ["--scanned-share", "0.2"], "code": "... commit abc1234 ..."}, ...}}
+
+(``flags`` works as well as ``make_data_flags``; a folder's commit is its ``commit``, else a ``commit <hash>``
+named in its ``code`` note, else the top-level ``commit``.)
 
 ``make_data.py`` draws everything about a scan from its family and index alone, so a scan comes out the same
 when the same code makes it again with the same flags. This script groups each folder's kept indices into runs
@@ -20,7 +22,8 @@ scans fall in the gaps between runs and are never made. The family flag comes fr
 ``--mixed``; ``dense_hard_`` and ``scanned_`` need none, ``--scanned-share`` decides which an index is).
 
 Reproduction is exact only with the code the scans were made with: check out that commit (SETS.json) first.
-The script warns when HEAD differs. Some families live on branches that may not have merged yet (``edges_``:
+The script warns, per folder, when HEAD differs; folders made with different
+commits (as on different branches) are best made one commit at a time with ``--only``. Some families live on branches that may not have merged yet (``edges_``:
 PR #77, ``networks_``: PR #79). Flags that change the structures (``--fast-relax``, ``--no-overlap-check``)
 must match too.
 
@@ -34,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from collections import defaultdict
@@ -114,11 +118,22 @@ def main() -> None:
     k, n = (int(v) for v in args.shard.split("/"))
 
     head = head_commit()
-    commits = {sets.get("commit")} | {f.get("commit") for f in folders.values()}
-    commits.discard(None)
-    if head and commits and not any(head.startswith(c) or c.startswith(head) for c in commits):
-        print(f"warning: HEAD is {head[:12]}, the scans were made with {', '.join(sorted(commits))}: they may not "
-              "come out the same", file=sys.stderr)
+
+    def recorded(folder: str) -> str | None:
+        """The commit a folder was made with: its "commit", or one named in its "code" note."""
+        entry = folders.get(folder, {})
+        found = re.search(r"\bcommit ([0-9a-f]{7,40})\b", str(entry.get("code", "")))
+        return entry.get("commit") or (found.group(1) if found else None) or sets.get("commit")
+
+    for folder in sorted(kept):
+        if only and folder not in only:
+            continue
+        made_with = recorded(folder)
+        if made_with is None:
+            print(f"note: {folder}: no recorded commit; the scans may not come out the same", file=sys.stderr)
+        elif head and not (head.startswith(made_with) or made_with.startswith(head)):
+            print(f"warning: {folder} was made with {made_with}, HEAD is {head[:12]}: check that commit out to "
+                  "remake it exactly", file=sys.stderr)
 
     commands: list[list[str]] = []
     for folder in sorted(kept):
@@ -126,7 +141,9 @@ def main() -> None:
             continue
         entries = kept[folder]
         # the folder's other flags (--fast-relax, --scanned-share ...); family flags come from the scan names
-        extra = [f for f in folders.get(folder, {}).get("flags", []) if f not in FAMILY_FLAG.values()]
+        entry = folders.get(folder, {})
+        given = entry.get("flags", entry.get("make_data_flags", []))
+        extra = [f for f in given if f not in FAMILY_FLAG.values()]
         by_flag: dict[tuple[str, ...], list[int]] = defaultdict(list)
         for family, index in entries:
             by_flag[tuple(family_flag(family))].append(index)
