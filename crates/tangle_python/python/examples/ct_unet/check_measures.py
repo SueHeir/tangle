@@ -31,20 +31,46 @@ def true_lines(data):
     lines = [data["p_pos"][fid == f].astype(np.float64) for f in ids]
     radii = np.array([float(np.median(data["p_rad"][fid == f])) for f in ids])
     types = np.array([int(data["p_typ"][fid == f][0]) for f in ids])
-    return lines, radii, types
+    return lines, radii, types, ids
 
 
-def type_brightness(path: Path, types: np.ndarray):
-    """Each true fiber's type brightness from the scan's settings, or None where they don't say it plainly
-    (no settings, or not every type of the settings present, so the stored type numbers may be renumbered)."""
+def axis_level(kind: dict) -> float:
+    """A fiber type's true brightness on its axis: a hollow type's lumen, a dim-cored type's core, else its
+    brightness (varied and mixed settings both)."""
+    if kind.get("hollow"):
+        return float(kind.get("lumen", 0.0))
+    if kind.get("rim"):
+        return float(kind["brightness"]) * float(kind.get("core", 1.0))
+    return float(kind["brightness"])
+
+
+def type_brightness(path: Path, types: np.ndarray, ids: np.ndarray):
+    """(each true fiber's brightness on its axis, the settings' brightness_spread, whether the per-fiber
+    spread is included) from the scan's settings, or Nones where they don't say it plainly (no settings, or
+    not every type of the settings present, so the stored type numbers may be renumbered).
+
+    Varied scans: the per-fiber factor is redrawn as ``ct.synthetic_ct`` draws it (its own stream,
+    ``default_rng([seed, 1])``, one per centerline; fiber ids are centerline indices + 1). Mixed scans draw
+    theirs partway through the rendering's stream, so only the type's level is known there."""
     meta = path.with_suffix(".json")
     if not meta.exists():
-        return None, None
-    settings = (json.loads(meta.read_text()).get("settings") or {})
+        return None, None, False
+    info = json.loads(meta.read_text())
+    settings = info.get("settings") or {}
     kinds = settings.get("types")
     if not kinds or len(np.unique(types)) != len(kinds):
-        return None, None
-    return np.array([kinds[t]["brightness"] for t in types], float), float(settings.get("brightness_spread", 0.0))
+        return None, None, False
+    level = np.array([axis_level(kinds[t]) for t in types], float)
+    spread = float(settings.get("brightness_spread", 0.0))
+    exact = False
+    varied = "family" not in settings and "seed" in settings and "fill" not in settings
+    if spread > 0 and varied and info.get("fibers") and ids.max() <= info["fibers"]:
+        factor = np.exp(np.random.default_rng([int(settings["seed"]), 1]).normal(0.0, spread, int(info["fibers"])))
+        level = level * factor[ids - 1]
+        exact = True
+    elif spread == 0:
+        exact = True
+    return level, spread, exact
 
 
 def padded_predict(model, volume, device, grey):
@@ -68,7 +94,7 @@ def main():
         data = dict(np.load(path))
         volume = data["volume"].astype(np.float32)
         grey = levels(volume)
-        lines, radii, types = true_lines(data)
+        lines, radii, types, ids = true_lines(data)
         if not lines:
             continue
         maps = padded_predict(model, volume, device, grey)
@@ -81,7 +107,7 @@ def main():
         found_m = measures(traced, traced_r, volume, grey)
         raw_true, raw_found = measures(lines, radii, volume, (0.0, 1.0)), measures(traced, traced_r, volume, (0.0, 1.0))
         smooth_m = {w: measures(traced, traced_r, smooth=w) for w in args.smooth if w}
-        bright, spread = type_brightness(path, types)
+        bright, spread, exact = type_brightness(path, types, ids)
         points = np.concatenate(lines)
         owner = np.concatenate([np.full(len(line), g) for g, line in enumerate(lines)])
         tree = cKDTree(points)
@@ -99,7 +125,8 @@ def main():
                          "true_axis_grey": true_m["grey"][g], "found_axis_grey": found_m["grey"][k],
                          "true_raw_grey": raw_true["grey"][g], "found_raw_grey": raw_found["grey"][k],
                          "type_brightness": np.nan if bright is None else bright[g],
-                         "brightness_spread": np.nan if spread is None else spread})
+                         "brightness_spread": np.nan if spread is None else spread,
+                         "brightness_exact": float(exact)})
         print(f"{path.stem}: {len(lines)} true, {len(traced)} traced, {sum(r['scan'] == path.stem for r in rows)} "
               "matched", flush=True)
     if not rows:
@@ -150,6 +177,15 @@ def report(c, scans):
                 within.append(np.corrcoef(c["found_raw_grey"][m], c["type_brightness"][m])[0, 1])
         if within:
             print(f"  r(raw axis grey, type brightness) within each scan with brighter and dimmer types: median "
+                  f"{np.median(within):.3f} over {len(within)} scans (range {min(within):.3f}..{max(within):.3f})")
+        exact = has & (c["brightness_exact"] > 0)  # each fiber's own brightness known, spread included
+        within = []
+        for scan in np.unique(scans[exact]):
+            m = exact & (scans == scan)
+            if m.sum() >= 10 and np.ptp(c["type_brightness"][m]) > 0:
+                within.append(np.corrcoef(c["found_raw_grey"][m], c["type_brightness"][m])[0, 1])
+        if within:
+            print(f"  the same where each fiber's own brightness is known (varied, or no spread): median "
                   f"{np.median(within):.3f} over {len(within)} scans (range {min(within):.3f}..{max(within):.3f})")
     elif has.sum():
         print("type brightness: every fiber here has the same, so grey against brightness can't be checked")
