@@ -127,6 +127,33 @@ For the group as a whole, r23's centerline F1 on the full test sets:
 | webs (blur capped) | 0.619 |
 | empty | 2.7 false traces per scan, 38 of 48 clean |
 
+**r24c** is the first network with the 3-way class output and no bond output
+(base 24, trained from scratch as r24 on an audited mix, then fine-tuned with
+the web sets added). Given the binder hint, on the same test scans:
+
+| group | r23 fiber F1 | r24c fiber F1 |
+|---|---|---|
+| pairs | 0.992 | 0.994 |
+| hard pairs | 0.870 | 0.873 |
+| mixed | 0.866 | 0.866 |
+| bends | 0.846 | 0.833 |
+| seams | 0.825 | 0.826 |
+| stiff | 0.718 | 0.723 |
+| bonds | 0.710 | 0.708 |
+| shapes | 0.687 | 0.687 |
+| web_easy | 0.773 | 0.790 |
+| webs | 0.621 | 0.622 |
+| empty | 2.27 false traces per scan | 0.25 false traces per scan |
+
+On scans whose blur is at most 0.7 of the thinnest diameter, r24c's bond F1
+(0.31-0.41 by group) is level with r23's on most groups and a little behind on
+mixed and web_easy; its binder voxel F1 is 0.02-0.09 behind r23's in every group.
+With the binder hint, no network gives a false bond on a bond-free scan. A fresh test set
+(211 scans never generated before) gives the same picture, and a network twice
+as wide (r25, base 48, the same data) scores within noise of r24c, so the gap
+is not capacity. Tracing on the true maps scores 0.97-0.995 fiber F1 in every
+group, so the network, not the tracer, is the limit.
+
 ![Every output channel, truth and network](media/ct-unet-val-all-channels.png)
 
 *The 14 channels one by one on one mixed scan, unmasked: off the fibers the
